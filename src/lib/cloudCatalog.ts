@@ -101,6 +101,8 @@ export interface CreateMemoryEntry {
 }
 
 export interface CloudCatalogState {
+  /** Authenticated native catalog viewer; not persisted or inferred from roles. */
+  viewerUserId?: string;
   /** Whose catalog this is (the account email); null while signed out. */
   owner: string | null;
   /** The account context revision the saved file is fenced by. */
@@ -596,6 +598,11 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
   if (running) return running;
   const owner = state.owner;
   const inboxAsk = inboxRevision;
+  const generation = catalogGeneration;
+  const context = getAccount().status.context;
+  const currentContext = () => !privacyEnabled() && state.owner === owner && inboxAsk === inboxRevision
+    && generation === catalogGeneration && getAccount().status.context?.account === context?.account
+    && getAccount().status.context?.revision === context?.revision;
   const flight = (async () => {
     const current = state.orgs[orgId];
     const requestedAt = now();
@@ -607,7 +614,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       wantRepositories ? api.cloudWorkspaceRepositories(cloudOrgArg(orgId)) : Promise.resolve(null),
     ]);
     // Signed out or another user while it ran, or (CS-18) the user left the organization: nothing lands.
-    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+    if (!currentContext()) return;
     if (isMultiOrg(getAccount().status) && !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
     if (repositories.status === "fulfilled" && repositories.value) {
       patchOrg(orgId, { repositories: repositories.value.repositories, repositoriesAt: now() });
@@ -626,7 +633,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
         return;
       }
       await ingestCloudList(list.value, orgId, now(), requestedAt);
-      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+      if (!currentContext()) return;
       // The list is read every 30 s and names this person's role on every
       // workspace: a role changed by an owner shows here before the account
       // session is next renewed.
@@ -700,11 +707,15 @@ let feedPausedUntil = 0;
 /** An organization's selected repositories, every few minutes: the feed carries the workspace lists only. */
 async function refreshRepositories(orgId: string, owner: string | null, now: () => number): Promise<void> {
   const inboxAsk = inboxRevision;
+  const generation = catalogGeneration;
+  const context = getAccount().status.context;
   const current = state.orgs[orgId];
   if (current?.repositoriesAt && now() - current.repositoriesAt <= REPOSITORIES_MAX_AGE_MS) return;
   try {
     const repositories = await api.cloudWorkspaceRepositories(cloudOrgArg(orgId));
-    if (state.owner !== owner || inboxAsk !== inboxRevision || !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
+    if (privacyEnabled() || state.owner !== owner || inboxAsk !== inboxRevision || catalogGeneration !== generation
+      || getAccount().status.context?.account !== context?.account || getAccount().status.context?.revision !== context?.revision
+      || !liveCloudOrgIds(getAccount().status).includes(orgId)) return;
     if (repositories) patchOrg(orgId, { repositories: repositories.repositories, repositoriesAt: now() });
   } catch {
     // The picker reads them again when it opens; the rows do not depend on them.
@@ -740,6 +751,11 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
   const owner = state.owner;
   const account = accountKey(getAccount().status);
   const inboxAsk = inboxRevision;
+  const generation = catalogGeneration;
+  const revision = getAccount().status.context?.revision;
+  const current = () => !privacyEnabled() && state.owner === owner && inboxAsk === inboxRevision
+    && generation === catalogGeneration && accountKey(getAccount().status) === account
+    && getAccount().status.context?.revision === revision;
   const asked = liveCloudOrgIds(getAccount().status);
   if (!asked.length) return Promise.resolve();
   let refused = false;
@@ -752,7 +768,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
     } catch (error) {
       await repositories;
       // Signed out or another user while it ran: nothing lands.
-      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+      if (!current()) return;
       const code = errorText(error);
       if (feedUnsupported(error)) {
         refused = true;
@@ -774,7 +790,8 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
       return;
     }
     await repositories;
-    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+    if (!current()) return;
+    if (feed.viewerUserId) set({ ...state, viewerUserId: feed.viewerUserId }, false);
     feedFailures = 0;
     // As of the answer: an organization the user left meanwhile gets nothing.
     const live = liveCloudOrgIds(getAccount().status);
@@ -814,7 +831,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
         const gone = new Set(feed.deletedWorkspaceIds ?? []);
         if (rows.some((item) => gone.has(item.workspace.id))) {
           await take(orgId, mergeFeedDelta(rows, { workspaces: [], tombstones: [], quota: state.orgs[orgId]?.quota ?? undefined }, feed.deletedWorkspaceIds ?? []));
-          if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+          if (!current()) return;
         }
         continue;
       }
@@ -833,7 +850,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
         ? { workspaces: entry.workspaces, tombstones: entry.tombstones ?? [], quota: entry.quota ?? undefined }
         : mergeFeedDelta(state.orgs[orgId]?.workspaces ?? [], { ...entry, tombstones: entry.tombstones ?? [] }, feed.deletedWorkspaceIds ?? []);
       await take(orgId, list);
-      if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+      if (!current()) return;
       noteListedOrgRole(orgId, listedOrgManages(list, getAccount().status.memberWorkspaces === true), requestedAt);
     }
     // The cursor says "this desktop holds that catalog". Where part of it was
@@ -842,7 +859,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
   })().finally(() => {
     // Only its own flight: after an account switch a newer one may be running.
     if (feedFlight === flight) feedFlight = null;
-    if (state.owner !== owner || inboxAsk !== inboxRevision) return;
+    if (!current()) return;
     // No feed after all: each organization is listed on its own from now on.
     if (refused) for (const orgId of liveCloudOrgIds(getAccount().status)) void refreshCloudCatalog(orgId);
     schedulePoll();
@@ -1035,21 +1052,43 @@ function onAccessChange(orgId: string) {
 
 /** Replay is retained for 30 days: reconnect must reauthorize from a full list.
  * An old in-flight list/feed cannot substitute for this fresh snapshot. */
-export async function resyncCloudInboxCatalog(): Promise<void> {
+let inboxResync: { account: string; revision: string; generation: number; inbox: number; promise: Promise<void> } | null = null;
+
+export function resyncCloudInboxCatalog(): Promise<void> {
   const status = getAccount().status;
-  if (privacyEnabled() || status.state !== "signed-in" || !status.context?.account) return;
+  if (privacyEnabled() || status.state !== "signed-in" || !status.context?.account) return Promise.resolve();
   const account = status.context.account;
   const revision = status.context.revision;
   const generation = catalogGeneration;
-  ++inboxRevision;
+  if (inboxResync?.account === account && inboxResync.revision === revision
+    && inboxResync.generation === generation && inboxResync.inbox === inboxRevision) return inboxResync.promise;
+  const inbox = ++inboxRevision;
   feedCursor = null;
-  await Promise.all(liveCloudOrgIds(status).map(async (orgId) => {
-    await flights.get(orgId)?.catch(() => undefined);
-    const current = getAccount().status;
-    if (privacyEnabled() || catalogGeneration !== generation || current.state !== "signed-in"
-      || current.context?.account !== account || current.context.revision !== revision) return;
-    await refreshCloudCatalog(orgId);
-  }));
+  const oldFeed = feedFlight;
+  const current = () => {
+    const now = getAccount().status;
+    return !privacyEnabled() && catalogGeneration === generation && inboxRevision === inbox
+      && now.state === "signed-in" && now.context?.account === account && now.context.revision === revision;
+  };
+  const promise = (async () => {
+    // Full per-org lists still recover retained read markers and catalog rows.
+    // They cannot supply the authenticated viewer or replace full feed metadata.
+    await Promise.all(liveCloudOrgIds(status).map(async (orgId) => {
+      await flights.get(orgId)?.catch(() => undefined);
+      if (current()) await refreshCloudCatalog(orgId);
+    }));
+    // The early feed was invalidated above. Joining it alone would discard its
+    // viewer and wait for the poll; ask once more after it leaves the flight slot.
+    // Inbox replay/receipts never await this task (CloudInboxSubscriber).
+    await oldFeed?.catch(() => undefined);
+    if (!current()) return;
+    feedCursor = null;
+    await refreshCloudFeed();
+  })().finally(() => {
+    if (inboxResync?.promise === promise) inboxResync = null;
+  });
+  inboxResync = { account, revision, generation, inbox, promise };
+  return promise;
 }
 
 /** Inbox hints contain no display content. Revoke cached content before reauthorizing by list. */
@@ -1112,11 +1151,17 @@ function scheduleSave() {
   }, SAVE_DELAY_MS);
 }
 
+/** Presence is current only. Never restore online state or authenticated viewer identity from disk. */
+export function withoutLivePresence(item: CloudWorkspaceListItem): CloudWorkspaceListItem {
+  const { presence: _presence, ...rest } = item;
+  return rest;
+}
+
 /** What goes on disk: rows and repositories, never errors or notices. */
 export function serializeCatalog(catalog: CloudCatalogState): unknown {
   const orgs: Record<string, unknown> = {};
   for (const [orgId, org] of Object.entries(catalog.orgs)) {
-    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions, pipelines: org.pipelines };
+    orgs[orgId] = { workspaces: org.workspaces.map(withoutLivePresence), repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions, pipelines: org.pipelines };
   }
   return { version: CATALOG_VERSION, orgs, createMemory: catalog.createMemory };
 }
@@ -1169,7 +1214,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
   const orgs: Record<string, OrgCatalog> = {};
   for (const [orgId, raw] of Object.entries(value.orgs)) {
     if (!isObject(raw) || !Array.isArray(raw.workspaces)) continue;
-    const workspaces = raw.workspaces.filter(validItem).filter((item) => item.workspace.orgId === orgId);
+    const workspaces = raw.workspaces.filter(validItem).filter((item) => item.workspace.orgId === orgId).map(withoutLivePresence);
     orgs[orgId] = {
       ...emptyOrg(orgId),
       workspaces,
@@ -1237,6 +1282,7 @@ async function loadSaved(owner: string, revision: string) {
 
 /** Forget the feed's cursor and what it could not list: the next request reads the whole catalog. */
 function resetFeed() {
+  inboxResync = null;
   feedCursor = null;
   feedFlight = null;
   feedErrors.clear();
@@ -1277,7 +1323,9 @@ function syncAccount() {
     set({ ...EMPTY, owner, revision }, false);
     if (owner && revision) void loadSaved(owner, revision);
   } else if (revision !== state.revision) {
-    set({ ...state, revision }, false);
+    ++inboxRevision;
+    resetFeed();
+    set({ ...state, revision, viewerUserId: undefined }, false);
   }
   if (owner && isMultiOrg(status)) dropLeftOrganizations(status);
   const live = owner ? liveCloudOrgIds(status) : [];
@@ -1291,7 +1339,7 @@ function syncAccount() {
   };
   if (owner && usesCatalogFeed(status)) {
     // One request for every live organization (PRO-74), unless all of them were read moments ago.
-    if (live.length && !live.every(fresh)) void refreshCloudFeed();
+    if (live.length && ((!state.viewerUserId && feedCursor === null) || !live.every(fresh))) void refreshCloudFeed();
   } else {
     for (const orgId of live) if (!fresh(orgId)) void refreshCloudCatalog(orgId);
   }
@@ -1326,6 +1374,9 @@ export function bootCloudCatalog() {
   booted = true;
   unsubscribe = subscribeAccount(syncAccount);
   unsubscribePrivacy = subscribeDataPrivacy(() => {
+    ++inboxRevision;
+    resetFeed();
+    set({ ...state, viewerUserId: undefined }, false);
     clearTimers();
     clearFeedTimer();
     for (const timer of accessTimers.values()) clearTimeout(timer);

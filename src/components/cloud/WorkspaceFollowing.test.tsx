@@ -1,0 +1,99 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { CloudCatalogState } from "@/lib/cloudCatalog";
+import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+const f = vi.hoisted(() => ({ status: {} as AccountStatus, catalog: {} as CloudCatalogState, ready: vi.fn(async () => true), reassign: vi.fn(), follow: vi.fn(), unfollow: vi.fn(), refresh: vi.fn(async () => undefined), roster: vi.fn(), settings: vi.fn(), rosterState: { roster: null, loading: false, error: null } as { roster: import("@/lib/organizationMembers").OrganizationRoster | null; loading: boolean; error: unknown } }));
+vi.mock("@/lib/api", () => ({ api: { phase2DesktopContractsAvailable: f.ready, cloudWorkspaceFollow: f.follow, cloudWorkspaceUnfollow: f.unfollow, cloudWorkspaceReassign: f.reassign } }));
+vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: f.status }), useAccount: () => ({ status: f.status }) }));
+vi.mock("@/lib/cloudCatalog", () => ({ refreshCloudCatalog: f.refresh, useCloudCatalog: () => f.catalog }));
+vi.mock("@/lib/organizationRoster", () => ({ useOrganizationRoster: () => f.rosterState }));
+vi.mock("@/lib/cloudPeople", () => ({ loadRosterIn: f.roster }));
+vi.mock("@/lib/dataPrivacy", () => ({ privacyEnabled: () => false, useDataPrivacy: () => ({ enabled: false }) }));
+vi.mock("@/lib/settingsLinks", () => ({ openOrganizationSettings: f.settings }));
+vi.mock("@/components/people/MemberProfile", () => ({ memberName: (person: { displayName: string }) => person.displayName, MemberProfile: () => <span /> }));
+import { WorkspaceReassignDialog, WorkspaceFollowButton } from "./WorkspaceFollowing";
+let item: CloudWorkspaceListItem;
+beforeEach(() => {
+  vi.clearAllMocks();
+  f.rosterState = { roster: null, loading: false, error: null };
+  f.status = { state: "signed-in", context: { account: "account", scope: "org", revision: "1" }, identity: { name: "Me", email: "me@example.test", organization: "Team", organizationId: "org" }, organizations: [{ id: "org", name: "Team", role: "admin" }] } as AccountStatus;
+  item = { workspace: { id: "workspace", orgId: "org", name: "Workspace", createdBy: "me", state: "suspended", accessMode: "organization" }, latestOperation: null, following: false } as CloudWorkspaceListItem;
+  f.catalog = { viewerUserId: "me", orgs: { org: { source: "live", error: null, workspaces: [item] } } } as unknown as CloudCatalogState;
+  f.ready.mockResolvedValue(true);
+  f.roster.mockResolvedValue([{ userId: "me", displayName: "Me", email: "me@example.test", role: "admin" }, { userId: "target", displayName: "Target", email: "target@example.test", role: "member" }]);
+});
+afterEach(cleanup);
+it("keeps the request UUID, expected owner and optional note unchanged for an explicit retry", async () => {
+  f.reassign.mockRejectedValueOnce({ code: "workspace_reassign_busy" }).mockResolvedValueOnce({ reassigned: false });
+  render(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  const choice = await screen.findByRole("radio", { name: /Target/ }); fireEvent.click(choice);
+  fireEvent.change(screen.getByLabelText("Note to the new owner"), { target: { value: "Away until Monday" } });
+  await waitFor(() => expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "Retry same attempt" }));
+  await screen.findByText(/Reassignment recorded/);
+  expect(f.reassign).toHaveBeenCalledTimes(2);
+  expect(f.reassign.mock.calls[0]).toEqual(f.reassign.mock.calls[1]);
+  expect(f.reassign.mock.calls[0]?.[2]).toMatchObject({ targetUserId: "target", expectedOwnerId: "me", note: "Away until Monday" });
+  expect(f.reassign.mock.calls[0]?.[2].requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(f.refresh).toHaveBeenCalledWith("org");
+});
+it("refuses private cross-owner transfer without pretending confirmation grants visibility", async () => {
+  item.workspace.accessMode = "private";
+  render(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("radio", { name: /Target/ }));
+  expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText(/Private cross-owner handover is unavailable/)).toBeTruthy(); expect(f.reassign).not.toHaveBeenCalled();
+});
+it("does not optimistically show Following, and hides the feature when the native gate is held", async () => {
+  let finish!: () => void; f.follow.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+  const view = render(<WorkspaceFollowButton item={item} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Follow" }));
+  expect(screen.queryByRole("button", { name: "Following" })).toBeNull();
+  finish(); await waitFor(() => expect(f.refresh).toHaveBeenCalledWith("org"));
+  item = { ...item, following: true }; f.catalog.orgs.org!.workspaces = [item]; view.rerender(<WorkspaceFollowButton item={item} />);
+  expect(screen.getByRole("button", { name: "Following" }).getAttribute("title")).toBe("Following on every device");
+  cleanup(); f.ready.mockResolvedValue(false); render(<WorkspaceFollowButton item={item} />);
+  await waitFor(() => expect(f.ready).toHaveBeenCalledTimes(2)); expect(screen.queryByRole("button", { name: "Following" })).toBeNull();
+});
+
+it("does not reveal a late reassignment result or note after account context changes", async () => {
+  let finish!: () => void;
+  f.reassign.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+  const view = render(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("radio", { name: /Target/ }));
+  fireEvent.change(screen.getByLabelText("Note to the new owner"), { target: { value: "Account-private note" } });
+  await waitFor(() => expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+  await waitFor(() => expect(f.reassign).toHaveBeenCalledTimes(1));
+  f.status = { ...f.status, context: { account: "other", scope: "org", revision: "2" } };
+  view.rerender(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  expect(screen.queryByDisplayValue("Account-private note")).toBeNull();
+  finish();
+  await waitFor(() => expect(screen.getByText(/The account changed/)).toBeTruthy());
+  expect(f.refresh).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Reassignment recorded/)).toBeNull();
+});
+
+it("retires removed roster candidates and refuses their selected target before sending", async () => {
+  const view = render(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("radio", { name: /Target/ }));
+  await waitFor(() => expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(false));
+  f.rosterState = { roster: { members: [] } as unknown as import("@/lib/organizationMembers").OrganizationRoster, loading: false, error: null };
+  view.rerender(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  expect(screen.queryByRole("radio", { name: /Target/ })).toBeNull();
+  expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+  expect(f.reassign).not.toHaveBeenCalled();
+});
+it("hides the initial roster after an authorization refresh fails", async () => {
+  const view = render(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("radio", { name: /Target/ }));
+  f.rosterState = { roster: null, loading: false, error: { code: "forbidden" } };
+  view.rerender(<WorkspaceReassignDialog item={item} onClose={vi.fn()} />);
+  expect(screen.queryByRole("radio", { name: /Target/ })).toBeNull();
+  expect(screen.getByText(/The member list is unavailable/)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Reassign" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(f.reassign).not.toHaveBeenCalled();
+});

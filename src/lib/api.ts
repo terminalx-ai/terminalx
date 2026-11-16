@@ -851,6 +851,7 @@ export interface AccountStatus {
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
 export interface CloudCatalogOrganization {
   orgId: string;
+  presence?: { activeMembers: PresencePerson[] };
   workspaces: CloudWorkspaceListItem[];
   tombstones: CloudWorkspaceTombstone[];
   quota?: CloudWorkspaceQuota | null;
@@ -864,6 +865,8 @@ export interface CloudCatalogOrganization {
  * listed and `deletedWorkspaceIds` names the ones to drop.
  */
 export interface CloudCatalogFeed {
+  /** Native authenticated identity, never a selector supplied by the page. */
+  viewerUserId?: string;
   changed: boolean;
   cursor: string | null;
   reset: boolean;
@@ -1253,6 +1256,7 @@ export interface CloudWorkspace {
    */
   repositories?: CloudWorkspaceRepository[] | null;
   createdBy?: string | null;
+  creator?: PresencePerson | null;
   lastActivityAt?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
   runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
@@ -1323,7 +1327,7 @@ export interface CloudWorkspaceDisposition {
 }
 
 /** What a share grants (contract §21.2). */
-export type CloudShareRole = "viewer" | "driver";
+export type CloudShareRole = "viewer" | "driver" | "manager";
 /** A person's effective role on a workspace (§21.1); `none` sees no content. */
 export type CloudCollaborationRole = "manager" | "driver" | "viewer" | "none";
 
@@ -1576,8 +1580,10 @@ export interface CloudWorkspaceOperation {
 export interface DesktopReadMarker { sessionId: string; readAt: string }
 export type DesktopInboxEvent =
   | { id: string; type: "workspace.share-removed"; workspaceId: string; createdAt: string }
-  | { id: string; type: "workspace.share-added" | "workspace.reassigned"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
+  | { id: string; type: "workspace.share-added" | "workspace.presence-changed"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
+  | { id: string; type: "workspace.reassigned"; workspaceId: string; organizationId: string; payload: WorkspaceReassignedPayload; createdAt: string }
   | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string };
+export interface WorkspaceReassignedPayload { actorId: string; previousOwnerId: string; note?: string }
 export interface DesktopInboxPage { v: 1; cursor: string; hasMore: boolean; events: DesktopInboxEvent[] }
 export interface DesktopInboxStreamPage { cursor: string; events: DesktopInboxEvent[] }
 
@@ -1648,9 +1654,11 @@ export interface CloudWorkspaceSnapshot {
 }
 
 export interface CloudWorkspaceListItem {
+  following?: boolean;
   workspace: CloudWorkspace;
   latestOperation: CloudWorkspaceOperation | null;
   readMarkers?: DesktopReadMarker[];
+  presence?: { activeMembers: PresencePerson[] };
 }
 
 export interface CloudWorkspaceList {
@@ -1836,6 +1844,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "github_installation_suspended"
   | "github_installation_revoked"
   | "organization_member_not_found"
+  | "cloud_workspace_share_unavailable"
   | "cloud_workspace_share_not_found"
   | "cloud_workspace_share_redundant"
   | "cloud_workspace_share_requires_organization_access"

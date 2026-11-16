@@ -1,3 +1,4 @@
+import { WorkspaceReassignedNotices } from "./WorkspaceReassignedNotices";
 import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
 import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
@@ -70,6 +71,7 @@ import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
+import { bootCloudPresence } from "@/lib/cloudPresence";
 import { bootDesktopInbox } from "@/lib/desktopInbox";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootCloudSelection } from "@/lib/cloudSelection";
@@ -149,6 +151,7 @@ export function AppShell() {
     void bootDataPrivacy().then(() => {
       void bootAccount();
       bootDesktopInbox();
+      bootCloudPresence();
       bootCloudCatalog();
     });
     bootCloudSelection();
@@ -308,6 +311,7 @@ export function AppShell() {
         <UnknownSettingLinkToast />
         <ProjectAddedNotice />
         <WorktreeCopyNotices />
+        <WorkspaceReassignedNotices />
         {/* Last, so it keeps the corner and the toasts stack above it. */}
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>

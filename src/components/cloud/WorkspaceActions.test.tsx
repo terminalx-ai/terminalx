@@ -144,3 +144,42 @@ describe("WorkspaceLifecycleDialog", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 });
+
+// PRO-137 uses creator identity and org administration, never collaboration-manager authority.
+import { mayReassign, preferenceError, WorkspacePreferencesController } from "./WorkspaceFollowing";
+it("does not treat an explicit workspace manager as permission to transfer ownership", () => {
+  const resource = { ...item, workspace: { ...item.workspace, createdBy: "owner", you: { role: "manager", canApprove: true } } } as CloudWorkspaceListItem;
+  expect(mayReassign(resource, "member", "member")).toBe(false);
+  expect(mayReassign(resource, "owner", "member")).toBe(true);
+  expect(mayReassign(resource, "admin", "admin")).toBe(true);
+  expect(mayReassign(resource, undefined, "admin")).toBe(false);
+  expect(mayReassign({ ...resource, workspace: { ...resource.workspace, createdBy: null } }, "admin", "admin")).toBe(false);
+});
+it("reauthorizes committed retries without treating their receipt as current ownership", async () => {
+  const transport = { cloudWorkspaceFollow: vi.fn(), cloudWorkspaceUnfollow: vi.fn(), cloudWorkspaceReassign: vi.fn(async () => ({ workspaceId: "ws-1", ownerId: "target", previousOwnerId: "old", reassigned: false })) };
+  const refresh = vi.fn(async () => undefined);
+  const controller = new WorkspacePreferencesController(transport, () => "account:revision", refresh);
+  const resource = { ...item, workspace: { ...item.workspace, createdBy: "old" } };
+  const input = { targetUserId: "target", expectedOwnerId: "old", requestId: "01234567-89ab-4cde-8fab-0123456789ab", note: "Away Monday" };
+  expect(await controller.reassign(resource, input)).toBe(true);
+  expect(transport.cloudWorkspaceReassign).toHaveBeenCalledWith("org-1", "ws-1", input);
+  expect(refresh).toHaveBeenCalledWith("org-1");
+  expect(resource.workspace.createdBy).toBe("old");
+});
+it("fences late Following responses and never retries a server refusal automatically", async () => {
+  let scope = "a:1";
+  let finish!: (value: { workspaceId: string; following: boolean }) => void;
+  const transport = { cloudWorkspaceFollow: vi.fn(() => new Promise<{ workspaceId: string; following: boolean }>((resolve) => { finish = resolve; })), cloudWorkspaceUnfollow: vi.fn(), cloudWorkspaceReassign: vi.fn() };
+  const refresh = vi.fn(async () => undefined);
+  const controller = new WorkspacePreferencesController(transport, () => scope, refresh);
+  const request = controller.follow(item, true);
+  scope = "b:2"; scope = "a:3";
+  finish({ workspaceId: "ws-1", following: true });
+  expect(await request).toBe(false); expect(refresh).not.toHaveBeenCalled();
+  transport.cloudWorkspaceReassign.mockRejectedValueOnce({ code: "workspace_reassign_runtime_unsupported" });
+  const resource = { ...item, workspace: { ...item.workspace, createdBy: "old" } };
+  await expect(controller.reassign(resource, { targetUserId: "target", expectedOwnerId: "old", requestId: "01234567-89ab-4cde-8fab-0123456789ab" })).rejects.toEqual({ code: "workspace_reassign_runtime_unsupported" });
+  expect(transport.cloudWorkspaceReassign).toHaveBeenCalledTimes(1);
+  expect(preferenceError({ code: "workspace_reassign_target_not_visible" })).toContain("cannot see");
+  expect(preferenceError({ code: "cloud_workspace_member_concurrency_exceeded" })).toContain("running limit");
+});

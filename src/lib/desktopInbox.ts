@@ -1,9 +1,11 @@
-import { invoke } from "@/lib/api";
+import { useSyncExternalStore } from "react";
+import { cloudPresence } from "@/lib/cloudPresence";
+import { invoke, type DesktopInboxEvent } from "@/lib/api";
 import { getAccount, subscribeAccount } from "@/lib/account";
 import { privacyEnabled, subscribeDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
-import { CloudInboxSubscriber, type InboxEvent, type InboxStorage, type InboxTransport } from "@/lib/cloudInbox";
+import { CloudInboxSubscriber, type InboxStorage, type InboxTransport } from "@/lib/cloudInbox";
 import { configureCloudReadMarkers, enableCloudReadMarkerWrites, reconcileCloudReadMarker } from "@/lib/cloudReadMarkers";
-import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog } from "@/lib/cloudCatalog";
+import { invalidateCloudInboxWorkspace, resyncCloudInboxCatalog, getCloudCatalog, subscribeCloudCatalog } from "@/lib/cloudCatalog";
 
 /** Exact commands implemented by the shared contracts worker. Use the existing
  * privacy-aware invoke wrapper; tokens and account fencing remain native.
@@ -23,13 +25,20 @@ export const desktopInboxTransport: InboxTransport = {
 };
 const transport = desktopInboxTransport;
 let stop: (() => void) | null = null;
-export function applyDesktopInboxEvent(event: InboxEvent) {
+export function applyDesktopInboxEvent(event: DesktopInboxEvent) {
   switch (event.type) {
     case "workspace.share-removed":
       invalidateCloudInboxWorkspace(event.workspaceId, undefined, true);
       break;
-    case "workspace.share-added":
+    case "workspace.presence-changed":
+      cloudPresence.hint(event.organizationId);
+      invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
+      break;
     case "workspace.reassigned":
+      invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
+      void takeReassignedNotice(event);
+      break;
+    case "workspace.share-added":
       invalidateCloudInboxWorkspace(event.workspaceId, event.organizationId);
       break;
     case "workspace.read-marker-changed":
@@ -41,6 +50,45 @@ export function applyDesktopInboxEvent(event: InboxEvent) {
   // Accepted events are access hints and self read markers. None is a completion/attention
   // event: existing runtime attention alone drives notify.ts and the macOS notification hook.
 }
+export interface ReassignedNotice { id: string; organizationId: string; workspaceId: string; name: string; actorId: string; previousOwnerId: string; note?: string }
+let notices: ReassignedNotice[] = [];
+const noticeListeners = new Set<() => void>();
+function publishNotices(next: ReassignedNotice[]) { notices = next; for (const listener of noticeListeners) listener(); }
+function noticeScope() {
+  const status = getAccount().status;
+  return !privacyEnabled() && status.state === "signed-in" && status.context ? `${status.context.account}:${status.context.revision}` : null;
+}
+type ReassignedEvent = Extract<DesktopInboxEvent, { type: "workspace.reassigned" }>;
+const pendingReassigned = new Map<string, { scope: string; event: ReassignedEvent; at: number }>();
+function flushReassignedNotices() {
+  const scope = noticeScope();
+  const catalog = getCloudCatalog();
+  for (const [id, pending] of pendingReassigned) {
+    if (pending.scope !== scope) { pendingReassigned.delete(id); continue; }
+    const event = pending.event;
+    const org = catalog.orgs[event.organizationId];
+    // A cached row or a catalog asked before the hint cannot authorize note display.
+    if (!catalog.viewerUserId || org?.source !== "live" || org.error || org.requestedAt == null || org.requestedAt < pending.at) continue;
+    pendingReassigned.delete(id);
+    const item = org.workspaces.find((row) => row.workspace.id === event.workspaceId);
+    if (item?.workspace.createdBy !== catalog.viewerUserId || notices.some((notice) => notice.id === id)) continue;
+    const { actorId, previousOwnerId, note } = event.payload;
+    if (!actorId || !previousOwnerId) continue;
+    publishNotices([...notices, { id, organizationId: event.organizationId, workspaceId: event.workspaceId, name: item.workspace.name, actorId, previousOwnerId, ...(typeof note === "string" ? { note: note.slice(0, 500) } : {}) }].slice(-10));
+  }
+}
+async function takeReassignedNotice(event: ReassignedEvent) {
+  const scope = noticeScope();
+  if (!scope) return;
+  // Keep only this account's bounded pending delivery, never render before reauthorization.
+  if (pendingReassigned.size >= 100) pendingReassigned.delete(pendingReassigned.keys().next().value!);
+  pendingReassigned.set(event.id, { scope, event, at: Date.now() });
+  await Promise.resolve(resyncCloudInboxCatalog()).catch(() => {});
+  if (scope === noticeScope()) flushReassignedNotices();
+}
+export function getReassignedNotices() { return notices; }
+export function useReassignedNotices() { return useSyncExternalStore((listener) => { noticeListeners.add(listener); return () => { noticeListeners.delete(listener); }; }, () => notices); }
+export function dismissReassignedNotice(id: string) { publishNotices(notices.filter((notice) => notice.id !== id)); }
 export function bootDesktopInbox() {
   if (stop) return;
   const storage: InboxStorage = {
@@ -58,6 +106,7 @@ export function bootDesktopInbox() {
     const nextRevision = next ? status.context?.revision ?? null : null;
     if (next === identity && nextRevision === revision) return;
     const token = ++generation;
+    pendingReassigned.clear(); publishNotices([]);
     // Clear durable delivery state on an actual identity change; context changes fence in-flight work.
     subscriber.stop(identity !== next);
     if (identity && identity !== next) {
@@ -76,9 +125,10 @@ export function bootDesktopInbox() {
       subscriber.start(next);
     }).catch(() => { /* Held or older native build: catalog polling continues unchanged. */ });
   };
+  const catalog = subscribeCloudCatalog(flushReassignedNotices);
   const account = subscribeAccount(sync);
   const privacy = subscribeDataPrivacy(sync);
-  stop = () => { ++generation; account(); privacy(); subscriber.stop(); configureCloudReadMarkers(null, null); };
+  stop = () => { ++generation; catalog(); account(); privacy(); subscriber.stop(); configureCloudReadMarkers(null, null); };
   sync();
 }
-export function resetDesktopInbox() { stop?.(); stop = null; }
+export function resetDesktopInbox() { stop?.(); stop = null; pendingReassigned.clear(); publishNotices([]); }

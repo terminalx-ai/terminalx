@@ -1,3 +1,5 @@
+import { PresenceFaces, OwnerProfile, useTeamOverview } from "./TeamOverview";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ListFilter, Search, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
@@ -69,9 +71,10 @@ export function AgentDashboard() {
   const personName = usePeople(false);
 
   const cloud = useCloudDashboard(true);
-  const { visibleIds } = useOrganizationVisibility();
+  const { visibleIds, selectedOrganization } = useOrganizationVisibility();
+  const catalog = useCloudCatalog();
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
-  const sessions = useMemo<CardSession[]>(() => [...store.sessions.map((session) => ({ ...session, ownerId: "local" })), ...visibleCloud], [store.sessions, visibleCloud]);
+  const sessions = useMemo<CardSession[]>(() => [...store.sessions.map((session) => ({ ...session, ownerId: catalog.viewerUserId ?? "local" })), ...visibleCloud], [store.sessions, visibleCloud, catalog.viewerUserId]);
   const localLive = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
   const summarySessions = useMemo(() => store.sessions.filter((s) => s.tabs.length && (!s.archived || filters.columns.includes("archived"))), [store.sessions, filters.columns]);
   const summaries = useSessionSummaries(summarySessions, store.loaded && preferences.view === "board");
@@ -93,23 +96,25 @@ export function AgentDashboard() {
   // The filter holds project paths; choosing "Quick chats" stands for every quick chat's own path.
   const pathFilters = useMemo(
     // The key itself stays in the list: with no quick chat left it still matches nothing, rather than turning the filter off.
-    () => (filters.projects.includes(QUICK_CHATS_FILTER) ? { ...filters, projects: [...filters.projects, ...quickPaths] } : filters),
+    () => (filters.projects.includes(QUICK_CHATS_FILTER) ? { ...filters, owners: [], projects: [...filters.projects, ...quickPaths] } : { ...filters, owners: [] }),
     [filters, quickPaths],
   );
-  const filtered = useMemo(
+  const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
+  // usePeople notifies on roster changes while keeping its resolver identity.
+  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" || id === catalog.viewerUserId ? "You" : Object.values(catalog.orgs).flatMap((org) => org.workspaces).find((item) => item.workspace.createdBy === id)?.workspace.creator?.displayName ?? personName(id)]));
+  const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
+  const baseFiltered = useMemo(
     () => filterSessions(sessions, { query, filters: pathFilters, projectName }),
     [sessions, query, pathFilters, projectName],
   );
+  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const filtered = team.rows;
   const buckets = useMemo(() => ({
     ...bucketSessions(filtered),
     archived: filtered.filter((s) => s.archived).sort((a, b) => b.modified.localeCompare(a.modified)),
   }), [filtered]);
   const boardColumns = filters.columns.includes("archived") ? DASHBOARD_STATES.filter((state) => filters.columns.includes(state.id)) : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
-  const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
-  // usePeople notifies on roster changes while keeping its resolver identity.
-  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" ? "This Mac" : personName(id)]));
-  const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
   const orgs = JSON.stringify([...new Set(visibleCloud.map((session) => session.orgId))].sort());
   useEffect(() => {
     for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
@@ -152,10 +157,12 @@ export function AgentDashboard() {
       additions, deletions,
       changes: additions === null || deletions === null ? null : additions + deletions,
       owner: session.ownerId ? owners.get(session.ownerId) ?? null : null,
-      updated: session.modified,
+      ownerCell: isCloudDashboardSession(session) ? (session.ownerId ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={owners.get(session.ownerId) ?? "Owner unavailable"} /> : "Owner unavailable") : "You",
+      locationCell: isCloudDashboardSession(session) ? <span className="inline-flex items-center gap-1">Cloud <PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} /></span> : "Local",
+      updated: isCloudDashboardSession(session) ? (() => { const at = catalog.orgs[session.orgId]?.workspaces.find((item) => item.workspace.id === session.workspaceId)?.workspace.lastActivityAt; return at == null || !Number.isFinite(new Date(at).getTime()) ? null : new Date(at).toISOString(); })() : session.modified,
       created: session.created ?? null,
     };
-  }), preferences.sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, preferences.sort, preferences.view]);
+  }), preferences.sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, preferences.sort, preferences.view, catalog]);
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
@@ -214,9 +221,15 @@ export function AgentDashboard() {
             </Button>
           ))}
         </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+          {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
+          {team.controls}
           {preferences.view === "table" && <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm">Columns</Button></DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="h-auto min-h-7 max-w-full whitespace-normal break-words text-left">Sort: {preferences.sort.column === "owner" ? "Owner" : preferences.sort.column === "status" ? "Status" : preferences.sort.column === "updated" ? "Last active" : TABLE_COLUMNS.find((column) => column.id === preferences.sort.column)?.label}</Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="end"><DropdownMenuLabel>Sort sessions</DropdownMenuLabel>{(["updated", "owner", "status"] as const).map((column) => <DropdownMenuItem key={column} onSelect={() => setPreferences({ ...preferences, sort: { column, direction: column === "updated" ? "desc" : "asc" } })}>{column === "updated" ? "Last active" : column === "owner" ? "Owner" : "Status"}</DropdownMenuItem>)}</DropdownMenuContent>
+          </DropdownMenu>}
+          {preferences.view === "table" && <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm">Display</Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
               {TABLE_COLUMNS.map(({ id, label }) => (
@@ -225,13 +238,13 @@ export function AgentDashboard() {
                   disabled={!preferences.hiddenColumns.includes(id) && preferences.hiddenColumns.length === TABLE_COLUMNS.length - 1}
                   onSelect={(e) => e.preventDefault()}
                   onCheckedChange={() => setPreferences({ ...preferences, hiddenColumns: toggleTableColumn(preferences.hiddenColumns, id) })}>
-                  {label}
+                  {id === "updated" ? "Last active" : label}
                 </DropdownMenuCheckboxItem>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>}
 
-          <div className="flex h-7 items-center gap-1.5 rounded-md bg-well px-2">
+          <div className="flex h-7 w-64 min-w-0 max-w-full items-center gap-1.5 rounded-md bg-well px-2">
             <Search className="size-3.5 shrink-0 text-faint" />
             <input
               value={query}
@@ -242,10 +255,10 @@ export function AgentDashboard() {
               }}
               placeholder="Search sessions, workspaces or projects…"
               aria-label="Search sessions"
-              className="w-56 bg-transparent text-xs outline-none placeholder:text-faint"
+              className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-faint"
             />
             {query && (
-              <button type="button" aria-label="Clear search" className="text-faint hover:text-foreground" onClick={() => setQuery("")}>
+              <button type="button" aria-label="Clear search" className="shrink-0 text-faint hover:text-foreground" onClick={() => setQuery("")}>
                 <X className="size-3.5" />
               </button>
             )}
@@ -323,17 +336,6 @@ export function AgentDashboard() {
                 onCheckedChange={(automated) => setFilters((f) => ({ ...f, automated: automated === true }))}>
                 Started by automation
               </DropdownMenuCheckboxItem>
-              {owners.size > 0 && <>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel>Owner</DropdownMenuLabel>
-                {[...owners].sort((a, b) => a[1].localeCompare(b[1])).map(([id, name]) => (
-                  <DropdownMenuCheckboxItem key={id} checked={!!filters.owners?.includes(id)}
-                    onSelect={(e) => e.preventDefault()}
-                    onCheckedChange={() => setFilters((f) => ({ ...f, owners: toggleFilter(f.owners ?? [], id) }))}>
-                    <span className="truncate" title={name}>{name}</span>
-                  </DropdownMenuCheckboxItem>
-                ))}
-              </>}
               {hasFilters(filters) && (
                 <>
                   <DropdownMenuSeparator />
@@ -347,6 +349,8 @@ export function AgentDashboard() {
         </div>
       </header>
 
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col @min-[600px]:flex-row">
+      {team.views}
       {preferences.view === "table" ? (
         <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort}
           onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(preferences.sort, column) })}
@@ -357,7 +361,7 @@ export function AgentDashboard() {
           }}
           loading={loading}
         />
-      ) : <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
+      ) : <div className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
         <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {boardColumns.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
@@ -394,6 +398,7 @@ export function AgentDashboard() {
           ))}
         </div>
       </div>}
+      </div>
     </div>
   );
 }

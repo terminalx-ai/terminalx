@@ -38,8 +38,9 @@ Mailbox judgment/application and follow-up dispatch serialize against policy
 replacement. Native permits carry provenance into delayed PTY prompt and native
 Codex frame writers. PTY body, attachments and submit recheck the tab under its
 runtime lock; automatic Enter retries retain the original permit. Native Codex
-rechecks before empty write retries, and keeps policy admission through a frame
-once physical delivery begins. Raw RPC terminal queues retain policy and process
+rechecks original authority before every physical attempt, including after partial
+progress, and releases policy admission during capacity waits. A refused partial
+frame retires its original connection without replaying its remainder. Raw RPC terminal queues retain policy and process
 identity. Port-stream writes also retain their opener's revision/source and
 check it at each nonblocking socket write. A handed-over v2 echo retains a
 durable provenance-required marker, so losing its in-memory permit cannot
@@ -150,3 +151,21 @@ invite paused across generation retirement. A second regression carries the
 bootstrap conversion and host installation into durable session RPC application,
 including independent manager approval and stale follow-up rejection. Relay and
 provider counterparts are local test stand-ins; no production service was enabled.
+
+
+## Dormant provider integration continuation
+
+The shared native owner now carries original operation identity through ACP
+opening, queues, settings, approval attempts, whole-response callbacks and
+nonblocking frame writes. OpenCode uses the same reserve-once streaming lifecycle
+for its actual HTTP writer and exact association fencing for SSE output. These
+internal paths retain the public ACP/OpenCode v2 entry blocks and unsupported
+Everyone witness; they do not advertise provider availability or activate v2.
+
+Lead integration checks passed serially on the combined source: shared carrier
+12, ACP owner 9, ACP adapter 9, OpenCode transport 10 and OpenCode owner 13 tests.
+The earlier no-wire mode-test timeout was traced to a fixture reply omitting its
+mode identifier; the fixture now supplies that report and asserts that a repeated
+known mode emits no extra RPC. Full privacy regressions, all local gates and
+independent review remain required. Local subprocess/loopback fixtures are not
+production or cross-device certification.

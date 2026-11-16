@@ -1,3 +1,5 @@
+import { cloudPresence } from "@/lib/cloudPresence";
+import { WorkspaceFollowingSection, OrganizationPresenceCount } from "./WorkspaceFollowingSection";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -206,6 +208,7 @@ function OrganizationSection({
     }).catch(() => false);
     if (!yes) return;
     try {
+      cloudPresence.leave();
       await api.organizationSelect(org.id, status.context?.revision ?? "");
       await refreshAccount();
     } catch (error) {
@@ -215,6 +218,7 @@ function OrganizationSection({
 
   const actions = (
     <>
+      <OrganizationPresenceCount orgId={org.id} />
       {/* Stays beside the header's actions: its tooltip says how many run, and the limit. */}
       {usage && (
         <WithTooltip label={usage.card.replace(/\n/g, " · ")}>
@@ -353,6 +357,7 @@ function OrganizationSection({
     >
       {live && !unloaded && (
         <div className={cn("min-w-0", offline && "opacity-70")}>
+          <WorkspaceFollowingSection orgId={org.id} />
           <OrgProjects orgId={org.id} projects={placed.projects} archived={placed.archived} sections={sections} filtered={filter.active} empty={filter.empty} mayCreate={mayCreate} onLifecycle={onLifecycle} />
         </div>
       )}

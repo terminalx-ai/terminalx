@@ -255,8 +255,16 @@ impl Settings {
     /// The app asks for a model. With no process to confirm it (`confirmed_by_provider`
     /// false) the value is simply what the next launch will be given; with
     /// one, it waits.
+    #[cfg(test)]
     pub fn request_model(&mut self, model: &str, confirmed_by_provider: bool) {
-        self.request_privacy.model = crate::data_privacy::remote_ticket();
+        let permit = crate::remote::collab::v2::current();
+        self.request_model_explicit(model, confirmed_by_provider, permit.as_ref(), crate::data_privacy::remote_ticket());
+    }
+
+    /// Native callback/owner entry: explicit Local is None, never callback TLS.
+    pub(crate) fn request_model_explicit(&mut self, model: &str, confirmed_by_provider: bool,
+        permit: Option<&crate::remote::collab::v2::Permit>, privacy: Option<crate::data_privacy::Ticket>) {
+        self.request_privacy.model = privacy;
         if !confirmed_by_provider || model == self.model {
             self.model = model.to_string();
             self.requested_model = None;
@@ -266,14 +274,21 @@ impl Settings {
             self.requested_model = Some(model.to_string());
             self.request_privacy.model_request_id = Some(uuid::Uuid::new_v4().to_string());
         }
-        self.stamp_collaboration("model", self.requested_model.is_some());
+        self.stamp_collaboration("model", self.requested_model.is_some(), permit);
     }
 
     /// The same for effort. Asking for no effort in particular is not
     /// something a running CLI can be told, so it is only ever a launch
     /// setting.
     pub fn request_effort(&mut self, effort: Option<&str>, confirmed_by_provider: bool) {
-        self.request_privacy.effort = crate::data_privacy::remote_ticket();
+        let permit = crate::remote::collab::v2::current();
+        self.request_effort_explicit(effort, confirmed_by_provider, permit.as_ref(), crate::data_privacy::remote_ticket());
+    }
+
+    /// Native callback/owner entry: explicit Local is None, never callback TLS.
+    pub(crate) fn request_effort_explicit(&mut self, effort: Option<&str>, confirmed_by_provider: bool,
+        permit: Option<&crate::remote::collab::v2::Permit>, privacy: Option<crate::data_privacy::Ticket>) {
+        self.request_privacy.effort = privacy;
         let effort = effort.filter(|e| !e.is_empty());
         if confirmed_by_provider && effort != self.effort.as_deref() {
             // An empty requested value means clearing the explicit effort
@@ -285,7 +300,7 @@ impl Settings {
             self.requested_effort = None;
             self.request_privacy.effort = None;
         }
-        self.stamp_collaboration("effort", self.requested_effort.is_some());
+        self.stamp_collaboration("effort", self.requested_effort.is_some(), permit);
     }
 
     /// Whether anything asked for is still waiting on the provider.
@@ -296,8 +311,16 @@ impl Settings {
     /// The app asks for a permission mode. It is what the next launch is
     /// given; `waits` says that launch is held up by a turn the restart would
     /// interrupt, and until then the tab is in the mode it was in.
+    #[cfg(test)]
     pub fn request_mode(&mut self, mode: &str, waits: bool) {
-        self.request_privacy.permission_mode = crate::data_privacy::remote_ticket();
+        let permit = crate::remote::collab::v2::current();
+        self.request_mode_explicit(mode, waits, permit.as_ref(), crate::data_privacy::remote_ticket());
+    }
+
+    /// Native callback/owner entry: explicit Local is None, never callback TLS.
+    pub(crate) fn request_mode_explicit(&mut self, mode: &str, waits: bool,
+        permit: Option<&crate::remote::collab::v2::Permit>, privacy: Option<crate::data_privacy::Ticket>) {
+        self.request_privacy.permission_mode = privacy;
         if !waits || mode == self.permission_mode {
             self.permission_mode = mode.to_string();
             self.requested_permission_mode = None;
@@ -305,15 +328,69 @@ impl Settings {
         } else {
             self.requested_permission_mode = Some(mode.to_string());
         }
-        self.stamp_collaboration("mode", self.requested_permission_mode.is_some());
+        self.stamp_collaboration("mode", self.requested_permission_mode.is_some(), permit);
     }
 
-    fn stamp_collaboration(&mut self, setting: &str, pending: bool) {
-        if pending && crate::remote::collab::v2::current().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+    fn stamp_collaboration(&mut self, setting: &str, pending: bool, original: Option<&crate::remote::collab::v2::Permit>) {
+        if pending && original.is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
             self.request_privacy.collaboration.insert(setting.into(), uuid::Uuid::new_v4().to_string());
         } else {
             self.request_privacy.collaboration.remove(setting);
         }
+    }
+
+    /// Provider owners retain an exact Configure attempt when the requested value
+    /// equals the reported value (including cancelling an older intent). Keep
+    /// its original privacy and IDs until that wire/no-wire confirmation.
+    /// Uses the existing non-authorizing request map; no new wire field.
+    pub(crate) fn retain_provider_request(&mut self, setting: &str,
+        original: Option<&crate::remote::collab::v2::Permit>, privacy: Option<crate::data_privacy::Ticket>) {
+        self.stamp_collaboration(setting, true, original);
+        match setting {
+            "model" => {
+                self.request_privacy.model = privacy;
+                if self.request_privacy.model_request_id.is_none() { self.request_privacy.model_request_id = Some(uuid::Uuid::new_v4().to_string()); }
+            },
+            "mode" => self.request_privacy.permission_mode = privacy,
+            _ => {},
+        }
+    }
+
+    /// Native sidecar capture only; never a fresh remote ticket on callback.
+    pub(crate) fn provider_ticket(&self, setting: &str) -> Option<crate::data_privacy::Ticket> {
+        match setting { "model" => self.request_privacy.model.clone(),
+            "mode" => self.request_privacy.permission_mode.clone(),
+            "effort" => self.request_privacy.effort.clone(), _ => None }
+    }
+
+    /// Local provider requests have native owner IDs, without stamping Local as a
+    /// remote collaboration request. Owner has already checked that exact ID.
+    pub(crate) fn settle_local_provider_request(&mut self, setting: &str) {
+        match setting {
+            "model" => self.accepted(Setting::Model),
+            "mode" => {
+                if let Some(mode) = self.requested_permission_mode.take() { self.permission_mode = mode; }
+                self.request_privacy.permission_mode = None;
+            },
+            _ => {},
+        }
+    }
+
+    /// Exact native collaboration request only. Equal-value reports and old
+    /// ACKs do not settle a replacement or an unrelated local setting.
+    pub(crate) fn settle_provider_request(&mut self, setting: &str, request_id: &str) -> bool {
+        if self.request_privacy.collaboration.get(setting).map(String::as_str) != Some(request_id) { return false; }
+        match setting {
+            "model" => self.accepted(Setting::Model),
+            "effort" => self.accepted(Setting::Effort),
+            "mode" => {
+                if let Some(mode) = self.requested_permission_mode.take() { self.permission_mode = mode; }
+                self.request_privacy.permission_mode = None;
+                self.request_privacy.collaboration.remove("mode");
+            }
+            _ => return false,
+        }
+        true
     }
 
     pub(crate) fn collaboration_requests(&self) -> &std::collections::HashMap<String, String> { &self.request_privacy.collaboration }

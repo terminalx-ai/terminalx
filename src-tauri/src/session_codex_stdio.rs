@@ -16,6 +16,15 @@ pub(super) struct Delivery {
     collaboration: Option<CollaborationPermit>,
 }
 
+/// A partial frame has already retired its exact child. The queue worker
+/// must not apply its generic tab failure handler to a successor connection.
+#[derive(Debug)]
+struct PartialFrameRetired;
+impl std::fmt::Display for PartialFrameRetired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("partial Codex frame retired; input will not be replayed") }
+}
+impl std::error::Error for PartialFrameRetired {}
+
 /// A command or continuation refused because Codex is still on a turn.
 /// Ordinary follow-ups are queued instead (#866). The request is refused, not the turn: nothing is published
 /// and the tab goes on as it was. The sender keeps its message.
@@ -457,7 +466,8 @@ impl SessionManager {
             // Only this worker writes. It may wait for admission, but reader
             // settlement and the Host terminal receipt never wait for it.
             while let Ok(Delivery { line, sender, privacy, collaboration }) = rx.recv() {
-                if let Err(error) = match collaboration { Some(permit) => permit.with(|| manager.write_codex_frame(&runtime, &launch, line, sender, privacy)), None => manager.write_codex_frame(&runtime, &launch, line, sender, privacy) } {
+                if let Err(error) = manager.write_codex_frame(&runtime, &launch, line, sender, privacy, collaboration) {
+                    if error.is::<PartialFrameRetired>() { return; }
                     if let Some(rt_arc) = runtime.upgrade() {
                         let mut rt = rt_arc.lock().unwrap();
                         if same_launch(&rt, &launch) && !rt.stopping {
@@ -574,7 +584,7 @@ impl SessionManager {
     /// takes it (`send_mobile`, `type_prompt`, a phone's reconcile): sharing,
     /// the share's admission, the phone's permit, the share owner's
     /// attachment, and only then the tab's runtime, never under it.
-    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound, sender: Option<Authority>, control: Option<crate::data_privacy::Ticket>) -> Result<()> {
+    fn write_codex_frame(&self, runtime: &std::sync::Weak<Mutex<TabRuntime>>, launch: &Arc<()>, frame: Outbound, sender: Option<Authority>, control: Option<crate::data_privacy::Ticket>, collaboration: Option<CollaborationPermit>) -> Result<()> {
         let mut bytes = frame.line.as_bytes().to_vec();
         bytes.push(b'\n');
         let mut offset = 0;
@@ -584,18 +594,21 @@ impl SessionManager {
         // Keep the remote barrier through every partial write of this frame.
         let privacy = control.as_ref().or_else(|| sender.as_ref().and_then(|sender| sender.privacy.as_ref().or_else(|| sender.shared.as_ref().map(|permit| &permit.privacy))
             .or_else(|| sender.mobile.as_ref().map(|permit| &permit.grant.privacy)))).map(|ticket| ticket.enter()).transpose();
-        let collaboration = sender.as_ref().and_then(|sender| sender.collaboration.clone()).or_else(collaboration_v2::current);
-        let mut policy_guard = None;
+        // Only immutable frame provenance may authorize a retry. The worker
+        // never consults caller TLS (including a completion callback's origin).
+        let collaboration = sender.as_ref().and_then(|sender| sender.collaboration.clone()).or(collaboration);
+        let mut original_child = None;
         let mut answered = None;
+        let result = (|| {
         while offset < bytes.len() {
+            let mut capacity_wait = false;
             anyhow::ensure!(Instant::now() < deadline, "Codex input pipe timed out; delivery is uncertain and will not be replayed");
             {
-                if policy_guard.is_none() { policy_guard = collaboration.as_ref().map(|permit| permit.collaboration.enter_admission()); }
+                let _policy = collaboration.as_ref().map(|permit| permit.collaboration.enter_admission());
                 let _admission = crate::issue_pipeline::admission::lock();
-                // Delivery that has begun under a current permit is finished:
-                // a stream takes no half frame back.
-                // An empty attempt consumed no authority: revalidate it on
-                // every retry until the first byte is actually written.
+                // Mobile/share barriers retain their existing first-byte semantics.
+                // Collaboration is independently checked at EVERY physical
+                // attempt, including after a partial frame and capacity wait.
                 let sender = if offset == 0 { sender.as_ref() } else { None };
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
@@ -639,6 +652,9 @@ impl SessionManager {
                 anyhow::ensure!(entry.tab(&rt.tab_id).is_some_and(selected), "Codex tab was closed or changed");
                 // The launch is the instance a PTY prompt's pane stands for.
                 let child = rt.child.as_ref().context("Codex child is missing")?;
+                if let Some(original) = &original_child {
+                    anyhow::ensure!(Arc::ptr_eq(original, child), "Codex child changed during a partial frame; input will not be replayed");
+                }
                 anyhow::ensure!(self.host.get(&rt.key()).is_some_and(|live| Arc::ptr_eq(&live, child)), "Codex child has been replaced or exited");
                 // A nonblocking syscall is the only physical write under the
                 // authority locks. Reader/Stop can run between attempts, even
@@ -650,8 +666,12 @@ impl SessionManager {
                 let written = child.try_write_stdin(&bytes[offset..]);
                 match written {
                     Ok(0) => bail!("Codex input pipe closed; delivery is uncertain and will not be replayed"),
-                    Ok(written) => offset += written,
+                    Ok(written) => {
+                        original_child.get_or_insert_with(|| child.clone());
+                        offset += written;
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        capacity_wait = true;
                         #[cfg(test)]
                         tests::observed_full_pipe();
                     }
@@ -666,13 +686,42 @@ impl SessionManager {
                     }
                 }
             }
-            if offset == 0 { drop(policy_guard.take()); }
+            // All per-attempt admission/runtime locks are gone before waiting.
+            #[cfg(test)]
+            if offset > 0 && capacity_wait { tests::after_partial_write(); }
+            let _ = capacity_wait;
             #[cfg(test)]
             if offset == 0 { tests::after_empty_write(); }
             if offset < bytes.len() { std::thread::sleep(Duration::from_millis(5)); }
         }
         if let Some((session, tab)) = answered { self.observer.answered(&session, &tab); }
         Ok(())
+        })();
+        if let Err(error) = &result {
+            if offset > 0 {
+                // A JSON prefix cannot be withdrawn or completed under new
+                // authority. Poison only its original engine; never stop by
+                // tab key, reconnect, replay, or settle a replacement's work.
+                if let Some(rt_arc) = runtime.upgrade() {
+                    let mut rt = rt_arc.lock().unwrap();
+                    if same_launch(&rt, launch) && !rt.stopping
+                        && original_child.as_ref().is_some_and(|original| rt.child.as_ref().is_some_and(|child| Arc::ptr_eq(original, child))) {
+                        // Unsent successors keep their own identity and text.
+                        // Retiring this uncertain frame cannot settle them.
+                        let queued = std::mem::take(&mut rt.queued);
+                        let authorities = std::mem::take(&mut rt.stdio_followups.authorities);
+                        self.codex_stdio_failed(&mut rt, error, None);
+                        rt.queued = queued;
+                        rt.stdio_followups.authorities = authorities;
+                    }
+                }
+                if let Some(child) = original_child {
+                    child.close_stdin();
+                    crate::harness::host::terminate(child.pid);
+                }
+            }
+        }
+        if offset > 0 { result.context(PartialFrameRetired) } else { result }
     }
 
     pub(super) fn apply_codex_actions(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>) -> Result<()> {
@@ -687,7 +736,12 @@ impl SessionManager {
                     // The frame carries its sender, so the writer can check
                     // the sender's permits without holding this runtime.
                     let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
-                    let delivery = Delivery { line, sender, privacy: crate::data_privacy::remote_ticket(), collaboration: collaboration_v2::current().or_else(|| rt.stdio_launch_permit.clone()) };
+                    // A prompt owns its original sender, even when a different
+                    // caller's completion dispatches a queued local prompt.
+                    let collaboration = if line.delivers_prompt() {
+                        sender.as_ref().and_then(|sender| sender.collaboration.clone())
+                    } else { collaboration_v2::current().or_else(|| rt.stdio_launch_permit.clone()) };
+                    let delivery = Delivery { line, sender, privacy: crate::data_privacy::remote_ticket(), collaboration };
                     let refused = match rt.stdio_writer.as_ref() {
                         Some(writer) => match writer.try_send(delivery) {
                             Ok(()) => None,

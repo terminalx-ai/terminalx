@@ -55,8 +55,8 @@ pub enum InboxEvent {
         #[serde(rename = "createdAt")]
         created_at: String,
     },
-    #[serde(rename = "workspace.reassigned")]
-    Reassigned {
+    #[serde(rename = "workspace.presence-changed")]
+    PresenceChanged {
         #[serde(deserialize_with = "cursor")]
         id: String,
         #[serde(rename = "workspaceId")]
@@ -67,6 +67,18 @@ pub enum InboxEvent {
         #[serde(rename = "createdAt")]
         created_at: String,
     },
+    #[serde(rename = "workspace.reassigned")]
+    Reassigned {
+        #[serde(deserialize_with = "cursor")]
+        id: String,
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "organizationId")]
+        organization_id: String,
+        payload: ReassignedPayload,
+        #[serde(rename = "createdAt")]
+        created_at: String,
+    },
 }
 impl InboxEvent {
     pub fn id(&self) -> &str {
@@ -74,12 +86,23 @@ impl InboxEvent {
             Self::ShareAdded { id, .. }
             | Self::ShareRemoved { id, .. }
             | Self::ReadMarkerChanged { id, .. }
+            | Self::PresenceChanged { id, .. }
             | Self::Reassigned { id, .. } => id,
         }
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmptyPayload {}
+
+/// Notes are plain text, delivered only to the target by authorized inbox replay.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReassignedPayload {
+    pub actor_id: String,
+    pub previous_owner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,6 +195,18 @@ pub fn read_stream(reader: impl Read) -> Result<InboxStreamPage, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase2_presence_and_reassigned_payloads_survive_checkpoint_without_private_extras() {
+        let presence = serde_json::json!({"id":"9007199254740993","type":"workspace.presence-changed","organizationId":"org","workspaceId":"workspace","payload":{},"createdAt":"2026-11-15T12:00:00Z"});
+        let wire = format!("event: inbox\nid: 9007199254740993\ndata: {}\n\nevent: checkpoint\nid: 9007199254740994\ndata: {{\"cursor\":\"9007199254740994\"}}\n\n", presence);
+        let page = read_stream(wire.as_bytes()).unwrap();
+        assert_eq!(page.cursor, "9007199254740994");
+        assert_eq!(serde_json::to_value(&page.events[0]).unwrap(), presence);
+        let event: InboxEvent = serde_json::from_value(serde_json::json!({"id":"4","type":"workspace.reassigned","organizationId":"org","workspaceId":"workspace","createdAt":"2026-11-15T12:00:00Z","payload":{"actorId":"actor","previousOwnerId":"old","note":"Away until Monday\nPlease finish.","receiptDigest":"must-not-cross"}})).unwrap();
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["payload"], serde_json::json!({"actorId":"actor","previousOwnerId":"old","note":"Away until Monday\nPlease finish."}));
+    }
 
     #[test]
     fn phase2_desktop_contract_sse_rejects_mismatched_or_incomplete_checkpoints() {

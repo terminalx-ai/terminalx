@@ -92,7 +92,7 @@ it("keeps search and filters across views, includes archived automations, and cl
   expect(rowNames()).toEqual(["Fix live"]);
 });
 
-it.each(TABLE_COLUMNS)("sorts and toggles the $label column", async ({ id, label }) => {
+it.each(TABLE_COLUMNS.map((column) => ({ ...column, label: column.id === "updated" ? "Last active" : column.label })))("sorts and toggles the $label column", async ({ id, label }) => {
   state.sessions = [session("Task 10"), session("Task 2")];
   render(<AgentDashboard />);
   fireEvent.click(screen.getByRole("button", { name: "Table" }));
@@ -103,7 +103,7 @@ it.each(TABLE_COLUMNS)("sorts and toggles the $label column", async ({ id, label
   expect(table.getByRole("columnheader", { name: label }).getAttribute("aria-sort")).toBe("ascending");
   fireEvent.click(table.getByRole("button", { name: label }));
   expect(table.getByRole("columnheader", { name: label }).getAttribute("aria-sort")).toBe("descending");
-  openMenu("Columns");
+  openMenu("Display");
   const checkbox = await screen.findByRole("menuitemcheckbox", { name: label });
   fireEvent.click(checkbox);
   expect(table.queryByRole("columnheader", { name: label, hidden: true })).toBeNull();
@@ -120,7 +120,7 @@ it("remembers the view, sorting and hidden columns, preserving natural name orde
   expect(rowNames()).toEqual(["Task 2", "Task 10"]);
   fireEvent.click(screen.getByRole("button", { name: "Name" }));
   expect(rowNames()).toEqual(["Task 10", "Task 2"]);
-  openMenu("Columns");
+  openMenu("Display");
   fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Branch" }));
   closeMenu();
   view.unmount();
@@ -149,7 +149,7 @@ it("moves and opens in sorted order, preserves selection after sorting, and leav
   state.select.mockClear();
   fireEvent.keyDown(screen.getByRole("button", { name: "Name" }), { key: "Enter" });
   fireEvent.keyDown(screen.getByRole("textbox", { name: "Search sessions" }), { key: "Enter" });
-  openMenu("Columns");
+  openMenu("Display");
   fireEvent.keyDown(screen.getByRole("menu"), { key: "ArrowDown" });
   expect(state.select).not.toHaveBeenCalled();
   closeMenu();
@@ -159,4 +159,37 @@ it("moves and opens in sorted order, preserves selection after sorting, and leav
   fireEvent.keyDown(window, { key: "ArrowDown" });
   fireEvent.keyDown(window, { key: "Enter" });
   expect(state.select).toHaveBeenCalledWith("Beta");
+});
+
+import { ownerStorageKey, readOwners, teamPredicate } from "./TeamOverview";
+import type { CloudCatalogState } from "@/lib/cloudCatalog";
+it("keeps Mine, Shared, Following and current Active predicates over the identical visible dataset", () => {
+  const catalog = { owner: "account", revision: "revision", loaded: true, viewerUserId: "me", notices: [], createMemory: {}, orgs: {
+    org: { orgId: "org", source: "live", error: null, workspaces: [
+      { workspace: { id: "mine", createdBy: "me", state: "ready" }, following: false },
+      { workspace: { id: "shared", createdBy: "other", state: "ready", you: { role: "viewer" } }, following: true },
+      { workspace: { id: "visible", createdBy: "other", state: "ready" }, following: false },
+    ] },
+  } } as unknown as CloudCatalogState;
+  const rows = [{ id: "local", ownerId: "me" }, ...["mine", "shared", "visible"].map((workspaceId) => ({ id: workspaceId, orgId: "org", workspaceId }))];
+  const active = (_org: string, id: string) => id === "shared";
+  const ids = (view: Parameters<typeof teamPredicate>[1]) => rows.filter((row) => teamPredicate(row, view, catalog, active)).map((row) => row.id);
+  expect(ids("everyone")).toEqual(["local", "mine", "shared", "visible"]);
+  expect(ids("mine")).toEqual(["local", "mine"]);
+  expect(ids("shared")).toEqual(["shared"]);
+  expect(ids("following")).toEqual(["shared"]);
+  expect(ids("active")).toEqual(["shared"]);
+  // Running compute alone never becomes active human presence or a fabricated share.
+  expect(teamPredicate(rows[3]!, "active", catalog, () => false)).toBe(false);
+  catalog.orgs.org!.error = "presence_unavailable";
+  expect(ids("active")).toEqual([]); expect(ids("following")).toEqual([]);
+});
+it("isolates this Mac's multi-person By preference by account and organization", () => {
+  const a = ownerStorageKey("account-a", "org");
+  localStorage.setItem(a, JSON.stringify(["alice", "bob", "alice"]));
+  expect(readOwners(a)).toEqual(["alice", "bob"]);
+  expect(readOwners(ownerStorageKey("account-b", "org"))).toEqual([]);
+  expect(readOwners(ownerStorageKey("account-a", "other-org"))).toEqual([]);
+  localStorage.setItem(a, "[]"); expect(readOwners(a)).toEqual([]);
+  localStorage.removeItem(a);
 });
