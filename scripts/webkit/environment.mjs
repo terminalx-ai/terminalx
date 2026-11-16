@@ -6,6 +6,9 @@
 // PRO-144: the local Environment pages too: Personal and a repository's
 // variables with their sources, documented variables and the Add sheet's
 // Keychain switch, inside the column and without overlapping controls.
+// PRO-376: at 1440 wide, in dark and light, the Personal table's rows are
+// 40 px with every action on one line, no value breaks mid-token, the buttons
+// sit beside the page title, and Add variables is a sheet at the right edge.
 import { launch, open, report, serve } from "./harness.mjs";
 
 const at = Date.UTC(2026, 9, 1);
@@ -210,11 +213,11 @@ async function localEnvironment() {
     const measure = (locator) => locator.evaluate((root) => {
       const main = root.closest('[role="main"]') ?? document.body;
       const bounds = root.getBoundingClientRect();
-      const outside = [...root.querySelectorAll("button, input, textarea, select, table, [role=switch], li")].filter((element) => {
+      const outside = [...root.querySelectorAll("button, input, textarea, select, table, li")].filter((element) => {
         const box = element.getBoundingClientRect();
         return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
       }).map((element) => `${element.tagName}:${(element.getAttribute("aria-label") ?? element.textContent ?? "").slice(0, 40)}`);
-      const boxes = [...root.querySelectorAll("button, [role=switch], td")].map((element) => ({ label: element.getAttribute("aria-label") ?? element.textContent, box: element.getBoundingClientRect() })).filter(({ box }) => box.width > 0);
+      const boxes = [...root.querySelectorAll("button, input[type=checkbox], td")].map((element) => ({ label: element.getAttribute("aria-label") ?? element.textContent, box: element.getBoundingClientRect() })).filter(({ box }) => box.width > 0);
       const overlaps = [];
       for (let a = 0; a < boxes.length; a++)
         for (let b = a + 1; b < boxes.length; b++) {
@@ -226,10 +229,11 @@ async function localEnvironment() {
     });
     const layout = await measure(repository);
     await repository.screenshot({ path: `/tmp/pro-144-repository-environment-${width}.png` });
-    await repository.getByRole("button", { name: "Paste variables" }).click();
+    const databaseRows = await repository.locator("tbody tr").evaluateAll((rows) => rows.filter((row) => row.cells[0].textContent.startsWith("DATABASE_URL")).length);
+    await repository.getByRole("button", { name: "Paste KEY=VALUE" }).click();
     const sheet = page.getByRole("dialog");
     await sheet.getByLabel("Variables").fill("SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP");
-    const keychain = sheet.getByRole("switch", { name: "Keep values that look like secrets in the Keychain" });
+    const keychain = sheet.getByRole("checkbox", { name: "Keep values that look like secrets in the Keychain" });
     const sheetLayout = await measure(sheet);
     await sheet.screenshot({ path: `/tmp/pro-144-add-variables-${width}.png` });
     const calls = await page.evaluate(() => window.__LOCAL_ENVIRONMENT_CALLS__);
@@ -237,13 +241,59 @@ async function localEnvironment() {
       "the repository page does not widen the Settings column": layout.noPageOverflow,
       "every control and row stays inside the repository page": layout.outside.length === 0,
       "no two controls or cells overlap on the repository page": layout.overlaps.length === 0,
-      "the column reads Applies to, with each source": /Applies to/.test(layout.text) && /from Personal/.test(layout.text) && /overrides Personal/.test(layout.text) && /This project/.test(layout.text) && /\.terminalx\/settings\.json/.test(layout.text),
+      "the column reads Applies to, with each source": /Applies to/i.test(layout.text) && /from Personal/.test(layout.text) && /overrides Personal/.test(layout.text) && /This project/.test(layout.text) && /\.terminalx\/settings\.json/.test(layout.text),
+      "a Personal value the project overrides is listed once": databaseRows === 1,
       "documented variables say where each is set": /Documented variables \(13\)/.test(layout.text) && /Set in Personal/.test(layout.text) && /Not set/.test(layout.text),
-      "the Add sheet's Keychain switch is on by default": (await keychain.getAttribute("aria-checked")) === "true",
+      "the Add sheet's Keychain box is ticked by default": await keychain.isChecked(),
       "the Add sheet stays inside itself with no overlaps": sheetLayout.outside.length === 0 && sheetLayout.overlaps.length === 0,
-      "the sheet marks the secret-looking value and the bad line": /SENTRY_AUTH_TOKENsecret/.test(sheetLayout.text) && /Line 3:/.test(sheetLayout.text),
+      "the sheet marks the secret-looking value and the bad line": /SENTRY_AUTH_TOKENsecret/.test(sheetLayout.text) && /line 3: starts with a digit/.test(sheetLayout.text) && /1 line skipped/.test(sheetLayout.text),
       "looking reveals and saves nothing": !calls.includes("environment_reveal") && !calls.includes("environment_save"),
     }, { outside: [...layout.outside, ...sheetLayout.outside], overlaps: [...layout.overlaps, ...sheetLayout.overlaps], calls });
+    await page.close();
+  }
+  for (const colorScheme of ["dark", "light"]) {
+    const page = await open(browser, server.url, { cloud: false, localProjects: 2 }, { width: 1440, height: 900 }, { colorScheme });
+    await page.evaluate((rows) => {
+      const answers = window.__PW_STUB__.answers;
+      answers.environment_list = ({ projectPath }) => structuredClone(rows[projectPath ?? "user"] ?? []);
+      answers.environment_save = () => true;
+    }, { ...rows, user: [...rows.user, { name: "PNPM_HOME", scope: "user", overridden: false, secret: false, value: "/Users/alex/Library/pnpm/a/rather/long/path/that/must/not/wrap/anywhere" }] });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Environment", exact: true }).click();
+    const table = page.getByRole("table", { name: "Environment variables" }).first();
+    await table.getByRole("button", { name: "Reveal ANTHROPIC_API_KEY" }).waitFor();
+    const personal = await table.evaluate((root) => {
+      const rows = [...root.querySelectorAll("tbody tr")];
+      const title = document.getElementById("settings-section-title").getBoundingClientRect();
+      const add = [...document.querySelectorAll("button")].find((b) => b.textContent === "Add variable").getBoundingClientRect();
+      const header = getComputedStyle(root.querySelector("th"));
+      return {
+        heights: rows.map((row) => Math.round(row.getBoundingClientRect().height)),
+        // Each row's buttons share one line, and each cell holds one line of text.
+        oneLineActions: rows.every((row) => new Set([...row.querySelectorAll("td:last-child button")].map((b) => Math.round(b.getBoundingClientRect().top))).size <= 1),
+        oneLineValues: rows.every((row) => { const cell = row.children[1]; return cell.scrollHeight <= cell.clientHeight + 1 && getComputedStyle(cell).whiteSpace === "nowrap"; }),
+        valueSize: getComputedStyle(rows[0].children[1]).fontSize,
+        kicker: header.textTransform === "uppercase" && parseFloat(header.fontSize) <= 11,
+        besideTitle: Math.abs((add.top + add.bottom) / 2 - (title.top + title.bottom) / 2) < 12 && add.left > title.left + 200,
+      };
+    });
+    await page.locator("main").screenshot({ path: `/tmp/pro-376-environment-1440-${colorScheme}.png` });
+    await page.getByRole("button", { name: "Paste KEY=VALUE" }).click();
+    const sheet = page.getByRole("dialog");
+    await sheet.getByLabel("Variables").fill("SENTRY_AUTH_TOKEN=sntrys_eyJpYXQiOjE3\nVITE_RELAY_URL=wss://relay.dev.example\n2FA_SEED=JBSWY3DPEHPK3PXP\nPOSTHOG_KEY=phc_8Qm2xR7tLw0");
+    await page.waitForTimeout(400);
+    const box = await sheet.boundingBox();
+    await page.screenshot({ path: `/tmp/pro-376-add-variables-1440-${colorScheme}.png` });
+    failures += report(`Personal environment at 1440px, ${colorScheme}`, {
+      "every row is 40 px": personal.heights.every((height) => height === 40),
+      "every row's actions are on one line": personal.oneLineActions,
+      "no value wraps": personal.oneLineValues,
+      "values are 12.5 px": personal.valueSize === "12.5px",
+      "column headers are uppercase kickers": personal.kicker,
+      "Add variable sits beside the page title": personal.besideTitle,
+      "Add variables is a full-height sheet at the right edge": Math.round(box.x + box.width) === 1440 && box.y === 0 && Math.round(box.height) === 900 && box.width <= 460,
+      "the sheet's footer counts the skipped line and the chosen variables": (await sheet.getByText("1 line skipped").count()) === 1 && (await sheet.getByRole("button", { name: "Add 3 variables" }).count()) === 1,
+    }, personal);
     await page.close();
   }
   return failures;

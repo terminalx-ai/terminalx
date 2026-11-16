@@ -14,6 +14,8 @@ const rows = [
   { name: "DATABASE_URL", scope: "repository", overridden: false, secret: false, value: "postgres://localhost/terminalx_dev" },
   { name: "STRIPE_SECRET_KEY", scope: "repository", overridden: false },
   { name: "VITE_RELAY_URL", scope: "repositoryShared", overridden: false, secret: false },
+  { name: "SENTRY_DSN", scope: "repository", overridden: true },
+  { name: "SENTRY_DSN", scope: "repositoryLocal", overridden: false, secret: false },
 ];
 beforeEach(() => {
   vi.clearAllMocks();
@@ -37,8 +39,11 @@ describe("repository environment page", () => {
     await screen.findByRole("button", { name: "Reveal STRIPE_SECRET_KEY" });
     expect(screen.getByRole("region", { name: "Environment of terminalx" }).textContent).toContain("These override your personal ones.");
     expect(screen.getByRole("columnheader", { name: "Applies to" })).toBeTruthy();
-    expect(cellsOf("DATABASE_URL").map((cells) => cells[2])).toEqual(["from Personal", "overrides Personal"]);
+    // A Personal value this project overrides is listed once, as the project's row.
+    expect(cellsOf("DATABASE_URL").map((cells) => cells.slice(1, 3))).toEqual([["postgres://localhost/terminalx_dev", "overrides Personal"]]);
     expect(cellsOf("STRIPE_SECRET_KEY")[0][2]).toBe("This project");
+    // A project value another source overrides stays listed, marked Overridden.
+    expect(cellsOf("SENTRY_DSN").map((cells) => cells[2])).toEqual(["This projectOverridden", ".terminalx/settings.local.json"]);
     expect(cellsOf("NODE_OPTIONS")[0].slice(1, 3)).toEqual(["--max-old-space-size=8192", "from Personal"]);
     expect(cellsOf("VITE_RELAY_URL")[0].slice(1, 3)).toEqual(["Set in file", ".terminalx/settings.json"]);
     // Only this repository's own rows are editable; file rows have no actions.
@@ -56,7 +61,16 @@ describe("repository environment page", () => {
     expect(status("ANTHROPIC_API_KEY")).toMatch(/instead of your Claude login.*Set in Personal$/);
     expect(status("OPENAI_API_KEY")).toMatch(/Not set$/);
     expect(status("VITE_RELAY_URL")).toMatch(/settings file\.Set in \.terminalx\/settings\.json$/);
-    expect(screen.getByText(/^Documented variables \(13\)$/)).toBeTruthy();
+    expect(screen.getByText(/^Documented variables/).textContent).toBe("Documented variables (14)");
+  });
+
+  it("adds a documented variable from its + button", async () => {
+    render(<RepositoryEnvironmentSettings projectPath="/code/terminalx" />);
+    const list = within(await screen.findByRole("list", { name: "Documented variables" }));
+    expect(list.queryByRole("button", { name: "Add STRIPE_SECRET_KEY" })).toBeNull();
+    fireEvent.click(list.getByRole("button", { name: "Add OPENAI_API_KEY" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect((dialog.getByLabelText("Name") as HTMLInputElement).value).toBe("OPENAI_API_KEY");
   });
 
   it("saves to this repository, keeps Load from .env a one-time import, and shows an empty state", async () => {
@@ -65,8 +79,8 @@ describe("repository environment page", () => {
     open.mockResolvedValue("/code/terminalx/.env");
     fireEvent.click(screen.getByRole("button", { name: "Load from .env file" }));
     const dialog = within(await screen.findByRole("dialog"));
-    expect(dialog.getByText("Applies to this project. An empty value sets the variable to an empty string.")).toBeTruthy();
-    fireEvent.click(dialog.getByRole("button", { name: "Import 1 valid variables" }));
+    expect((dialog.getByRole("combobox", { name: "Applies to" }) as HTMLSelectElement).value).toBe("/code/terminalx");
+    fireEvent.click(dialog.getByRole("button", { name: "Add 1 variable" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("environment_save", { projectPath: "/code/terminalx", inputs: [{ name: "FROM_FILE", value: "loaded", secret: false }], previous: null }));
     expect(invoke.mock.calls.filter(([command]) => command === "environment_read_file")).toHaveLength(1);
     cleanup();
