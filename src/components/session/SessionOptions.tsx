@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { Popover } from "radix-ui";
-import { Ellipsis } from "@/icons";
+import { ChevronDown, Ellipsis, GitFork } from "@/icons";
 import { Switch } from "@/components/ui/controls";
 import type { usePipelineLaunch } from "@/lib/pipelineLaunch";
 import { cn } from "@/lib/cn";
 import { PipelineLaunchControls } from "./PipelineLaunchControls";
 
 /**
- * The new session's less-used choices behind `…`: whether it gets a branch of
- * its own, and what TerminalX does with its pull request. A dot on the button
- * says an automation is on, so nothing that acts later is hidden unseen.
+ * The new session's less-used choices: whether it gets a branch of its own,
+ * and what TerminalX does with its pull request. Behind `…`, or behind a chip
+ * that says the choice (`chip`: "New worktree"), as the new-session box's
+ * header shows it. A dot on the button says an automation is on, so nothing
+ * that acts later is hidden unseen.
  */
 export function SessionOptions({
   useWorktree,
@@ -18,6 +20,7 @@ export function SessionOptions({
   switchLabel = "Start on a new branch in a worktree",
   currentBranch,
   pipeline,
+  chip,
 }: {
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
@@ -25,21 +28,38 @@ export function SessionOptions({
   switchLabel?: string;
   currentBranch?: string;
   pipeline: ReturnType<typeof usePipelineLaunch>;
+  /** The choice in words, shown on the button in place of `…`. */
+  chip?: string;
 }) {
   const [open, setOpen] = useState(false);
   const automated = pipeline.value.resolveConflicts || pipeline.value.autoMerge;
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <button
-          type="button"
-          aria-label="Session options"
-          title="Branch and automation"
-          className={cn("relative flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground", open && "bg-veil-raised text-foreground")}
-        >
-          <Ellipsis className="size-4" />
-          {automated && <span className="absolute right-1 top-1 size-1.5 rounded-full bg-accent" aria-label="Automation on" />}
-        </button>
+        {chip ? (
+          <button
+            type="button"
+            aria-label="Session options"
+            title="Branch and automation"
+            data-testid="worktree-chip"
+            className={cn("relative flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground", open && "bg-veil-raised text-foreground")}
+          >
+            <GitFork className="size-[13px]" aria-hidden />
+            {chip}
+            {automated && <span className="size-1.5 rounded-full bg-accent" aria-label="Automation on" />}
+            <ChevronDown className="size-3 text-faint" aria-hidden />
+          </button>
+        ) : (
+          <button
+            type="button"
+            aria-label="Session options"
+            title="Branch and automation"
+            className={cn("relative flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-veil-raised hover:text-foreground", open && "bg-veil-raised text-foreground")}
+          >
+            <Ellipsis className="size-4" />
+            {automated && <span className="absolute right-1 top-1 size-1.5 rounded-full bg-accent" aria-label="Automation on" />}
+          </button>
+        )}
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content

@@ -2352,6 +2352,8 @@ export interface PullRequest {
   checks: PrCheck[];
   body: string;
   author: string;
+  /** `owner/name` of the fork its head is on; only a pull request search reads it. */
+  headRepository?: string | null;
 }
 
 export const git = {
