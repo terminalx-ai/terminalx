@@ -72,6 +72,12 @@ export interface Turn {
   usage?: Usage;
   agent?: string;
   model?: string;
+  /**
+   * The settings the app last recorded a change to before the turn ended
+   * (PRO-379). A key is absent when no change to it came before the turn;
+   * `Transcript.changedSettings` says whether one came later.
+   */
+  settings?: { effort?: string; permissionMode?: string };
   toolCount: number;
   editedFiles: number;
   live: boolean;
@@ -146,6 +152,8 @@ export interface Transcript {
   rateLimit?: { status?: string; resetsAt?: number; window?: string };
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
+  /** Settings the app recorded a change to somewhere in this transcript: a turn without its own record of one ran before it. */
+  changedSettings?: { effort?: boolean; permissionMode?: boolean };
 }
 
 const GROUPABLE = new Set(["Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit", "Bash", "shell", "apply_patch"]);
@@ -300,6 +308,7 @@ export class TranscriptReducer {
   private contextUsed: number | undefined;
   private contextMax: number | undefined;
   private model: string | undefined;
+  private settings: { effort?: string; permissionMode?: string } = {};
   private compacting = false;
   private retry: Transcript["retry"];
   private modelRequestOpen = false;
@@ -607,6 +616,7 @@ export class TranscriptReducer {
           turn.usage = payload.usage;
           turn.model = payload.usage.model ?? turn.model;
         }
+        if (this.settings.effort || this.settings.permissionMode) turn.settings = { ...this.settings };
         if (payload.authFailed) this.authFailed = true;
         this.modelRequestOpen = false;
         this.compacting = false;
@@ -778,6 +788,9 @@ export class TranscriptReducer {
         break;
       }
       case "settings_changed":
+        if (payload.effort) this.settings = { ...this.settings, effort: payload.effort };
+        if (payload.permissionMode) this.settings = { ...this.settings, permissionMode: payload.permissionMode };
+        break;
       case "conversation":
       case "delta":
       case "unknown":
@@ -873,6 +886,7 @@ export class TranscriptReducer {
       rateLimit: this.rateLimit,
       usageWindows: this.usageWindows,
       codexUsage: this.codexUsage,
+      changedSettings: this.settings.effort || this.settings.permissionMode ? { effort: !!this.settings.effort, permissionMode: !!this.settings.permissionMode } : undefined,
     };
     this.last = { version: this.version, live, transcript };
     return transcript;

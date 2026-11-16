@@ -2,8 +2,9 @@ import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/rev
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { getPrefs, subscribePrefs } from "@/lib/prefs";
+import { ArrowUp, AtSign, Bookmark, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -85,6 +86,9 @@ export function insertNewLine(el: HTMLTextAreaElement) {
 }
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
+const savedSnippets = () => getPrefs().promptSnippets;
+/** A picker row that is a saved snippet, not an agent command: its id follows. */
+const SNIPPET = "snippet:";
 const NO_HISTORY: string[] = [];
 
 /**
@@ -381,7 +385,9 @@ export function Composer({
     },
   });
   const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
-  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
+  // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
+  const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || snippets.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -403,13 +409,16 @@ export function Composer({
     if (!token) return [];
     if (token.kind === "slash") {
       const q = token.query.toLowerCase();
-      return commands
+      const saved = snippets
+        .filter((snippet) => snippet.name.includes(q))
+        .map((snippet) => ({ id: `${SNIPPET}${snippet.id}`, label: `/${snippet.name}`, detail: snippet.text.split("\n")[0], hint: "Snippet", icon: <Bookmark className="size-3.5" /> }));
+      return [...saved, ...commands
         .filter((c) => c.name.toLowerCase().includes(q))
         .slice(0, 30)
-        .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }));
+        .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }))];
     }
     return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
-  }, [token, commands, fileHits]);
+  }, [token, commands, fileHits, snippets]);
 
   // The highlighted row belongs to the list it was chosen in: another token, or a list of another
   // length, starts at its first row. That is read off while rendering, never reset in an effect. A
@@ -429,7 +438,8 @@ export function Composer({
   const complete = useCallback(
     (item: PickerItem) => {
       if (!token) return;
-      const replacement = token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
+      const snippet = token.kind === "slash" && item.id.startsWith(SNIPPET) ? snippets.find((saved) => `${SNIPPET}${saved.id}` === item.id) : undefined;
+      const replacement = snippet ? snippet.text : token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
       const before = draft.slice(0, token.start);
       const after = draft.slice(caret);
       const next = before + replacement + after;
@@ -444,7 +454,7 @@ export function Composer({
         }
       });
     },
-    [token, draft, caret, onDraftChange],
+    [token, draft, caret, onDraftChange, snippets],
   );
 
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);

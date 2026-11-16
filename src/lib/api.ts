@@ -735,6 +735,9 @@ export const api = {
   /** Keep the worktree on disk but run the session in the project itself from now on. */
   relocateSession: (sessionId: string) => invoke<SessionEntry>("relocate_session", { sessionId }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
+  /** Fork the conversation as it stood at the end of the turn `endSeq` (PRO-379), into a tab beside it or a session of its own. */
+  forkTurn: (sessionId: string, tabId: string, endSeq: number, into: "tab" | "session") =>
+    invoke<{ session: SessionEntry; tabId: string; note: string | null }>("fork_turn", { sessionId, tabId, endSeq, into }),
 
   // harnesses
   listHarnesses: () => invoke<HarnessInfo[]>("list_harnesses"),

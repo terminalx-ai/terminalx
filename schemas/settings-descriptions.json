@@ -114,6 +114,7 @@
   "preferences.shortcuts.session.closeTab": "Session keyboard shortcut.",
   "preferences.shortcuts.session.fixErrors": "Session keyboard shortcut.",
   "preferences.shortcuts.session.focusOtherPane": "Session keyboard shortcut.",
+  "preferences.shortcuts.session.forkTurn": "Session keyboard shortcut.",
   "preferences.shortcuts.session.interrupt": "Session keyboard shortcut.",
   "preferences.shortcuts.session.lastTab": "Session keyboard shortcut.",
   "preferences.shortcuts.session.latestShell": "Session keyboard shortcut.",

@@ -11,6 +11,13 @@ import userPreferenceDefaults from "./userPreferenceDefaults.json";
  * User-facing preferences live in settings.json after the one-time migration.
  * Transient navigation/layout state stays in localStorage.
  */
+/** A prompt kept to send again: offered as `/name` in the composer, which puts its text in. */
+export interface PromptSnippet {
+  id: string;
+  name: string;
+  text: string;
+}
+
 export interface Prefs {
   dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
@@ -62,6 +69,8 @@ export interface Prefs {
   resetFiles: boolean;
   /** Appended to the prompt that sends failed CI logs to an agent. */
   fixErrorsInstructions: string;
+  /** Prompts saved from a turn's menu (PRO-379), offered by name under / in the composer. */
+  promptSnippets: PromptSnippet[];
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -186,6 +195,7 @@ const DEFAULTS: Prefs = {
   promptMap: true,
   resetFiles: false,
   fixErrorsInstructions: "",
+  promptSnippets: [],
   autocorrect: false,
   followUps: "now",
   lastProject: null,
@@ -317,6 +327,8 @@ function load(legacyOnly = false): Prefs {
     if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
     if (typeof prefs.resetFiles !== "boolean") prefs.resetFiles = false;
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
+    prefs.promptSnippets = Array.isArray(prefs.promptSnippets) ? prefs.promptSnippets.filter((snippet: Partial<PromptSnippet> | null): snippet is PromptSnippet =>
+      !!snippet && typeof snippet.id === "string" && typeof snippet.name === "string" && typeof snippet.text === "string") : [];
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

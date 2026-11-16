@@ -882,6 +882,15 @@ export async function forkSession(id: string, tabId: string) {
   return s;
 }
 
+/** Fork at a turn (PRO-379) and open the fork; the result's `note` says what went differently, such as files left as they were. */
+export async function forkTurn(id: string, tabId: string, endSeq: number, into: "tab" | "session") {
+  const forked = await api.forkTurn(id, tabId, endSeq, into);
+  upsertSession(forked.session);
+  selectSession(forked.session.id);
+  setSelectedAgent(forked.session.id, forked.tabId);
+  return forked;
+}
+
 export async function addTab(sessionId: string, harness: string, model: string, effort: string | null, permissionMode: string) {
   const tab = await api.addTab(sessionId, { harness, model, effort, permissionMode });
   const s = state.sessions.find((x) => x.id === sessionId);

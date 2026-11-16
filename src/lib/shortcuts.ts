@@ -115,6 +115,7 @@ const ACTIONS = [
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"], menu: { section: "view", order: 2, label: "Terminal", target: "focused" } },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"], menu: { section: "view", order: 3, label: "Switch Chat / Terminal", target: "focused" } },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
+  { id: "session.forkTurn", label: "Fork the chat at its last turn into a new tab", group: "Session", keys: ["mod+alt+enter"] },
   { id: "session.interrupt", label: "Interrupt the running turn", group: "Session", keys: ["escape"], scope: "context" },
   // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
   { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },

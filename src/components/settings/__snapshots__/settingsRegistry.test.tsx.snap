@@ -211,6 +211,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.session.reopenTab",
   "shortcuts.session.latestShell",
   "shortcuts.session.toggleTerminalView",
+  "shortcuts.session.forkTurn",
   "shortcuts.session.interrupt",
   "shortcuts.session.stop",
   "shortcuts.panel.changes",

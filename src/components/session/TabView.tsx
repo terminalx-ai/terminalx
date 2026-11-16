@@ -42,6 +42,9 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import { SaveSnippetDialog } from "@/components/chat/SaveSnippetDialog";
+import { forkTurn } from "@/lib/sessions";
+import { showError } from "@/lib/errorToasts";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
 import { modelLabel, useModels } from "@/lib/models";
@@ -169,6 +172,7 @@ export function TabView({
   const sendBusy = sendNotice !== null;
   const [busyRefused, setBusyRefused] = useState<string | null>(null);
   const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
+  const [snippetPrompt, setSnippetPrompt] = useState<string | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -321,6 +325,9 @@ export function TabView({
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  // Fork from a turn (PRO-379): what a reset can cut, a fork can copy.
+  const canFork = canReset;
+  const turnSettings = useMemo(() => ({ effort: tab.effort, permissionMode: tab.permissionMode }), [tab.effort, tab.permissionMode]);
   // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
   const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
@@ -624,6 +631,16 @@ export function TabView({
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
     enabled: focused && active && !continuationOpen && !terminalMode && interrupts,
   });
+  // Fork at the last finished turn into a new tab beside this one (PRO-379).
+  useShortcut("session.forkTurn", () => {
+    const last = [...transcript.turns].reverse().find((turn) => turn.completed && !turn.live);
+    const endSeq = last?.completed?.status === "ok" ? last.completed.seq : undefined;
+    if (endSeq == null) return false;
+    void forkTurn(session.id, tab.id, endSeq, "tab").then(
+      (forked) => { if (forked.note) showError(forked.note, undefined, { title: "Forked to a new tab" }); },
+      (e) => showError("Couldn't fork the conversation", e));
+    return true;
+  }, { enabled: focused && active && canFork && !terminalMode });
   // The hard stop has no keys unless the reader gives it some. A cloud tab's terminal view passes those through too.
   useShortcut("session.stop", () => (takesKey() ? (actions.pressedWith("shortcut"), stop("chat"), true) : false), {
     enabled: focused && active && !continuationOpen && !(remoteTerminal && terminalMode),
@@ -842,6 +859,12 @@ export function TabView({
       onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
+      secondOpinionAgent={counterpart?.name}
+      onFork={canFork ? (endSeq, into) => void forkTurn(session.id, tab.id, endSeq, into).then(
+        (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
+        (e) => showError("Couldn't fork the conversation", e)) : undefined}
+      onSaveSnippet={setSnippetPrompt}
+      turnSettings={turnSettings}
       footer={
         <>
         {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
@@ -1106,6 +1129,7 @@ export function TabView({
       <span>{resetNotice(tab)}</span>
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
+    {snippetPrompt !== null && <SaveSnippetDialog prompt={snippetPrompt} onClose={() => setSnippetPrompt(null)} />}
     {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}

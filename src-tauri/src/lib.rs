@@ -984,6 +984,7 @@ pub fn run() {
             commands::search_text,
             commands::replace_text,
             commands::fork_session,
+            commands::fork_turn,
             commands::dictation_available,
             commands::notification_permission,
             commands::dictation_start,

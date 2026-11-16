@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -106,6 +106,10 @@ export function Chat({
   sending = null,
   onSendAgain,
   onSecondOpinion,
+  secondOpinionAgent,
+  onFork,
+  onSaveSnippet,
+  turnSettings,
   onReset,
 }: {
   sessionId: string;
@@ -135,8 +139,21 @@ export function Chat({
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
+  /** Who a second opinion asks, by name ("Codex"). */
+  secondOpinionAgent?: string;
+  /** Fork at a finished turn (PRO-379), where the backend can. */
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  /** Keep a turn's prompt as a snippet. */
+  onSaveSnippet?: (text: string) => void;
+  /** The tab's settings now, for turns whose own record does not say. */
+  turnSettings?: { effort?: string | null; permissionMode?: string | null };
   onReset?: (endSeq: number) => void;
 }) {
+  // Rebuilt only when a value changes: every turn is memoised on it.
+  const [effort, permissionMode] = [turnSettings?.effort, turnSettings?.permissionMode];
+  const [effortChanged, modeChanged] = [transcript.changedSettings?.effort, transcript.changedSettings?.permissionMode];
+  const turnFallback = useMemo(() => turnSettings ? { effort, permissionMode, changed: { effort: effortChanged, permissionMode: modeChanged } } : undefined,
+    [!!turnSettings, effort, permissionMode, effortChanged, modeChanged]);
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
   useNoticeDeferral(active && transcript.pendingAsks.length > 0);
@@ -460,6 +477,11 @@ export function Chat({
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
                 onSecondOpinion={onSecondOpinion}
+                secondOpinionAgent={secondOpinionAgent}
+                onFork={onFork}
+                onSaveSnippet={onSaveSnippet}
+                turnFallback={turnFallback}
+                latest={isLast}
                 onReset={!isLast && !live && !sending ? onReset : undefined}
                 divider={turnDivider(turns[start + i - 1], t)}
               />
