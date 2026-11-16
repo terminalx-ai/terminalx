@@ -4,6 +4,7 @@ import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQu
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
+import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
@@ -894,6 +895,8 @@ export function TabView({
             if (viewError) clearTabViewError(tab.id);
             setDraft(tab.id, v);
             if (collabLive && v) presenceTyping(shared!.key);
+            // Not switched to another account while the person types here (#981).
+            if (local && v) noteComposerTyping(session.id, tab.id);
           }}
           onSend={send}
           sentAfter={sentAfter}

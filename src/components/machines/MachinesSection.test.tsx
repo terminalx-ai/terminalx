@@ -143,7 +143,7 @@ describe("the Machines section", () => {
     expect(within(section("Mac mini")).getByRole("button").getAttribute("title")).toBe("Lost it 12 seconds ago");
     setState("m1", { state: "offline", lastSeenAt: null, retryInMs: 10_000 });
     expect(label()).toBe(`Offline · seen ${clockTime(MAC_MINI.lastSeenAt!)}`);
-    setState("m1", { state: "needsUpdate", version: "0.2.27" });
+    setState("m1", { state: "needsUpdate", version: "0.2.27", side: "machine" });
     expect(label()).toBe("Needs update");
     setState("m1", { state: "accessRemoved" });
     expect(label()).toBe("Access removed");
@@ -177,7 +177,7 @@ describe("the Machines section", () => {
     expect(screen.getByTestId("machine-chip").textContent).toBe("Mac miniOffline");
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Sessions there keep running");
     expect(screen.queryByTestId("machine-path")).toBeNull();
-    setState("m1", { state: "needsUpdate", version: null });
+    setState("m1", { state: "needsUpdate", version: null, side: "machine" });
     expect(screen.getByTestId("machine-chip").getAttribute("title")).toBe("Runs an older TerminalX");
 
     // dev-server through the relay: a server icon and the relay path.

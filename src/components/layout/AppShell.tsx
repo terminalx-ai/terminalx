@@ -58,6 +58,7 @@ import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspac
 import { startMachineConnections } from "@/lib/machineConnections";
 import { updateMachineSession } from "@/lib/machineCatalog";
 import { setMachineDashboardEnabled } from "@/lib/machineDashboard";
+import { startAppUpdateResponder } from "@/lib/machineUpdate";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
@@ -295,6 +296,10 @@ export function AppShell() {
   useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
   // Machine sessions join the overview, the dock badge, notices and attention stepping only while it is on (PRO-346).
   useEffect(() => setMachineDashboardEnabled(machinesOn), [machinesOn]);
+  // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
+  useEffect(() => {
+    void startAppUpdateResponder();
+  }, []);
   // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
   const selectedWorkspace = store.selectedCloudWorkspace ?? null;
   const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;

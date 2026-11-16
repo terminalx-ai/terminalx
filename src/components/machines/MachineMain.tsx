@@ -10,9 +10,11 @@ import { machineConnection, reconnectMachine, useMachineConnections } from "@/li
 import { machineSessionTab, useMachineProjects } from "@/lib/machineCatalog";
 import type { AgentFocus, AgentProjects } from "@/components/cloud/CloudAgents";
 import { selectCloudSession } from "@/lib/sessions";
-import { machineSessionKey, parseMachineKey } from "@/types/target";
 import { takeMachineNewSession, useMachineNewSession } from "./machineNewSession";
+import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
+import { machineSessionKey, parseMachineKey } from "@/types/target";
 import { MachineChip, MachineLocation } from "./connectionStatus";
+import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 
 /**
  * A paired machine in the main slot (PRO-345, screen 21.08): the header chip
@@ -48,6 +50,9 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
   const { machine, state, connection, attachError } = machineConnection(store, machineId);
   const name = machine?.name ?? "Machine";
   const [clientState, setClientState] = useState<WorkspaceConnectionState>({ state: "idle" });
+  // "Needs update" also when the machine is connected but hides a feature this desktop uses (PRO-354).
+  const version = machineVersionView(machine, state, connection?.client ?? null, clientState, useThisVersion());
+  const shown = version.shownState;
   useEffect(() => {
     if (!connection) return;
     setClientState({ state: "idle" });
@@ -90,9 +95,10 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
             </Button>
           </WithTooltip>
         )}
-        <MachineChip machine={machine} name={name} state={state} />
+        <MachineChip machine={machine} name={name} state={shown} />
       </header>
       {machine && <MachineLocation machine={machine} name={name} state={state} />}
+      {machine && <MachineHiddenFeatures machineId={machineId} view={version} />}
       {body}
     </main>
   );

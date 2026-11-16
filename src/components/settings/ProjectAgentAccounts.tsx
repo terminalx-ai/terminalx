@@ -47,6 +47,18 @@ function ProjectAccountRow({ agent, agentName, view, projectPath }: { agent: Age
   const own = view.projectDefaults[projectPath] ?? null;
   const ownLabel = accountLabel(view, own);
   const agentDefault = accountLabel(view, view.defaultAccount) ?? "This Mac's login";
+  const never = view.autoSwitch?.setting.neverProjects.includes(projectPath) ?? false;
+  const neverSwitch = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      takeAgentAccounts(await agentAccounts.setNeverSwitch(agent, projectPath, next));
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const choose = async (value: string) => {
     const next = value === FOLLOW_AGENT ? null : value;
     if (next === own) return;
@@ -90,6 +102,13 @@ function ProjectAccountRow({ agent, agentName, view, projectPath }: { agent: Age
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+      {/* A project with an account of its own may keep its tabs there (#981). */}
+      {view.autoSwitch?.offered && (own || never) && (
+        <label className="flex basis-full items-center gap-2 pl-5.5 text-[12px] text-muted-foreground">
+          <input type="checkbox" checked={never} disabled={busy} onChange={(e) => void neverSwitch(e.target.checked)} />
+          Never switch accounts in this project
+        </label>
+      )}
       {error && <p role="alert" className="basis-full text-[12px] text-destructive">{error}</p>}
     </div>
   );

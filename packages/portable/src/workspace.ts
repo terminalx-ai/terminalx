@@ -64,8 +64,12 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * the matching action.
  */
 export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
-/** Offered only by a runtime that serves every project of its machine (docs/MACHINES.md). */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2"] as const;
+/**
+ * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
+ * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
+ * `machine.updateChanged` notification.
+ */
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -74,6 +78,8 @@ export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typ
  */
 export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> = {
   "machine.relayAccess": "machine/2",
+  "machine.updateStatus": "machine/3",
+  "machine.update": "machine/3",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -195,6 +201,88 @@ export type WorkspaceConnectionState =
        */
       link?: number;
     };
+
+/**
+ * A machine's update (PRO-354, docs/MACHINES.md "Versions and updates"):
+ * `machine.updateStatus`, `machine.update` and `machine.updateChanged`.
+ * `src/types/machines.ts` re-exports these for the desktop.
+ */
+export type MachineUpdateMethod = "installer" | "app" | "unmanaged";
+
+/** Work a handover cannot carry: it stops if the person goes ahead. */
+export interface MachineUpdateBlocker {
+  id: string;
+  kind: string;
+  title: string;
+}
+
+/** Another paired computer operating the machine right now. */
+export interface MachineUpdateOtherComputer {
+  id: string;
+  label: string;
+}
+
+export type MachineUpdatePhase = "downloading" | "verifying" | "trial" | "handingOver" | "cleaningUp";
+
+export type MachineUpdateProgress =
+  | { phase: "idle" }
+  | { phase: MachineUpdatePhase; version: string; since: number }
+  | { phase: "appUpdating"; version: string | null; since: number; step: string | null }
+  | { phase: "updated"; from: string; to: string; at: number }
+  | {
+      phase: "failed";
+      version: string;
+      at: number;
+      message: string;
+      /** The version the machine runs now. */
+      running: string;
+      /** The new version was started and the old one put back. */
+      rolledBack: boolean;
+    };
+
+export interface MachineUpdateStatus {
+  method: MachineUpdateMethod;
+  current: string;
+  /** The newest release this machine could update to; null when none is newer or it has not checked. */
+  available: { version: string } | null;
+  checkedAt: number | null;
+  blockers: MachineUpdateBlocker[];
+  otherComputers: MachineUpdateOtherComputer[];
+  /** Versions on disk, newest first (at most three). */
+  kept: string[];
+  progress: MachineUpdateProgress;
+}
+
+/** `machine.update`'s params. */
+export interface MachineUpdateRequest {
+  version: string;
+  /** Blocker ids the person agreed to stop. */
+  stop?: string[];
+  /** The other computers (ids) the person was told are connected; one not named refuses the update with `update_confirm`. */
+  confirmedOthers?: string[];
+}
+
+const UPDATE_METHODS: readonly string[] = ["installer", "app", "unmanaged"];
+
+/** A `MachineUpdateStatus` as the runtime sent it, or null when it is not one. Lists default to empty. */
+export function machineUpdateStatus(value: unknown): MachineUpdateStatus | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.method !== "string" || !UPDATE_METHODS.includes(raw.method) || typeof raw.current !== "string") return null;
+  const progress = raw.progress && typeof raw.progress === "object" && typeof (raw.progress as { phase?: unknown }).phase === "string" ? (raw.progress as MachineUpdateProgress) : { phase: "idle" as const };
+  const available = raw.available && typeof raw.available === "object" && typeof (raw.available as { version?: unknown }).version === "string" ? { version: (raw.available as { version: string }).version } : null;
+  const list = <T,>(items: unknown, valid: (item: Record<string, unknown>) => boolean): T[] => (Array.isArray(items) ? items.filter((item): item is T => !!item && typeof item === "object" && valid(item as Record<string, unknown>)) : []);
+  return {
+    method: raw.method as MachineUpdateMethod,
+    current: raw.current,
+    available,
+    checkedAt: typeof raw.checkedAt === "number" ? raw.checkedAt : null,
+    blockers: list<MachineUpdateBlocker>(raw.blockers, (item) => typeof item.id === "string" && typeof item.title === "string"),
+    otherComputers: list<MachineUpdateOtherComputer>(raw.otherComputers, (item) => typeof item.id === "string" && typeof item.label === "string"),
+    kept: Array.isArray(raw.kept) ? raw.kept.filter((entry): entry is string => typeof entry === "string") : [],
+    progress,
+  };
+}
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
 export type PtyControl = "you" | "other" | "none";
@@ -1336,6 +1424,38 @@ export class WorkspaceRpcClient {
       if (notification.event !== "pipeline.changed") return;
       const pipeline = notification.params.pipeline;
       if (pipeline && typeof pipeline === "object" && typeof (pipeline as { id?: unknown }).id === "string") listener(pipeline as RuntimeIssuePipeline);
+    });
+  }
+
+  /** `machine.updateStatus` (`machine/3`): how the machine updates, what it could update to, and what an update would stop. `refresh` checks for a release now. */
+  async machineUpdateStatus(refresh = false): Promise<MachineUpdateStatus> {
+    const status = machineUpdateStatus(await this.call("machine.updateStatus", refresh ? { refresh: true } : {}));
+    if (!status) throw new WorkspaceRpcError("invalid_response", "The machine answered machine.updateStatus with something else", "machine.updateStatus");
+    return status;
+  }
+
+  /**
+   * `machine.update` (`machine/3`, a manager): update the machine to
+   * `version`. Refused with `update_confirm` (its data the status) unless
+   * `stop` names every blocker and `confirmedOthers` names every other
+   * computer connected; `update_busy` while one runs; `update_unavailable` when the
+   * machine cannot update itself.
+   */
+  async updateMachine(request: MachineUpdateRequest): Promise<MachineUpdateStatus> {
+    const params: Record<string, unknown> = { version: request.version };
+    if (request.stop) params.stop = request.stop;
+    if (request.confirmedOthers) params.confirmedOthers = request.confirmedOthers;
+    const status = machineUpdateStatus(await this.call("machine.update", params));
+    if (!status) throw new WorkspaceRpcError("invalid_response", "The machine answered machine.update with something else", "machine.update");
+    return status;
+  }
+
+  /** `machine.updateChanged` (`machine/3`): the update status whenever any field changes. */
+  onMachineUpdate(listener: (status: MachineUpdateStatus) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "machine.updateChanged") return;
+      const status = machineUpdateStatus(notification.params.status);
+      if (status) listener(status);
     });
   }
 

@@ -46,6 +46,78 @@ export interface AgentAccounts {
   defaultAccount: string;
   /** Project id → account id. */
   projectDefaults: Record<string, string>;
+  /** Switching accounts automatically (#981); absent from a build before it. */
+  autoSwitch?: AutoSwitchView;
+}
+
+/** How automatic switching picks the next account. */
+export type AutoSwitchOrder = "mostRoom" | "inOrder";
+
+/** One account in the automatic switching list: whether it may be switched onto. */
+export interface AutoSwitchPick {
+  id: string;
+  use: boolean;
+}
+
+/**
+ * Switch accounts automatically (#981), as `agent-logins.json` keeps it: off
+ * by default; `threshold` the used share of a window at which an account
+ * counts as full (50–100).
+ */
+export interface AutoSwitchSetting {
+  enabled: boolean;
+  threshold: number;
+  /** The person's priority order, each account checked or not. */
+  accounts: AutoSwitchPick[];
+  order: AutoSwitchOrder;
+  notifySwitch: boolean;
+  notifyNoneLeft: boolean;
+  /** Projects set to "Never switch accounts in this project". */
+  neverProjects: string[];
+  /** Fields a newer build wrote: sent back as they came. */
+  [unknown: string]: unknown;
+}
+
+/** One account as the setting lists it, in its order. */
+export interface AutoSwitchListed {
+  id: string;
+  label: string;
+  kind: AgentAccountKind;
+  use: boolean;
+  signedIn: boolean;
+}
+
+export interface AutoSwitchView {
+  /** Offered: the agent has two or more subscription accounts. */
+  offered: boolean;
+  setting: AutoSwitchSetting;
+  accounts: AutoSwitchListed[];
+}
+
+export const AUTO_SWITCH_MIN_THRESHOLD = 50;
+export const AUTO_SWITCH_MAX_THRESHOLD = 100;
+
+/** One line of the switch log: labels only, never a token. */
+export interface AccountSwitchLogEntry {
+  /** Milliseconds since the epoch. */
+  at: number;
+  agent: AgentAccountAgent;
+  sessionId: string;
+  tabId: string;
+  title?: string;
+  from: string;
+  fromLabel: string;
+  to?: string;
+  toLabel?: string;
+  outcome: "switched" | "started" | "noneAvailable" | "failed";
+  reason: string;
+}
+
+/** The account a new session starts on because automatic switching moved it, and why. */
+export interface LaunchAccountChoice {
+  account: string;
+  label: string;
+  reason: string | null;
 }
 
 /** A sign-in that has begun: the browser (Claude Code) or a device code (Codex). */
@@ -114,7 +186,31 @@ export const agentAccounts = {
   setDefault: (harness: string, accountId: string | null, projectId: string | null = null) =>
     invoke<AgentAccounts>("agent_accounts_set_default", { harness, accountId, projectId }),
   readiness: (harness: string, accountId: string) => invoke<AgentReadiness>("agent_accounts_readiness", { harness, accountId }),
+  /** Save the agent's automatic switching setting (#981). */
+  setAutoSwitch: (harness: string, setting: AutoSwitchSetting) => invoke<AgentAccounts>("agent_accounts_set_auto_switch", { harness, setting }),
+  /** "Never switch accounts in this project", on or off. */
+  setNeverSwitch: (harness: string, projectId: string, never: boolean) => invoke<AgentAccounts>("agent_accounts_set_never_switch", { harness, projectId, never }),
+  /** The switches of the last 30 days, newest first. */
+  switchLog: () => invoke<AccountSwitchLogEntry[]>("agent_accounts_switch_log"),
+  /** The account a new session starts on when automatic switching moves it off `accountId`, or `null`. */
+  launchChoice: (harness: string, projectId: string | null, accountId: string | null) =>
+    invoke<LaunchAccountChoice | null>("agent_accounts_launch_choice", { harness, projectId, accountId }),
 };
+
+/**
+ * `view`'s setting with its list in the order shown: every account, each
+ * checked or not, so a save keeps the order the person sees.
+ */
+export function autoSwitchSetting(view: AutoSwitchView, patch: Partial<AutoSwitchSetting> = {}): AutoSwitchSetting {
+  return { ...view.setting, accounts: view.accounts.map(({ id, use }) => ({ id, use })), ...patch };
+}
+
+/** Whether `harness`'s tabs in project `projectId` switch automatically. */
+export function switchesIn(view: AgentAccounts | null | undefined, projectId: string | null | undefined): boolean {
+  const auto = view?.autoSwitch;
+  if (!auto?.offered || !auto.setting.enabled) return false;
+  return !projectId || !auto.setting.neverProjects.includes(projectId);
+}
 
 /** The agents this version keeps several accounts for. */
 export const ACCOUNT_AGENTS: readonly AgentAccountAgent[] = ["claude", "codex"];
