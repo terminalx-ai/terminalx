@@ -63,7 +63,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -1215,10 +1215,25 @@ export class WorkspaceRpcClient {
     nativeCodex?: boolean;
     /** `machine/1`: the machine project the session is created in (docs/MACHINES.md "Project scoping"); a machine refuses a session without one. */
     projectId?: string;
+    /** `session-base/1` (PRO-348): the branch the new worktree is cut from; the project's default branch without it. */
+    baseRef?: string | null;
+    /**
+     * The create's idempotency id, when the caller keeps it: pressing Create
+     * again after the connection gave up is then the same request, and the
+     * runtime answers it with the session it already made (PRO-348).
+     */
+    clientRequestId?: string;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
     if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
-    const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-    return this.mutate("session.create", defined);
+    if (params.baseRef && !this.hasCapability("session-base/1")) throw new WorkspaceRpcError("capability_not_granted", "This runtime cannot start a session from another branch.", "session.create");
+    const { clientRequestId, ...rest } = params;
+    const defined = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    return this.mutate("session.create", defined, clientRequestId);
+  }
+
+  /** A fresh idempotency id for a mutation whose caller keeps it across attempts (`createAgentTab`). */
+  requestId(): string {
+    return this.newRequestId();
   }
 
   /** Stop a tab's agent process; `remove` also drops the tab and its checkpoints. */

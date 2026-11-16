@@ -867,7 +867,7 @@ type NewCloudAgentTab = Parameters<WorkspaceRpcClient["createAgentTab"]>[0];
  * when the tab was started from an issue (`pipeline/1`): the pipeline, or why
  * there is none.
  */
-export async function newCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<{ tabId: string; pipeline: RuntimeIssuePipeline | null; pipelineNote: string | null }> {
+export async function newCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<{ tabId: string; sessionId: string; pipeline: RuntimeIssuePipeline | null; pipelineNote: string | null; startError: string | null }> {
   const created = await client.createAgentTab(params);
   const s = store(scope);
   const now = new Date().toISOString();
@@ -885,7 +885,7 @@ export async function newCloudAgentTab(scope: CloudAgentScope, client: Workspace
   if (!s.tabs.has(created.tabId)) s.tabs.set(created.tabId, newTab(info, "live"));
   publish(s);
   scheduleSave(s, created.tabId);
-  return { tabId: created.tabId, pipeline: created.pipeline ?? null, pipelineNote: created.pipelineNote ?? null };
+  return { tabId: created.tabId, sessionId: created.sessionId, pipeline: created.pipeline ?? null, pipelineNote: created.pipelineNote ?? null, startError: created.startError ?? null };
 }
 
 /** Stop the tab's process and drop it and its checkpoints from the workspace. */

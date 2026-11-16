@@ -258,7 +258,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "resendUnsent" => serde_json::to_value(manager.resend_unsent(session, tab)?)?,
         "resendMessage" => serde_json::to_value(manager.resend_message(session, tab, params["seq"].as_u64().context("seq is required")?)?)?,
         "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
-        "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+        "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab), params["portable"].as_bool() == Some(true))?)?,
         "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64(),
             serde_json::from_value(params.get("files").cloned().unwrap_or_else(|| json!([])))?)?)?,
