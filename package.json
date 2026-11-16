@@ -33,6 +33,7 @@
     "test:webkit-run-sidebar": "node scripts/webkit/run-sidebar.mjs",
     "test:webkit-machine-sidebar": "node scripts/webkit/machine-sidebar.mjs",
     "test:webkit-machine-session": "node scripts/webkit/machine-session.mjs",
+    "test:webkit-machine-ports": "node scripts/webkit/machine-ports.mjs",
     "test:webkit-orchestrate-start": "node scripts/webkit/orchestrate-start.mjs",
     "test:webkit-readable-panels": "node scripts/webkit/readable-panels.mjs",
     "test:webkit-agent-logins": "node scripts/webkit/agent-logins.mjs",
