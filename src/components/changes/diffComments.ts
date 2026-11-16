@@ -36,12 +36,13 @@ class ChangeMarker extends GutterMarker {
   toDOM() { const el = document.createElement("span"); el.textContent = this.sign; el.className = this.sign === "+" ? "cm-change-add" : "cm-change-del"; return el; }
 }
 const plus = new ChangeMarker("+"), minus = new ChangeMarker("−");
-const changedCache = new WeakMap<object, Set<number>>();
+// Keyed by side as well: a split view's two editors share one chunks array, and each side numbers its own lines.
+const changedCache = { before: new WeakMap<object, Set<number>>(), after: new WeakMap<object, Set<number>>() };
 /** The lines of this editor that a chunk changed: the original's in a split view's before side, the current's otherwise. */
 function changedLines(state: EditorState, side: LineCommentSide): Set<number> {
   const info = getChunks(state);
   if (!info) return new Set();
-  const cached = changedCache.get(info.chunks);
+  const cached = changedCache[side].get(info.chunks);
   if (cached) return cached;
   const lines = new Set<number>();
   const doc = state.doc;
@@ -51,7 +52,7 @@ function changedLines(state: EditorState, side: LineCommentSide): Set<number> {
     const first = doc.lineAt(Math.min(from, doc.length)).number, last = doc.lineAt(Math.min(Math.max(from, to - 1), doc.length)).number;
     for (let n = first; n <= last; n++) lines.add(n);
   }
-  changedCache.set(info.chunks, lines);
+  changedCache[side].set(info.chunks, lines);
   return lines;
 }
 /** The diff's gutter: line numbers, markers, and the + to comment, shown on hover only. */

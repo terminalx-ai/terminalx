@@ -161,7 +161,8 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
   };
   /**
    * Run `then` once the draft may go: at once when nothing was written, else after its card's
-   * in-app "Discard this comment?" (PRO-392) says Discard.
+   * in-app "Discard this comment?" (PRO-392) says Discard. The draft moves to this panel to ask:
+   * the one that held it may be a hidden tab, where the question would never be seen.
    */
   const whenDiscarded = (then: () => void) => {
     const held = drafts.get(source.key);
@@ -172,7 +173,7 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
       if (now?.asking === asking) { drafts.set(source.key, { ...now, asking: undefined }); draftChanged(); }
       if (discard) then();
     };
-    drafts.set(source.key, { ...held, asking });
+    drafts.set(source.key, { ...held, asking, owner });
     draftChanged();
   };
   const add = (items: ReviewComment[]) => {
@@ -205,12 +206,12 @@ export function ReviewCommentsProvider({ source, tabId, active = true, onAdd, ch
     add,
   };
   // The draft goes under its line. Only when no diff here shows that line is it drawn above them, so it is never lost;
-  // that waits a frame for the diff to place it first.
+  // that waits a moment for the diff to place it first (its editor may be rebuilt to draw it), so it does not flash.
   const [fallback, setFallback] = useState(false);
   useEffect(() => {
     if (!ownsDraft || placed > 0) { setFallback(false); return; }
-    const frame = requestAnimationFrame(() => setFallback(true));
-    return () => cancelAnimationFrame(frame);
+    const timer = window.setTimeout(() => setFallback(true), 120);
+    return () => window.clearTimeout(timer);
   }, [ownsDraft, placed, draft?.anchor]);
   const header = chrome || error || notice || (ownsDraft && fallback);
   return <Context.Provider value={value}>

@@ -266,3 +266,36 @@ it("gives a saved comment a filled Add to chat, Add all N and quiet Edit · Dele
   expect(getDraft("review-tab")).toContain("First");
   expect(getDraft("review-tab")).toContain("Second");
 });
+
+it("marks each side of a split view on its own lines when an earlier hunk shifts them", async () => {
+  const before = "a\nb\nc\nx", after = "a\nnew1\nnew2\nb\nc\ny";
+  render(<ReviewCommentsProvider source={source("split-markers")} tabId="review-tab"><DiffPane base={base} path="a" before={before} after={after} mode="split" /></ReviewCommentsProvider>);
+  const marks = (side: "a" | "b") => [...document.querySelectorAll(`.cm-merge-${side} .cm-change-gutter .cm-gutterElement`)].map((el) => el.textContent).filter(Boolean);
+  await waitFor(() => expect(marks("b")).toEqual(["+", "+", "+"]));
+  // The before side's one changed line is its fourth ("x"), not the after side's 2, 3 and 6.
+  expect(marks("a")).toEqual(["−"]);
+});
+
+it("asks about an unsaved draft held by a hidden tab in the panel that starts a new comment", async () => {
+  const s = source("hidden-owner");
+  const view = render(<>
+    <div data-testid="hidden"><ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+  </>);
+  const hidden = within(screen.getByTestId("hidden"));
+  fireEvent.click(await hidden.findByRole("button", { name: "Comment on after line 1" }));
+  fireEvent.change(await hidden.findByRole("textbox", { name: "Review comment" }), { target: { value: "Unsaved" } });
+  // The tab that holds it is hidden (still mounted, inactive); another tab shows the same file.
+  view.rerender(<>
+    <div data-testid="hidden"><ReviewCommentsProvider source={s} tabId="review-tab" active={false}><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+    <div data-testid="shown"><ReviewCommentsProvider source={s} tabId="review-tab"><DiffPane base={base} path="a" before="old" after="new" mode="unified" /></ReviewCommentsProvider></div>
+  </>);
+  const shown = within(screen.getByTestId("shown"));
+  fireEvent.click(await shown.findByRole("button", { name: "Comment on after line 1" }));
+  const ask = await shown.findByRole("alertdialog", { name: "Discard this comment?" });
+  expect(hidden.queryByRole("alertdialog")).toBeNull();
+  await waitFor(() => expect(shown.getAllByRole("textbox", { name: "Review comment" })).toHaveLength(1));
+  expect((shown.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe("Unsaved");
+  fireEvent.click(within(ask).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect((shown.getByRole("textbox", { name: "Review comment" }) as HTMLTextAreaElement).value).toBe(""));
+  expect(hidden.queryByRole("textbox", { name: "Review comment" })).toBeNull();
+});

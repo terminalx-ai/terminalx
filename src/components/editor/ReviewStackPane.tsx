@@ -69,14 +69,66 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
     window.addEventListener("workspace-files-changed", onChange);
     return () => { window.removeEventListener("focus", onChange); window.removeEventListener("workspace-files-changed", onChange); };
   }, [visible, live, refresh]);
-  // Opening a file from Changes scrolls this tab to it.
+  // WebKit has no scroll anchoring: files load lazily and grow, which would push what is being read down the page.
+  // The file at the top of the view is remembered on every scroll, and kept where it was when the stack resizes.
   const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ section: HTMLElement; offset: number } | null>(null);
+  const written = useRef<number | null>(null);
+  // Opening a file holds the stack at the tallest it has been until the reader scrolls (or a few seconds pass):
+  // an editor being rebuilt shrinks it for a moment, and the browser would clamp the scroll off the opened file.
+  const settling = useRef<number | null>(null);
   const loaded = files !== null;
+  const write = useCallback((el: HTMLElement, top: number) => { el.scrollTop = top; written.current = el.scrollTop; }, []);
+  const settle = useCallback((on: boolean) => {
+    const inner = content.current;
+    if (settling.current !== null) window.clearTimeout(settling.current);
+    settling.current = on ? window.setTimeout(() => settle(false), 5000) : null;
+    if (inner) inner.style.minHeight = on ? `${inner.offsetHeight}px` : "";
+  }, []);
   useEffect(() => {
-    if (!loaded) return;
-    const section = [...(scroller.current?.querySelectorAll<HTMLElement>("[data-review-file]") ?? [])].find((el) => el.dataset.reviewFile === entry.rel);
-    section?.scrollIntoView?.({ block: "start" });
-  }, [loaded, focus, entry.rel]);
+    const el = scroller.current, inner = content.current;
+    if (!loaded || !el || !inner) return;
+    const remember = () => {
+      // The scroll this tab made itself keeps the anchor it was made for.
+      if (written.current !== null && Math.abs(el.scrollTop - written.current) <= 1) return;
+      written.current = null;
+      const top = el.getBoundingClientRect().top;
+      const section = [...el.querySelectorAll<HTMLElement>("[data-review-file]")].find((s) => s.getBoundingClientRect().bottom > top + 1);
+      anchor.current = section ? { section, offset: section.getBoundingClientRect().top - top } : null;
+    };
+    const keep = () => {
+      // Raised a frame later: resizing what this observes from its own callback is a ResizeObserver loop.
+      if (settling.current !== null) requestAnimationFrame(() => { if (settling.current !== null) inner.style.minHeight = `${inner.offsetHeight}px`; });
+      const held = anchor.current;
+      if (!held?.section.isConnected) return;
+      const moved = held.section.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+      if (Math.abs(moved) > 1) write(el, el.scrollTop + moved);
+    };
+    const reader = () => { if (settling.current !== null) settle(false); };
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(keep);
+    resized?.observe(inner);
+    const events = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    for (const name of events) el.addEventListener(name, reader, { passive: true });
+    el.addEventListener("scroll", remember, { passive: true });
+    return () => {
+      resized?.disconnect();
+      for (const name of events) el.removeEventListener(name, reader);
+      el.removeEventListener("scroll", remember);
+      settle(false);
+    };
+  }, [loaded, write, settle]);
+  // Opening a file from Changes scrolls this tab to it.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!loaded || !el) return;
+    const section = [...el.querySelectorAll<HTMLElement>("[data-review-file]")].find((s) => s.dataset.reviewFile === entry.rel);
+    if (!section) return;
+    anchor.current = { section, offset: 0 };
+    settle(true);
+    // Straight to the offset, not scrollIntoView: that also scrolls the window and the panes around it.
+    write(el, section.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop);
+  }, [loaded, focus, entry.rel, write, settle]);
   const openFile = (file: ChangedFile) => {
     if (!range) return;
     openDiff(entry.sessionId, entry.root, file.path, live ? { scope: "all", range, oldPath: file.oldPath, target, uncommitted } : { scope: "turn", range, oldPath: file.oldPath, turnLabel });
@@ -92,8 +144,8 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
       {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Choose All changes in the Changes panel to review the workspace.</p>
         : files === null ? !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading changes…</p>
         : !files.length ? <p className="p-4 text-sm text-muted-foreground">No changes in this scope.</p>
-        : files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace}
-          viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpen={() => openFile(file)} />)}
+        : <div ref={content}>{files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace}
+          viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpen={() => openFile(file)} />)}</div>}
     </div>
   </div>;
 }

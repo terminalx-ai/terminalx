@@ -37,6 +37,7 @@ function setup() {
     ] }),
     thread("t-open", { path: "test/slug.test.js", line: 13, startLine: null, originalLine: 13, originalStartLine: null, comments: [comment("c4", "sam", "Sam Rivera", "Add a case for input that is only punctuation, like `!!!`.", testHunk)] }),
   ];
+  const long = (word) => Array.from({ length: 180 }, (_, i) => i % 3 ? `const keep${i} = ${i};` : `const ${word}${i} = "${word}";`).join("\n") + "\n";
   // The review comments store, kept in the page.
   window.__comments = [];
   let id = 0;
@@ -59,8 +60,13 @@ function setup() {
     branch_overview: { branch: "make-slugify", base: "origin/main", onBase: false, ahead: 1, behind: 0, commits: [], baseCommits: [], contributors: [], baseContributors: [], upstream: "origin/make-slugify", unpushed: 0, unpulled: 0, incoming: [], dirty: false, changed: 0, hasRemote: true, merge: { state: "clean", conflicted: [] } },
     git_identity: { name: "Developer", email: "dev@example.test" },
     review_range: () => ({ target: "main", base: "a".repeat(40), head: "head" }),
-    changes_between: [{ path: "src/slug.js", blobHash: "s1", status: "modified", additions: 4, deletions: 1 }, { path: "test/slug.test.js", blobHash: "t1", status: "modified", additions: 20, deletions: 0 }],
-    file_contents_at: ({ path }) => path === "src/slug.js" ? { before, after } : { before: tests.split("\n").slice(0, 7).join("\n") + "\n", after: tests },
+    // Long files between the two: they load lazily and grow, and opening the tests must still land on them.
+    changes_between: [{ path: "src/slug.js", blobHash: "s1", status: "modified", additions: 4, deletions: 1 },
+      ...[1, 2, 3, 4, 5, 6].map((n) => ({ path: `src/long-${n}.js`, blobHash: `l${n}`, status: "modified", additions: 60, deletions: 60 })),
+      { path: "test/slug.test.js", blobHash: "t1", status: "modified", additions: 20, deletions: 0 }],
+    file_contents_at: ({ path }) => path === "src/slug.js" ? { before, after }
+      : path.startsWith("src/long-") ? { before: long("old"), after: long("new") }
+      : { before: tests.split("\n").slice(0, 7).join("\n") + "\n", after: tests },
     unfinished_merge: null,
     review_comments: reviewComments,
   });
@@ -115,8 +121,17 @@ try {
     // One review tab, stacking both files under one toolbar row.
     const tabTitle = await page.getByRole("tab", { name: /^Review · All changes/ }).count();
     await page.getByText("slug.test.js", { exact: true }).first().click();
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(2500);
     const reviewTabs = await page.getByRole("tab", { name: /^Review · / }).count();
+    // The files just above it have loaded and grown by now; the tests' header is still at the top.
+    const landed = await stack.evaluate((root) => {
+      const scroller = root.children[1];
+      const section = root.querySelector('[data-review-file="test/slug.test.js"]');
+      const loadedAbove = [...root.querySelectorAll("[data-review-file^='src/long-']")].filter((s) => !!s.querySelector(".cm-content")).length;
+      // The last file may be too short to reach the top: then the tab is scrolled to its end instead.
+      const atEnd = scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 2;
+      return { offset: Math.round(section.getBoundingClientRect().top - scroller.getBoundingClientRect().top), loadedAbove, scrolled: Math.round(scroller.scrollTop), atEnd };
+    });
     await stack.locator('[data-review-file="src/slug.js"]').scrollIntoViewIfNeeded();
     const shape = await stack.evaluate((root) => {
       const top = root.getBoundingClientRect().top;
@@ -128,7 +143,7 @@ try {
       const markers = [...(gutter?.querySelectorAll(".cm-gutterElement") ?? [])].map((el) => el.textContent).filter(Boolean);
       const plus = [...sections[0].querySelectorAll(".cm-review-gutter .cm-review-add")];
       return {
-        files: sections.map((s) => s.dataset.reviewFile),
+        files: sections.map((s) => s.dataset.reviewFile).filter((f) => !f.startsWith("src/long-")),
         header: header?.textContent,
         viewed: sections.every((s) => !!s.querySelector('header input[type="checkbox"]')),
         toolbar: toolbar?.textContent, toolbarHeight: toolbar?.getBoundingClientRect().height,
@@ -224,6 +239,7 @@ try {
     failed += report(mode, {
       "opening a file keeps the panel on Changes with its scope": panel.changesSelected && panel.scope === "all" && panel.noTurnError,
       "one Review tab stacks every file": tabTitle === 1 && reviewTabs === 1 && shape.files.join() === "src/slug.js,test/slug.test.js",
+      "opening a file further down lands on it once the files above have loaded": landed.loadedAbove >= 1 && (Math.abs(landed.offset) <= 2 || (landed.atEnd && landed.offset >= 0)) && landed.scrolled > 1000,
       "file headers carry path, +/− and Viewed": shape.header?.includes("src/slug.js") && shape.header.includes("+4") && shape.header.includes("−1") && shape.viewed,
       "one toolbar row: Unified, Split, Hide whitespace": shape.toolbar === "UnifiedSplitHide whitespace" && shape.toolbarHeight <= 35 && clean(toolbarLayout),
       "code starts right under the toolbar and file header": shape.codeOffset > 0 && shape.codeOffset <= 100,
@@ -238,7 +254,7 @@ try {
       "thread text is 13px with the reply box and Send to agent helper": openShape.body === "13px" && /mono/i.test(openShape.code) && openShape.reply && openShape.text.includes("Send to agent adds the comment") && clean(openLayout),
       "composer says the comments are ready to send": stripText.includes("2 review comments ready to send") && stripText.includes("they go to the agent as one message") && clean(stripLayout),
       "no browser errors": errors.length === 0,
-    }, { panel, tabTitle, reviewTabs, shape, toolbarLayout, hoverPlus, draftPlace, draftLayout, askPlace, askLayout, card, cardLayout, resolvedShape, resolvedLayout, openShape, openLayout, stripText, stripLayout, errors });
+    }, { panel, tabTitle, reviewTabs, landed, shape, toolbarLayout, hoverPlus, draftPlace, draftLayout, askPlace, askLayout, card, cardLayout, resolvedShape, resolvedLayout, openShape, openLayout, stripText, stripLayout, errors });
     await page.close();
   }
 } finally {
