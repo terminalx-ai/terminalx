@@ -20,6 +20,10 @@ it("locks a forced setting and explains what it disables", async () => {
   expect(control.getAttribute("aria-checked")).toBe("true");
   expect(control.matches(":disabled")).toBe(true);
   expect(screen.getByText("Managed by your organisation")).toBeTruthy();
+  // PRO-375: locked on, not greyed out: the managed switch keeps full opacity on a muted accent track.
+  expect(control.className).toContain("disabled:opacity-100");
+  expect(screen.getByText("Turned off while it’s on")).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toContain("configuration profile");
   for (const label of ["Cloud workspaces", "Organisations", "Remote control and pairing", "MCP servers from organisation config", "External logging"]) {
     expect(screen.getByText(label)).toBeTruthy();
   }
@@ -69,4 +73,15 @@ it("shows applied off with the synchronization error and does not invent protect
   expect(screen.getByRole("switch", { name: "Data privacy mode" }).getAttribute("aria-checked")).toBe("false");
   expect(screen.getByRole("switch", { name: "Data privacy mode" }).matches(":disabled")).toBe(true);
   expect(screen.getByRole("alert").textContent).toContain("Could not verify");
+});
+
+it("is a plain row while off and yours to change, with no list of what it turns off", async () => {
+  native.mockResolvedValue({ enabled: false, managed: false });
+  await act(refreshDataPrivacy);
+  render(<DataPrivacySettings />);
+  const control = screen.getByRole("switch", { name: "Data privacy mode" });
+  expect(control.matches(":disabled")).toBe(false);
+  expect(control.className).not.toContain("disabled:opacity-100");
+  expect(screen.queryByText("Turned off while it’s on")).toBeNull();
+  expect(screen.queryByText("Managed by your organisation")).toBeNull();
 });

@@ -121,6 +121,9 @@ pub struct PullRequest {
     pub checks: Vec<PrCheck>,
     pub body: String,
     pub author: String,
+    /// `owner/name` of the repository the head is on, when that is a fork. Read only where it was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +182,11 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
         checks,
         body: v["body"].as_str().unwrap_or("").into(),
         author: v["author"]["login"].as_str().unwrap_or("").into(),
+        head_repository: v["isCrossRepository"]
+            .as_bool()
+            .unwrap_or(false)
+            .then(|| Some(format!("{}/{}", v["headRepositoryOwner"]["login"].as_str()?, v["headRepository"]["name"].as_str()?)))
+            .flatten(),
     }
 }
 
@@ -2944,11 +2952,14 @@ pub fn search_prs(cwd: &Path, query: &str) -> Result<Vec<PullRequest>> {
 }
 
 fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+    // The fork a head is on, for the row that says where it comes from.
+    let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
+    let fields = fields.as_str();
     let query = query.trim().trim_start_matches('#');
     if !query.is_empty() && query.bytes().all(|b| b.is_ascii_digit()) {
         let number = query.parse::<u64>()?;
         if number == 0 { return Ok(vec![]); }
-        let out = match run(cwd, &["pr", "view", &number.to_string(), "--json", FIELDS]) {
+        let out = match run(cwd, &["pr", "view", &number.to_string(), "--json", fields]) {
             Ok(out) => out,
             Err(error) if error.to_string().contains("Could not resolve to a PullRequest") || error.to_string().contains("no pull requests found") => return Ok(vec![]),
             Err(error) => return Err(error),
@@ -2956,12 +2967,12 @@ fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) 
         return Ok(vec![parse_pr(&serde_json::from_str(&out)?)]);
     }
     let search = format!("\"{}\" in:title", query.replace(['"', '\\'], " "));
-    let mut args = vec!["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS];
+    let mut args = vec!["pr", "list", "--state", "open", "--limit", "30", "--json", fields];
     if !query.is_empty() { args.extend(["--search", &search]); }
     let mut records: Vec<Value> = serde_json::from_str(&run(cwd, &args)?)?;
     let author = query.trim_start_matches('@');
     if !author.is_empty() && author.len() <= 39 && author.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        let authored: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS, "--author", author])?)?;
+        let authored: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", "30", "--json", fields, "--author", author])?)?;
         records.extend(authored);
     }
     let mut seen = BTreeSet::new();
@@ -3151,10 +3162,11 @@ mod start_from_tests {
         for query in ["12", "#12", " 12 "] {
             let found = search_prs_with(Path::new("/repo"), query, |cwd, args| {
                 assert_eq!(cwd, Path::new("/repo"));
-                assert_eq!(args, ["pr", "view", "12", "--json", FIELDS]);
+                assert_eq!(args, ["pr", "view", "12", "--json", &format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner")]);
                 Ok(PR.into())
             }).unwrap();
             assert_eq!(found.len(), 1);
+            assert_eq!(found[0].head_repository, None, "a head on the repository itself names no fork");
             assert_eq!(found[0].number, 12);
             assert_eq!(found[0].state, "MERGED");
         }
@@ -3170,6 +3182,8 @@ mod start_from_tests {
             Ok(format!("[{PR}]"))
         }).unwrap();
         assert_eq!(found.len(), 1);
+        let fork = r#"[{"number":7,"title":"From a fork","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"},"headRepository":{"name":"app"}}]"#;
+        assert_eq!(search_prs_with(Path::new("/repo"), "", |_, _| Ok(fork.into())).unwrap()[0].head_repository.as_deref(), Some("alice/app"));
         assert_eq!(&calls[0][8..], ["--search", "\"alice\" in:title"]);
         assert_eq!(&calls[1][8..], ["--author", "alice"]);
         assert!(search_prs_with(Path::new("/repo"), "", |_, _| Ok("not json".into())).is_err());

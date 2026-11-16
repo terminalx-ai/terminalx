@@ -1,11 +1,13 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
+import { cloudIdleOptions, type CloudIdleOptions } from "@/lib/cloudNewSession";
 import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
+import { idleSuspendSentence } from "@/lib/idleSuspend";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
@@ -102,6 +104,37 @@ export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { 
   const suspended = quote.estimatedSuspendedMonthlyMicros !== null ? formatMicros(quote.estimatedSuspendedMonthlyMicros, quote.currency) : null;
   return {
     machine: `${providerLabel} · ${config.machineClassLabel} (${config.vcpu} vCPU, ${Math.round(config.memoryMiB / 1024)} GB) · ${config.locationLabel}`,
-    price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. It stops itself after ${config.idleSuspendMinutes} idle minutes.`,
+    price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. ${idleSuspendSentence(config.idleSuspendMinutes)}`,
   };
+}
+
+/** How long one organization's idle choices are kept before setup is asked again. */
+const IDLE_OPTIONS_TTL_MS = 5 * 60_000;
+const idleOptionsCache = new Map<string, { at: number; options: Promise<CloudIdleOptions> }>();
+
+/**
+ * What "Stop when idle" offers for a new workspace in this organization
+ * (PRO-410), or null while it loads, when it cannot be read (the create then
+ * takes the provider's default and reports its own errors), or for no
+ * organization. Read once per organization for a few minutes, not per render.
+ */
+export function useCloudIdleOptions(orgId: string | null): CloudIdleOptions | null {
+  const [loaded, setLoaded] = useState<{ orgId: string; options: CloudIdleOptions } | null>(null);
+  useEffect(() => {
+    if (!orgId) return;
+    let live = true;
+    const cached = idleOptionsCache.get(orgId);
+    const entry = cached && Date.now() - cached.at < IDLE_OPTIONS_TTL_MS ? cached : { at: Date.now(), options: cloudIdleOptions(orgId) };
+    idleOptionsCache.set(orgId, entry);
+    entry.options.then(
+      (options) => live && setLoaded({ orgId, options }),
+      () => {
+        if (idleOptionsCache.get(orgId) === entry) idleOptionsCache.delete(orgId);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [orgId]);
+  return orgId && loaded?.orgId === orgId && loaded.options.choices.length > 0 ? loaded.options : null;
 }

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { closeEditor, getEditors, isReviewEditor, setActiveEditor, setLastFocused, useEditors, type ReviewEditorEntry } from "@/lib/editors";
+import { closeEditor, getEditors, isReviewEditor, isTabEditor, setActiveEditor, setLastFocused, useEditors, type AttachmentEditorEntry, type FileEditorEntry, type ReviewEditorEntry, type TabEditorEntry } from "@/lib/editors";
 import { activateBrowserPage, closeBrowserPage, getBrowserState, pagesFor, useBrowser } from "@/lib/browser";
 import { lastRunning, offerCloseUndo } from "@/lib/closeUndo";
 import type { BrowserPage, TabLayout, TabState } from "@/lib/api";
@@ -30,12 +30,33 @@ interface PeerBase {
  * no agent with a chat was ever started in. `paneAgent` is the agent in
  * front of the tab's terminal right now, by harness id, and `pane` an agent
  * tab's terminal when this window has it.
+ *
+ * `review` is a centre tab an editor fills: a diff, a pull request, a
+ * conflict, an attachment, or a file the session opened (PRO-402). A file
+ * tab carries the file as `file`, which is what its panel draws; `editor`
+ * is how the tab lists read it (`fileTabEntry`).
  */
 export type PeerTab =
   | (PeerBase & { kind: "agent"; sessionId: string; tab: TabEntry; pane: TerminalPane | null; paneAgent: string | null })
   | (PeerBase & { kind: "terminal"; sessionId: string; pane: TerminalPane; paneAgent: string | null })
   | (PeerBase & { kind: "browser"; sessionId: null; page: BrowserPage })
-  | (PeerBase & { kind: "review"; sessionId: string; editor: ReviewEditorEntry });
+  | (PeerBase & { kind: "review"; sessionId: string; editor: ReviewEditorEntry; file?: FileEditorEntry });
+
+/**
+ * A session's file tab as the tab lists read a centre tab. The sidebar's row
+ * and the strip draw a file by its type's icon, its name and its unsaved
+ * dot, which is how they draw an attached file: this is the file under that
+ * reading, and never what its panel is given to draw.
+ */
+export function fileTabEntry(file: FileEditorEntry): AttachmentEditorEntry {
+  const { kind, attachment: _attachment, ...rest } = file;
+  return { ...rest, kind: "attachment", media: kind, attachment: { path: `${file.root}/${file.rel}` } };
+}
+
+/** The editor a review tab's panel draws: the file itself for a file tab. */
+export function peerEditor(tab: Extract<PeerTab, { kind: "review" }>): TabEditorEntry {
+  return tab.file ?? tab.editor;
+}
 
 /**
  * Every tab of a workspace in one row: the agent tabs and shells of the
@@ -56,7 +77,7 @@ export function workspaceTabs(
   pages: readonly BrowserPage[] = [],
   saved: TabLayout = NO_LAYOUT,
   agents: Readonly<Record<string, string>> = {},
-  reviews: readonly ReviewEditorEntry[] = [],
+  reviews: readonly TabEditorEntry[] = [],
 ): PeerTab[] {
   const layout = followedLayout(saved, sessions);
   const ids = new Set(sessions.map((session) => session.id));
@@ -76,7 +97,9 @@ export function workspaceTabs(
     ...panes
       .filter((pane) => ids.has(pane.sessionId) && !pane.hidden && !taken.has(pane.id))
       .map((pane): PeerTab => peer({ kind: "terminal", id: pane.id, created: pane.created, sessionId: pane.sessionId, pane, paneAgent: agents[pane.id] ?? null })),
-    ...reviews.filter((entry) => ids.has(entry.sessionId)).map((editor): PeerTab => peer({ kind: "review", id: editor.id, sessionId: editor.sessionId, editor, created: editor.created ?? "9999" })),
+    ...reviews.filter((entry) => ids.has(entry.sessionId)).map((editor): PeerTab => isReviewEditor(editor)
+      ? peer({ kind: "review", id: editor.id, sessionId: editor.sessionId, editor, created: editor.created ?? "9999" })
+      : peer({ kind: "review", id: editor.id, sessionId: editor.sessionId, editor: fileTabEntry(editor), file: editor, created: editor.created ?? "9999" })),
     ...pages.map((page): PeerTab => peer({ kind: "browser", id: page.id, created: page.created, sessionId: null, page })),
   ];
   return sortByLayout(tabs, layout);
@@ -99,7 +122,7 @@ export interface TabRow {
  * branch's sessions as tabs); otherwise only the open session's own tabs,
  * and the sidebar lists the others.
  */
-function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, workspaces: Record<string, Workspace[]>, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[], reviews: readonly ReviewEditorEntry[]): TabRow {
+function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: string | null, workspaces: Record<string, Workspace[]>, shared: boolean, saved: TabState, panes: readonly TerminalPane[], agents: Readonly<Record<string, string>>, pages: BrowserPage[], reviews: readonly TabEditorEntry[]): TabRow {
   const workspace = workspaceKey(session, chatsPath);
   const sessions = shared ? workspaceSessions(all, session, chatsPath, workspaces) : [session];
   const layout = followedLayout(layoutOf(saved, workspace), sessions);
@@ -110,7 +133,7 @@ function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: s
 export function workspaceRow(session: SessionEntry): TabRow {
   const { panes, agents } = getTerminalState();
   const { sessions, chatsPath, workspaces } = getSessionStore();
-  return rowOf(session, sessions, chatsPath, workspaces, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages, getEditors().editors.filter(isReviewEditor));
+  return rowOf(session, sessions, chatsPath, workspaces, branchSessionsAsTabs(getPrefs()), getTabState(), panes, agents, getBrowserState().pages, getEditors().editors.filter(isTabEditor));
 }
 
 /** A session's workspace row, kept up to date: what the strip, the tab shortcuts and the tab menus all act on. */
@@ -122,7 +145,7 @@ export function useTabRow(session: SessionEntry): TabRow {
   const editors = useEditors();
   const saved = useTabState();
   const shared = branchSessionsAsTabs(usePrefs());
-  return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages, editors.editors.filter(isReviewEditor)), [editors, session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
+  return useMemo(() => rowOf(session, sessions, chatsPath, workspaces, shared, saved, panes, agents, browser.pages, editors.editors.filter(isTabEditor)), [editors, session, sessions, chatsPath, workspaces, shared, panes, agents, browser, saved]);
 }
 
 /** The focused pane's row, for tab navigation and bulk actions. */
@@ -208,7 +231,7 @@ export function noteClosed(sessionId: string, closing: readonly PeerTab[], origi
       pinned: layout.pinned.includes(tab.key),
       muted: layout.muted.includes(tab.key),
       title: layout.titles[tab.key],
-      review: tab.kind === "review" ? { ...tab.editor, dirty: false } : undefined,
+      review: tab.kind === "review" ? { ...peerEditor(tab), dirty: false, jump: undefined } : undefined,
       page: tab.kind === "browser" ? { url: tab.page.url, cwd: session.cwd } : undefined,
     });
   });
@@ -334,7 +357,7 @@ const REVIEW_KINDS: Record<string, string> = { diff: "File diff", pr: "Pull requ
 /** What kind of tab it is now: its agent's name, "Terminal" (with the agent running in it, if one is) or "Browser page". */
 export function peerKind(tab: PeerTab, harnessName: (id: string) => string | undefined): string {
   if (tab.kind === "browser") return "Browser page";
-  if (tab.kind === "review") return REVIEW_KINDS[tab.editor.kind] ?? "Pull request";
+  if (tab.kind === "review") return tab.file ? "File" : REVIEW_KINDS[tab.editor.kind] ?? "Pull request";
   const agent = peerAgent(tab);
   const name = agent ? harnessName(agent) || agent : null;
   if (!isShellPeer(tab)) return name ?? "Agent";

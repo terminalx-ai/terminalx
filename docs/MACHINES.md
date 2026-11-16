@@ -583,7 +583,8 @@ been paired. Nothing should be reachable until the person asks for it.
   the workspace protocol reads or writes it.
 - On a headless server, installing the service does not turn it on.
   `terminalx-serve pair`, with the person's consent in that terminal, does.
-- Data privacy mode forces it off (PRO-357).
+- Data privacy mode forces it off, and stops this computer operating others
+  (PRO-357, [Trust model](#trust-model)).
 
 ## Protocol
 
@@ -833,6 +834,7 @@ the pull request that adds it.
 | `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
 | `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
 | `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
+| `machine.rotateCredential` | `machine/5` | Served | Manage only; a fresh device token for the paired computer that asks, kept beside its own until it connects with it ([Trust model](#trust-model), PRO-357) |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1639,7 +1641,10 @@ Screen 21.09, behind Settings → Experimental → Machines like the rest.
 
 ## Trust model
 
-PRO-357 adds the threat model and its tests here. What each party can see and do:
+What each party can see and do, then the threats PRO-357 reviewed: each has a
+mitigation and a test, or is an accepted risk. The boundary tests run in CI
+with the rest of the Rust tests (`src-tauri/src/machine_host/security_tests.rs`,
+named `security_tests::…` below).
 
 | Party | Can see | Can do | Cannot |
 | --- | --- | --- | --- |
@@ -1651,6 +1656,79 @@ PRO-357 adds the threat model and its tests here. What each party can see and do
 The pairing code is a secret until it is used. Whoever has it can ask to pair,
 which is why every computer pairing waits for "Allow" and a fingerprint the
 person compares on both screens.
+
+### Threats
+
+| Threat | Mitigation | Test |
+| --- | --- | --- |
+| **A stolen laptop** (the operating computer) | Its device token and client key are in its Keychain, never in a file. The token is bound to the client key: a copied token alone is refused (`4401`). The token rotates on every connection (`machine.rotateCredential`, `machine/5`). The new token replaces the old one when a connection is made with it, so a copy taken earlier, from a backup say, stops working once the owner's computer has connected twice more (once to be given a new token, once to use it), and not while one of its links stays up. A copy without the client key does nothing. One unused for 90 days, and not connected, expires. On the machine the person presses Disconnect or Revoke under "Computers that can operate this Mac", and the activity log shows what it did meanwhile. | `security_tests::a_credential_rotates_on_each_connection`, `…::a_credential_unused_for_ninety_days_expires`, `…::disconnect_closes_the_connection_and_holds_the_computer_off_until_it_is_let_back`, `pairing_tests::revoking_closes_the_connection_and_refuses_the_credential` |
+| **A stolen laptop** (the machine) | The registry keeps token hashes only, mode 0600; the activity log has no prompts, commands, paths or file contents. Beyond that the machine is the user's own account and disk (FileVault), as for every local session. | `registry` tests (hash only), `security_tests::the_activity_log_records_what_a_computer_did_and_nothing_secret`, `activity` tests |
+| **A stolen pairing code** | It works once and for five minutes. Using it only asks: the machine waits for "Allow", and the person compares a fingerprint that binds both keys and the code's token. Five wrong attempts in a minute pause pairing. | `security_tests::a_code_alone_adds_no_machine_without_allow_on_the_machine`, `pairing_tests::a_computer_pairs_by_code_once_the_machine_allows_it`, `…::decline_no_answer_and_closing_leave_no_record`, `…::five_wrong_attempts_pause_pairing_but_not_paired_computers` |
+| **A hostile relay** | Everything after the E2EE hello is sealed and counted (E2EE framing v2); the device token travels inside it. A changed, replayed or reordered frame closes the connection. The relay can only drop or delay. | `relay_e2ee::tests::e2ee_frame_nonce_is_fixed_and_replays_fail`, `…::transcript_and_key_schedule_match_the_phone_fixture` |
+| **A hostile account server** | It cannot read an offer (HPKE-sealed to the requester's key) and cannot pair a computer: an account grant still waits for "Allow" and the fingerprint (decision 5). A forged directory entry leads to a machine whose fingerprint does not match. Revoking a computer revokes its grant, best effort. | `pairing_tests::a_computer_paired_through_a_grant_still_waits_for_allow_and_its_revocation_removes_it` |
+| **A hostile agent on the machine** | It has a shell (decision 5), so the boundary is letting someone else in. Making a code, Allow and Let back need a person's witness (`serve_cli::consent`): the kernel says which process asks, and the runtime refuses itself, its descendants and its terminals. The window's attachment is no boundary here: any process of the user can attach. Revoke and Disconnect are not guarded, since they only take access away (Accepted risks). | `security_tests::an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back`, `serve_cli::consent` tests |
+| **A hostile agent on the operating computer** | It drives what the person drives: the machine's projects with full rights (decision 5). It cannot add a machine: a code waits for "Allow" on the machine. No `terminalx` command adds or removes one; only the app's own windows do. No method pairs others, changes the operate switch, or reaches the browser, computer use, dictation, Local VM or runs; `fs.*` stays inside the projects. | `security_tests::a_code_alone_adds_no_machine_without_allow_on_the_machine`, `…::no_terminalx_command_adds_or_removes_a_machine`, `…::an_operating_computer_cannot_change_the_switch_or_reach_this_machines_own_controls`, `…::an_operating_computer_reads_only_inside_the_machines_projects`, `pairing_tests::a_paired_computer_has_no_pairing_browser_or_computer_methods` |
+| **A replayed message** | E2EE frames carry a counter: a replay closes the connection. A code works once. A rotated token replaces the old one once a connection is made with it, and a token whose answer was lost is never promoted. A consent witness answers its own nonce once. | `relay_e2ee::tests::e2ee_frame_nonce_is_fixed_and_replays_fail`, `security_tests::a_credential_rotates_on_each_connection` |
+
+Data privacy mode turns off both sides: the runtime treats the operate switch as
+off (no listener, no relay registration, no code), and this computer makes no
+machine connection (`data_privacy::require_network`, the IPC gate in
+`src/lib/dataPrivacy.ts`). Settings → Machines says so. Test:
+`security_tests::data_privacy_mode_opens_no_listener_and_makes_no_machine_connection`,
+which runs in a child process because data privacy is one switch per process.
+
+### Accepted risks
+
+- **A paired computer has a shell** (decision 5, confirmed). Revoking ends its
+  credential, not what it already did; the UI says only that.
+- **A shell on the operating computer can remove a machine** by editing
+  `machines.json` or the Keychain. That loses this computer's own access and
+  gains nothing, so no integrity key guards it.
+- **Consent cannot yet tell the window from a detached process** of the same
+  user on a desktop runtime (`serve_cli::consent`); recognising the window is
+  PRO-369. A same-user process that opens a pseudo-terminal of its own to run
+  `terminalx-serve pair` also passes.
+- **A computer on a runtime before PRO-357** does not rotate its token (it
+  does not ask for `machine/5`). Its token still expires after 90 days unused.
+- **Whoever holds a computer's client key and token is that computer.** With
+  both copied, someone can connect before the owner's computer uses its
+  rotated token; connecting with the old token drops the rotated one, so the
+  owner's computer is refused ("Access removed") while the copy keeps working.
+  The machine cannot tell the two apart. The lockout is the sign: the person
+  revokes the computer on the machine, checks the activity log, and pairs again.
+- **An agent on the machine can Revoke or Disconnect a computer.** It attaches
+  as any process of the user can. That takes access away and gives it none.
+- **An expired computer's account grant** ends when the operating computer
+  removes the machine, as it is asked to on "Access removed"; the machine ends
+  its connections and relay credential itself.
+
+### As built (PRO-357)
+
+- **Activity log.** `<data dir>/machine-host/activity.jsonl`, mode 0600, the
+  last 200 entries (cut back from 400), read by a restarted runtime. Entries:
+  paired, connected (with its route), disconnected, session created and
+  terminal opened (with the project's name), project added or removed while a
+  computer is connected (not put down to it: no method adds one), update (the
+  version), revoked, expired, held (Disconnect) and let back. Each has the
+  computer's name and the time; never a prompt, a command, a path or a file.
+  `runtime.machineHost.activity` and `machines_activity` read it; Settings →
+  Machines lists it under "Computers that can operate this Mac".
+- **Rotation.** `machine.rotateCredential` (`machine/5`, Manage) answers a new
+  device token; the host keeps its hash beside the current one. Admission with
+  the new one promotes it and drops the old; admission with the old one drops
+  the new. The client asks on every connection and keeps the new token in the
+  Keychain before anything else.
+- **Expiry.** A credential unused for 90 days (from the later of its approval
+  and its last connection) is removed at admission, refused `code-inactive`
+  ("Access removed"), and swept whenever the host reads its settings. A
+  computer connected now never expires, however long its link has been up.
+  Expiry ends its connections and relay credential as Revoke does.
+- **Revoke with no runtime.** `terminalx-serve devices revoke` writes the
+  "revoked" entry itself when it removes the record directly.
+- **Disconnect.** `runtime.machineHost.disconnect` closes the computer's
+  connections and refuses it with `pairing_refused` `disconnected` until
+  `runtime.machineHost.letBack`, which needs a person like Allow. The operating
+  computer shows Disconnected and does not retry until "Try again".
 
 ## Session feature parity
 
@@ -1759,3 +1837,201 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Left out.** Docker and Local VM targets are PRO-312. The cloud entry's
   second line shows the organization's project count, not a price: a price
   needs a create quote, which the cloud form asks for when it is chosen.
+
+### As built (PRO-355): forwarded ports and previews
+
+A machine session has the same Ports tab and header popover as a cloud
+session (14.10, 14.11, 21.08), with the machine's name where they say cloud.
+The tab and the header's forward chip appear where the machine grants
+`ports/1`; without it the "Runs on" strip's update line names "forward ports"
+(PRO-354) and neither appears. Hosted preview links (PRO-135) are never
+offered for a machine: a machine's ports reach this Mac only.
+
+**`ports.list` names the listener.** Each entry may carry
+`process: { name, pid, cwd? }`, additive within `ports/1` (an older desktop
+ignores it; an older runtime sends none, and the row shows the port alone).
+`name` is a short label for the command: the executable's file name, or for
+an interpreter (`node`, `bun`, `deno`, `python`, `python3`, `ruby`) running a
+script, the script's file name (`vite`, not `node`). `cwd` is the process's
+working directory on the machine; the UI shows its last component beside the
+name when it differs ("vite · console"). The runtime lists what it can see as
+its own user:
+
+- Linux: `/proc/net/tcp` and `tcp6` as before, each socket inode matched to a
+  process through `/proc/<pid>/fd`, its argv from `/proc/<pid>/cmdline`, its
+  directory from `/proc/<pid>/cwd`.
+- macOS: listening TCP sockets of the user's processes through libproc
+  (`proc_listallpids`, `PROC_PIDLISTFDS`, `PROC_PIDFDSOCKETINFO`), argv from
+  `KERN_PROCARGS2`, directory from `PROC_PIDVNODEPATHINFO`. Before PRO-355 a
+  Mac answered `detected: false` and listed nothing.
+
+The runtime's own listeners (its pid) are left out of the list. `ports.list`
+stays a driver's call (`Role::Driver`, as before): naming the processes adds
+nothing a terminal on the machine would not show the same person.
+
+**Forwards on this Mac.** Every listener binds `127.0.0.1` only, as for a
+cloud workspace (docs/CLOUD-PREVIEWS.md): nothing on the network can reach a
+forwarded port. The desktop keeps, per connection, the forwards the person
+asked for and two switches (`CloudPortSettings` in `src/lib/api.ts`):
+
+- **Forwarding** (`enabled`, on by default): off closes every listener and
+  keeps each forward as `waiting`; on opens them again.
+- **Forward new ports automatically** (`auto`, off by default): while on and
+  connected, the desktop reads `ports.list` every 2 s (request ids under
+  `ports-`, never shown to the web view) and forwards each port that starts
+  listening after the switch was turned on, skipping 32768–60999, on the same
+  local port when free (a random one for a port below 1024), at most 16 at
+  once per connection. Ports already listening when it was turned on, and a
+  port the person stopped, are left to the person while they keep
+  listening; one that stops and starts again is new and is taken. While Forwarding is off a
+  new forward is refused with `cloud_port_forwarding_off`.
+
+A machine's forwards **end with the connection and return with it**: when the
+link drops (`reconnecting`, `offline`) the listeners close and the forwards
+stay as `waiting`; on `connected` they open again, on the same local port when
+it is free, else on a new one (`reassigned`). A cloud workspace's forwards do
+not return (docs/CLOUD-PREVIEWS.md): they are dropped with the connection.
+Everything is forgotten when the last web view lets go of the connection
+(`cloud_remote_detach`), so a closed session view leaves nothing listening and
+nothing to come back.
+
+| Command | Params | Result |
+| --- | --- | --- |
+| `cloud_port_forwards` | `connectionId` | `CloudPortForward[]`, with `state` (`open`, `waiting`) and `auto` |
+| `cloud_port_settings` | `connectionId` | `CloudPortSettings` |
+| `cloud_port_set_settings` | `connectionId`, `enabled?`, `auto?` | `CloudPortSettings` as they now are |
+
+The event `cloud_port_forwards_changed` (`CloudPortForwardsChanged`) carries a
+connection's forwards and switches whenever either changes, with `opened`: the
+forwards that opened without a click (auto, or returned after a reconnect), for
+the "Port 5173 forwarded to 127.0.0.1:5173" toast.
+
+**Open** opens the address in this Mac's built-in browser (decision 7); the
+browser runs here, and only the stream crosses.
+
+### As built (PRO-358): two machines end to end in CI
+
+Every Machines ticket changes how two processes on two computers talk, and a
+unit test on one side passes while the pair is broken. So CI runs the pair.
+
+**The world** (`src-tauri/serve/tests/common/world.rs`) starts three machines,
+each its own process with its own data directory:
+
+- **This Mac**: the operating computer's own local runtime, one project,
+  "Let other computers operate this Mac" off. It must end the run untouched:
+  not hosting, nothing paired, no session, no commit, the same project list.
+- **Mac mini**: a second `terminalx-serve` on the same host in machine mode
+  (no `--project-root`) with two projects and hosting on, started as its app
+  starts it (`TERMINALX_LOCAL_DESKTOP=1`, the key in a file). The test is its
+  window: `createCode`, `approve`, `decline` and `revoke` over the runtime
+  IPC with a fresh attachment, and a consent witness for what only a person
+  may do (`serve_cli::consent`).
+- **dev-server**: `terminalx-serve` in a Linux container
+  (`scripts/machine-e2e/Dockerfile`, ubuntu:24.04 for the runner's glibc),
+  headless, one project added with `terminalx-serve projects add`, paired as
+  a person pairs a server: `terminalx-serve pair` in a terminal on it
+  (`docker exec -it` inside a pseudo-terminal), answered `y`. The container
+  sees the test's directories, the binary and `scripts/remote-runtime` at the
+  same paths, runs as the runner's uid and gid with a passwd entry for it, and
+  publishes its port on 127.0.0.1, so its socket, token and project ids are
+  the same on both sides. It runs only when `TERMINALX_E2E_LINUX_IMAGE` names
+  the image; with `TERMINALX_E2E_REQUIRE_LINUX=1` (CI) a missing image is a
+  failure, never a skip. On a Mac it cannot run (the binary is a Mac's), so
+  the Linux scenarios are left out there with a message.
+
+The operating computer is the desktop's own code: the pairing client
+(`src-tauri/src/machines/pair.rs`, compiled at the crate root as
+`machine_pair` so headless builds and these tests have it; the desktop still
+reaches it as `machines::pair`) and `MachineSupervisor`, with the web view's
+frames sent and answered through it.
+
+**The scenarios** (`src-tauri/serve/tests/machines_e2e.rs`), against Mac mini
+and the dev-server:
+
+- pair by code and Allow (the window; the server's terminal);
+- `machine.describe` (name, OS family, `hasWindow`) and `machine.projects`;
+- a session in a project and a prompt the fake agent answers (`echo:`);
+- a shell: `pty.create`, type, `pty.resize` (checked with `stty size`), drop
+  the connection and make it again, then `pty.attach` from an offset replays
+  only what came after it;
+- `fs.write` and `git.commit`, then the file and the commit (hash, message,
+  author) read on that machine's own disk with its own git (inside the
+  container for the dev-server);
+- refusals: a wrong code, a used code from another computer, a paired token
+  with another client key (4401), a declined approval (window and
+  terminal), Mac mini's credential on the dev-server; another machine's
+  `projectId` (`not_found`), a path leaving the project (`path_forbidden`),
+  a `projectId` that is not the session's (`invalid_params`), Mac mini's
+  sessions unknown to the dev-server and the reverse, and this Mac
+  untouched. Each machine sees at most four wrong attempts, under the five
+  that pause pairing;
+- a running turn interrupted with `session.interrupt` (`slow:`) and an
+  approval answered with `session.decide` (`ask:`), last, since a refusal
+  leaves the tab busy. A refusal is collected and fails the test at its
+  end, after everything else has been checked on both machines;
+- revoke (the window's `revoke`; `terminalx-serve devices revoke` on the
+  server): the supervisor ends in "access removed" and retries nothing.
+
+**Found by these scenarios, and fixed with them.**
+
+- *A machine reached only directly served no agent commands.* A runtime
+  started its agents layer (`start_cloud_agents` in `src/serve.rs`, which
+  `session.interrupt` and `agent-commands/1` need) only with a relay link,
+  and only the relay route's RPC got it (`WorkspaceRpc::set_agents` in
+  `remote::host::serve_machine`). A machine with no link (every desktop
+  until PRO-344, a server paired with `terminalx-serve pair`) builds its own
+  RPC in `MachineHost::rpc`, which had none: a computer could send prompts
+  but not stop a turn (`unavailable`) or answer an approval
+  (`method_not_found`). The machine host is now given `Parts::agents`, which
+  opens the agent tabs (no mailbox: live calls with receipts kept here,
+  decision 3) the first time it builds its RPC, so a runtime hosting no one
+  opens nothing more. With a link, the direct listener serves the relay
+  route's RPC as before.
+- *A paired computer was two peers.* The direct route serves a paired
+  computer as its registry id; the relay route served it as its relay device
+  id. After a move from the direct route to the relay, the computer no longer
+  controlled the terminals it had opened (`pty.write` refused
+  `not_controller`, and the desktop never sends `pty.control` after a route
+  change), and its write numbering and command receipts started over, so a
+  resend could be applied twice. The relay route now serves a paired
+  computer under its registry id too (`RelayHost`, `remote/host.rs`);
+  `machine_routes.rs` checks the terminal keeps working through the relay and
+  a resent write is dropped.
+
+**The job.** `machines-e2e` in `.github/workflows/ci.yml`, on ubuntu-latest,
+required by `check`. `check` fails on a skipped job, so it always runs and
+decides in a step (`scripts/machine-e2e/relevant.py`): every push, schedule
+and dispatch, and a pull request whose files (from the API, else the merge
+commit's diff, else assumed relevant) touch `src-tauri/src/remote`,
+`pairing`, `serve.rs`, `machine_host`, `machines`, `machine_wire.rs`,
+`relay_e2ee.rs`, `src-tauri/serve`, the scripts, `src/components/machines`,
+`src/lib/machine*`, any other file under `src/` named for machines
+(`MachineNewSession.tsx`, `src/types/machines.ts`, ...) or the workflows. `scripts/machine-e2e/run.py tests
+machines_e2e machine_routes` builds the image, the runtime and the tests,
+checks the binary loads in the image (`ldd`), runs each test on its own and
+writes each test's time, each phase's and the total to the job summary. The
+cargo cache is the job's own (CI's cache policy, `infra/ci-runners`, allows
+no other job's), saved only from main, schedule and dispatch runs; a pull
+request restores main's. The job may run 25 minutes, so a cold build (the
+first after a `Cargo.lock` change) can finish and be saved, and its last step
+checks the budget: over ten minutes with a warm cache fails the job, and every
+run writes its time to the summary.
+
+**The break check.** `.github/workflows/machines-e2e-breaks.yml` (nightly and
+by hand) runs `run.py breaks`: for each `scripts/machine-e2e/breaks/*.patch`
+the patch must apply, the runtime and tests must still build, `machines_e2e`
+must then fail, and its output must hold the patch's `.expect` marker, the
+message of the assertion that guards that check.
+
+| Patch | Removes | Fails |
+| --- | --- | --- |
+| `pairing-check.patch` | `MachineHost::paired_with_key` pinning a paired token to its client key (rule 2 above) | `pairing_refuses_a_wrong_or_used_code_another_key_and_a_declined_approval`: the used code from another computer is let in, and the paired token with another key is admitted (`PAIRING CHECK BROKEN`) |
+| `project-scoping.patch` | `Projects::get` refusing a `projectId` the machine does not have | `a_computer_pairs_with_two_machines_and_operates_each_in_its_own_projects`: this Mac's project is served by Mac mini (`PROJECT SCOPING BROKEN`) |
+
+The workflow fails when a patch no longer applies, no longer builds, or the
+scenarios pass (or fail for another reason) with it applied. A change that
+moves either check updates its patch in the same pull request.
+
+Previous-release compatibility is the `machine-compat` job (PRO-354,
+`tests/machine_compat.rs`); this job does not repeat it. The relay route is
+`tests/machine_routes.rs` with the relay in `tests/common/relay.rs`.
