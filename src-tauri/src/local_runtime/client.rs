@@ -328,7 +328,21 @@ impl Client {
         if matches!(command, "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
             params["networkAuthority"] = serde_json::to_value(crate::github_process::ticket().forwarded(&self.epoch))?;
         }
-        serde_json::from_value(request(&self.socket, &self.token, command, params, timeout)?).context("decode local runtime result")
+        // Making a pairing code and letting a computer in say who asks
+        // (`serve_cli::consent`): the runtime refuses its own agents.
+        let run = self.socket.parent().context("the runtime's socket has no directory")?;
+        let witness = crate::serve_cli::consent::witness_for(command, run, &mut params)?;
+        let answer = match request(&self.socket, &self.token, command, params.clone(), timeout) {
+            // A runtime from before the guard takes no `consent` and refuses
+            // the field; it has no guard to satisfy.
+            Err(error) if witness.is_some() && error.downcast_ref::<Refused>().is_some_and(|refused| refused.code == "invalid_arguments") => {
+                drop(witness);
+                if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
+                request(&self.socket, &self.token, command, params, timeout)
+            }
+            answered => answered,
+        };
+        serde_json::from_value(answer?).context("decode local runtime result")
     }
 
     pub(crate) fn require_local_vm(&self) -> Result<()> {

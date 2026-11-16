@@ -23,6 +23,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(unix)]
+pub mod consent;
+#[cfg(unix)]
+pub mod control_client;
 pub mod devices;
 pub mod login;
 pub mod pair;
