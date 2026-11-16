@@ -215,9 +215,10 @@ approval as Denied, without changing the provider-selected wire option.
 The adapter now retains each request's authoritative option-kind mapping, and
 binds the semantic boolean to the exact original answer attempt. Known
 `allow_once` / `allow_always` choices allow; `reject_once` / `reject_always` deny.
-Missing, unknown, duplicate or reserved-ID-conflicting metadata refuses before
-producing a response frame. A native cancellation still uses the existing
-cancelled outcome. The owner publishes a decision only after that exact answer
+Missing, unknown or duplicate provider-selected metadata refuses before
+producing a response frame. Native `raccoon:cancel` always means the existing
+cancelled denial for a pending ask, including when a reject option already
+exists; it can never select a provider grant using that reserved ID. The owner publishes a decision only after that exact answer
 attempt is delivered: `None` means no current delivery, `Some(false)` means a
 delivered denial, and `Some(true)` means a delivered approval. The legacy ACP
 owner path uses the same metadata; neither path examines opaque ID substrings.
@@ -235,3 +236,28 @@ these exact changed sources in the next explicitly allocated combined focused
 checks, independent Codex review and mandatory full merged-head gates. Earlier
 81/70 test evidence predates this correction and does not validate it. Public
 V2/unsupported-provider entry blocks and production activation remain held.
+
+
+### Full-gate follow-up: internal cancellation and typed retirement
+
+The first full merged-head desktop run caught an internal-cancellation gap that
+the initial five targeted semantic-choice regressions did not cover. When the
+provider already offered a reject choice, no synthetic cancellation menu item
+was added; applying the provider-choice map to native Escape incorrectly omitted
+its cancelled response. Native cancellation is now recognized as a denial for
+any pending request. Unknown selected provider options remain refused. A sixth
+semantic-choice regression covers existing reject options, unknown option kinds
+and a conflicting reserved ID; none can turn cancellation into a selected grant.
+The actual headless Escape regression passes again.
+
+The full run also exposed an older process-bounded fixture assertion inspecting
+only the outer error string. Partial frames deliberately carry the typed
+`PartialFrameRetired` marker and retain their original error as a cause. The
+fixture now requires both that typed marker and the original Stop cancellation
+or expired-partial-write cause. Child-exit, deadline and no-replay assertions
+remain intact; the complete process-bounded lifecycle case passes. No production
+Codex writer behavior was changed by that fixture correction.
+
+The first full run's failures are preserved in the lead gate logs. These repairs
+still require the next complete merged-head checks and independent scoped
+review; focused passes alone do not certify all wave6 or activate any capability.

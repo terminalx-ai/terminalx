@@ -326,7 +326,12 @@ impl Acp {
 
     /// Unknown, ambiguous or absent metadata must never mean Allowed.
     pub(crate) fn answer_choice(&self, request_id: &str, option_id: &str) -> Option<bool> {
-        self.asks.get(request_id)?.choices.get(option_id).copied().flatten()
+        let ask = self.asks.get(request_id)?;
+        // This is our native cancelled outcome, never a selected provider ID.
+        // Stop/Escape must still deny an ask even when the provider offered its
+        // own reject option (and no synthetic cancel menu item was needed).
+        if option_id == "raccoon:cancel" { return Some(false); }
+        ask.choices.get(option_id).copied().flatten()
     }
 
     /// Deferred native envelopes live separately from legacy privacy tuples.
@@ -986,6 +991,20 @@ mod tests {
             {"optionId":"opaque","kind":"allow_once"}]}}).to_string());
         assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), Some(false));
         assert_eq!(writes(&a.answer("acp:77", "raccoon:cancel").unwrap())[0]["result"]["outcome"], json!({"outcome":"cancelled"}));
+    }
+
+    #[test]
+    fn acp_permission_choice_native_cancel_is_denial_even_without_a_cancel_menu_item() {
+        for options in [json!([{"optionId":"allow","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]),
+            json!([{"optionId":"opaque","kind":"future_kind"}]),
+            json!([{"optionId":"raccoon:cancel","kind":"allow_once"}])] {
+            let mut a = Acp::new("/tmp", None, None, "auto");
+            a.handle(&json!({"id":77,"method":"session/request_permission","params":{"options":options}}).to_string());
+            assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), Some(false));
+            assert_eq!(writes(&a.answer("acp:77", "raccoon:cancel").unwrap())[0]["result"]["outcome"], json!({"outcome":"cancelled"}));
+            assert!(!a.has_ask("acp:77"));
+            assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), None);
+        }
     }
 
     #[test]

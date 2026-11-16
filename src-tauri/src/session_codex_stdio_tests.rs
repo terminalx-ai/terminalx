@@ -1908,12 +1908,16 @@ fn child_fixture() {
             engine.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}}"#).unwrap();
             drop(rt);
             let error = result.recv_timeout(WAIT).unwrap().unwrap_err();
-            assert!(error.to_string().contains("partial write"), "expired partial frame must fail, got {error:#}");
+            assert!(error.is::<PartialFrameRetired>(), "expired partial frame must retire its exact child: {error:#}");
+            assert!(error.chain().any(|cause| cause.to_string().contains("expired after a partial write")),
+                "expired partial frame must preserve its cause, got {error:#}");
             manager.stop("stdio-owner", "tab").unwrap();
         } else {
             manager.stop("stdio-owner", "tab").unwrap();
             let error = result.recv_timeout(WAIT).unwrap().unwrap_err();
-            assert!(error.to_string().contains("cancelled"), "expected Stop cancellation, got {error:#}");
+            assert!(error.is::<PartialFrameRetired>(), "Stop must retire the partial frame without replay: {error:#}");
+            assert!(error.chain().any(|cause| cause.to_string().contains("Codex launch was cancelled")),
+                "expected original Stop cancellation cause, got {error:#}");
         }
         writer.join().unwrap();
         assert!(child.terminal_receipt().is_some());
