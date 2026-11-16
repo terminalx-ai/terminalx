@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AppState, Pressable, StyleSheet, Switch, Text, View } from "react-native";
-import { ChevronRight } from "lucide-react-native";
+import { BellOff, Check, ChevronRight, CircleHelp, CircleX, Gauge, GitMerge, ShieldAlert, TriangleAlert, type LucideIcon } from "lucide-react-native";
 import {
   machineOn,
   notificationPermission,
@@ -17,24 +17,28 @@ import {
   type SessionScope,
 } from "@mobile/notifications";
 import { useApp } from "@mobile/state/AppProvider";
+import { iconFor } from "@mobile/state/machines";
 import { hostDisplayName, hostDisplayNames } from "@mobile/store/host-name";
+import { MachineGlyph } from "../DeviceMenu";
 import { Button, Card, Screen, SectionTitle } from "../primitives";
-import { useTheme } from "../theme";
+import { useTheme, type Palette } from "../theme";
 import { ChoiceSheet, type Choice } from "./ChoiceSheet";
 import { QUARTER_HOURS, quietSpan, timeOfDay } from "./time";
 
-/** The page's rows in design 22.07's order and words. */
-const AGENT_KINDS: [NotificationKind, string][] = [
-  ["question", "Asks a question"],
-  ["approval", "Needs approval"],
-  ["finished", "Finishes its task"],
-  ["failed", "Fails or stops on an error"],
-  ["usage_limit", "Reaches a usage limit"],
+type Tone = "warning" | "success" | "danger" | "muted";
+/** The page's rows in design 22.07's order and words, each with its mark in its colour. */
+const AGENT_KINDS: [NotificationKind, string, LucideIcon, Tone][] = [
+  ["question", "Asks a question", CircleHelp, "warning"],
+  ["approval", "Needs approval", ShieldAlert, "warning"],
+  ["finished", "Finishes its task", Check, "success"],
+  ["failed", "Fails or stops on an error", TriangleAlert, "danger"],
+  ["usage_limit", "Reaches a usage limit", Gauge, "muted"],
 ];
-const PULL_REQUEST_KINDS: [NotificationKind, string][] = [
-  ["pr_checks_failed", "Checks fail"],
-  ["pr_merged", "Merged"],
+const PULL_REQUEST_KINDS: [NotificationKind, string, LucideIcon, Tone][] = [
+  ["pr_checks_failed", "Checks fail", CircleX, "danger"],
+  ["pr_merged", "Merged", GitMerge, "muted"],
 ];
+const mark = (Icon: LucideIcon, tone: Tone, palette: Palette) => <Icon size={20} color={palette[tone]} />;
 const SCOPES: [SessionScope, string][] = [
   ["all", "All sessions"],
   ["mine", "Only sessions I started or follow"],
@@ -88,9 +92,12 @@ export function NotificationsPage() {
 
   return <Screen>
     {iosOff ? <Card accessibilityRole="alert" style={styles.notice}>
-      <Text style={[styles.noticeTitle, { color: palette.ink }]}>Notifications are off for TerminalX</Text>
-      <Text style={[styles.detail, { color: palette.muted }]}>Turn them on in iOS Settings. Your choices below are kept.</Text>
-      <Button label="Open iOS Settings" kind="secondary" onPress={() => void openNotificationSettings()} style={styles.noticeButton} />
+      <BellOff size={20} color={palette.warning} />
+      <View style={styles.flex}>
+        <Text style={[styles.noticeTitle, { color: palette.ink }]}>Notifications are off for TerminalX</Text>
+        <Text style={[styles.detail, styles.noticeDetail, { color: palette.muted }]}>Turn them on in iOS Settings. Your choices below are kept.</Text>
+        <Button label="Open iOS Settings" kind="secondary" size="small" onPress={() => void openNotificationSettings()} style={styles.noticeButton} />
+      </View>
     </Card> : <>
       <Card><Row label="Allow notifications" first><Toggle label="Allow notifications" value={settings.allow} onChange={(on) => void allow(on)} /></Row></Card>
       <Text style={[styles.note, { color: palette.faint }]}>{DELIVERY_NOTE}</Text>
@@ -98,23 +105,28 @@ export function NotificationsPage() {
 
     <View style={dimmed && styles.dimmed} pointerEvents={iosOff ? "none" : "auto"}>
       <SectionTitle>Notify me when an agent</SectionTitle>
-      <Card>{AGENT_KINDS.map(([kind, label], index) => <Row key={kind} label={label} first={index === 0}><Toggle label={label} value={settings.kinds[kind]} disabled={iosOff} onChange={(on) => setKind(kind, on)} /></Row>)}</Card>
+      <Card>{AGENT_KINDS.map(([kind, label, Icon, tone], index) => <Row key={kind} icon={mark(Icon, tone, palette)} label={label} first={index === 0}><Toggle label={label} value={settings.kinds[kind]} disabled={iosOff} onChange={(on) => setKind(kind, on)} /></Row>)}</Card>
 
       <SectionTitle>Pull requests</SectionTitle>
-      <Card>{PULL_REQUEST_KINDS.map(([kind, label], index) => <Row key={kind} label={label} first={index === 0}><Toggle label={`Pull request ${label.toLowerCase()}`} value={settings.kinds[kind]} disabled={iosOff} onChange={(on) => setKind(kind, on)} /></Row>)}</Card>
+      <Card>{PULL_REQUEST_KINDS.map(([kind, label, Icon, tone], index) => <Row key={kind} icon={mark(Icon, tone, palette)} label={label} first={index === 0}><Toggle label={`Pull request ${label.toLowerCase()}`} value={settings.kinds[kind]} disabled={iosOff} onChange={(on) => setKind(kind, on)} /></Row>)}</Card>
 
       <SectionTitle>Which sessions</SectionTitle>
       <Card>{SCOPES.map(([scope, label], index) => {
         const selected = settings.sessions === scope;
-        return <Pressable key={scope} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled: iosOff }} disabled={iosOff} onPress={() => change((current) => ({ ...current, sessions: scope }))} style={[styles.row, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, selected && { backgroundColor: palette.selected }]}>
-          <Text style={[styles.label, { color: palette.ink }]}>{label}</Text>
+        // The one chosen carries the accent check, as 22.07 draws it.
+        return <Pressable key={scope} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled: iosOff }} disabled={iosOff} onPress={() => change((current) => ({ ...current, sessions: scope }))} style={({ pressed }) => [styles.row, styles.choiceRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.selected }]}>
+          <Text style={[styles.label, styles.flex, { color: palette.ink }]}>{label}</Text>
+          {selected ? <Check size={18} color={palette.accent} /> : null}
         </Pressable>;
       })}</Card>
 
       <SectionTitle>Machines</SectionTitle>
       <Card>{app.hosts.length ? app.hosts.map((host, index) => {
         const name = names.get(host.id) ?? hostDisplayName(host);
-        return <Row key={host.id} label={name} first={index === 0}><Toggle label={`Notifications from ${name}`} value={machineOn(settings, host.id)} disabled={iosOff} onChange={(on) => void setMachineNotifications(host.id, on)} /></Row>;
+        const on = machineOn(settings, host.id);
+        // Its mark as the Machines list draws it, muted while its notifications are off.
+        const icon = iconFor(name, app.accountHosts?.find((account) => account.hostId === host.id) ?? null);
+        return <Row key={host.id} icon={<MachineGlyph icon={icon} color={on ? palette.ink : palette.muted} />} label={name} first={index === 0}><Toggle label={`Notifications from ${name}`} value={on} disabled={iosOff} onChange={(on) => void setMachineNotifications(host.id, on)} /></Row>;
       }) : <Row label="No paired Macs on this phone." first muted />}</Card>
 
       <SectionTitle>Quiet hours</SectionTitle>
@@ -144,9 +156,10 @@ export function NotificationsPage() {
   </Screen>;
 }
 
-function Row({ label, detail, first, muted, children }: { label: string; detail?: string; first?: boolean; muted?: boolean; children?: ReactNode }) {
+function Row({ icon, label, detail, first, muted, children }: { icon?: ReactNode; label: string; detail?: string; first?: boolean; muted?: boolean; children?: ReactNode }) {
   const { palette } = useTheme();
   return <View style={[styles.row, !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}>
+    {icon}
     <View style={styles.flex}>
       <Text style={[styles.label, { color: muted ? palette.muted : palette.ink }]}>{label}</Text>
       {detail ? <Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text> : null}
@@ -157,10 +170,10 @@ function Row({ label, detail, first, muted, children }: { label: string; detail?
 
 function ValueRow({ label, value, disabled, first, onPress }: { label: string; value: string; disabled?: boolean; first?: boolean; onPress(): void }) {
   const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.row, !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.selected }]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${label}, ${value}`} accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.row, styles.choiceRow, !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }, pressed && { backgroundColor: palette.selected }]}>
     <Text style={[styles.label, styles.flex, { color: palette.ink }]}>{label}</Text>
     <Text style={[styles.value, { color: palette.muted }]}>{value}</Text>
-    <ChevronRight size={16} color={palette.faint} />
+    <ChevronRight size={18} color={palette.faint} />
   </Pressable>;
 }
 
@@ -169,15 +182,18 @@ function Toggle({ label, value, disabled, onChange }: { label: string; value: bo
   return <Switch accessibilityLabel={label} value={value} disabled={disabled} onValueChange={onChange} trackColor={{ true: palette.accent }} />;
 }
 
+// 22.07's sizes: 56 pt rows of 16 pt words with a 20 pt mark, 48 pt rows for a choice or a value.
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  row: { minHeight: 50, paddingHorizontal: 15, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 12 },
-  label: { fontSize: 15 },
+  row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
+  choiceRow: { minHeight: 48 },
+  label: { fontSize: 16 },
   value: { fontSize: 15 },
   detail: { fontSize: 13, lineHeight: 18 },
   note: { fontSize: 12, lineHeight: 17, paddingHorizontal: 4, marginTop: 8 },
-  notice: { padding: 16, gap: 6 },
+  notice: { padding: 14, borderRadius: 14, flexDirection: "row", alignItems: "flex-start", gap: 10 },
   noticeTitle: { fontSize: 16, fontWeight: "600" },
-  noticeButton: { alignSelf: "flex-start", minHeight: 36, paddingHorizontal: 14, marginTop: 6 },
+  noticeDetail: { marginTop: 2, marginBottom: 10 },
+  noticeButton: { alignSelf: "flex-start" },
   dimmed: { opacity: 0.45 },
 });
