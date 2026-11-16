@@ -74,6 +74,11 @@ impl Runtime {
         self.client.build().version.as_ref().map(ToString::to_string)
     }
 
+    /// A control command that names no attachment.
+    pub fn call(&self, command: &str, params: Value) -> Result<Value> {
+        self.client.call_within(command, params, QUICK_TIMEOUT).map_err(said)
+    }
+
     /// Attach as a window does, for the commands that need it.
     pub fn attach(&self) -> Result<Attachment> {
         let attached: Value = self.client.call_within("runtime.attach", json!({ "protocol": 1 }), LIFECYCLE_TIMEOUT).map_err(said)?;

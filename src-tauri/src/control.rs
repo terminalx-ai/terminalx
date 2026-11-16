@@ -744,6 +744,15 @@ impl ControlService {
                 let (projects, last_selected) = projects::list().map_err(ControlError::internal)?;
                 Ok(json!({"projects": projects, "lastSelected": last_selected}))
             }
+            // `terminalx-serve projects add` on a headless server (PRO-353):
+            // the runtime writes the store, so no write of its own is lost,
+            // and a paired computer's `machine.changed` hears of it.
+            "projects.add" => {
+                let path = required_string(&params, "path")?;
+                let project = projects::ensure(&path).map_err(|error| ControlError::new("invalid_project", format!("{error:#}"), None))?;
+                self.sink.emit("projects_changed", &());
+                Ok(json!({ "project": project }))
+            }
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
                 let selector = required_string(&params, "session")?;

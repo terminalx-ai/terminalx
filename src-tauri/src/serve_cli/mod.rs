@@ -1,5 +1,5 @@
 //! `terminalx-serve` commands a person runs on a headless server (PRO-353):
-//! `service`, `pair`, `devices`, `login`, `logout` and `update`. Each lives in
+//! `service`, `pair`, `devices`, `projects`, `login`, `logout` and `update`. Each lives in
 //! its own module; this one only dispatches, and holds what they share: the
 //! install layout, the default data directory and the key runtime releases
 //! are signed with.
@@ -30,6 +30,8 @@ pub mod control_client;
 pub mod devices;
 pub mod login;
 pub mod pair;
+#[cfg(unix)]
+pub mod projects;
 pub mod service;
 pub mod update;
 
@@ -101,6 +103,8 @@ pub fn run(args: &[String]) -> Option<i32> {
         "service" => service::run(rest),
         "pair" => pair::run(rest),
         "devices" => devices::run(rest),
+        #[cfg(unix)]
+        "projects" => projects::run(rest),
         "login" => login::run(rest),
         "logout" => login::run_logout(rest),
         "update" => update::run(rest),
@@ -119,6 +123,8 @@ Commands on a headless server:
                                      shows a one-time code and asks Allow? [y/N]
   devices [revoke <id>]              List or remove the computers that may
                                      operate this one
+  projects [add <folder>]            List the projects paired computers see, or
+                                     add a folder (a Git clone) as one
   login | logout                     Sign in to your TerminalX account with a
                                      device code, for the relay route
   update                             Install the newest signed runtime
