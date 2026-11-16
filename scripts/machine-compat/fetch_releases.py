@@ -3,7 +3,8 @@
 compatibility matrix (PRO-354, docs/MACHINES.md "Versions and updates").
 
 From this build's version (src-tauri/Cargo.toml), pick the two newest
-`vX.Y.Z` releases older than it, download each one's TerminalX.app.tar.gz
+`vX.Y.Z` releases before it (older, or this version tagged on another commit:
+see `previous_releases`), download each one's TerminalX.app.tar.gz
 and SHA256SUMS, check the archive against the sums, and take the bundled
 `terminalx-serve` out of it. From the release's git tag, read what a desktop
 of that version asks a runtime for: its CAPABILITIES, its machine namespaces,
@@ -77,21 +78,43 @@ def repository() -> str:
     return str(gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")).strip()
 
 
-def previous_releases(repo: str, build: tuple[int, int, int]) -> list[str]:
-    """The `HOW_MANY` newest published `vX.Y.Z` releases older than `build`."""
+def this_commit() -> str:
+    """The commit being built: GITHUB_SHA under CI, else the checkout's HEAD."""
+    named = os.environ.get("GITHUB_SHA")
+    if named:
+        return named
+    done = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, check=False)
+    if done.returncode != 0:
+        fail(f"git rev-parse HEAD failed: {done.stderr.decode(errors='replace').strip()}")
+    return done.stdout.decode().strip()
+
+
+def tag_commit(repo: str, tag: str) -> str:
+    return str(gh("api", f"repos/{repo}/commits/{tag}", "-q", ".sha")).strip()
+
+
+def previous_releases(repo: str, build: tuple[int, int, int], commit: str) -> list[str]:
+    """The `HOW_MANY` newest published `vX.Y.Z` releases before this build.
+
+    A release is before this build when its version is older, or when it is
+    this build's version and its tag is another commit: main keeps the version
+    of the release it last shipped until the next release bumps it, so the
+    newest runtime people run has this build's version. A tag on this very
+    commit is this build, not a previous one.
+    """
     listed = json.loads(str(gh("release", "list", "-R", repo, "--limit", "200", "--exclude-drafts", "--json", "tagName,isPrerelease,isDraft")))
-    older = []
+    before = []
     for release in listed:
         match = TAG.match(release["tagName"])
         if not match or release["isPrerelease"] or release["isDraft"]:
             continue
         version = tuple(int(part) for part in match.groups())
-        if version < build:
-            older.append((version, release["tagName"]))
-    older.sort(reverse=True)
-    if len(older) < HOW_MANY:
-        fail(f"only {len(older)} released versions are older than {'.'.join(map(str, build))}: {[tag for _, tag in older]}")
-    return [tag for _, tag in older[:HOW_MANY]]
+        if version < build or (version == build and tag_commit(repo, release["tagName"]) != commit):
+            before.append((version, release["tagName"]))
+    before.sort(reverse=True)
+    if len(before) < HOW_MANY:
+        fail(f"only {len(before)} released versions come before {'.'.join(map(str, build))}: {[tag for _, tag in before]}")
+    return [tag for _, tag in before[:HOW_MANY]]
 
 
 def source_at(repo: str, tag: str, path: str) -> str | None:
@@ -211,8 +234,9 @@ def main() -> None:
     build_version = package_version((ROOT / "src-tauri" / "Cargo.toml").read_text())
     build = parse_version(build_version)
     repo = repository()
-    tags = previous_releases(repo, build)
-    print(f"this build is {build_version}; checking it against {', '.join(tags)}")
+    commit = this_commit()
+    tags = previous_releases(repo, build, commit)
+    print(f"this build is {build_version} ({commit}); checking it against {', '.join(tags)}")
 
     releases = []
     for tag in tags:

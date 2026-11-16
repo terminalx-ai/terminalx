@@ -31,7 +31,7 @@ use raccoon_lib::remote::machine::{MACHINE, UNSERVED, WITHHELD};
 use raccoon_lib::remote::machine_client::{
     wanted_capabilities, MachineConnectionState, MachineConnectionView, MachineEnv, MachineRoute, MachineSupervisor, NetDialer, OnState, RelayCredential, RouteKind, RouteUsed, Target, Zeroizing,
 };
-use raccoon_lib::remote::protocol::{self, CAPABILITIES, PROTOCOL};
+use raccoon_lib::remote::protocol::{self, AGENT_COMMANDS, CAPABILITIES, PROTOCOL};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -42,7 +42,8 @@ const COMPUTER_TOKEN: &str = "the-compat-matrix-device-token-000001";
 /// one a release has, in a namespace it is granted, is called on the wire.
 const PROBES: [&str; 9] = ["session.list", "runtime.agents", "pty.list", "lifecycle.resources", "pipeline.list", "pipeline.reviewers", "ports.list", "machine.describe", "machine.projects"];
 
-/// Probes that must succeed with no parameters, not merely be answered.
+/// Probes that must succeed with no parameters, not merely be answered, for
+/// a desktop granted machine/1.
 const MUST_SUCCEED: [&str; 3] = ["session.list", "machine.describe", "machine.projects"];
 
 /// Answers that mean the runtime does not serve the call at all.
@@ -77,10 +78,16 @@ struct ReleaseMethod {
 }
 
 impl Release {
-    /// What its runtime offers a paired computer: a machine's namespaces,
-    /// less what a machine withholds (`protocol::served(true)` at its tag).
+    /// What its runtime offers a paired computer on the direct listener: a
+    /// machine's namespaces (`protocol::served(true)` at its tag), less what
+    /// a machine withholds and less [`AGENT_COMMANDS`] (see [`offered_directly`]).
     fn offered_to_a_computer(&self) -> BTreeSet<String> {
-        self.capabilities.iter().filter(|capability| !self.withheld.contains(capability)).chain(&self.machine).cloned().collect()
+        self.capabilities
+            .iter()
+            .filter(|capability| !self.withheld.contains(capability) && capability.as_str() != AGENT_COMMANDS)
+            .chain(&self.machine)
+            .cloned()
+            .collect()
     }
 
     /// Its `terminalx-serve`, started the way that version's desktop starts
@@ -154,12 +161,23 @@ fn manifest() -> Option<Manifest> {
     assert_eq!(manifest.releases.len(), 2, "the matrix runs against the previous two releases");
     let versions: Vec<_> = manifest.releases.iter().map(|release| version_triple(&release.version)).collect();
     assert!(versions[0] > versions[1], "the two releases, newest first: {versions:?}");
-    assert!(versions[0] < version_triple(&build), "both releases are older than this build ({build})");
+    // The newer may have this build's version: main keeps the version of the
+    // release it last shipped until the next one (fetch_releases.py).
+    assert!(versions[0] <= version_triple(&build), "both releases come before this build ({build})");
     for release in &manifest.releases {
         assert_eq!(release.tag, format!("v{}", release.version));
         assert!(!release.capabilities.is_empty() && !release.methods.is_empty(), "{}: read nothing from its tag", release.tag);
     }
     Some(manifest)
+}
+
+/// What this build's runtime offers a paired computer on the direct
+/// listener. A runtime with no relay link builds that listener's RPC without
+/// agent tabs (`machine_host.rs`, `MachineHost::rpc`), so it keeps no agent
+/// command receipts and does not offer [`AGENT_COMMANDS`]
+/// (`WorkspaceRpc::offered`); every release with machines does the same.
+fn offered_directly() -> BTreeSet<String> {
+    protocol::served(true).into_iter().filter(|capability| *capability != AGENT_COMMANDS).map(str::to_string).collect()
 }
 
 fn set(names: impl IntoIterator<Item = impl ToString>) -> BTreeSet<String> {
@@ -380,7 +398,7 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
     let serve = Serve::start(command, &world.data);
     listening(&serve);
     let keypair = host_key(&world.data);
-    let offered = set(protocol::served(true));
+    let offered = offered_directly();
     let known: BTreeSet<String> = set(CAPABILITIES).union(&offered).cloned().collect();
 
     for release in &manifest.releases {
@@ -399,8 +417,9 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
             .await;
         assert_eq!(hello["ok"], true, "{tag}: {hello}");
         let granted = set(hello["result"]["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str));
-        let expected: BTreeSet<String> = want.iter().filter(|namespace| !WITHHELD.contains(&namespace.as_str())).cloned().collect();
-        assert_eq!(granted, expected, "{tag}: granted everything it wants but what a machine withholds");
+        let expected: BTreeSet<String> =
+            want.iter().filter(|namespace| !WITHHELD.contains(&namespace.as_str()) && namespace.as_str() != AGENT_COMMANDS).cloned().collect();
+        assert_eq!(granted, expected, "{tag}: granted everything it wants but what a machine withholds and, with no relay, agent commands");
         assert_eq!(granted, want.intersection(&offered).cloned().collect::<BTreeSet<_>>(), "{tag}");
         if want.contains(MACHINE) {
             assert!(granted.contains(MACHINE), "{tag}: a machine-era desktop is granted {MACHINE}");
@@ -416,7 +435,12 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
             assert_eq!(served.capability, method.capability, "{tag}: {} moved namespace", method.name);
         }
 
-        // On the wire: the reads it makes as it connects are answered.
+        // On the wire: the reads it makes as it connects are answered. A
+        // machine-era desktop gets them; one from before machines was not
+        // granted machine/1, so a call that needs a project is refused as
+        // docs/MACHINES.md "Project scoping" says, naming machine/1, and
+        // every other refusal is a real answer, never "not served".
+        let machine_era = granted.contains(MACHINE);
         let mut probed = 0;
         for name in PROBES {
             let Some(method) = release.methods.iter().find(|method| method.name == name) else { continue };
@@ -424,13 +448,18 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
                 continue;
             }
             let answer = desktop.call(name, json!({})).await;
-            if MUST_SUCCEED.contains(&name) {
-                assert_eq!(answer["ok"], true, "{tag}: {name}: {answer}");
-            } else if answer["ok"] != true {
-                let code = answer["error"]["code"].as_str().unwrap_or_default();
+            probed += 1;
+            if answer["ok"] == true {
+                continue;
+            }
+            assert!(!(machine_era && MUST_SUCCEED.contains(&name)), "{tag}: {name}: {answer}");
+            let code = answer["error"]["code"].as_str().unwrap_or_default();
+            if code == "capability_not_granted" {
+                let message = answer["error"]["message"].as_str().unwrap_or_default();
+                assert!(!machine_era && message.contains(MACHINE), "{tag}: {name} refused although {} was granted: {answer}", method.capability);
+            } else {
                 assert!(!NOT_SERVED.contains(&code), "{tag}: {name} was not served: {answer}");
             }
-            probed += 1;
         }
         assert!(probed > 0, "{tag}: no read call was probed");
 
@@ -450,6 +479,11 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
         let refused = other.call("rpc.hello", json!({ "protocol": release.protocol, "want": WITHHELD, "client": { "app": "terminalx-desktop", "version": release.version } })).await;
         assert_eq!(refused["ok"], false, "{tag}: {refused}");
         assert_eq!(refused["error"]["code"], "update_required", "{tag}: {refused}");
+        // PRO-354: the refusal says which version this runtime is and what it
+        // serves, so that desktop can tell which side has to update.
+        assert_eq!(refused["error"]["data"]["runtimeVersion"], build_version().as_str(), "{tag}: {refused}");
+        let named = refused["error"]["data"]["offered"].as_array().unwrap_or_else(|| panic!("{tag}: no offered list: {refused}"));
+        assert_eq!(set(named.iter().filter_map(Value::as_str)), offered, "{tag}: {refused}");
     }
     let mut serve = serve;
     assert!(serve.child.try_wait().unwrap().is_none(), "this build's runtime kept running through every release's calls");

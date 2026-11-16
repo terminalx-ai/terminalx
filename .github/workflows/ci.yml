@@ -384,7 +384,7 @@ jobs:
           restore-keys: |
             ci-v3-machine-compat-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
             ci-v3-machine-compat-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
-      # The two newest v* releases older than this build's version, each
+      # The two newest v* releases before this build's version, each
       # archive checked against its SHA256SUMS before the runtime comes out.
       - name: Fetch and verify the previous two released runtimes
         env:
