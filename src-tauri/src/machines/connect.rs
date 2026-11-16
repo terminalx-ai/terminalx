@@ -246,6 +246,11 @@ pub(crate) fn apply_described(machine: &mut super::store::PairedMachine, describ
     if !endpoints.is_empty() {
         machine.direct_endpoints = endpoints;
     }
+    // A desktop app, or headless (`hasWindow` in `PairedMachine`): kept with
+    // the record's other fields, so Settings → Machines says "headless".
+    if let Some(has_window) = described["hasWindow"].as_bool() {
+        machine.other.insert("hasWindow".into(), Value::Bool(has_window));
+    }
     machine.last_seen_at = Some(now);
     machine.last_route = Some(route.clone());
 }
@@ -317,7 +322,7 @@ mod tests {
     fn a_describe_brings_the_record_up_to_date_and_an_empty_address_list_keeps_the_last() {
         let mut machine = crate::machines::store::tests_support::machine("cs1uhCLEB_ttCYaQ");
         let route = RouteUsed { kind: RouteKind::Lan, endpoint: Some("ws://192.168.1.21:6768/machine/1".into()) };
-        let described = json!({ "machineId": "cs1uhCLEB_ttCYaQ", "name": "Studio", "os": { "family": "macos", "version": "26.2" }, "version": "0.2.40",
+        let described = json!({ "machineId": "cs1uhCLEB_ttCYaQ", "name": "Studio", "os": { "family": "macos", "version": "26.2" }, "version": "0.2.40", "hasWindow": false,
             "directEndpoints": ["ws://192.168.1.21:6768/machine/1", "http://not-a-machine", "ws://mac-mini.local:6768/machine/1"] });
         apply_described(&mut machine, &described, &route, 77);
         assert_eq!(machine.name, "Studio");
@@ -325,6 +330,7 @@ mod tests {
         assert_eq!(machine.version, "0.2.40");
         assert_eq!(machine.direct_endpoints, vec!["ws://192.168.1.21:6768/machine/1".to_string(), "ws://mac-mini.local:6768/machine/1".to_string()]);
         assert_eq!(machine.last_seen_at, Some(77));
+        assert_eq!(serde_json::to_value(&machine).unwrap()["hasWindow"], json!(false), "headless, as the UI reads it");
         assert_eq!(machine.last_route, Some(route.clone()));
         apply_described(&mut machine, &json!({ "machineId": "cs1uhCLEB_ttCYaQ", "directEndpoints": [] }), &route, 78);
         assert_eq!(machine.direct_endpoints.len(), 2, "kept");

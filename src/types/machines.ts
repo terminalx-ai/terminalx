@@ -118,6 +118,8 @@ export interface PairedMachine {
   lastRoute?: MachineRouteUsed | null;
   /** Where this computer reaches the machine through the relay; null without a relay credential. Never the credential. */
   relay?: MachineRelayInfo | null;
+  /** From `machine.describe`: a desktop app (true) or headless (false); absent until it was connected (PRO-349). */
+  hasWindow?: boolean;
 }
 
 /**
