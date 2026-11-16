@@ -47,12 +47,50 @@ const fixture = (machines) => `(() => {
     "m-server": { state: "relay", route: { kind: "relay", endpoint: null }, since: Date.now(), rttMs: 41 },
   };
   answers.machines_connections = () => Object.entries(views).map(([machineId, state]) => ({ machineId, state }));
-  answers.machine_remote_attach = ({ machineId }) => "conn-" + machineId;
+  // The transport state the native side sends on cloud_remote_event for each
+  // machine state (docs/MACHINES.md "As built (PRO-345)"): connected carries
+  // the link, offline is reconnecting, needs update and access removed end it.
+  const links = {};
+  const transport = (machineId, view) => {
+    switch (view.state) {
+      case "direct":
+      case "relay":
+        links[machineId] = (links[machineId] ?? 0) + 1;
+        return { state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.2.33", authority: "manage", link: links[machineId],
+          capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "machine/1", "machine/2"] };
+      case "reconnecting":
+        return { state: "reconnecting", attempt: view.attempt, reason: "link lost", retryInMs: view.retryInMs };
+      case "offline":
+        return { state: "reconnecting", attempt: 0, reason: "offline", retryInMs: view.retryInMs };
+      case "needsUpdate":
+        return { state: "updateRequired" };
+      case "accessRemoved":
+        return { state: "stopped" };
+      default:
+        return { state: "connecting", attempt: 1 };
+    }
+  };
+  const sendState = (machineId) =>
+    setTimeout(() => emit("cloud_remote_event", { kind: "state", connectionId: "conn-" + machineId, state: transport(machineId, views[machineId]) }), 0);
+  answers.machine_remote_attach = ({ machineId }) => {
+    sendState(machineId);
+    return "conn-" + machineId;
+  };
+  // A machine with no terminals, repositories or files open yet answers the
+  // workspace view's first requests; anything else stays unanswered.
+  const empty = { "pty.list": { epoch: "e1", terminals: [] }, "git.repositories": { repositories: [] }, "fs.list": { path: "", entries: [] },
+    "runtime.agents": { agents: [] }, "session.list": { sessions: [] } };
+  answers.cloud_remote_send = ({ connectionId, frame }) => {
+    if (frame.method in empty)
+      setTimeout(() => emit("cloud_remote_event", { kind: "message", connectionId, message: { id: frame.id, ok: true, result: empty[frame.method] } }), 0);
+    return true;
+  };
   answers.machines_reconnect = null;
   answers.cloud_remote_detach = null;
   window.__PW_MACHINE__ = (machineId, state) => {
     views[machineId] = state;
     emit("machines_connection_changed", { machineId, state });
+    sendState(machineId);
   };
 })();`;
 
