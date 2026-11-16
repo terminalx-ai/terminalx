@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { DashboardSession, DashboardTabStatus } from "@/lib/dashboard";
 import { bucketSessions, isUnread } from "@/lib/dashboard";
-import { sessionPassesFilter, SIDEBAR_FILTERS } from "./sidebarFilter";
+import { machineDashboardSession, sessionPassesFilter, SIDEBAR_FILTERS } from "./sidebarFilter";
+import type { MachineSessionRow, MachineSessionTab } from "@/lib/machineCatalog";
 
 const session = (id: string, statuses: DashboardTabStatus[], fields: Partial<DashboardSession> = {}): DashboardSession => ({
   id,
@@ -50,5 +51,44 @@ describe("the sidebar's session filter", () => {
       ["unread", "Unread", "No unread sessions."],
       ["needs", "Needs you", "Nothing needs you."],
     ]);
+  });
+});
+
+describe("machine sessions under the filter (PRO-346)", () => {
+  const tab = (fields: Partial<MachineSessionTab> = {}): MachineSessionTab => ({ tabId: "t", harness: "claude", title: null, status: "idle", unread: false, pendingApprovals: 0, live: true, ...fields });
+  const row = (tabs: MachineSessionTab[], fields: Partial<MachineSessionRow> = {}): MachineSessionRow => ({
+    key: "machine:m1:p1:s1",
+    machineId: "m1",
+    projectId: "p1",
+    sessionId: "s1",
+    title: "Bisect",
+    branch: null,
+    worktreeName: null,
+    created: "2026-11-15T10:00:00Z",
+    modified: "2026-11-15T10:00:00Z",
+    pinned: false,
+    archived: false,
+    tabs,
+    activeTab: null,
+    source: "live",
+    ...fields,
+  });
+
+  it("is keyed by the session's machine key under its machine project", () => {
+    const session = machineDashboardSession(row([tab()]));
+    expect(session.id).toBe("machine:m1:p1:s1");
+    expect(session.projectPath).toBe("machine:m1:p1");
+  });
+
+  it("needs you while a tab asks or has approvals pending", () => {
+    expect(sessionPassesFilter("needs", machineDashboardSession(row([tab({ status: "waiting" })])))).toBe(true);
+    expect(sessionPassesFilter("needs", machineDashboardSession(row([tab({ status: "in_progress", pendingApprovals: 1 })])))).toBe(true);
+    expect(sessionPassesFilter("needs", machineDashboardSession(row([tab({ status: "in_progress" })])))).toBe(false);
+  });
+
+  it("is unread only while a finished answer is unread, and never while archived", () => {
+    expect(sessionPassesFilter("unread", machineDashboardSession(row([tab({ status: "completed", unread: true })])))).toBe(true);
+    expect(sessionPassesFilter("unread", machineDashboardSession(row([tab({ status: "completed", unread: false })])))).toBe(false);
+    expect(sessionPassesFilter("unread", machineDashboardSession(row([tab({ status: "completed", unread: true })], { archived: true })))).toBe(false);
   });
 });
