@@ -90,6 +90,10 @@ export interface IssuePipeline {
   mergeCheck?: string | null;
   /** When the reviewer said its own checks were still running; its verdict is waited for a while from then. */
   reviewPendingSince?: string | null;
+  /** Reviews in a row set aside because the branch moved while the reviewer read it; each is asked again in the same round (#1018). */
+  movedReviews?: number;
+  /** The branch moved during a review and is waited on to hold still before the reviewer reads it again (#1018). */
+  headWait?: { reviewed: string; head: string; stillSince: string; since: string } | null;
   verdict?: PipelineVerdict | null;
   /** Author-reported local failures, pinned to commits until explicitly passed. */
   failedLocalChecks?: string[];

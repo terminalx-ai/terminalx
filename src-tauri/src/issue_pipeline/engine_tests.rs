@@ -1478,6 +1478,143 @@ fn a_reviewer_that_changes_the_checkout_voids_its_review() {
     assert!(run.merges().is_empty());
 }
 
+impl Run {
+    /// The author pushes `commit` to the pull request while the reviewer reads.
+    fn pushed(&self, commit: &str) {
+        self.host.commit(commit);
+        self.host.world().pr.as_mut().unwrap().head_sha = commit.into();
+    }
+
+    /// The poller's pass, `minutes` from now.
+    fn poll_after(&self, minutes: i64) -> Pipeline {
+        self.host.world().now += TimeDelta::minutes(minutes);
+        poll(&self.host);
+        self.pipeline()
+    }
+}
+
+#[test]
+fn a_commit_pushed_mid_review_is_reviewed_again_in_the_same_round_with_no_person() {
+    let run = Run::start(&github_issue(), true);
+    let first = run.to_review();
+    assert_eq!(first.round, 1);
+    let reviewer = first.reviewer.unwrap();
+    run.pushed(C2);
+    let again = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((again.stage, again.state, again.round, again.review_commit.as_deref()), (Stage::Review, State::Working, 1, Some(C2)), "{:?}", again.note);
+    assert!(again.verdict.is_none() && again.reason.is_none() && run.merges().is_empty());
+    assert!(again.events.iter().any(|event| event.kind == "reviewAgain" && event.message == "Reviewing again: the branch moved from 1111111111 to 2222222222 during the review."), "{:?}", run.kinds());
+    let asked = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(asked.len(), 2);
+    assert!(asked[1].contains("so your verdict on 1111111111 does not count") && asked[1].contains("Commit to review: 2222222222"), "{}", asked[1]);
+
+    let merged = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((merged.state, merged.round, merged.moved_reviews), (State::Merged, 1, 0));
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert!(!run.kinds().iter().any(|kind| kind == "needsYou"), "{:?}", run.kinds());
+}
+
+#[test]
+fn a_commit_pushed_during_the_last_round_does_not_use_up_the_round_limit() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.reviewer(&reviewed(C1, "changes", HIGH));
+    run.host.commit(C2);
+    run.author(&done("Second try."));
+    run.reviewer(&reviewed(C2, "changes", HIGH));
+    run.host.commit(C3);
+    let third = run.author(&done("Third try."));
+    assert_eq!((third.round, third.max_rounds), (3, 3));
+    run.pushed(C4);
+    let again = run.reviewer(&reviewed(C3, "merge", "[]"));
+    assert_eq!((again.stage, again.state, again.round, again.review_commit.as_deref()), (Stage::Review, State::Working, 3, Some(C4)), "{:?}", again.reason);
+    assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_head_that_keeps_moving_is_waited_on_until_still_and_then_left_to_a_person() {
+    const C6: &str = "6666666666666666666666666666666666666666";
+    const C7: &str = "7777777777777777777777777777777777777777";
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    // The first move: read again at once.
+    run.pushed(C2);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).review_commit.as_deref(), Some(C2));
+
+    // The second: the branch is waited on until it holds still.
+    run.pushed(C3);
+    let waiting = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((waiting.stage, waiting.state, waiting.round, waiting.review_commit.as_deref()), (Stage::Review, State::Waiting, 1, Some(C2)), "{:?}", waiting.note);
+    assert!(waiting.note.as_deref().unwrap().contains("held still for 2 minutes"), "{:?}", waiting.note);
+    assert_eq!(run.poll_after(1).state, State::Waiting);
+    // It moves again while waited on: the clock starts over.
+    run.pushed(C4);
+    assert_eq!(run.poll_after(1).head_wait.unwrap().head, C4);
+    assert_eq!(run.poll_after(1).state, State::Waiting);
+    let reading = run.poll_after(1);
+    assert_eq!((reading.state, reading.round, reading.review_commit.as_deref()), (State::Working, 1, Some(C4)), "{:?}", reading.note);
+    assert!(reading.head_wait.is_none());
+    assert!(run.pipeline().events.iter().any(|event| event.kind == "reviewAgain" && event.message == "Reviewing again: the branch moved from 2222222222 to 4444444444 during the review."));
+
+    // The third.
+    run.pushed(C6);
+    assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Waiting);
+    assert_eq!(run.poll_after(2).review_commit.as_deref(), Some(C6));
+
+    // The fourth is past the tries: a person's, with the reason.
+    run.pushed(C7);
+    let stopped = run.reviewer(&reviewed(C6, "merge", "[]"));
+    assert_eq!((stopped.stage, stopped.state, stopped.round), (Stage::Review, State::NeedsYou, 1));
+    assert!(
+        matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail == "the branch moved during 4 reviews in a row, most recently from 6666666666 to 7777777777. Review it again once it holds still."),
+        "{:?}",
+        stopped.reason
+    );
+    assert!(stopped.verdict.is_none() && stopped.head_wait.is_none() && run.merges().is_empty());
+
+    // A person asking reviews the head in a new round.
+    let asked = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((asked.state, asked.round, asked.moved_reviews, asked.review_commit.as_deref()), (State::Working, 2, 0, Some(C7)));
+}
+
+#[test]
+fn a_branch_that_never_holds_still_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.pushed(C2);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    run.pushed(C3);
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Waiting);
+    let mut stopped = run.pipeline();
+    for minute in 0..40 {
+        run.pushed(if minute % 2 == 0 { C4 } else { C3 });
+        stopped = run.poll_after(1);
+        if stopped.state != State::Waiting {
+            break;
+        }
+    }
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("did not hold still for 2 minutes within 30")), "{:?}", stopped.reason);
+    assert_eq!(stopped.review_commit.as_deref(), Some(C2), "never reviewed while it moved");
+}
+
+#[test]
+fn a_commit_made_only_in_the_checkout_while_waiting_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.pushed(C2);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    run.pushed(C3);
+    run.reviewer(&reviewed(C2, "merge", "[]"));
+    // Committed here and never pushed: whose it is cannot be told.
+    run.host.commit(C4);
+    run.poll_after(1);
+    let stopped = run.poll_after(2);
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("4444444444, which is not on the pull request (at 3333333333)")), "{:?}", stopped.reason);
+    assert_eq!(run.host.world().pushes, [C1], "nothing made in the checkout is pushed");
+}
+
 #[test]
 fn the_author_session_is_never_asked_to_review() {
     let run = Run::start(&github_issue(), true);
