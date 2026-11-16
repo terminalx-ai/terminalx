@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { configuration, layerLabels, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
 import { cn } from "@/lib/cn";
 import { useGithubIdentity } from "@/lib/githubIdentity";
-import { LAYER_TITLES, resetFor } from "@/lib/settingSources";
+import { LAYER_ORDER, LAYER_TITLES, resetFor } from "@/lib/settingSources";
 import type { SettingsFileLayer } from "@/types/settingsSources";
 import { SettingsFiles } from "./SettingsFiles";
 import { ValueSource } from "./ValueSource";
@@ -115,10 +115,10 @@ function ConfigurationEditor({ project, identityPath }: { project: string | null
       setNotice(`Removed the ${LAYER_TITLES[from]} value.`);
     });
   };
-  const save = (next: string) => void run(async () => {
+  const save = (next: string | null) => void run(async () => {
     await configuration.write(project, layer, "branchPrefix", next);
     install(await configuration.resolve(project));
-    setNotice(`Saved to ${layerLabels[layer]}.`);
+    setNotice(next === null ? `Removed the ${LAYER_TITLES[layer]} value.` : `Saved to ${layerLabels[layer]}.`);
   });
   // PRO-374 (design 09.23): the prefix is a choice. TerminalX default, GitHub username and None save at once;
   // Custom saves its field on Enter or when it loses focus.
@@ -128,10 +128,20 @@ function ConfigurationEditor({ project, identityPath }: { project: string | null
   const derived: PrefixChoice = current === defaultPrefix ? "default" : current === "" ? "none" : login && current === `${login}/` ? "github" : "custom";
   const choice = picked ?? derived;
   const resettable = value ? resetFor(value) : null;
+  // TerminalX default removes the chosen layer's value, so a later change to the built-in default still reaches
+  // the person. Only when a layer below would then win (your own prefix under a repository's) is the default
+  // written, as the one way to put it back over that layer.
+  const lowerValue = value?.layers?.some((entry) => entry.layer !== "defaults" && LAYER_ORDER.indexOf(entry.layer) > LAYER_ORDER.indexOf(layer));
   const choose = (option: PrefixChoice) => {
     setPicked(option === "custom" ? "custom" : null);
     if (option === "custom") { if (derived !== "custom") { dirty.current = true; setPrefix(""); } return; }
-    const next = option === "default" ? defaultPrefix : option === "github" ? `${login}/` : "";
+    if (option === "default") {
+      const layerHasValue = value?.layers?.some((entry) => entry.layer === layer);
+      if (lowerValue) save(defaultPrefix);
+      else if (layerHasValue) save(null);
+      return;
+    }
+    const next = option === "github" ? `${login}/` : "";
     if (next !== current || value?.source !== layer) save(next);
   };
   const saveCustom = () => {
@@ -179,7 +189,8 @@ function ConfigurationEditor({ project, identityPath }: { project: string | null
             onBlur={() => saveCustom()} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveCustom(); } }} placeholder="team/" />
         </div>}
       </div>)}
-      <p className="font-mono text-xs text-faint" aria-live="polite">Next branch: {choice === "custom" ? prefix.trim() : current}fix-login-bug</p>
+      {/* What the next branch gets: the saved prefix, not an unsaved draft in the Custom field. */}
+      <p className="font-mono text-xs text-faint" aria-live="polite">Next branch: {current}fix-login-bug</p>
     </div>
     {value?.locked && <p className="text-xs text-muted-foreground">Locked by managed configuration</p>}
     {project && value && (value.source === "repositoryShared" || value.source === "repositoryLocal") && <p className="text-xs text-muted-foreground">This repository overrides the user prefix. Saving to User affects repositories that inherit it.</p>}

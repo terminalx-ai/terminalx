@@ -4,7 +4,7 @@ import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
@@ -50,10 +50,12 @@ export const SETTING_HIGHLIGHT_HOLD_MS = 1200;
 export const SETTING_HIGHLIGHT_FADE_MS = 700;
 
 /**
- * Pages whose rows bring their live control into a search result. Projects and Organizations need a project or an
- * organization chosen first, so their results open the page instead.
+ * Pages mounted, hidden, while a search lists their rows, so those rows bring their live control into the result.
+ * Only pages whose mount reads local settings and nothing more: a page that scans disk or the network on mount
+ * (Storage's leftover scan, Agents' install checks, Account, Machines…) is not started by typing a query. Its
+ * results open the page instead. The open page needs no copy: it stays mounted, hidden, and lends its controls.
  */
-const LIVE_CONTROL_SECTIONS: ReadonlySet<SettingsSection> = new Set<SettingsSection>(["general", "appearance", "agents", "orchestrator", "storage", "experimental", "about", "account", "machines", "transcription", "integrations"]);
+const LIVE_CONTROL_SECTIONS: ReadonlySet<SettingsSection> = new Set<SettingsSection>(["general", "appearance", "orchestrator", "experimental"]);
 
 /** The row kept at a user-file key, for the Can't save toast to name. */
 const userKeySettingTitle = (key: string) => SETTINGS_ROWS.find((row) => row.layout !== "content" && userFileKeys(row.storage.location).includes(key))?.title;
@@ -356,11 +358,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 );
               })}
             </div>
-            {/* Each result page, off screen, hands its rows' live controls to the slots above. */}
+            {/* A change made from a result that its page refuses shows on its page, which is hidden: say it here. */}
+            <SearchPageAlerts root={content} pages={pages} />
+            {/* Each other result page, hidden, hands its rows' live controls to the slots above. */}
             <SettingControlSlots.Provider value={slots}>
               <div hidden aria-hidden>
-                {pages.filter((page) => LIVE_CONTROL_SECTIONS.has(page.section) && page.matches.some((match) => slots.has(match.id))).map((page) => (
-                  <div key={page.section}>{settingsSectionRenderers[page.section]({ onOpenSkills, onOpenUsage })}</div>
+                {pages.filter((page) => page.section !== section && LIVE_CONTROL_SECTIONS.has(page.section) && page.matches.some((match) => slots.has(match.id))).map((page) => (
+                  <div key={page.section} data-search-page={page.section}>{settingsSectionRenderers[page.section]({ onOpenSkills, onOpenUsage })}</div>
                 ))}
               </div>
             </SettingControlSlots.Provider>
@@ -370,11 +374,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               <p className="mt-1 text-[12px] text-faint">Try fewer letters, or <button type="button" className="text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => choose("shortcuts")}>search keyboard shortcuts</button>.</p>
             </div>}
           </div>}
-          <div hidden={searching} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}`}>
+          <div hidden={searching} data-search-page={section} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}`}>
             {/* Design 09.02: the title just under the title bar, a one-line subtitle beneath it. */}
             <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
             <p id="settings-section-subtitle" className="mb-4 mt-1 text-[13px] text-muted-foreground">{SETTINGS_SECTIONS[section].subtitle}</p>
-            {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+            <SettingControlSlots.Provider value={searching ? slots : null}>
+              {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+            </SettingControlSlots.Provider>
             <SectionBadgeLegend section={section} />
           </div>
         </section>
@@ -383,6 +389,38 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       <CantSaveToast settingTitle={userKeySettingTitle} />
     </main>
   );
+}
+
+/**
+ * The alerts (role="alert") of the hidden pages a search lists, shown above its results: a refused change made
+ * from a result's control is said where the person is looking (Experimental and Orchestrator report a failed
+ * save on their page).
+ */
+function SearchPageAlerts({ root, pages }: { root: RefObject<HTMLElement | null>; pages: readonly { section: SettingsSection; title: string }[] }) {
+  const [alerts, setAlerts] = useState<readonly { key: string; title: string; text: string }[]>([]);
+  const listed = pages.map((page) => page.section).join(" ");
+  useEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const titles = new Map(pages.map((page) => [page.section as string, page.title]));
+    const read = () => {
+      const next = [...element.querySelectorAll<HTMLElement>("[data-search-page] [role=alert]")].flatMap((alert, index) => {
+        const page = alert.closest<HTMLElement>("[data-search-page]")!.dataset.searchPage!;
+        const text = alert.textContent?.trim();
+        return text && titles.has(page) ? [{ key: `${page}:${index}`, title: titles.get(page)!, text }] : [];
+      });
+      setAlerts((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(element, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+    // `listed` stands for `pages`: the observer restarts when the pages listed change, not on every render.
+  }, [root, listed]);
+  if (!alerts.length) return null;
+  return <div className="mt-3 flex flex-col gap-1">
+    {alerts.map((alert) => <p key={alert.key} role="alert" className="text-xs text-destructive">{alert.title}: {alert.text}</p>)}
+  </div>;
 }
 
 /** The badges a page can show: "Your value" on rows kept in the user file. */

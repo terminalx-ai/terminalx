@@ -7,6 +7,7 @@ import { getPrefs, setPrefs } from "@/lib/prefs";
 import { movePaletteSelection } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
+import { api, experimental } from "@/lib/api";
 
 const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
 vi.mock("@/lib/settingsFile", () => ({
@@ -20,7 +21,7 @@ beforeEach(() => {
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Settings search", () => {
   const search = () => screen.getByRole("combobox", { name: "Search settings" }) as HTMLInputElement;
@@ -48,6 +49,42 @@ describe("Settings search", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “link actions”");
     // The description is one line; the full text is its tooltip.
     expect(option.querySelector("[title]")?.className).toContain("truncate");
+  });
+
+  // Review of PRO-374: typing a query must not start a page's disk or network work.
+  it("does not mount Storage, with its leftover scan, to search it", async () => {
+    const scan = vi.spyOn(api, "scanLeftovers").mockResolvedValue([] as never);
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "leftovers" } });
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    await act(async () => {});
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it("lends the open page's controls to its results instead of mounting it again", async () => {
+    const settings = vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    render(<SettingsPage initialTab="experimental" onBack={vi.fn()} />);
+    // The page has read its switches (the app's shared store reads them too).
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Session cost" }).hasAttribute("disabled")).toBe(false));
+    await act(async () => {});
+    const before = settings.mock.calls.length;
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await act(async () => {});
+    expect(settings.mock.calls.length).toBe(before);
+  });
+
+  it("says, above the results, when a change made from a result is refused", async () => {
+    vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    vi.spyOn(experimental, "setSessionCost").mockRejectedValue(new Error("refused by the runtime"));
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    const control = await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await waitFor(() => expect(control.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(control);
+    // The page's own alert is hidden with the page; the results say it.
+    await waitFor(() => expect(screen.getAllByRole("alert").map((element) => element.textContent)).toContain("Experimental: refused by the runtime"));
+    expect(control.getAttribute("aria-checked")).toBe("false");
   });
 
   it("lists matching rows grouped by page under the query, a count and the keys (design 09.31)", () => {

@@ -40,9 +40,35 @@ it("defaults every editor to user writes and explicitly selects repository local
   fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryLocal" } });
   fireEvent.click(radio("None"));
   await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryLocal", "branchPrefix", ""));
+  // TerminalX default removes the layer's value (nothing below it), so a later default still applies.
   fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryShared" } });
   fireEvent.click(radio("TerminalX default"));
-  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryShared", "branchPrefix", ""));
+  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryShared", "branchPrefix", null));
+});
+
+it("TerminalX default clears your own value, and is written only over a layer below that would win", async () => {
+  resolve.mockResolvedValue(withLayers(at("user", "me/"), at("defaults", "raccoon/")));
+  render(<LayeredConfiguration />);
+  await screen.findByDisplayValue("me/");
+  fireEvent.click(radio("TerminalX default"));
+  await waitFor(() => expect(write).toHaveBeenCalledWith(null, "user", "branchPrefix", null));
+  write.mockClear();
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/repo" } });
+  await waitFor(() => expect(resolve).toHaveBeenCalledWith("/repo"));
+  await screen.findByDisplayValue("me/");
+  fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryLocal" } });
+  fireEvent.click(radio("TerminalX default"));
+  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryLocal", "branchPrefix", "raccoon/"));
+});
+
+it("previews the saved prefix, not an empty Custom field", async () => {
+  resolve.mockResolvedValue(withLayers(at("user", "raccoon/"), at("defaults", "raccoon/")));
+  render(<LayeredConfiguration />);
+  await waitFor(() => expect(radio("TerminalX default").checked).toBe(true));
+  fireEvent.click(radio("Custom"));
+  expect(customField().value).toBe("");
+  expect(screen.getByText(/Next branch:/).textContent).toBe("Next branch: raccoon/fix-login-bug");
+  expect(write).not.toHaveBeenCalled();
 });
 
 it("offers the GitHub username only once it is known", async () => {

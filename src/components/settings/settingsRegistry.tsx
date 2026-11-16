@@ -1043,17 +1043,16 @@ type RegisteredProps = Omit<RowProps, "children" | "control"> & (
 );
 /**
  * Settings search (PRO-374, design 09.01): each result row carries its live control. The result's page is
- * rendered off screen inside this context, so its state adapters run as on the page itself; a row drawn as a
- * row hands its control to the slot of its result, and nothing else of the page is shown.
+ * rendered (hidden) inside this context, so its state adapters run as on the page itself: a row drawn as a row
+ * draws itself as usual and also puts a copy of its control in the slot of its result. Both read and write the
+ * same state. The row stays in one shape (a fragment) with or without slots, so the page and its editors keep
+ * their state when a search starts or ends.
  */
 export const SettingControlSlots = createContext<ReadonlyMap<string, HTMLElement> | null>(null);
 export function RegisteredSetting({ setting, ...props }: RegisteredProps) {
   const slots = useContext(SettingControlSlots);
-  if (slots) {
-    const slot = byId.get(setting)!.layout === "content" || props.instance ? undefined : slots.get(setting);
-    return slot && props.control ? createPortal(props.control, slot) : null;
-  }
-  return byId.get(setting)!.render(props);
+  const slot = slots && byId.get(setting)!.layout !== "content" && !props.instance ? slots.get(setting) : undefined;
+  return <>{byId.get(setting)!.render(props)}{slot && props.control ? createPortal(props.control, slot) : null}</>;
 }
 /** Accept old section entry points and new row links; reject events and unknown strings. */
 export function resolveSetting(target: unknown): SettingRegistration {
