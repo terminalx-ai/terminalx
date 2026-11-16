@@ -350,6 +350,8 @@ jobs:
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
+        run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/debug/terminalx-serve
 
   # PRO-354: this build against the previous two released runtimes, both
   # ways (docs/MACHINES.md "Versions and updates"). The released runtimes

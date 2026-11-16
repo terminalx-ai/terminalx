@@ -13,7 +13,7 @@ import { selectCloudSession } from "@/lib/sessions";
 import { takeMachineNewSession, useMachineNewSession } from "./machineNewSession";
 import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
 import { machineSessionKey, parseMachineKey } from "@/types/target";
-import { MachineChip, MachineLocation } from "./connectionStatus";
+import { MachineChip, MachineLocation, machineViewLabel, machineViewStatus } from "./connectionStatus";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 
 /**
@@ -61,7 +61,16 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
 
   let body;
   if (connection && machine) {
-    body = <WorkspaceView key={workspaceTargetKey(connection.target)} opened={{ connection, name, provider: null, workspaceState: null }} state={clientState} initialAgent={!!focusAgent || !!request} focusAgent={focusAgent} agentProjects={agentProjects} />;
+    body = (
+      <WorkspaceView
+        key={workspaceTargetKey(connection.target)}
+        opened={{ connection, name, provider: null, workspaceState: null, machine: { record: machine, status: machineViewStatus(state, name), label: machineViewLabel(state) } }}
+        state={clientState}
+        initialAgent={!!focusAgent || !!request}
+        focusAgent={focusAgent}
+        agentProjects={agentProjects}
+      />
+    );
   } else {
     body = (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-[13px] text-muted-foreground" data-testid="machine-main-empty">

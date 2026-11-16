@@ -59,6 +59,7 @@ import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
+import { useMachinePlace } from "./workspacePlace";
 import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
@@ -125,6 +126,7 @@ export function CloudAgentsView({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const connected = state.state === "connected";
+  const machine = useMachinePlace();
   const generation = connected ? `${state.runtimeGeneration}:${state.runtimeEpoch ?? ""}` : null;
   const key = collabKey ?? `cloud:${scope.organizationId}:${scope.workspaceId}`;
   const collab = useCollab(key);
@@ -279,9 +281,11 @@ export function CloudAgentsView({
           {!snapshot.loaded ? (
             <Loader2 className="size-4 animate-spin" />
           ) : manage ? (
-            "No agent tabs in this workspace yet. Start one with + Agent."
+            machine ? `No agent tabs on ${machine.name} yet. Start one with + Agent.` : "No agent tabs in this workspace yet. Start one with + Agent."
           ) : connected ? (
-            "No agent tabs in this workspace."
+            machine ? `No agent tabs on ${machine.name}.` : "No agent tabs in this workspace."
+          ) : machine ? (
+            `Agent tabs appear here once ${machine.name} is connected or has saved conversations.`
           ) : (
             "Agent tabs appear here once the workspace is connected or has saved conversations."
           )}
@@ -317,15 +321,21 @@ function StatusBar({
   // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
   const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
   const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
+  // On a paired machine the chip follows the machine's own state: Offline, not the transport's Reconnecting.
+  const machine = useMachinePlace();
+  const connection = machine && state.state !== "connected" ? machine.label : connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connection} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip
-        label="Workspace"
-        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
-        testId="cloud-agent-provisioning"
-      />
+      {/* A paired machine is not provisioned, woken or put to sleep from here: it has no such state to show. */}
+      {!machine && (
+        <Chip
+          label="Workspace"
+          value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
+          testId="cloud-agent-provisioning"
+        />
+      )}
     </div>
   );
 }
