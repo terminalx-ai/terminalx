@@ -20,6 +20,7 @@ vi.mock("@/lib/api", () => ({
   },
   api: {
     cloudProviders: vi.fn(),
+    cloudProviderSetCreationEnabled: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
     cloudWorkspacePreflight: vi.fn(),
     cloudWorkspaceSetup: vi.fn(),
@@ -31,10 +32,20 @@ vi.mock("@/lib/api", () => ({
     listHarnesses: vi.fn(),
   },
 }));
-const account = vi.hoisted(() => ({ multiOrg: false }));
+const account = vi.hoisted(() => ({ multiOrg: false, role: null as "owner" | "admin" | "member" | null }));
 vi.mock("@/lib/account", async (original) => ({
   ...(await original<typeof import("@/lib/account")>()),
-  getAccount: () => ({ status: { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1" }, multiOrg: account.multiOrg }, ready: true, busy: false }),
+  getAccount: () => ({
+    status: {
+      state: "signed-in",
+      identity: { email: "a@example.com", organizationId: "org-1" },
+      multiOrg: account.multiOrg,
+      context: { scope: "org-1", revision: "rev-1" },
+      organizations: account.role ? [{ id: "org-1", name: "Acme", role: account.role }] : undefined,
+    },
+    ready: true,
+    busy: false,
+  }),
 }));
 const catalog = vi.hoisted(() => ({ models: [] as ModelInfo[] }));
 vi.mock("@/lib/models", async (original) => ({
@@ -91,6 +102,7 @@ const snapshot = (phase: string, patch: { workspace?: object; operation?: object
 
 beforeEach(async () => {
   account.multiOrg = false;
+  account.role = null;
   nativeCodex.on = false;
   nativeCodex.asked = [];
   localStorage.clear();
@@ -343,6 +355,76 @@ describe("CloudCreateWorkspace", () => {
     await create();
     expect(await screen.findByText(/runtime cannot start agents from a first prompt/)).toBeTruthy();
     expect(screen.queryByText(/runtime-unsupported/)).toBeNull();
+  });
+});
+
+// PRO-372: an organization created at login.terminalx.ai whose compute provider was connected there.
+describe("CloudCreateWorkspace in an organization whose provider was connected in the web console", () => {
+  /** The provider list the server answers once the console's connect has made the connection. */
+  const boat = (availability: "available" | "disabled-for-create", canManage = true) => ({
+    id: "box",
+    displayName: "Boat",
+    availability,
+    canManage,
+    connection: canManage ? { state: "connected", connectedAt: 1_700_000_000_000, lastValidatedAt: 1_700_000_000_000, credentialFingerprint: "sha256:3f9a2c1b" } : null,
+    capabilities: {},
+  });
+
+  it("uses that provider the first time it opens, and creates without a visit to Settings", async () => {
+    mocked.cloudProviders.mockResolvedValue({ providers: [boat("available")] });
+    mocked.cloudWorkspaceCreate.mockResolvedValue(snapshot("allocating"));
+    await fill();
+    expect(screen.queryByTestId("cloud-create-no-provider")).toBeNull();
+    expect(screen.queryByText(/Connect a compute provider/)).toBeNull();
+    await create();
+    await screen.findByTestId("cloud-create-progress");
+    expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), null);
+    expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("says its new machines are paused, not that none is connected, and allows them in the form", async () => {
+    mocked.cloudProviders.mockResolvedValueOnce({ providers: [boat("disabled-for-create")] }).mockResolvedValue({ providers: [boat("available")] });
+    mocked.cloudProviderSetCreationEnabled.mockResolvedValue(boat("available"));
+    mocked.cloudWorkspaceCreate.mockResolvedValue(snapshot("allocating"));
+    await fill();
+    const shortfall = screen.getByTestId("cloud-create-no-provider");
+    expect(shortfall.textContent).toContain("Boat is connected, but new machines are paused for this organization.");
+    expect(shortfall.textContent).not.toMatch(/Connect a compute provider/);
+    fireEvent.click(within(shortfall).getByRole("button", { name: "Allow new machines" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-create-no-provider")).toBeNull());
+    expect(mocked.cloudProviderSetCreationEnabled).toHaveBeenCalledWith("box", "rev-1", true);
+    await create();
+    await screen.findByTestId("cloud-create-progress");
+    expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), null);
+  });
+
+  it("keeps the form as it was and says why when allowing them is refused", async () => {
+    mocked.cloudProviders.mockResolvedValue({ providers: [boat("disabled-for-create")] });
+    mocked.cloudProviderSetCreationEnabled.mockRejectedValue({ code: "organization_admin_required" });
+    await fill();
+    fireEvent.click(screen.getByRole("button", { name: "Allow new machines" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Only an organization owner or administrator can manage this connection.");
+    expect(screen.getByTestId("cloud-create-no-provider").textContent).toContain("new machines are paused");
+  });
+
+  it("tells a member that an owner or admin allows them, with nothing to press", async () => {
+    account.role = "member";
+    mocked.cloudProviders.mockResolvedValue({ providers: [boat("disabled-for-create", false)] });
+    await fill();
+    const shortfall = screen.getByTestId("cloud-create-no-provider");
+    expect(shortfall.textContent).toBe(
+      "Boat is connected, but new machines are paused for this organization. An owner or admin can allow them in Settings → Organizations, under Cloud compute.",
+    );
+    expect(within(shortfall).queryByRole("button")).toBeNull();
+  });
+
+  it("tells a member with no provider connected who connects one", async () => {
+    account.role = "member";
+    mocked.cloudProviders.mockResolvedValue({ providers: [{ ...boat("available", false), availability: "not-connected" }] });
+    await fill();
+    expect(screen.getByTestId("cloud-create-no-provider").textContent).toBe(
+      "No compute provider is connected for this organization. An owner or admin connects one in Settings → Organizations, under Cloud compute.",
+    );
   });
 });
 

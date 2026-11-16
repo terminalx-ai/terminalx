@@ -1,7 +1,7 @@
 import type { CloudProviderSummary } from "@/lib/api";
 import { defaultOrgId } from "@/lib/cloudCatalog";
 import { getAccount } from "@/lib/account";
-import { usableProviders } from "@/lib/cloudCreate";
+import { CreateRefused, PROVIDER_CREATION_PAUSED, listedNames, usableProviders } from "@/lib/cloudCreate";
 
 // Machine0 is hidden while Boat is the launch provider (saas
 // CLOUD_MACHINE0_ENABLED, 2026-10-17). A server that offers it says so in the
@@ -36,4 +36,19 @@ export function pausedProviders(providers: CloudProviderSummary[], orgId?: strin
 /** The providers settings list: a hidden one only while the organization is still connected to it. */
 export function listedProviders(providers: CloudProviderSummary[], orgId?: string | null): CloudProviderSummary[] {
   return providers.filter((provider) => provider.id !== "machine0" || Boolean(provider.connection) || machine0Offered(orgId));
+}
+
+/**
+ * Why a new workspace has no provider to use, once `creatableProviders` is
+ * empty (PRO-372). A provider that is connected but whose new machines are
+ * paused (PRO-112), or whose connection needs attention, is not "no provider
+ * connected": saying so asked people to connect again what they had connected
+ * in the web console. The detail names the providers concerned.
+ */
+export function noProviderRefusal(providers: CloudProviderSummary[], orgId?: string | null): CreateRefused {
+  const paused = pausedProviders(providers, orgId);
+  if (paused.length) return new CreateRefused(PROVIDER_CREATION_PAUSED, listedNames(paused.map((provider) => provider.displayName)));
+  const attention = providers.filter((provider) => provider.availability === "attention-required" && (provider.id !== "machine0" || machine0Offered(orgId)));
+  if (attention.length) return new CreateRefused("cloud_provider_connection_attention_required", listedNames(attention.map((provider) => provider.displayName)));
+  return new CreateRefused("cloud_provider_connection_required");
 }

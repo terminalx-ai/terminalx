@@ -16,7 +16,7 @@ import {
   type CreateForm,
   type PendingCreate,
 } from "@/lib/cloudCreate";
-import { creatableProviders, machine0Offered } from "@/lib/hiddenProviders";
+import { creatableProviders, machine0Offered, noProviderRefusal } from "@/lib/hiddenProviders";
 import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
@@ -269,8 +269,9 @@ const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", 
 async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderId; label: string; setup: CloudWorkspaceSetup | null }> {
   const status = getAccount().status;
   if (!isMultiOrg(status) || orgId === defaultOrgId(status)) {
-    const provider = creatableProviders((await api.cloudProviders()).providers, orgId)[0];
-    if (!provider) throw new CreateRefused("cloud_provider_connection_required");
+    const { providers } = await api.cloudProviders();
+    const provider = creatableProviders(providers, orgId)[0];
+    if (!provider) throw noProviderRefusal(providers, orgId);
     return { id: provider.id, label: provider.displayName || provider.id, setup: null };
   }
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};

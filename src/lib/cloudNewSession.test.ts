@@ -427,6 +427,18 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  // PRO-372: the organization's provider was connected in the web console, with new machines paused.
+  it("says new machines are paused, not that a provider is needed, when the only provider is connected but paused", async () => {
+    await place([], { used: 0, limit: 2 });
+    mocks.api.cloudProviders.mockResolvedValue({
+      providers: [{ id: "box", displayName: "Boat", availability: "disabled-for-create", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: "fp" } }],
+    });
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Boat" });
+    expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
   it("asks a new workspace for a native Codex first tab only for Codex, and only when Settings → Experimental says so (#745)", async () => {
     await place([], { used: 0, limit: 5 });
     const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
