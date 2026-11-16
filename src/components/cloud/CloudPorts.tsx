@@ -4,6 +4,8 @@ import { Copy, ExternalLink, Loader2 } from "@/icons";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { api, type CloudPortForward } from "@/lib/api";
+import { MachineFeatureNotice } from "@/components/machines/MachineFeatureNotice";
+import { isMachineKey } from "@/types/target";
 
 /**
  * How often the list is read while the panel is on screen, so an application
@@ -244,6 +246,9 @@ export function CloudPortsView({
         {expired.length > 0 && <p className="mt-1">{CLOSED_WITH_CONNECTION}</p>}
       </div>
     );
+  }
+  if (!supported && isMachineKey(workspaceKey)) {
+    return <MachineFeatureNotice workspaceKey={workspaceKey} capability="ports/1" granted={state.capabilities} className="m-3" />;
   }
   if (!supported) {
     return (

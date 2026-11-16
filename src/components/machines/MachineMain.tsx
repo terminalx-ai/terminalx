@@ -7,6 +7,7 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { WorkspaceView } from "@/components/cloud/CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
+import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
 import { parseMachineKey } from "@/types/target";
 import { MachineChip, MachineLocation } from "./connectionStatus";
 
@@ -22,6 +23,8 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
   const { machine, state, connection, attachError } = machineConnection(store, machineId);
   const name = machine?.name ?? "Machine";
   const [clientState, setClientState] = useState<WorkspaceConnectionState>({ state: "idle" });
+  // "Needs update" also when the machine is connected but hides a feature this desktop uses (PRO-354).
+  const shown = machineVersionView(machine, state, connection?.client ?? null, clientState, useThisVersion()).shownState;
   useEffect(() => {
     if (!connection) return;
     setClientState({ state: "idle" });
@@ -64,7 +67,7 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
             </Button>
           </WithTooltip>
         )}
-        <MachineChip machine={machine} name={name} state={state} />
+        <MachineChip machine={machine} name={name} state={shown} />
       </header>
       {machine && <MachineLocation machine={machine} name={name} state={state} />}
       {body}
