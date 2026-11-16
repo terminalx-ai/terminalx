@@ -23,7 +23,8 @@ export function TerminalMoveButton({ id, docked }: { id: string; docked: boolean
     }
   };
   return <>
-    <button type="button" disabled={pending} onClick={() => void move()} className="shrink-0 rounded px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">{docked ? "Move to tab" : "Move to dock"}</button>
-    {error && <p role="alert" className="absolute top-8 right-2 z-30 max-w-80 rounded border border-hairline bg-popover p-2 text-xs text-destructive">{error}</p>}
+    {/* Beside the button in its own row, never over the terminal's output. */}
+    {error && <span role="alert" title={error} className="min-w-0 max-w-80 truncate text-xs text-destructive">{error}</span>}
+    <button type="button" disabled={pending} onClick={() => void move()} className="h-6 shrink-0 rounded px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground disabled:opacity-50">{docked ? "Move to tab" : "Move to dock"}</button>
   </>;
 }
