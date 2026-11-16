@@ -154,7 +154,9 @@ describe("file tabs (PRO-402)", () => {
     const checkout = openFile("checkout:/repo", "/repo", "a.ts");
     // A cloud session has no panes of the workspace's tabs: a file a link in its chat opens stays in the pane too.
     const cloudSession = openFile("cloud:org:ws:one", "/repo", "a.ts");
-    for (const id of [cloud, checkout, cloudSession]) expect(isTabEditor(getEditors().editors.find((e) => e.id === id)!)).toBe(false);
+    // Nor is a paired machine's session local: "not a cloud key" must never read as "this Mac" (PRO-346).
+    const machineSession = openFile("machine:cs1uhCLEB_ttCYaQ:1_xp39fWQj0RTKD0:5b4c4c1e", "/repo", "a.ts");
+    for (const id of [cloud, checkout, cloudSession, machineSession]) expect(isTabEditor(getEditors().editors.find((e) => e.id === id)!)).toBe(false);
     expect(getTerminalState().selected.s).toEqual({ kind: "agent", id: "chat" });
     expect(getTerminalState().selected["checkout:/repo"]).toBeUndefined();
     expect(getTerminalState().selected["cloud:org:ws:one"]).toBeUndefined();

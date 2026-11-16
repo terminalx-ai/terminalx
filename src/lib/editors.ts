@@ -3,6 +3,7 @@ import { recordRecentFile } from "@/lib/recentFiles";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
+import { isLocalKey } from "@/types/target";
 import type { ChangeRange } from "./changes";
 import type { PrAssociation } from "./api";
 import { discardStashedBuffers } from "@/lib/workspaceFiles";
@@ -106,9 +107,12 @@ export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
   return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
 }
 
-/** Whether files opened under this id are tabs of a local session: not a checkout with no session, not a cloud session. */
+/**
+ * Whether files opened under this id are tabs of a local session: not a checkout with no
+ * session, and not a cloud, machine or guest session, whose files keep their own pane.
+ */
 function hasFileTabs(sessionId: string): boolean {
-  return !sessionId.startsWith("checkout:") && !sessionId.startsWith("cloud:");
+  return !sessionId.startsWith("checkout:") && isLocalKey(sessionId);
 }
 
 /**
