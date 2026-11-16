@@ -132,6 +132,19 @@ pub struct Link {
     pub approved: HashSet<String>,
     #[serde(skip)]
     pub used_by: Option<String>,
+    /// The host's own choice of one person's access on this link (user id to
+    /// role), over the link's: set from the People list of the Share dialog.
+    #[serde(skip)]
+    pub access: HashMap<String, Role>,
+}
+
+impl Link {
+    /// What this person may do through the link: none when its settings keep
+    /// them out, else the host's choice for them, else the link's.
+    fn role_for(&self, person: &Person, org: &str) -> Option<Role> {
+        let role = self.settings.role_for(person, org)?;
+        Some(self.access.get(&person.user_id).copied().unwrap_or(role))
+    }
 }
 
 pub struct Guest {
@@ -266,7 +279,6 @@ impl Share {
         }
         // Restriction precedes approval: outsiders never appear as requests.
         let role = link
-            .settings
             .role_for(&guest.person, &self.organization_id)
             .ok_or_else(|| anyhow!("Your account does not have access to this link."))?;
         if self.guests.len() >= MAX_GUESTS * 4 {
@@ -381,6 +393,42 @@ impl Share {
         Ok(())
     }
 
+    /// The host sets one person's access on a link: Read only ends their lease and drops what they queued.
+    pub fn set_role(&mut self, link_id: &str, user: &str, role: Role, now: i64) -> Result<()> {
+        let link = self
+            .links
+            .get_mut(link_id)
+            .ok_or_else(|| anyhow!("Link not found."))?;
+        if link.revoked {
+            bail!("This link was revoked.");
+        }
+        link.access.insert(user.into(), role);
+        let mut connections = HashSet::new();
+        for guest in self
+            .guests
+            .values_mut()
+            .filter(|g| g.link_id == link_id && g.person.user_id == user)
+        {
+            if guest.role != role {
+                guest.write_revision += 1;
+            }
+            guest.role = role;
+            connections.insert(guest.connection_id.clone());
+        }
+        if role == Role::Viewer {
+            self.leases.retain(|_, lease| lease.holder.user_id != user);
+            self.queue
+                .retain(|input| !connections.contains(&input.connection_id));
+        }
+        self.record(
+            &self.host_id.clone(),
+            "access-changed",
+            json!({ "linkId": link_id, "userId": user, "role": role }),
+            now,
+        );
+        Ok(())
+    }
+
     pub fn revoke(&mut self, link_id: &str, remove: bool, now: i64) -> Result<()> {
         self.links
             .get_mut(link_id)
@@ -427,11 +475,14 @@ impl Share {
                 .min();
         }
         link.settings = settings.clone();
+        // New settings fail closed: a person the host let drive goes back to the link's access, while one the host
+        // kept to read only stays so.
+        link.access.retain(|_, role| *role == Role::Viewer);
         let mut remove = Vec::new();
         let mut demoted = HashSet::new();
         let mut admitted = HashSet::new();
         for guest in self.guests.values_mut().filter(|g| g.link_id == link_id) {
-            let Some(role) = settings.role_for(&guest.person, &self.organization_id) else {
+            let Some(role) = link.role_for(&guest.person, &self.organization_id) else {
                 remove.push(guest.connection_id.clone());
                 continue;
             };
@@ -555,7 +606,6 @@ impl Share {
             .get(&guest.link_id)
             .ok_or_else(|| anyhow!("Access ended."))?;
         let role = link
-            .settings
             .role_for(&person, &self.organization_id)
             .ok_or_else(|| anyhow!("Your account no longer has access to this link."))?;
         if role != guest.role {

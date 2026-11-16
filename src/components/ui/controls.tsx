@@ -32,6 +32,8 @@ export interface SegmentedOption<T extends string> {
   label: React.ReactNode;
   "aria-label"?: string;
   title?: string;
+  /** This one choice is not available now; arrows pass over it. */
+  disabled?: boolean;
 }
 
 /** A track with a sliding thumb; one Tab stop, arrows move inside it. */
@@ -41,6 +43,7 @@ export function Segmented<T extends string>({
   options,
   disabled,
   className,
+  packed,
   "aria-label": ariaLabel,
 }: {
   value: T;
@@ -48,6 +51,8 @@ export function Segmented<T extends string>({
   options: SegmentedOption<T>[];
   disabled?: boolean;
   className?: string;
+  /** Each choice as wide as its label, packed from the start of a track that may be wider: the thumb sits on the chosen one. */
+  packed?: boolean;
   "aria-label"?: string;
 }) {
   const idx = Math.max(
@@ -56,12 +61,12 @@ export function Segmented<T extends string>({
   );
   const onKey = (e: React.KeyboardEvent) => {
     if (disabled) return;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
-      e.preventDefault();
-      onChange(options[(idx + 1) % options.length].value);
-    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
-      e.preventDefault();
-      onChange(options[(idx - 1 + options.length) % options.length].value);
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    for (let n = 1; n < options.length; n++) {
+      const next = options[(idx + step * n + options.length * n) % options.length];
+      if (!next.disabled) return onChange(next.value);
     }
   };
   return (
@@ -78,9 +83,9 @@ export function Segmented<T extends string>({
       )}
       // Equal tracks keep the percentage-based thumb aligned; max-content prevents
       // nowrap labels from painting over each other even in a constrained grid.
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(max-content, 1fr))` }}
+      style={{ gridTemplateColumns: packed ? `repeat(${options.length}, max-content) minmax(0, 1fr)` : `repeat(${options.length}, minmax(max-content, 1fr))` }}
     >
-      <div
+      {!packed && <div
         aria-hidden
         className="absolute top-0.5 bottom-0.5 rounded-[5px] bg-(--surface-thumb) shadow-button transition-transform duration-150"
         style={{
@@ -88,7 +93,7 @@ export function Segmented<T extends string>({
           left: 2,
           transform: `translateX(${idx * 100}%)`,
         }}
-      />
+      />}
       {options.map((o) => (
         <button
           key={o.value}
@@ -98,11 +103,13 @@ export function Segmented<T extends string>({
           aria-label={o["aria-label"]}
           title={o.title}
           tabIndex={-1}
-          disabled={disabled}
+          disabled={disabled || o.disabled}
           onClick={() => onChange(o.value)}
           className={cn(
             "relative z-10 whitespace-nowrap rounded-[5px] px-2.5 font-medium transition-colors",
             o.value === value ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+            packed && o.value === value && "bg-(--surface-thumb) shadow-button",
+            o.disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
           )}
         >
           {o.label}
