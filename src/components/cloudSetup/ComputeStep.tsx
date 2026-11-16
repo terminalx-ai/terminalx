@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
-import { Check, CircleCheck, Cloud, Container, Loader2, Server, Ship, TriangleAlert } from "@/icons";
+import { CircleCheck, Cloud, Container, Loader2, Server, Ship, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudProviderConnection, type CloudProviderSummary, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
 import { refreshAccount } from "@/lib/account";
@@ -14,8 +14,8 @@ import type { StepProps } from "./stepProps";
 const DISCLOSURE_VERSION = "cloud-provider-connections-2026-08-13";
 
 /** What each provider is, for the cards (12.03). A provider not named here shows its name alone. */
-const PROVIDER_COPY: Partial<Record<CloudWorkspaceProviderId, { icon: ComponentType<{ className?: string }>; description: string; billing: string; key: string }>> = {
-  hetzner: { icon: Server, description: "Machines in Falkenstein, Nuremberg, Helsinki, Ashburn and Hillsboro.", billing: "Hourly, billed by Hetzner", key: "Hetzner API token" },
+const PROVIDER_COPY: Partial<Record<CloudWorkspaceProviderId, { icon: ComponentType<{ className?: string }>; description: string; billing: string; key: string; prices?: string }>> = {
+  hetzner: { icon: Server, description: "Machines in Falkenstein, Nuremberg, Helsinki, Ashburn and Hillsboro.", billing: "Hourly, billed by Hetzner", key: "Hetzner API token", prices: "Hetzner, without VAT" },
   box: { icon: Ship, description: "Fast-start sandboxes that sleep when idle. Part of the disk resets on resume.", billing: "Per second, billed by Boat", key: "Boat API token" },
   "local-docker": { icon: Container, description: "Containers on a machine you run. Good for trying cloud workspaces out.", billing: "Your own hardware", key: "Local Docker connection" },
   machine0: { icon: Cloud, description: "Cloud machines in your Machine0 account.", billing: "Billed by Machine0", key: "Machine0 API token" },
@@ -304,9 +304,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 ? { label: "New machines paused", tone: "text-warning" }
                 : item.connection?.state === "attention-required" || item.availability === "attention-required"
                   ? { label: "Needs attention", tone: "text-warning" }
-                  : item.connection?.state === "connected"
-                    ? { label: "Connected", tone: "text-add" }
-                    : null;
+                  : null;
             return (
               <label
                 key={item.id}
@@ -329,7 +327,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                   {itemCopy && <span className="text-faint">{itemCopy.billing}</span>}
                   {state && (
                     <span className={cn("flex items-center gap-1", state.tone)}>
-                      {state.tone === "text-add" ? <Check className="size-3" /> : <TriangleAlert className="size-3" />}
+                      <TriangleAlert className="size-3" />
                       {state.label}
                     </span>
                   )}
@@ -344,7 +342,15 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         <>
           <div className="mt-4 grid grid-cols-[1fr_200px] gap-3 max-sm:grid-cols-1">
             <div className="min-w-0">
-              <FieldLabel>{copy?.key ?? `${provider.displayName} API token`}</FieldLabel>
+              <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                <span className="text-[12.5px] font-medium">{copy?.key ?? `${provider.displayName} API token`}</span>
+                {/* Replacing the key is a link on the field's own line, not a row of its own (12.03). */}
+                {manage && connection && !entering && !disconnecting && (
+                  <button type="button" className="text-[12px] text-muted-foreground hover:text-foreground hover:underline disabled:opacity-60" disabled={Boolean(busy)} onClick={() => setReplacing(true)}>
+                    Replace key
+                  </button>
+                )}
+              </div>
               <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-hairline bg-card px-3 text-[12.5px]" data-testid="cloud-setup-provider-connection">
                 {detailLoading && !connection ? (
                   <span className="flex items-center gap-2 text-muted-foreground">
@@ -415,13 +421,6 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
               {connected ? "Organization owners and administrators manage provider keys." : `Ask an owner or administrator of ${organization.name} to connect ${provider.displayName}.`}
             </p>
           )}
-          {manage && connection && !entering && !disconnecting && (
-            <div className="mt-2">
-              <Button size="sm" variant="ghost" className="-ml-2.5" disabled={Boolean(busy)} onClick={() => setReplacing(true)}>
-                Replace key
-              </Button>
-            </div>
-          )}
           {entering && connection && (
             <div className="mt-3 rounded-lg border border-hairline bg-raised p-3" data-testid="cloud-setup-provider-connect">
               <p className="text-[12.5px] leading-[19px] text-muted-foreground">
@@ -464,7 +463,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
 
           <div className="mt-4 mb-1.5 text-[12.5px] font-medium">
             Machine size
-            {offered && <span className="font-normal text-faint"> · {offered.pricing === "provider-rate" ? `prices from ${provider.displayName}` : "estimated prices"}</span>}
+            {offered && <span className="font-normal text-faint"> · {offered.pricing === "provider-rate" ? `prices from ${copy?.prices ?? provider.displayName}` : "estimated prices"}</span>}
           </div>
           {offered ? (
             offered.machineClasses.length ? (
@@ -544,7 +543,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
               readOnly={!canEdit}
               disabled={busy === "save"}
               aria-invalid={canEdit && !nameValid}
-              aria-describedby="cloud-setup-computer-name-help"
+              aria-describedby={!canEdit || !nameValid ? "cloud-setup-computer-name-help" : undefined}
               onChange={(event) => {
                 setName(event.target.value.toLowerCase());
                 setSaveError(null);
@@ -590,9 +589,12 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
           </span>
         </div>
       </div>
-      <p id="cloud-setup-computer-name-help" className={cn("mt-1.5 text-[12px]", canEdit && !nameValid ? "text-destructive" : "text-faint")}>
-        {!canEdit ? `Owners and admins of ${organization.name} choose the computer's name and colour.` : !nameValid ? NAME_RULE : "Everyone in the organization sees the cloud computer by this name."}
-      </p>
+      {/* The "Shows as" chip already says how everyone sees the name (12.03); a line shows only for a rule or a restriction. */}
+      {(!canEdit || !nameValid) && (
+        <p id="cloud-setup-computer-name-help" className={cn("mt-1.5 text-[12px]", canEdit ? "text-destructive" : "text-faint")}>
+          {!canEdit ? `Owners and admins of ${organization.name} choose the computer's name and colour.` : NAME_RULE}
+        </p>
+      )}
 
       <p className="mt-3 text-[12px] leading-[18px] text-faint">
         {idleMinutes > 0 && provider?.capabilities.suspend ? `Idle workspaces sleep after ${idleMinutes} minutes. ` : ""}

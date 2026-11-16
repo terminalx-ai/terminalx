@@ -459,7 +459,7 @@ export function AppShell() {
         )}
       </div>
 
-      {status.settings.visible || runtimeSwitch ? (
+      {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
             <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />

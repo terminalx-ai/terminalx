@@ -3,7 +3,7 @@ import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId } from "@/lib/api";
 import { refreshCloudWorkspaces, useCloudCatalog } from "@/lib/cloudCatalog";
-import { observationsBody, preparationPrompt, type PreparationRepository } from "@/lib/environmentProposal";
+import { observationsBody, preparationPrompt, type BuildFailureContext, type PreparationRepository } from "@/lib/environmentProposal";
 import { PREPARATION_LIMIT_MINUTES, PreparationError, machineSentence, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
 import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, retryEnvironmentRun, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
 import { formatMicros, providerLabel } from "@/lib/organizationCompute";
@@ -54,7 +54,21 @@ type Stage = { kind: "idle" } | { kind: "offering" } | { kind: "confirm"; offer:
  * checks, and the machine is stopped. What comes out is a recipe to review.
  * Saving it changes nothing: applying and building stay their own presses.
  */
-export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved }: { status: EnvironmentStatus; organizationId: string | null; onSaved: () => void }) {
+export function ConfigureEnvironmentWithAgent({
+  status,
+  organizationId,
+  onSaved,
+  failure = null,
+  autoBegin = false,
+}: {
+  status: EnvironmentStatus;
+  organizationId: string | null;
+  onSaved: () => void;
+  /** "Fix with an agent" on a failed build (PRO-389): the agent is also given that build's script and log to fix. */
+  failure?: BuildFailureContext | null;
+  /** Go straight to the price and the confirm, as when a button elsewhere asked for this run. */
+  autoBegin?: boolean;
+}) {
   const provider = status.provider as CloudWorkspaceProviderId;
   const [local, setStage] = useState<Stage>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +133,15 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
     }
   };
 
+  // Asked for from elsewhere: offered once on arrival, never again on a re-render.
+  const begun = useRef(false);
+  useEffect(() => {
+    if (!autoBegin || begun.current || local.kind !== "idle" || run.kind === "running" || run.kind === "review") return;
+    begun.current = true;
+    void begin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on arrival
+  }, [autoBegin]);
+
   const repositories = parseRepositories(repositoryText);
   const repositoryProblem =
     repositories === null
@@ -133,7 +156,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
     if (!repositories || repositoryProblem || !agent || !startKey.current || !token) return;
     setError(null);
     const started = startEnvironmentRun(
-      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current, token },
+      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current, token, failure },
       { baseRevision: status.template?.revision ?? 0, onChange: refresh },
     );
     if (!started) {
@@ -259,7 +282,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             </Button>
             {showPrompt && repositories && repositories.length > 0 && (
               <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-xs" aria-label="What the agent is asked">
-                {preparationPrompt(repositories, token)}
+                {preparationPrompt(repositories, token, failure)}
               </pre>
             )}
           </div>

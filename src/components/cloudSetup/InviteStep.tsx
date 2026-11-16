@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
-import { Check, Circle, CircleAlert, CircleCheck, Link, Loader2, PartyPopper, X } from "@/icons";
+import { Check, Circle, CircleAlert, CircleCheck, Link, Loader2, LoaderCircle, PartyPopper, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type CloudWorkspaceProviderId } from "@/lib/api";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { providerLabel } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
-import { isBuilding, organizationEnvironment, stageLabel } from "@/lib/organizationEnvironment";
+import { buildTimeLeft, isBuilding, organizationEnvironment } from "@/lib/organizationEnvironment";
+import { initials } from "@/lib/cloudPeople";
+import { COMPUTER_COLORS } from "@/lib/computerIdentity";
 import {
   isInvitableEmail,
   isTransientMembersError,
@@ -20,7 +22,6 @@ import { agentLoginUsable } from "@/components/settings/OrganizationAgentLogins"
 import { cn } from "@/lib/cn";
 import { FieldLabel, StepError, StepPage } from "./FlowLayout";
 import { FinishActions } from "./FinishActions";
-import { initials } from "./OrganizationStep";
 import type { StepProps } from "./stepProps";
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
@@ -72,6 +73,23 @@ interface Area {
 
 const UNKNOWN: Area = { mark: "unknown", detail: "Couldn't check" };
 
+/** "ana.kim@example.com" → "Ana Kim": an invitation carries only the address. */
+export function inviteeName(email: string): string {
+  const local = email.replace(/@.*/, "").replace(/\+.*/, "");
+  const words = local.split(/[._-]+/).filter(Boolean);
+  return words.length ? words.map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" ") : email;
+}
+
+/** One colour per person, the same every time for the same address (12.06). */
+export function personColor(email: string): string {
+  const palette = COMPUTER_COLORS.filter((item) => item.id !== "gray");
+  let hash = 0;
+  for (const char of email.toLowerCase()) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length]!.css;
+}
+
+const tint = (css: string) => ({ background: `color-mix(in oklab, ${css} 15%, transparent)`, color: css });
+
 function AreaRow({ title, area }: { title: string; area: Area | null }) {
   const mark = area?.mark;
   return (
@@ -82,7 +100,7 @@ function AreaRow({ title, area }: { title: string; area: Area | null }) {
         ) : mark === "done" ? (
           <CircleCheck className="size-4 text-add" aria-label="done" />
         ) : mark === "working" ? (
-          <Loader2 className="size-4 animate-spin text-warning" aria-label="in progress" />
+          <LoaderCircle className="size-4 animate-spin text-warning" aria-label="in progress" />
         ) : mark === "unknown" ? (
           <CircleAlert className="size-4 text-faint" aria-label="unknown" />
         ) : (
@@ -91,7 +109,7 @@ function AreaRow({ title, area }: { title: string; area: Area | null }) {
       </span>
       <div className="min-w-0">
         <div className="text-[13px] font-medium">{title}</div>
-        <div className={cn("text-[12px] leading-[18px]", mark === "unknown" ? "text-faint" : "text-muted-foreground")}>{area ? area.detail : "Checking…"}</div>
+        <div className={cn("truncate text-[12px] leading-[18px]", mark === "unknown" ? "text-faint" : "text-muted-foreground")}>{area ? area.detail : "Checking…"}</div>
       </div>
     </li>
   );
@@ -208,7 +226,7 @@ function AlmostSet({
       else if (building)
         setEnvironment({
           mark: "working",
-          detail: `Version ${building.number} ${building.state === "queued" ? "waiting to build" : `building · ${stageLabel(building.stage).toLowerCase()}`}`,
+          detail: `Version ${building.number} ${building.state === "queued" ? "waiting to build" : `building · ${buildTimeLeft(building, status.versions, Date.now())}`}`,
         });
       else if (active) setEnvironment({ mark: "done", detail: `Version ${active.number} active${status.rebuildRequired ? " · unbuilt changes" : ""}` });
       else {
@@ -525,8 +543,11 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                           problem ? "border-destructive/50 bg-destructive/10 text-destructive" : "border-hairline bg-raised",
                         )}
                       >
-                        <span className={cn("grid size-[18px] shrink-0 place-items-center rounded-full text-[9px] font-semibold", problem ? "bg-destructive/15" : "bg-accent/15 text-accent")}>
-                          {initials(null, chip.email)}
+                        <span
+                          className={cn("grid size-[22px] shrink-0 place-items-center rounded-full text-[12px] leading-none font-semibold tracking-[-0.04em]", problem && "bg-destructive/15")}
+                          style={problem ? undefined : tint(personColor(chip.email))}
+                        >
+                          {initials(chip.email)}
                         </span>
                         <span className="truncate">{chip.email}</span>
                         {problem && <span className="sr-only">: {problem}</span>}
@@ -576,7 +597,7 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 </div>
                 <select
                   aria-label="Role for these invites"
-                  className="h-9 rounded-md border border-hairline bg-card px-2 text-[12.5px] disabled:opacity-60"
+                  className="h-9 w-[150px] shrink-0 rounded-md border border-hairline bg-card px-2 text-[12.5px] disabled:opacity-60"
                   value={role}
                   disabled={busy === "send"}
                   onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "member")}
@@ -618,9 +639,12 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 const expired = invite.status === "expired" || (invite.expiresAt !== undefined && invite.expiresAt <= now);
                 return (
                   <li key={invite.email} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5" aria-label={invite.email}>
-                    <span className="grid size-7 shrink-0 place-items-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">{initials(null, invite.email)}</span>
+                    <span className="grid size-7 shrink-0 place-items-center rounded-full text-[12px] font-semibold" style={tint(personColor(invite.email))} aria-hidden>
+                      {initials(invite.email)}
+                    </span>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px]">{invite.email}</div>
+                      <div className="truncate text-[13px]">{inviteeName(invite.email)}</div>
+                      <div className="truncate text-[12px] text-muted-foreground">{invite.email}</div>
                       {own && !own.emailSent && <div className="text-[12px] text-warning">The email could not be sent. Copy the link and share it with them.</div>}
                     </div>
                     <span className="text-[12.5px] text-muted-foreground">{roleLabel(invite.role)}</span>
