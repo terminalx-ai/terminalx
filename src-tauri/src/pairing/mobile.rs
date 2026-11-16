@@ -240,8 +240,11 @@ pub(super) struct MobileRuntime {
     asked: Mutex<VecDeque<(String, String)>>,
     /// What each tab's turn has met since it began, by `session/tab`.
     turns: Mutex<HashMap<String, TurnNotes>>,
-    /// Pipeline news already sent, by `engine::PhoneNotice::key`.
+    /// Pipeline news already sent, by `engine::PhoneNotice::key`. Held in
+    /// memory only: news from before `started` is not sent at all, as an
+    /// earlier run of the app may have sent it.
     pipeline_notices: Mutex<VecDeque<String>>,
+    started: chrono::DateTime<Utc>,
     notes: Mutex<()>,
     /// Shared by every connection: the retry of a send whose reply was lost
     /// comes over the connection that replaced the one that dropped (#675).
@@ -262,6 +265,7 @@ impl MobileRuntime {
             asked: Mutex::new(VecDeque::new()),
             turns: Mutex::new(HashMap::new()),
             pipeline_notices: Mutex::new(VecDeque::new()),
+            started: Utc::now(),
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
             codex_models: OnceLock::new(),
@@ -492,9 +496,11 @@ impl MobileRuntime {
         Some(notification)
     }
 
-    /// The notice for a pipeline's news, once per news (`PhoneNotice::key`).
+    /// The notice for a pipeline's news, once per news (`PhoneNotice::key`),
+    /// and only for news since this app started.
     fn pipeline_notification(&self, notice: crate::issue_pipeline::engine::PhoneNotice, author_title: Option<String>) -> Option<MobileNotification> {
         use crate::issue_pipeline::engine::PhoneNoticeKind;
+        if notice.at < self.started { return None; }
         {
             let mut sent = self.pipeline_notices.lock().unwrap();
             if sent.contains(&notice.key) { return None; }
@@ -3438,16 +3444,21 @@ mod tests {
         use crate::issue_pipeline::engine::{PhoneNotice, PhoneNoticeKind};
         let runtime = MobileRuntime::new();
         let author = crate::issue_pipeline::SessionRef { session_id: "session".into(), tab_id: "tab".into() };
-        let failed = PhoneNotice { key: "p:needsYou:1".into(), kind: PhoneNoticeKind::ChecksFailed, pull_request: "Open a pull request".into(), detail: "Failed: test.".into(), author: author.clone() };
+        let failed = PhoneNotice { key: "p:needsYou:1".into(), kind: PhoneNoticeKind::ChecksFailed, pull_request: "Open a pull request".into(), detail: "Failed: test.".into(), author: author.clone(), at: Utc::now() };
         let notification = runtime.pipeline_notification(failed.clone(), titled()).unwrap();
         assert_eq!((notification.kind, notification.title.as_str(), notification.body.as_str()), (NoticeKind::PrChecksFailed, "Checks failed on Open a pull request", "Failed: test."));
         assert_eq!((notification.session_id.as_deref(), notification.tab_id.as_deref(), notification.session_title.as_deref()), (Some("session"), Some("tab"), Some("Fix login")));
         assert_eq!(serde_json::to_value(&notification).unwrap()["kind"], "pr_checks_failed");
         assert!(runtime.pipeline_notification(failed, titled()).is_none(), "the same news announced again");
-        let merged = PhoneNotice { key: "p:merged:2".into(), kind: PhoneNoticeKind::Merged, pull_request: "Open a pull request".into(), detail: "TerminalX merged pull request #7.".into(), author };
-        let notification = runtime.pipeline_notification(merged, titled()).unwrap();
+        let merged = PhoneNotice { key: "p:merged:2".into(), kind: PhoneNoticeKind::Merged, pull_request: "Open a pull request".into(), detail: "TerminalX merged pull request #7.".into(), author, at: Utc::now() };
+        let notification = runtime.pipeline_notification(merged.clone(), titled()).unwrap();
         assert_eq!((notification.kind, notification.title.as_str()), (NoticeKind::PrMerged, "Open a pull request merged"));
         assert_eq!(serde_json::to_value(&notification).unwrap()["kind"], "pr_merged");
+        // The app restarted inside the window the pipeline still calls it news: sent before, if at all.
+        let restarted = MobileRuntime::new();
+        let earlier = PhoneNotice { at: restarted.started - chrono::TimeDelta::minutes(2), ..merged };
+        assert!(restarted.pipeline_notification(earlier.clone(), titled()).is_none(), "news from before this app started");
+        assert!(restarted.pipeline_notification(PhoneNotice { at: restarted.started, ..earlier }, titled()).is_some(), "news since is sent");
     }
 
     fn of(kind: NoticeKind, session: &str) -> MobileNotification {

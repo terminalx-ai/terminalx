@@ -325,7 +325,8 @@ pub fn waits_on_pull_request(pipeline: &Pipeline) -> bool {
 
 /// How long after a pipeline stopped on failed checks, or merged, a phone is
 /// still told so (#990). A pipeline announced again later, by a step that
-/// changed something else or by an app that just started, is old news.
+/// changed something else, is old news; whoever sends it also drops news
+/// from before it started (`PhoneNotice::at`), which it may have sent already.
 pub const PHONE_NOTICE_MINUTES: i64 = 15;
 
 /// What a paired phone is told about an issue's pull request (#990).
@@ -348,6 +349,8 @@ pub struct PhoneNotice {
     pub detail: String,
     /// The conversation the pull request belongs to: the author's.
     pub author: SessionRef,
+    /// When the pipeline recorded the news.
+    pub at: DateTime<Utc>,
 }
 
 /// The news in a pipeline just announced, if it has any a phone is told:
@@ -381,6 +384,7 @@ pub fn phone_notice(pipeline: &Pipeline, author_title: Option<&str>, now: DateTi
         pull_request: title,
         detail: detail.unwrap_or_else(|| event.message.clone()),
         author: pipeline.author.clone(),
+        at,
     })
 }
 
