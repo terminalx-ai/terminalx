@@ -1360,9 +1360,12 @@ with the same probe Settings → Agents uses on this Mac
 (`harness::readiness`: `claude auth status --json`, Codex's
 `account/read`). A probe that fails or cannot tell is `unknown`, never
 signed out. The result also lists `missing: { id, name, installable }[]`,
-the agents the runtime knows with no CLI there. The probes start a process
-each, so the runtime keeps their answers for a minute; `{ refresh: true }`
-asks again now, and a setup step's exit drops them. An older runtime sends
+the agents the runtime knows with no CLI there. With agent accounts (#980)
+the login read is the agent's default account's, the one new sessions
+there start on: a subscription account's own directory, else the CLI's own
+login. The probes start a process each, so the runtime keeps their answers
+for a minute; `{ refresh: true }` from a manager asks again now (anyone
+else is answered from the kept check), and a setup step's exit drops them. An older runtime sends
 none of these fields: its agents show without a state, and nothing offers
 Install.
 
@@ -1386,7 +1389,9 @@ serves its machine grants it.
   (no key, token, file or environment) is sent: the terminal starts with
   the machine's own environment, in the machine user's home.
 - One step at a time per agent, whichever computer or the machine's own
-  window asks: a second start is refused with `setup_busy`. Its `data` is
+  window asks (`harness::setup` notes the steps started for other
+  computers, and the window's own setup counts them): a second start is
+  refused with `setup_busy`. Its `data` is
   the run (`{ ptyId, step }`), which the caller attaches to instead, when it
   runs in a terminal of the connection; there is none when the machine's own
   window runs the step in one of its setup panes.

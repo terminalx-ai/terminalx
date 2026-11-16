@@ -621,6 +621,11 @@ async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
     m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::SignedOut, Some("2.4.1".to_string())))]));
     let kept = call(&m.rpc, &peer, "runtime.agents", json!({})).await.unwrap();
     assert_eq!(kept["agents"][0]["signIn"], "signedIn");
+    // A participant's refresh starts no probe: it is answered from the kept check.
+    let (viewer, _viewer_events) = Peer::new("viewer-350".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["agents/1"] })).await.unwrap();
+    let viewed = call(&m.rpc, &viewer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(viewed["agents"][0]["signIn"], "signedIn");
     let asked = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
     assert_eq!(asked["agents"][0]["signIn"], "signedOut");
 

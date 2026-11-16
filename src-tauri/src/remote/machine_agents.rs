@@ -69,10 +69,25 @@ pub(super) fn sign_in(agent: &HarnessInfo, refresh: bool, probe: &dyn Fn(&Harnes
     sign_in
 }
 
-/// The probe Settings → Agents uses: the CLI's version and its own login.
+/// The probe Settings → Agents uses: the CLI's version and the login new
+/// sessions there use. With agent accounts (#980) that is the agent's
+/// default account: a subscription account's own directory, else the CLI's
+/// own login (a key account counts as signed in, as on this Mac). A project
+/// may name another default; the page and the form speak for the machine's.
 pub(super) fn probe(agent: &HarnessInfo) -> Probed {
-    let readiness = crate::harness::readiness::check_binary(&agent.id, agent.path.clone());
+    let readiness = match default_account_dir(&agent.id) {
+        Some(dir) => crate::harness::readiness::check_account_binary(&agent.id, agent.path.clone(), &dir),
+        None => crate::harness::readiness::check_binary(&agent.id, agent.path.clone()),
+    };
     (readiness.state, readiness.version)
+}
+
+/// The directory of `harness`'s default account, when that is a subscription account.
+fn default_account_dir(harness: &str) -> Option<std::path::PathBuf> {
+    let store = crate::agent_keys::store().ok()?;
+    let entry = store.entry(crate::agent_keys::agent_of(harness).ok()?).ok()?;
+    let id = crate::agent_accounts::agent_default(&entry);
+    crate::agent_accounts::directory(harness, &id).ok().flatten()
 }
 
 /// Forget every answer: an install or sign-in step just ended there.

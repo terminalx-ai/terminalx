@@ -106,7 +106,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let (cols, rows) = size()?;
                 let home = dirs::home_dir().context("no home directory")?;
                 // One step at a time per agent, whichever pane or window asks.
-                crate::harness::setup::begin(harness, id, step, || setup_panes(terminals, harness), || {
+                crate::harness::setup::begin(harness, Some(id), step, || setup_panes(terminals, harness), || {
                     // In the place of the step before, whose output stays above this one's.
                     terminals.respawn(sink.clone(), id, crate::pty::PaneSpec { cwd: &home.to_string_lossy(), cols, rows, command: Some(&command), env: &[] })
                 })?;

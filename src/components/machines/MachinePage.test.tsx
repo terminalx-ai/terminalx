@@ -106,6 +106,8 @@ function fakeClient({ capabilities = ALL, reports = [CURRENT], resources = RESOU
     updateMachine: vi.fn(async () => updateStatus()),
     onMachineUpdate: vi.fn(() => () => undefined),
     runtimeAgentsReport: vi.fn(async (_options?: { refresh?: boolean }) => reports[Math.min(read++, reports.length - 1)]),
+    // The new-session form's reading, refreshed after a sign-in check.
+    listRuntimeAgents: vi.fn(async () => reports[Math.min(read, reports.length) - 1]?.agents ?? []),
     call: vi.fn(async (method: string) => {
       if (method === "lifecycle.resources" && resources) return resources;
       throw new WorkspaceRpcError("method_not_found", "no such method", method);

@@ -288,12 +288,15 @@ mod tests {
     }
 
     #[test]
-    fn the_processor_reading_names_its_cores_and_has_no_use_before_a_second_reading() {
+    fn the_processor_reading_names_its_cores_and_a_use_between_zero_and_one() {
+        // The previous reading is process-wide, so whether a call is the
+        // first is not known here; `usage` itself is tested above.
         let reading = cpu();
         assert!(reading["cores"].as_u64().unwrap() >= 1);
-        let again = cpu();
-        if let Some(usage) = again["usage"].as_f64() {
-            assert!((0.0..=1.0).contains(&usage));
+        for reading in [reading, cpu()] {
+            if let Some(usage) = reading["usage"].as_f64() {
+                assert!((0.0..=1.0).contains(&usage));
+            }
         }
     }
 

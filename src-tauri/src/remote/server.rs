@@ -1526,7 +1526,7 @@ impl WorkspaceRpc {
             "session.update" => self.session_update(peer, params),
             "session.addTab" => self.session_add_tab(peer, params),
             "session.delete" => self.session_delete(peer, params),
-            "runtime.agents" => self.runtime_agents(&params),
+            "runtime.agents" => self.runtime_agents(peer, &params),
             "session.nudge" => {
                 self.agents()?.poll.raise();
                 Ok(json!({}))
@@ -2476,6 +2476,9 @@ impl WorkspaceRpc {
     /// is gone. Returns their subscriptions, to forget once unlocked.
     fn remove_pty(ptys: &mut HashMap<String, PtyState>, pty_id: &str) -> Vec<String> {
         let Some(pty) = ptys.remove(pty_id) else { return Vec::new() };
+        if pty.setup.is_some() {
+            crate::harness::setup::ended_elsewhere(pty_id);
+        }
         for (subscription_id, peer) in &pty.subscribers {
             peer.notify("pty.closed", json!({ "subscriptionId": subscription_id, "ptyId": pty_id }));
         }
@@ -2631,6 +2634,7 @@ impl WorkspaceRpc {
             let Some(pty) = ptys.get_mut(&exit.id) else { return };
             if pty.setup.is_some() {
                 // Installed or signed in, or not: what the agents' logins say now is read again.
+                crate::harness::setup::ended_elsewhere(&exit.id);
                 super::machine_agents::forget();
             }
             pty.exit = Some(exit.code);
@@ -3239,13 +3243,15 @@ impl WorkspaceRpc {
 
     /// `agents/1`: the installed agents, each with its models (and their
     /// efforts) and the launch modes it takes. Paths on the VM stay here.
-    fn runtime_agents(&self, params: &Value) -> Result<Value, RpcError> {
+    fn runtime_agents(&self, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
         let offered = self.offered_agents();
         // PRO-350: on a machine, each agent's version and login there, and
         // the agents it has no CLI for. A cloud workspace's agents sign in
         // through its own flows, so it starts no probe.
         let machine = matches!(self.scope, Scope::Machine { .. });
-        let refresh = params["refresh"].as_bool().unwrap_or(false);
+        // Each probe starts a process there: only a manager makes them run
+        // now; anyone else is answered from the kept check.
+        let refresh = params["refresh"].as_bool().unwrap_or(false) && peer.authority == Authority::Manage;
         let missing = machine.then(|| super::machine_agents::missing(&offered));
         let installed: Vec<crate::harness::HarnessInfo> = offered.into_iter().filter(|agent| agent.available).collect();
         let sign_ins: HashMap<String, super::machine_agents::SignIn> = if machine {
@@ -3351,11 +3357,11 @@ impl WorkspaceRpc {
         let home = home.to_string_lossy().into_owned();
         let mut started: Option<(String, Value)> = None;
         let mut failed: Option<RpcError> = None;
-        // Its terminal id is made as it starts; the step is told apart from
-        // the window's own setup panes by being in `ptys`, not by that id.
+        // Its terminal id is made as it starts: noted as a step for another
+        // computer, which the window's own setup counts too.
         let begun = crate::harness::setup::begin(
             &p.harness,
-            "",
+            None,
             step,
             || self.setup_running(&p.harness),
             || {
@@ -3363,7 +3369,10 @@ impl WorkspaceRpc {
                     peer,
                     NewPty { cwd: "~".into(), start_in: &home, command: Some(&command), session_id: None, project_id: None, cols: p.cols, rows: p.rows, setup: Some(SetupPty { harness: p.harness.clone(), step }) },
                 ) {
-                    Ok(pty) => started = Some(pty),
+                    Ok(pty) => {
+                        crate::harness::setup::began_elsewhere(&p.harness, &pty.0);
+                        started = Some(pty);
+                    }
                     Err(error) => {
                         failed = Some(error);
                         anyhow::bail!("not started");

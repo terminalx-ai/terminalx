@@ -70,8 +70,15 @@ class AgentsReading {
       .then((report) => {
         if (this.client.connection !== state) return null;
         if (this.pending === pending) this.set({ report, error: null, loading: false });
-        // A fresh check of the sign-ins: the new-session form's word on them follows (PRO-350).
-        if (refresh) void refreshRuntimeModels(this.client);
+        // A fresh check of the sign-ins: the new-session form's word on them
+        // follows (PRO-350). Its own failure is the form's, never this read's.
+        if (refresh) {
+          try {
+            void refreshRuntimeModels(this.client).catch(() => {});
+          } catch {
+            // The form keeps what it read before.
+          }
+        }
         return report;
       })
       .catch((error: unknown) => {
