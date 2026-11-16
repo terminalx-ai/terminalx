@@ -446,7 +446,7 @@ pub(crate) fn account_in(store: &Store<'_>, agent: Agent, id: &str) -> Result<Op
 /// How a sign-in the person started ended, for the add and sign-in-again
 /// flows. Labels and addresses go to Settings only, never a log.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "status")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "status")]
 pub enum Finished {
     /// The agent's own login is still open.
     Waiting,
@@ -457,7 +457,6 @@ pub enum Finished {
     /// That agent account is already listed: the new sign-in was signed out
     /// (and, when it was a new directory, deleted).
     Duplicate {
-        #[serde(rename = "accountId")]
         account_id: String,
         label: String,
     },

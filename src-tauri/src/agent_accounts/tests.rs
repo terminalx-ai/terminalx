@@ -482,3 +482,13 @@ fn the_usage_twin_matches_the_typescript_contract() {
     let back: AgentAccountUsage = serde_json::from_value(json!({ "accountId": "a", "label": "b", "windows": [], "error": "usage unavailable", "unavailable": false })).unwrap();
     assert_eq!(back.error.as_deref(), Some("usage unavailable"));
 }
+
+/// How a sign-in ended, as Settings reads it (`AgentAccountLoginFinished` in
+/// src/lib/agentAccounts.ts): the status tag and camelCase fields.
+#[test]
+fn a_finished_sign_in_has_the_wire_names_settings_reads() {
+    let duplicate = Finished::Duplicate { account_id: "0123456789abcdef".into(), label: "Work · Max".into() };
+    assert_eq!(serde_json::to_value(&duplicate).unwrap(), serde_json::json!({"status":"duplicate","accountId":"0123456789abcdef","label":"Work · Max"}));
+    assert_eq!(serde_json::to_value(Finished::Failed { message: "no login".into() }).unwrap(), serde_json::json!({"status":"failed","message":"no login"}));
+    assert_eq!(serde_json::to_value(Finished::Waiting).unwrap(), serde_json::json!({"status":"waiting"}));
+}
