@@ -20,7 +20,7 @@ describe("Project added notice", () => {
     expect(screen.getByText("Project added")).toBeTruthy();
     expect(screen.getByText("~/code/procyon/server")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Project settings" }));
-    expect(requested).toHaveBeenCalledExactlyOnceWith("/Users/someone/code/procyon/server");
+    expect(requested).toHaveBeenCalledExactlyOnceWith("/Users/someone/code/procyon/server", "scripts");
     expect(screen.queryByText("Project added")).toBeNull();
     stop();
   });

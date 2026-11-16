@@ -1,4 +1,6 @@
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { archiveWithUndo } from "@/lib/archiveNotices";
+import { reportError } from "@/lib/errorToasts";
 import { MoveToLocalSectionItems } from "./LocalSidebarSections";
 import { openSessionShare } from "@/lib/localSharing";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -506,7 +508,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
       <DropdownMenuItem onSelect={() => pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </DropdownMenuItem>
-      <DropdownMenuItem onSelect={() => archiveSession(session.id, !session.archived)}>
+      <DropdownMenuItem onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${session.title}”`))}>
         <Archive /> {session.archived ? "Unarchive" : "Archive"}
       </DropdownMenuItem>
       <DropdownMenuItem onSelect={() => void forkSession(session.id, session.activeTab ?? session.tabs[0]?.id ?? "")} disabled={!session.tabs.length}>
