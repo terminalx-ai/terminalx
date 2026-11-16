@@ -833,6 +833,12 @@ the pull request that adds it.
 | `machine.update` | `machine/3` | Served | Manage only; refused with `update_confirm`, `update_busy` or `update_unavailable` as that section says |
 | `machine.agentSetup` | `machine/4` | Served | Manage only; an agent's install or sign-in in a terminal on the machine (PRO-350, [The machine page](#as-built-pro-350-the-machine-page)) |
 | `machine.agentSetupRunning` | `machine/4` | Served | Manage only; the setup step running there for one agent, if any |
+| `machine.browse` | `machine/6` | Served | Manage only; folder names under the home directory of the runtime's user, never a file's contents (PRO-351, [A machine's projects](#as-built-pro-351-a-machines-projects-from-another-computer)) |
+| `machine.addProject` | `machine/6` | Served | Manage only; a folder under that home becomes a project |
+| `machine.removeProject` | `machine/6` | Served | Manage only; names the project; its folder and worktrees stay on disk |
+| `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
+| `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
+| `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1417,6 +1423,95 @@ keeps `namedHere: true`, so the name the machine gives itself in
 `machine.describe` no longer replaces it. Nothing on the machine changes.
 
 **Remove** is `machines_remove`, as on the card (PRO-349).
+
+### As built (PRO-351): a machine's projects from another computer
+
+The machine's page lists its **Projects** (screen 21.10): each with its folder
+and how many sessions it has, and a menu with "Remove project". "Add a
+project" opens a dialog (screen 21.11) with two tabs: "Folder on <machine>"
+browses the machine's folders, and "Clone from GitHub" clones a repository
+there. Before this a machine's projects were the ones someone added while
+sitting at it, and `fs/1` stays inside a project, so it cannot browse for one.
+
+`machine/6` adds six methods. Only a runtime that serves its machine grants
+it, and every method is the manager's: a paired computer has operating
+rights (decision 5); a session-scoped participant has none of them. (PRO-357
+takes `machine/5`.)
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.browse` | `{ path? }` | `{ home, path, parent, entries, truncated }` |
+| `machine.addProject` | `{ path }` | `{ project }` |
+| `machine.removeProject` | `{ projectId }` | `{ removed: true }` |
+| `machine.cloneProject` | `{ repository, parent }` | `{ clone }` |
+| `machine.cloneStatus` | `{ cloneId }` | `{ clone }` |
+| `machine.cloneCancel` | `{ cloneId }` | `{ clone }` |
+
+**Browse.** `path` is absolute; without it, the home directory of the user
+the runtime runs as. `home` is that directory, `path` the folder listed
+(canonical), and `parent` the folder above it, or null at `home`.
+
+- Only below `home`. The path is resolved (symbolic links followed) before
+  it is checked, so a link that leads out is refused with `path_forbidden`,
+  and so is any path outside `home`. A path that is missing or not a folder
+  is `not_found`.
+- Folder names only. `entries` are the folders directly inside `path`, in
+  name order (case folded), each `{ name, path, git, projectId }`. A file is
+  never listed and nothing is read from one. Hidden folders (a name starting
+  with `.`) and links that lead outside `home` are left out.
+- `git` is `{ branch, github }` for a Git repository, else null: `branch` is
+  read from `HEAD` (null when detached), `github` says whether `origin` is on
+  github.com. Both are read from the repository's own files, with no `git`
+  process per folder.
+- `projectId` is set when the folder already is a project (archived ones
+  too), so the dialog can say "Already a project".
+- At most 500 entries, so a reply fits the relay's frame; `truncated` says
+  some were left out.
+
+**Add.** `path` follows the same rules as `browse`. The folder becomes a
+project (`store::projects::ensure`, as `projects.add` on the control socket)
+and the runtime emits `projects_changed`, so `machine.changed` brings it to
+the sidebar and the new-session form of every connected computer, and the
+machine's own window shows it. A folder that already is a project is
+returned as it is. `projectId` comes from the path, so a folder removed and
+added again gets its old id back, and this computer's pins and order with it.
+
+**Remove.** The project leaves the machine's store and `projects_changed` is
+emitted. Its folder, its worktrees and its sessions' records stay on disk;
+nothing is deleted. The page asks first when the project has sessions.
+
+**Clone.** `repository` is `owner/name` on GitHub or a repository URL, as the
+local clone takes it (`project_start::parse_source`); `parent` is an absolute
+folder under `home` (rules as `browse`), and the clone lands in
+`<parent>/<name>`. It runs on the machine with its own git sign-in and never
+prompts (`project_start::clone_repository`): it is made in a staging folder
+beside its place and moved in whole, so one that fails or is canceled leaves
+nothing behind. Once it is whole the folder is added as a project, as Add
+does. A clone takes longer than a call may, so `machine.cloneProject` answers
+at once with the clone, and the page asks `machine.cloneStatus` every second
+until it ends. `clone` is `{ cloneId, repository, path, state, stage,
+percent, project, error }`:
+
+- `state` is `cloning`, `done`, `failed` or `canceled`.
+- `stage` and `percent` are git's progress while cloning.
+- `project` is the added project once `done`.
+- `error` is `{ code, message }` when `failed`, with the local clone's codes:
+  `invalid-source`, `invalid-destination`, `destination-exists`,
+  `access-denied`, `network`, `timed-out`, `disk-full` or `failed`. A folder
+  already holding a clone of the same repository is added as it is.
+- The runtime keeps a finished clone's status for ten minutes, so a page that
+  reconnects can still read how it ended; an unknown `cloneId` is
+  `not_found`.
+
+**Errors** use the protocol's codes: `invalid_params` for a missing or
+relative path, `path_forbidden`, `not_found`, and `invalid_project` when the
+store refuses the folder (a local mirror of a cloud workspace).
+
+**The page.** Projects show once the machine is connected; without
+`machine/6` they are listed with no Add or Remove, and the page names the
+machine and says to update it. A project's session count is the sessions of
+that machine with its `projectId`. Like the rest of Machines, it stays behind
+Settings → Experimental → Machines until PRO-360.
 
 ### Versions and updates (PRO-354)
 
