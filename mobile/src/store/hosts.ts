@@ -4,7 +4,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { z } from "zod";
 
-const HOSTS_KEY = "terminalx:mobile:hosts:v1";
+/** Where the paired machines are kept (no credentials: those are in the keychain). */
+export const HOSTS_KEY = "terminalx:mobile:hosts:v1";
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 
 const relaySchema = z.object({

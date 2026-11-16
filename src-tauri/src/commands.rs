@@ -2704,10 +2704,10 @@ use crate::AppState;
 use tauri::State;
 
 #[tauri::command]
-pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
+pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String, portable: Option<bool>) -> CmdResult<crate::continuation::Context> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
-        m.prepare_continuation(&session_id, &tab_id).map_err(err)
+        m.prepare_continuation(&session_id, &tab_id, portable == Some(true)).map_err(err)
     }).await.map_err(err)?
 }
 
@@ -3725,6 +3725,14 @@ pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id:
         }
         manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)
     }).await.map_err(err)?
+}
+
+/// The person is typing in a tab's composer (#981): automatic account
+/// switching leaves the tab alone meanwhile. Best effort.
+#[tauri::command]
+pub async fn tab_note_typing(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let Ok(sessions) = state.sessions() else { return Ok(()) };
+    tauri::async_runtime::spawn_blocking(move || sessions.note_typing(&session_id, &tab_id)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]

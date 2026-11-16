@@ -8,13 +8,18 @@
 // (iOS puts launch arguments into NSUserDefaults, which `Settings` reads).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
 import { Settings } from "react-native";
+import * as Notifications from "expo-notifications";
 import type { AgentEvent, Payload } from "@terminalx/portable/events";
 import type { SessionStatusInput } from "@terminalx/portable/sessionStatus";
 import { HostApi, type SessionSummary } from "../../src/data/host-api";
 import { cacheEpoch, writeCache, writeSaved } from "../../src/data/transcript-cache";
+import { restoreLocalNotifications } from "../../src/notifications/local";
+import { updateNotificationSettings } from "../../src/notifications/store";
+import type { LockScreenShow } from "../../src/notifications/model";
 import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../../src/pairing/contracts";
 import type { AccountHost } from "../../src/pairing/account-client";
-import type { StoredHost } from "../../src/store/hosts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { HOSTS_KEY, type StoredHost } from "../../src/store/hosts";
 import type { HostConnection, ConnectionStage } from "../../src/transport/connection";
 import { useWaited, WAITING_AFTER_MS } from "../../src/state/connection-view";
 
@@ -153,6 +158,35 @@ const CONVERSATIONS: Record<string, AgentEvent[]> = {
   "review-3": conversation("review", "review-3", "done"),
 };
 
+// ---- Notifications (22.07) ----
+
+/**
+ * With `-fixtureLockScreen everything|nothing` the phone has notifications on
+ * at that lock-screen level, and the Mac has three it sent while the phone was
+ * away. They reach iOS through the app's own path (`restoreLocalNotifications`
+ * asks `notifications.missedSince`, then filters, words and schedules each).
+ * Without it, the choices are the ones 22.07 frames 2 and 3 draw.
+ */
+const LOCK_LEVELS: readonly LockScreenShow[] = ["everything", "sessionName", "nothing"];
+const lockAsked = Settings.get("fixtureLockScreen");
+const lockScreen: LockScreenShow | null = LOCK_LEVELS.includes(lockAsked) ? lockAsked : null;
+/** A new epoch each launch, as after a Mac restarts: the phone's watermark from an earlier capture does not hold them back. */
+const EPOCH = `fixture-${now}`;
+/** As the Mac sends them (#990): oldest first, so the newest is on top. */
+const MAC_NOTIFICATIONS = [
+  { seq: 1, epoch: EPOCH, kind: "finished", sessionId: "runtime", tabId: "runtime-0", sessionTitle: "Runtime handover", title: "Runtime handover finished", body: "Merged, and the checks passed." },
+  { seq: 2, epoch: EPOCH, kind: "approval", sessionId: "approval", tabId: "approval-0", sessionTitle: "Rust cleanup", title: "Rust cleanup needs approval", body: "Run: cargo clean in the build folder", approval: { requestId: "approval-0-ask" } },
+  { seq: 3, epoch: EPOCH, kind: "question", sessionId: "question", tabId: "question-0", sessionTitle: "Mobile question card", title: "Mobile question card needs your answer", body: "Merge now, or wait for the macOS job?", question: { requestId: "question-0-ask", options: [{ label: "Merge now" }, { label: "Wait for it" }] } },
+];
+/** The choices 22.07 draws: the defaults, Office iMac off, quiet hours on, and the lock screen's level. */
+const seedNotifications = () => updateNotificationSettings((current) => ({
+  ...current,
+  allow: true,
+  machines: { ...current.machines, [imac.id]: false },
+  quietHours: { ...current.quietHours, on: lockScreen === null },
+  lockScreen: { ...current.lockScreen, show: lockScreen ?? "sessionName" },
+}));
+
 // ---- The Mac, as the phone's requests reach it ----
 
 const MODELS = [{ id: "claude-opus-5-5", label: "Opus 5.5", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }];
@@ -191,6 +225,7 @@ class FixtureConnection {
       case "models.list": return reply(MODELS);
       case "mac.settings": case "mac.setSettings": return reply({ nativeCodex: params.nativeCodex ?? true });
       case "host.describe": return reply({ name: "Studio MacBook" });
+      case "notifications.missedSince": return reply({ events: lockScreen ? MAC_NOTIFICATIONS : [] });
       default: return reply({});
     }
   }
@@ -249,8 +284,18 @@ export function AppProvider({ children }: PropsWithChildren) {
       writeSaved(studio.id, "features", FEATURES, cacheEpoch(studio.id)),
       writeSaved(studio.id, "models", MODELS, cacheEpoch(studio.id)),
       ...Object.keys(CONVERSATIONS).map((tabId) => writeSaved(studio.id, `tab:${JSON.stringify(["review", tabId])}`, TAB, cacheEpoch(studio.id))),
+      seedNotifications(),
+      // The paired machines' list as a real phone keeps it, so what reads the store (a notification's machine name) finds them.
+      // Only the list: the fixture's ad hoc build has no keychain for the credentials beside it.
+      AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(HOSTS)),
     ]).then(() => setReady(true));
   }, []);
+  // On connecting, as the app does: catch up on what the Mac sent while away, then subscribe.
+  useEffect(() => {
+    if (!ready || !connected) return;
+    // A lock-screen capture starts from an empty Notification Center, not the last capture's.
+    void (lockScreen ? Notifications.dismissAllNotificationsAsync() : Promise.resolve()).then(() => restoreLocalNotifications(connection as unknown as HostConnection, studio.id));
+  }, [ready, connected, connection]);
   const refreshSessions = useCallback(async () => { if (scenario === "slow-refresh") await pause(6_000); }, []);
   const value: Value = {
     ready, session: { accessToken: "fixture", refreshToken: "fixture", expiresAt: now + DAY * 60_000, user: { userId: "fixture", email: "alex@example.com", displayName: "Alex" } },

@@ -19,6 +19,7 @@ import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
 import { openTerminal, selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
 import type { CloudSessionModel } from "@/lib/cloudSession";
+import { MACHINE_LOCAL_ONLY } from "@/components/machines/MachineSession";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import { tabAccount } from "@/lib/api";
 import { LOCAL_ACCOUNT, showsAccounts, type AgentAccount } from "@/lib/agentAccounts";
@@ -206,8 +207,9 @@ export function LocalNewTabItems({ session }: { session: SessionEntry }) {
  * menu says why when it is not there.
  */
 /** Why the cloud "New tab" menu's items are disabled, or null when they are not. */
-export function newTabBlockedReason(cloud: Pick<CloudSessionModel, "backend" | "connected" | "asleep" | "canWakeForTerminal" | "manage">): string | null {
+export function newTabBlockedReason(cloud: Pick<CloudSessionModel, "backend" | "connected" | "asleep" | "canWakeForTerminal" | "manage" | "machine">): string | null {
   if (cloud.backend.readOnlyReason) return cloud.backend.readOnlyReason;
+  if (cloud.machine) return cloud.connected && cloud.manage ? null : `Tabs and terminals open once ${cloud.machine.name} is connected.`;
   if (!cloud.connected) {
     if (!cloud.asleep) return "Connecting to the workspace…";
     return cloud.canWakeForTerminal
@@ -289,8 +291,17 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem disabled={!!blocked} onSelect={() => run(() => cloud.openTerminal())}>
-            <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on the VM</span>
+            <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">{cloud.machine ? `on ${cloud.machine.name}` : "on the VM"}</span>
           </DropdownMenuItem>
+        )}
+        {/* Where a local session offers a browser page: a machine session says, once, what stays on this Mac (decision 7). */}
+        {cloud.machine && (
+          <>
+            <DropdownMenuSeparator />
+            <NewTabHint>
+              <span data-testid="machine-local-only">{MACHINE_LOCAL_ONLY}</span>
+            </NewTabHint>
+          </>
         )}
         {onShowPorts && (
           <>

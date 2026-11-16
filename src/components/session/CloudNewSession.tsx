@@ -1,23 +1,19 @@
 import { useMemo } from "react";
-import { Cloud, Loader2 } from "@/icons";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
-import { Button } from "@/components/ui/button";
-import { errorMessage, type CloudWorkspaceQuota, type CloudWorkspaceQuote } from "@/lib/api";
+import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
-import type { PreparedCreate } from "@/lib/cloudNewSession";
-import { managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
+import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
-import { limitOf } from "@/lib/runningLimit";
 import { useSessionStore } from "@/lib/sessions";
 import type { CloudProject } from "@/types/target";
 
 /**
  * The cloud half of the new-session form (PRO-23): which cloud project the
- * form is for, and the one-time cost confirmation a new workspace needs.
+ * form is for, and the words for a start's errors and a new workspace's machine.
  */
 
 /**
@@ -61,8 +57,9 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
   const { status } = useAccount();
   const key = store.cloudSessionPreset?.projectKey ?? null;
   return useMemo(() => {
-    if (!key) return null;
-    const orgId = key.slice("cloud:".length).split(":")[0];
+    // Only a cloud project presets this form; any other key is no cloud draft.
+    const orgId = cloudKeyOrgId(key);
+    if (!orgId) return null;
     const org = status.organizations?.find((item) => item.id === orgId);
     const orgName = org ? (org.isPersonal ? "Personal" : org.name) : "Organization";
     const placed = placeCloudProjects(catalog.orgs[orgId] ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {
@@ -98,11 +95,6 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
   return errorMessage(error);
 }
 
-/**
- * The spend confirmation for a new workspace, shown once per create: the
- * quota first, then the provider, the machine and its price. Nothing is
- * created until Create is pressed.
- */
 /** A quote in words: the machine it is for, and what it costs running and stopped. */
 export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { machine: string; price: string } {
   const config = quote.configuration;
@@ -112,42 +104,4 @@ export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { 
     machine: `${providerLabel} · ${config.machineClassLabel} (${config.vcpu} vCPU, ${Math.round(config.memoryMiB / 1024)} GB) · ${config.locationLabel}`,
     price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. It stops itself after ${config.idleSuspendMinutes} idle minutes.`,
   };
-}
-
-/** How full the organization is before this create: against its limit, or only the count where it has none (PRO-371). */
-export function quotaText(orgName: string, quota: CloudWorkspaceQuota | null): string {
-  // An older server sends no quota at all, so all that can be said is that its limit applies.
-  if (!quota) return `${orgName}'s workspace limit applies; this adds one workspace.`;
-  const limit = limitOf(quota);
-  if (limit !== null) return `${orgName} has ${quota.used} of ${limit} cloud workspaces in use; this adds one.`;
-  return `${orgName} has ${quota.used} cloud workspace${quota.used === 1 ? "" : "s"} in use; this adds one.`;
-}
-
-export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCancel }: { prepared: PreparedCreate; orgName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
-  const { quote, quota } = prepared;
-  const text = quoteText(quote, prepared.providerLabel);
-  return (
-    <div className="mb-3 rounded-xl border border-hairline bg-well p-3 text-xs" role="group" aria-label="Confirm a new cloud workspace" data-testid="cloud-create-confirm">
-      <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-foreground">
-        <Cloud className="size-4" /> {prepared.project.blank ? `Create the ${prepared.project.fullName} workspace` : `Create a cloud workspace for ${prepared.project.fullName}`}
-      </div>
-      <p className="text-muted-foreground" data-testid="cloud-create-quota">
-        {quotaText(orgName, quota)}
-      </p>
-      <p className="mt-1 text-muted-foreground">{text.machine}</p>
-      <p className="mt-1 text-foreground" data-testid="cloud-create-price">
-        {text.price}
-      </p>
-      {prepared.project.blank && <p className="mt-1 text-muted-foreground">It starts as an empty folder with Git, so changes can be tracked.</p>}
-      <div className="mt-2 flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-        <Button size="sm" variant="accent" onClick={onConfirm} disabled={busy} data-testid="cloud-create-confirm-button">
-          {busy ? <Loader2 className="animate-spin" /> : null}
-          Create workspace and start
-        </Button>
-      </div>
-    </div>
-  );
 }

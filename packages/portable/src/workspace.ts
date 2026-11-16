@@ -63,9 +63,15 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
-/** Offered only by a runtime that serves every project of its machine (docs/MACHINES.md). */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
+/**
+ * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
+ * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
+ * `machine.updateChanged` notification.
+ * `machine/4` (PRO-350): `machine.agentSetup` and `machine.agentSetupRunning`,
+ * an agent's install or sign-in in a terminal on the machine.
+ */
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -74,6 +80,10 @@ export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typ
  */
 export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> = {
   "machine.relayAccess": "machine/2",
+  "machine.updateStatus": "machine/3",
+  "machine.update": "machine/3",
+  "machine.agentSetup": "machine/4",
+  "machine.agentSetupRunning": "machine/4",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -116,6 +126,9 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
 export function agentPtyId(tabId: string): string {
   return `tab:${tabId}`;
 }
+
+/** Methods a machine serves per project: they name the project (docs/MACHINES.md "Project scoping"). */
+const PROJECT_SCOPED = /^(fs|git)\./;
 
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
@@ -195,6 +208,88 @@ export type WorkspaceConnectionState =
        */
       link?: number;
     };
+
+/**
+ * A machine's update (PRO-354, docs/MACHINES.md "Versions and updates"):
+ * `machine.updateStatus`, `machine.update` and `machine.updateChanged`.
+ * `src/types/machines.ts` re-exports these for the desktop.
+ */
+export type MachineUpdateMethod = "installer" | "app" | "unmanaged";
+
+/** Work a handover cannot carry: it stops if the person goes ahead. */
+export interface MachineUpdateBlocker {
+  id: string;
+  kind: string;
+  title: string;
+}
+
+/** Another paired computer operating the machine right now. */
+export interface MachineUpdateOtherComputer {
+  id: string;
+  label: string;
+}
+
+export type MachineUpdatePhase = "downloading" | "verifying" | "trial" | "handingOver" | "cleaningUp";
+
+export type MachineUpdateProgress =
+  | { phase: "idle" }
+  | { phase: MachineUpdatePhase; version: string; since: number }
+  | { phase: "appUpdating"; version: string | null; since: number; step: string | null }
+  | { phase: "updated"; from: string; to: string; at: number }
+  | {
+      phase: "failed";
+      version: string;
+      at: number;
+      message: string;
+      /** The version the machine runs now. */
+      running: string;
+      /** The new version was started and the old one put back. */
+      rolledBack: boolean;
+    };
+
+export interface MachineUpdateStatus {
+  method: MachineUpdateMethod;
+  current: string;
+  /** The newest release this machine could update to; null when none is newer or it has not checked. */
+  available: { version: string } | null;
+  checkedAt: number | null;
+  blockers: MachineUpdateBlocker[];
+  otherComputers: MachineUpdateOtherComputer[];
+  /** Versions on disk, newest first (at most three). */
+  kept: string[];
+  progress: MachineUpdateProgress;
+}
+
+/** `machine.update`'s params. */
+export interface MachineUpdateRequest {
+  version: string;
+  /** Blocker ids the person agreed to stop. */
+  stop?: string[];
+  /** The other computers (ids) the person was told are connected; one not named refuses the update with `update_confirm`. */
+  confirmedOthers?: string[];
+}
+
+const UPDATE_METHODS: readonly string[] = ["installer", "app", "unmanaged"];
+
+/** A `MachineUpdateStatus` as the runtime sent it, or null when it is not one. Lists default to empty. */
+export function machineUpdateStatus(value: unknown): MachineUpdateStatus | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.method !== "string" || !UPDATE_METHODS.includes(raw.method) || typeof raw.current !== "string") return null;
+  const progress = raw.progress && typeof raw.progress === "object" && typeof (raw.progress as { phase?: unknown }).phase === "string" ? (raw.progress as MachineUpdateProgress) : { phase: "idle" as const };
+  const available = raw.available && typeof raw.available === "object" && typeof (raw.available as { version?: unknown }).version === "string" ? { version: (raw.available as { version: string }).version } : null;
+  const list = <T,>(items: unknown, valid: (item: Record<string, unknown>) => boolean): T[] => (Array.isArray(items) ? items.filter((item): item is T => !!item && typeof item === "object" && valid(item as Record<string, unknown>)) : []);
+  return {
+    method: raw.method as MachineUpdateMethod,
+    current: raw.current,
+    available,
+    checkedAt: typeof raw.checkedAt === "number" ? raw.checkedAt : null,
+    blockers: list<MachineUpdateBlocker>(raw.blockers, (item) => typeof item.id === "string" && typeof item.title === "string"),
+    otherComputers: list<MachineUpdateOtherComputer>(raw.otherComputers, (item) => typeof item.id === "string" && typeof item.label === "string"),
+    kept: Array.isArray(raw.kept) ? raw.kept.filter((entry): entry is string => typeof entry === "string") : [],
+    progress,
+  };
+}
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
 export type PtyControl = "you" | "other" | "none";
@@ -468,6 +563,8 @@ export type CleanupProgress =
  * `cwd` and `projectPath` are paths on the VM: never hand them to a local command.
  */
 export interface RuntimeSession {
+  /** The machine project it belongs to (`machine/1`, docs/MACHINES.md "Project scoping"); absent elsewhere. */
+  projectId?: string | null;
   rowStatus?: import("./sessionStatus").SessionStatusInput;
   manualStatus?: import("./manualStatus").ManualStatus;
   automation?: { id: string } | null;
@@ -488,6 +585,18 @@ export interface RuntimeSession {
   activeTab?: string | null;
   /** The issue it was started from (`pipeline/1` runtimes). */
   issue?: RuntimeIssueRef | null;
+}
+
+/** A project on a paired machine (`machine.projects`, `machine.changed`; docs/MACHINES.md "machine/1"). */
+export interface MachineProject {
+  /** Derived from the project's path on the machine: 16 base64url characters, no `:` or `/`. */
+  projectId: string;
+  name: string;
+  /** A path on the machine: display only, never a local path. */
+  path: string;
+  kind: "git" | "folder" | string;
+  defaultBranch: string | null;
+  archived: boolean;
 }
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
@@ -514,6 +623,13 @@ export interface RuntimeAgentModel {
   resolved?: string | null;
 }
 
+/**
+ * Whether an agent's own login on the runtime's computer is in place
+ * (PRO-350): `unknown` when its CLI could not tell. A login is evidence of
+ * configuration, not of provider access.
+ */
+export type RuntimeAgentSignIn = "signedIn" | "signedOut" | "unknown";
+
 /** An agent installed on the runtime (`runtime.agents`, `agents/1`). */
 export interface RuntimeAgent {
   id: string;
@@ -523,6 +639,35 @@ export interface RuntimeAgent {
   /** Launch modes it takes; empty when it has none. */
   modes: string[];
   defaultMode: string;
+  /** Its CLI's version (PRO-350); null when it did not say, absent from an older runtime. */
+  version?: string | null;
+  /** Its login on that computer (PRO-350); absent from an older runtime, which shows the agent without a state. */
+  signIn?: RuntimeAgentSignIn;
+  /** When `signIn` was read, ms since the epoch (PRO-350). */
+  signInCheckedAt?: number;
+}
+
+/** An agent the runtime knows and has no CLI for (`runtime.agents`, PRO-350). */
+export interface RuntimeMissingAgent {
+  id: string;
+  name: string;
+  /** Whether `machine.agentSetup` can install it there (its provider has an official installer). */
+  installable: boolean;
+}
+
+/** `runtime.agents` in full (PRO-350). `missing` is null from an older runtime, which does not list them. */
+export interface RuntimeAgentsReport {
+  agents: RuntimeAgent[];
+  missing: RuntimeMissingAgent[] | null;
+}
+
+/** A step of an agent's setup on a machine (`machine/4`), as on this Mac (`src/lib/agentSetupFlow.ts`). */
+export type MachineAgentSetupStep = "install" | "login";
+
+/** The setup step of an agent running on the machine now (`machine.agentSetupRunning`). */
+export interface MachineAgentSetupRun {
+  ptyId: string;
+  step: MachineAgentSetupStep;
 }
 
 /** `session.status`: a subscribed tab's turn or process state changed. */
@@ -571,6 +716,8 @@ export interface PtyInfo {
   /** An agent tab's own terminal (`agent-pty/1`): the tab, and whether its CLI runs now. */
   tabId?: string;
   running?: boolean;
+  /** An agent's install or sign-in (`machine/4`); such a terminal is never in `pty.list`. */
+  setup?: { harness: string; step: MachineAgentSetupStep };
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -669,6 +816,8 @@ export class WorkspaceRpcClient {
   private nextLocal = 0;
   private closed = false;
   private readonly dropWaiters = new Set<() => void>();
+  /** One view per project, so a project's client keeps its identity across renders. */
+  private readonly projectViews = new Map<string, WorkspaceRpcClient>();
 
   constructor(private readonly transport: WorkspaceTransport, private readonly newRequestId: () => string = randomRequestId, timeoutMs = 30_000) {
     this.rpc = new PortableRpcClient(
@@ -687,6 +836,35 @@ export class WorkspaceRpcClient {
 
   get connection(): WorkspaceConnectionState {
     return this.state;
+  }
+
+  /**
+   * This connection as one project of a machine sees it (`machine/1`,
+   * docs/MACHINES.md "Project scoping"): every `fs.*` and `git.*` call, a
+   * file watch and a terminal opened outside a session carry `projectId`.
+   * Everything else (sessions, tabs, terminals, ports) is the machine's and
+   * goes as it is. The same object for the same project, so it can be a
+   * React dependency. A call that already names a project keeps it.
+   */
+  forProject(projectId: string): WorkspaceRpcClient {
+    const known = this.projectViews.get(projectId);
+    if (known) return known;
+    const scoped = (method: string, params: Record<string, unknown> = {}) =>
+      PROJECT_SCOPED.test(method) && params.projectId === undefined ? { ...params, projectId } : params;
+    const view = new Proxy(this, {
+      get: (target, property) => {
+        if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => target.call<T>(method, scoped(method, params));
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => target.mutate<T>(method, scoped(method, params), id);
+        if (property === "watchFiles") return (path: string, onChange: (paths: string[] | null) => void) => target.watchFiles(path, onChange, { projectId });
+        if (property === "createPty")
+          return (params: Parameters<WorkspaceRpcClient["createPty"]>[0]) => target.createPty(params.sessionId === undefined && params.projectId === undefined ? { ...params, projectId } : params);
+        if (property === "forProject") return (other: string) => target.forProject(other);
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    this.projectViews.set(projectId, view);
+    return view;
   }
 
   get generation(): number | null {
@@ -820,7 +998,7 @@ export class WorkspaceRpcClient {
   }
 
   /** `sessionId` needs `pty/2`; an older runtime would open a terminal that belongs to no session. */
-  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string }): Promise<PtyInfo> {
+  async createPty(params: { cols: number; rows: number; cwd?: string; sessionId?: string; projectId?: string }): Promise<PtyInfo> {
     if (params.sessionId !== undefined) this.assertCapability("pty/2", "pty.create");
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
@@ -1077,10 +1255,27 @@ export class WorkspaceRpcClient {
     worktreeName?: string | null;
     /** The desktop's Native Codex setting (#644): a Codex tab goes through Codex's app server where it can. An older runtime ignores it. */
     nativeCodex?: boolean;
+    /** `machine/1`: the machine project the session is created in (docs/MACHINES.md "Project scoping"); a machine refuses a session without one. */
+    projectId?: string;
+    /** `session-base/1` (PRO-348): the branch the new worktree is cut from; the project's default branch without it. */
+    baseRef?: string | null;
+    /**
+     * The create's idempotency id, when the caller keeps it: pressing Create
+     * again after the connection gave up is then the same request, and the
+     * runtime answers it with the session it already made (PRO-348).
+     */
+    clientRequestId?: string;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
     if (params.repository && !this.hasCapability("session-repository/1")) throw new Error("cloud_repository_session_runtime_update_required");
-    const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-    return this.mutate("session.create", defined);
+    if (params.baseRef && !this.hasCapability("session-base/1")) throw new WorkspaceRpcError("capability_not_granted", "This runtime cannot start a session from another branch.", "session.create");
+    const { clientRequestId, ...rest } = params;
+    const defined = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    return this.mutate("session.create", defined, clientRequestId);
+  }
+
+  /** A fresh idempotency id for a mutation whose caller keeps it across attempts (`createAgentTab`). */
+  requestId(): string {
+    return this.newRequestId();
   }
 
   /** Stop a tab's agent process; `remove` also drops the tab and its checkpoints. */
@@ -1116,6 +1311,21 @@ export class WorkspaceRpcClient {
    */
   moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
     return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
+  }
+
+  /** A machine's projects (`machine/1`). */
+  async machineProjects(): Promise<MachineProject[]> {
+    const result = await this.call<{ projects?: MachineProject[] }>("machine.projects");
+    return Array.isArray(result.projects) ? result.projects : [];
+  }
+
+  /** `machine.changed`: the machine's name or project set changed; `projects` is the whole new list when sent. */
+  onMachineChanged(listener: (change: { projects: MachineProject[] | null }) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "machine.changed") return;
+      const projects = (notification.params as { projects?: unknown }).projects;
+      listener({ projects: Array.isArray(projects) ? (projects as MachineProject[]) : null });
+    });
   }
 
   /** The sessions this connection may see (`session.list`). */
@@ -1257,6 +1467,37 @@ export class WorkspaceRpcClient {
     return result.agents ?? [];
   }
 
+  /**
+   * `runtime.agents` with what PRO-350 adds: each agent's version and
+   * sign-in, and the agents with no CLI there. `refresh` reads the sign-ins
+   * again now, else the runtime answers from a check at most a minute old.
+   */
+  async runtimeAgentsReport(options: { refresh?: boolean } = {}): Promise<RuntimeAgentsReport> {
+    const result = await this.call<{ agents?: RuntimeAgent[]; missing?: RuntimeMissingAgent[] }>("runtime.agents", options.refresh ? { refresh: true } : {});
+    return { agents: result.agents ?? [], missing: result.missing ?? null };
+  }
+
+  /**
+   * `machine/4`: start an agent's install or sign-in in a terminal on the
+   * machine (PRO-350). The command is the runtime's own; the terminal is
+   * attached and typed into as any other (`attachPty`, `write`), and ends
+   * with `pty.exit`, whose code says how (`SETUP_EXIT` in
+   * `src/lib/agentSetupFlow.ts`). Refused with `setup_busy` while a step of
+   * that agent runs there; its data is that {@link MachineAgentSetupRun}
+   * when the step runs in a terminal to attach to, absent when the machine's
+   * own window runs it.
+   */
+  async startAgentSetup(params: { harness: string; step: MachineAgentSetupStep; cols: number; rows: number }): Promise<PtyInfo> {
+    // Not resent after a drop: a second start would only be refused as busy.
+    return this.call<PtyInfo>("machine.agentSetup", params);
+  }
+
+  /** `machine/4`: the setup step running there for `harness`, to follow it from another window or after a reload. */
+  async agentSetupRunning(harness: string): Promise<MachineAgentSetupRun | null> {
+    const result = await this.call<{ run?: MachineAgentSetupRun | null }>("machine.agentSetupRunning", { harness });
+    return result.run ?? null;
+  }
+
   /** `pipeline/1`: the issue pipelines the runtime carries, newest last. */
   async listPipelines(): Promise<RuntimeIssuePipeline[]> {
     const result = await this.call<{ pipelines?: RuntimeIssuePipeline[] }>("pipeline.list");
@@ -1308,6 +1549,38 @@ export class WorkspaceRpcClient {
     });
   }
 
+  /** `machine.updateStatus` (`machine/3`): how the machine updates, what it could update to, and what an update would stop. `refresh` checks for a release now. */
+  async machineUpdateStatus(refresh = false): Promise<MachineUpdateStatus> {
+    const status = machineUpdateStatus(await this.call("machine.updateStatus", refresh ? { refresh: true } : {}));
+    if (!status) throw new WorkspaceRpcError("invalid_response", "The machine answered machine.updateStatus with something else", "machine.updateStatus");
+    return status;
+  }
+
+  /**
+   * `machine.update` (`machine/3`, a manager): update the machine to
+   * `version`. Refused with `update_confirm` (its data the status) unless
+   * `stop` names every blocker and `confirmedOthers` names every other
+   * computer connected; `update_busy` while one runs; `update_unavailable` when the
+   * machine cannot update itself.
+   */
+  async updateMachine(request: MachineUpdateRequest): Promise<MachineUpdateStatus> {
+    const params: Record<string, unknown> = { version: request.version };
+    if (request.stop) params.stop = request.stop;
+    if (request.confirmedOthers) params.confirmedOthers = request.confirmedOthers;
+    const status = machineUpdateStatus(await this.call("machine.update", params));
+    if (!status) throw new WorkspaceRpcError("invalid_response", "The machine answered machine.update with something else", "machine.update");
+    return status;
+  }
+
+  /** `machine.updateChanged` (`machine/3`): the update status whenever any field changes. */
+  onMachineUpdate(listener: (status: MachineUpdateStatus) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "machine.updateChanged") return;
+      const status = machineUpdateStatus(notification.params.status);
+      if (status) listener(status);
+    });
+  }
+
   /** `session.sessions`: the whole visible session list, after any create, update or delete (`session/2`). */
   onSessions(listener: (sessions: RuntimeSession[]) => void): () => void {
     return this.onNotification((notification) => {
@@ -1337,11 +1610,11 @@ export class WorkspaceRpcClient {
    * be re-read: after a reconnect (changes made while away were not seen)
    * or a burst too large to name.
    */
-  watchFiles(path: string, onChange: (paths: string[] | null) => void): Promise<() => void> {
+  watchFiles(path: string, onChange: (paths: string[] | null) => void, scope: { projectId?: string } = {}): Promise<() => void> {
     let resumed = false;
     return this.subscribe({
       method: "fs.watch",
-      params: { path },
+      params: scope.projectId ? { path, projectId: scope.projectId } : { path },
       resumeParams: () => ({}),
       onReplay: () => {
         if (resumed) onChange(null);

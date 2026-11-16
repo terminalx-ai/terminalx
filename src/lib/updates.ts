@@ -171,6 +171,12 @@ export function dismissUpdateNotice(version: string) {
   publish();
 }
 
+/** Every change of the app's update state, outside React (a machine asking this Mac to update reports each step, PRO-354). */
+export function subscribeUpdate(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function useUpdate(): { state: UpdateState; noticeDismissed: boolean } {
   const current = useSyncExternalStore(
     (listener) => {
