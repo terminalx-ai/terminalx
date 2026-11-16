@@ -1531,14 +1531,61 @@ person compares on both screens.
 ## Session feature parity
 
 PRO-347 completes this list. It names every local session feature and whether it
-works on a machine, is hidden, or is a follow-up with its ticket. Settled here:
+works on a machine, is hidden, or is a follow-up with its ticket. A machine
+session (`machine:<m>:<p>:<s>`) opens in `SessionView` with the cloud views,
+fed by the machine's one connection (`src/lib/machineSession.ts`).
 
 | Feature | On a machine | Where |
 | --- | --- | --- |
-| Built-in browser | Hidden | Decision 7 |
+| Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
+| Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
+| Image attachments | Works; uploaded to the machine by session | PRO-347 |
+| Other file attachments | Follow-up | PRO-407 |
+| Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
+| Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
+| Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
+| Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
+| Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
+| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
+| The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
+| Header branch button: diff size, Create PR | Follow-up | PRO-404 |
+| Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
+| Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
+| Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
+| Rename, archive, pin | Works | PRO-346 |
+| Header chip (machine, state, route), "Runs on" strip | Works | 21.08, PRO-347 |
+| Reconnecting and unreachable states in the session | Works; the composer says it can't send until the machine is back | 21.09, PRO-347 |
+| Agent sign-in notice | Works; names the machine ("Sign in from its page") | 21.09, PRO-350 |
+| Cost chip, agent account label, Continue in a new tab, Fix check errors | Follow-up | PRO-408 |
+| Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
 | Computer use | Hidden | Decision 7 |
 | Dictation into a terminal | Hidden; dictation into the composer works | Decision 7 |
 | Local VM | Hidden | Decision 7 |
 | Orchestration runs | Hidden | Decision 7 |
-| Sharing, presence, driver leases | Hidden | Decision 1, method table |
-| Forwarded ports and previews | Works | PRO-355 |
+| Sharing, presence, driver leases, notes | Hidden | Decision 1, method table |
+| Wake and sleep, price, mirror, cloud resource notices | Hidden | Decision 1 |
+| Dropping files into a terminal | Refused with a message: the path is this computer's | Decision 7 |
+| Forwarded ports and previews | Ports tab where the machine grants `ports/1`; forwarding and previews on this computer | PRO-355 |
+| New session on a machine | Follow-up | PRO-348 |
+
+### As built (PRO-347)
+
+- **Project scope.** `fs.*` and `git.*` need `projectId` on a machine.
+  `WorkspaceRpcClient.forProject(projectId)` is a view of the one connection
+  that adds it to every `fs.*`/`git.*` call, to `fs.watch`, and to `pty.create`
+  without a `sessionId`. The machine session uses it for Files, Changes and the
+  repository list; session-scoped calls (`session.*`, `pty.create` with a
+  `sessionId`) need no project.
+- **Worktree root.** The session's `cwd` relative to its project's `path`
+  (compared as strings, never opened here) is the base of `cloudFileSource`;
+  Changes uses the repository `git.repositories` lists for that worktree.
+- **Live commands.** The machine's agent scope (no organization) sends
+  `session.send/steer/stop/decide` with a `clientRequestId` when
+  `agent-commands/1` is granted. A decision keeps one id per request across
+  retries, so a resend after a dropped link is answered `id-reused` or
+  `request-not-pending`, which the tab shows as already answered. Without the
+  capability only prompts are taken, as before.
+- **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
+  which `assertLocal` refuses; PR associations skip `machine:` keys like
+  `cloud:` ones, so nothing of the machine is looked up on this computer.
