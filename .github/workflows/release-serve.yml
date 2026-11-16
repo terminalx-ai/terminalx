@@ -155,6 +155,9 @@ jobs:
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/release/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
+        if: runner.os == 'Linux'
+        run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/release/terminalx-serve
       - name: Report the glibc floor
         if: runner.os == 'Linux'
         run: objdump -T src-tauri/target/release/terminalx-serve | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
