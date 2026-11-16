@@ -160,11 +160,11 @@ export function DiffStats({ additions, deletions, unpushed, coloured = true }: {
 }
 
 /** Relative age of a row's last activity, up to six days, which gives way to the row's toolbar. Older rows show none. */
-export function RowTime({ at }: { at: string }) {
+export function RowTime({ at, className = "text-[10px]" }: { at: string; className?: string }) {
   const age = recentTime(at);
   if (!age) return null;
   return (
-    <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
+    <span className={cn("shrink-0", className, "tabular-nums text-faint", yieldsToRowActions)}>
       {age}
     </span>
   );

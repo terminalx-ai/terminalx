@@ -268,7 +268,7 @@ export function QueuedPieceRow({ piece, run }: { piece: RunPiece; run: Run }) {
   const title = [piece.title, PIECE_STATE_LABEL.queued, waitsFor.length ? `waits for ${waitsFor.join(", ")}` : null].filter(Boolean).join(" · ");
   return (
     <li data-queued-piece={piece.id}>
-      <div title={title} className="relative -mx-2 flex min-h-7 items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3">
+      <div title={title} className="relative flex min-h-7 items-center gap-2 rounded-md py-0.5 pl-[calc(1rem+var(--indent,0px))] pr-2.5">
         {/* It hangs from its lead's glyph by the same line as the workers. */}
         <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />
         <span className="flex min-w-0 flex-1 items-center gap-2">

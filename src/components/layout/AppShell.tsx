@@ -378,7 +378,7 @@ export function AppShell() {
                 onToggle={toggleSidebar}
                 onOpenSettings={openSettings}
                 onOpenAccount={openAccountSettings}
-                onOpenHome={showHome}
+                onNewSession={newSession}
                 onOpenIssues={showIssues}
                 onOpenAgents={showAgents}
                 onOpenStats={showStats}

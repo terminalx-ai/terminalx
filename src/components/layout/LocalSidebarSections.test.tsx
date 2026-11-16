@@ -58,7 +58,7 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><LocalSectionDialogs /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><LocalSectionDialogs /></TooltipProvider>);
 async function seed(sections: LocalSection[]) { saved = { revision: saved.revision + 1, sections }; await act(() => local.refreshLocalSections()); }
 async function menu(name: string, action: string) { fireEvent.click(screen.getByRole("button", { name: `Menu for section ${name}` })); fireEvent.click(await screen.findByRole("menuitem", { name: action })); }
 async function submit(name: string) { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name })); await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); }
@@ -146,10 +146,11 @@ describe("personal local sections", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Release" }));
     await waitFor(() => expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Session one")).toBeTruthy());
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "move", sessionIds: ["one"], sectionId: "Release" } });
-    fireEvent.click(within(screen.getByRole("region", { name: "Release section" })).getByRole("button", { name: "Release" }));
+    // The header names the section and counts its sessions (02.14).
+    fireEvent.click(within(screen.getByRole("region", { name: "Release section" })).getByRole("button", { name: "Release 1" }));
     expect(screen.queryByText("Session one")).toBeNull();
     view.unmount(); mount();
-    expect(within(screen.getByRole("region", { name: "Release section" })).getByRole("button", { name: "Release" }).getAttribute("aria-expanded")).toBe("false");
+    expect(within(screen.getByRole("region", { name: "Release section" })).getByRole("button", { name: "Release 1" }).getAttribute("aria-expanded")).toBe("false");
     await menu("Bugs", "Move section up");
     expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "reorder", id: "Bugs", by: -1 } });
   });
@@ -224,7 +225,10 @@ describe("personal local sections", () => {
     await seed([section("Release", ["one"])]);
     mocks.copyText.mockResolvedValue(undefined);
     mount();
-    expect(within(screen.getByRole("region", { name: "Release section" })).getByText("Web · release")).toBeTruthy();
+    // The row is its title; where it lives, project and branch, is in its tooltip (PRO-384).
+    const release = screen.getByRole("region", { name: "Release section" });
+    expect(within(release).getByTitle("Web · release · Session one")).toBeTruthy();
+    expect(within(release).queryByText("Web · release")).toBeNull();
     fireEvent.contextMenu(screen.getByText("Session one"));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Copy branch name" }));
     expect(mocks.copyText).toHaveBeenCalledWith("release");
