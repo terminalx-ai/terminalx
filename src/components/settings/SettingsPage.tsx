@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { HighlightedText } from "@/components/ui/HighlightedText";
@@ -65,7 +65,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const initial = resolveSetting(initialTab);
   const [section, setSection] = useState<SettingsSection>(initial.section);
   const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
-  const [target, setTarget] = useState<string | null>(() => initialTab === initial.id ? initial.id : null);
+  const [target, setTarget] = useState<string | null>(() => isRowLink(initialTab) ? initial.id : null);
   const content = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
@@ -120,7 +120,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   useEffect(() => {
     setSection(initial.section);
     setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
-    setTarget(initialTab === initial.id ? initial.id : null);
+    setTarget(isRowLink(initialTab) ? initial.id : null);
     setQuery("");
     setSelected(0);
     setSelectionRequest((request) => request + 1);
