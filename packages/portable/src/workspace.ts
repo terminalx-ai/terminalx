@@ -258,8 +258,8 @@ export interface MachineUpdateRequest {
   version: string;
   /** Blocker ids the person agreed to stop. */
   stop?: string[];
-  /** The person was told other computers are connected. */
-  confirmOthers?: boolean;
+  /** The other computers (ids) the person was told are connected; one not named refuses the update with `update_confirm`. */
+  confirmedOthers?: string[];
 }
 
 const UPDATE_METHODS: readonly string[] = ["installer", "app", "unmanaged"];
@@ -1406,14 +1406,14 @@ export class WorkspaceRpcClient {
   /**
    * `machine.update` (`machine/3`, a manager): update the machine to
    * `version`. Refused with `update_confirm` (its data the status) unless
-   * `stop` names every blocker and `confirmOthers` is set while others are
-   * connected; `update_busy` while one runs; `update_unavailable` when the
+   * `stop` names every blocker and `confirmedOthers` names every other
+   * computer connected; `update_busy` while one runs; `update_unavailable` when the
    * machine cannot update itself.
    */
   async updateMachine(request: MachineUpdateRequest): Promise<MachineUpdateStatus> {
     const params: Record<string, unknown> = { version: request.version };
     if (request.stop) params.stop = request.stop;
-    if (request.confirmOthers !== undefined) params.confirmOthers = request.confirmOthers;
+    if (request.confirmedOthers) params.confirmedOthers = request.confirmedOthers;
     const status = machineUpdateStatus(await this.call("machine.update", params));
     if (!status) throw new WorkspaceRpcError("invalid_response", "The machine answered machine.update with something else", "machine.update");
     return status;

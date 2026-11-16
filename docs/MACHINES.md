@@ -1257,7 +1257,10 @@ uses on a machine, the namespace it needs, and the words for what is lost:
 forwarding", capability: "ports/1", action: "forward ports" }`. A feature
 whose namespace was not granted is hidden where it would be, and that place
 shows one line naming the machine: "ci-box runs TerminalX 0.2.27. Update it to
-forward ports from here." (21.09). The machine's card in Settings → Machines,
+forward ports from here." (21.09). The machine's view shows the same line once
+for everything it hides, under its "Runs on" strip, with Update beside it, so a
+hidden control (adding agent tabs, interrupting, issue pipelines) is never gone
+without a word. The machine's card in Settings → Machines,
 its header chip and its page say **Needs update** whenever any listed feature
 is missing; its page lists what is hidden (21.10). The machine stays
 connected and usable meanwhile.
@@ -1284,7 +1287,7 @@ hidden by it, and its page says "TerminalX 0.2.35 there, 0.2.33 here" with
 | Method | Authority | Params | Result |
 | --- | --- | --- | --- |
 | `machine.updateStatus` | `Participate` | `{ refresh?: boolean }` (`refresh` checks for a newer release now, else at most every 10 minutes) | `MachineUpdateStatus` |
-| `machine.update` | `Manage` | `{ version, stop?: string[], confirmOthers?: boolean }` | `MachineUpdateStatus` with the update under way |
+| `machine.update` | `Manage` | `{ version, stop?: string[], confirmedOthers?: string[] }` | `MachineUpdateStatus` with the update under way |
 
 and the notification `machine.updateChanged` `{ status: MachineUpdateStatus }`
 to `machine/3` connections whenever any field changes. The shapes are in
@@ -1306,7 +1309,9 @@ to `machine/3` connections whenever any field changes. The shapes are in
   handover does.
 - `otherComputers: { id, label }[]`: the other paired computers connected
   right now (not the caller). `machine.update` refuses with `update_confirm`
-  unless `confirmOthers` is true while this list is not empty. An update never
+  unless `confirmedOthers` names every computer in this list by id: a
+  computer that connects after the person was asked is not named, so the
+  update is refused again and the person sees it first. An update never
   replaces a runtime another computer is attached to without saying so first.
 - `kept: string[]`: the versions on disk, newest first.
 - `progress`: `idle`; `downloading`, `verifying`, `trial`, `handingOver`,
@@ -1392,8 +1397,11 @@ serves the two methods; `src-tauri/src/serve_cli/update.rs` is the helper.
   only later changes, so a computer that reconnects asks once.
 - `machines_app_update_report` takes an optional `available` (the version
   the app's updater offers, `null` when none), which becomes the `app`
-  machine's `available` and `checkedAt`. `upToDate` sets `progress` back to
-  `idle`; `failed` records `failed` with `rolledBack: false`. The desktop
+  machine's `available` and `checkedAt`, and, while the app updates, the
+  `appUpdating` version: the app installs what its updater found, which may
+  not be the version the desktop asked for. An app update ends as `updated`
+  once the machine runs any version other than the one it updated from.
+  `upToDate` sets `progress` back to `idle`; `failed` records `failed` with `rolledBack: false`. The desktop
   forwards each report as `runtime.machineUpdate.report` with its window's
   attachment (`epoch`, `lease`), which the runtime checks.
 - `terminalx-serve update` run by a person takes the same steps and writes

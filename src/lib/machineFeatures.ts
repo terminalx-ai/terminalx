@@ -63,6 +63,20 @@ export function machineFeatureMessage(name: string, version: string | null, feat
   return `${runs} Update it to ${feature.action} from here.`;
 }
 
+/**
+ * The one line a machine's view shows for everything it hides (PRO-354):
+ * "dev-server runs TerminalX 0.2.29. Update it to forward ports, interrupt
+ * agents and run issue pipelines from here." Updating itself is left out:
+ * that is the Update button beside the line. Null when nothing else is hidden.
+ */
+export function machineFeaturesMessage(name: string, version: string | null, features: readonly MachineFeature[]): string | null {
+  const actions = features.filter((feature) => feature.capability !== "machine/3").map((feature) => feature.action);
+  if (!actions.length) return null;
+  const runs = version ? `${name} runs TerminalX ${version}.` : `${name} runs an older TerminalX.`;
+  const list = actions.length === 1 ? actions[0] : `${actions.slice(0, -1).join(", ")} and ${actions[actions.length - 1]}`;
+  return `${runs} Update it to ${list} from here.`;
+}
+
 /** "Port forwarding and orchestration runs", "A, B and C". */
 export function featureList(features: readonly MachineFeature[]): string {
   const labels = features.map((feature, index) => (index === 0 ? feature.label : feature.label.charAt(0).toLowerCase() + feature.label.slice(1)));

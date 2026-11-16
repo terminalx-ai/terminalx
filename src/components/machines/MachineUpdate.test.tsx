@@ -36,8 +36,13 @@ vi.mock("@/lib/updates", () => ({
 const { MachineChip, machineStateHint } = await import("./connectionStatus");
 const { MachineRow } = await import("./MachineRow");
 const { MachinePage } = await import("./MachinePage");
-const { MachineFeatureNotice } = await import("./MachineFeatureNotice");
-const { resetMachineUpdateForTests } = await import("@/lib/machineUpdate");
+const { MachineFeatureNotice, MachineHiddenFeatures } = await import("./MachineFeatureNotice");
+const { resetMachineUpdateForTests, useMachineVersion } = await import("@/lib/machineUpdate");
+
+/** A machine's view as its main slot holds it, with the line for what it hides. */
+function HiddenLine({ machineId }: { machineId: string }) {
+  return <MachineHiddenFeatures machineId={machineId} view={useMachineVersion(machineId)} />;
+}
 
 const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3"];
 const LIVE: MachineConnectionState = { state: "relay", route: { kind: "relay", endpoint: null }, since: 1, rttMs: 20 };
@@ -157,7 +162,7 @@ describe("the machine page (21.10)", () => {
     expect(within(dialog).getByTestId("machine-update-others").textContent).toContain("Paresh’s MacBook Air");
     expect(client.updateMachine).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "Stop it and update" }));
-    await waitFor(() => expect(client.updateMachine).toHaveBeenCalledWith({ version: "0.2.33", stop: ["pty-7"], confirmOthers: true }));
+    await waitFor(() => expect(client.updateMachine).toHaveBeenCalledWith({ version: "0.2.33", stop: ["pty-7"], confirmedOthers: ["c2"] }));
     expect(client.machineUpdateStatus).toHaveBeenCalledWith(true);
   });
 });
@@ -178,5 +183,34 @@ describe("a hidden feature's place (21.09)", () => {
       </>,
     );
     expect(container.textContent).toBe("");
+  });
+});
+
+describe("a machine's view (PRO-354)", () => {
+  const devServer = pairedMachine({ machineId: "dev", name: "dev-server", os: { family: "linux", version: "24.04" }, version: "0.2.29" });
+
+  it("says once, under its strip, everything the machine hides, with Update", async () => {
+    attach(devServer, LIVE, fakeClient(ALL.filter((name) => !["ports/1", "session/3", "pipeline/1"].includes(name)), "0.2.29", updateStatus({ current: "0.2.29" })));
+    render(<HiddenLine machineId="dev" />);
+    const line = await screen.findByTestId("machine-hidden-features-line");
+    expect(line.textContent).toContain("dev-server runs TerminalX 0.2.29. Update it to forward ports, interrupt agents and run issue pipelines from here.");
+    expect(within(line).getByRole("button", { name: "Update" })).toBeTruthy();
+  });
+
+  it("says nothing when it hides nothing", () => {
+    attach(devServer, LIVE, fakeClient(ALL, "0.2.33", updateStatus()));
+    const { container } = render(<HiddenLine machineId="dev" />);
+    expect(container.textContent).toBe("");
+  });
+
+  it("says an installer machine has no newer TerminalX yet instead of asking it to update", async () => {
+    const client = fakeClient(ALL.filter((name) => name !== "ports/1"), "0.2.29", updateStatus({ current: "0.2.29", available: null }));
+    attach(devServer, LIVE, client);
+    render(<MachinePage machineId="dev" onBack={() => undefined} />);
+    const button = await screen.findByRole("button", { name: "Update dev-server" });
+    await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(button);
+    await screen.findByText("There is no newer TerminalX for dev-server yet.");
+    expect(client.updateMachine).not.toHaveBeenCalled();
   });
 });

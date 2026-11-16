@@ -230,14 +230,24 @@ export function needsConfirmation(status: MachineUpdateStatus | null): boolean {
   return !!status && (status.blockers.length > 0 || status.otherComputers.length > 0);
 }
 
-/** The request after the person confirmed `status`: stop every blocker it named, others told. */
+/**
+ * The request after the person confirmed `status`: stop every blocker it
+ * named, and the other computers it named. A computer that connects after
+ * the confirmation is not among them, so the machine asks again.
+ */
 export function confirmedRequest(version: string, status: MachineUpdateStatus): MachineUpdateRequest {
-  return { version, stop: status.blockers.map((blocker) => blocker.id), confirmOthers: status.otherComputers.length > 0 };
+  return { version, stop: status.blockers.map((blocker) => blocker.id), confirmedOthers: status.otherComputers.map((computer) => computer.id) };
 }
 
-/** The version to update a machine to: what it offers, else this desktop's (a machine catches up to the desktop). */
+/**
+ * The version to update a machine to: what it offers. An installer machine
+ * offering nothing has no newer signed runtime yet, so there is nothing to
+ * ask for; an app machine's own updater finds its version, so it is asked to
+ * catch up to this desktop's.
+ */
 export function updateTarget(status: MachineUpdateStatus | null, ours: string | null): string | null {
-  return status?.available?.version ?? ours;
+  if (status?.available) return status.available.version;
+  return status?.method === "installer" ? null : ours;
 }
 
 // ------------------------------------------------------------------ another computer asks this Mac's app to update

@@ -250,7 +250,13 @@ pub fn settle(record: &mut Record, running: &str, now: i64, helper_alive: impl F
         }
         Progress::AppUpdating { version, since, .. } => {
             let from = record.from.as_deref();
-            if version.as_deref() == Some(running) && from != Some(running) {
+            // The app came back on another version than it ran: it updated,
+            // to whatever its updater installed.
+            let came_back = match from {
+                Some(from) => from != running,
+                None => version.as_deref() == Some(running),
+            };
+            if came_back {
                 Progress::Updated { from: from.unwrap_or_default().to_string(), to: running.to_string(), at: now }
             } else if now - since > APP_PATIENCE_MS {
                 Progress::Failed {
@@ -292,6 +298,9 @@ pub fn report(data: &Path, params: &Value) -> Result<Value> {
     match phase {
         "checking" | "downloading" | "installing" | "restarting" => {
             let (version, since) = requested.unwrap_or((record.app_available.clone(), now));
+            // The version the app's updater found is the one it installs,
+            // whatever the desktop that asked had in mind.
+            let version = text("available").or(version);
             if record.from.is_none() || !matches!(record.progress, Progress::AppUpdating { .. }) {
                 record.from = Some(own_version().to_string());
             }
@@ -506,7 +515,9 @@ impl MachineUpdates {
         Ok(json!(self.status(Some(caller), access)))
     }
 
-    /// `machine.update` `{ version, stop?, confirmOthers? }`. Blocking.
+    /// `machine.update` `{ version, stop?, confirmedOthers? }`. Blocking.
+    /// `confirmedOthers` names the other computers the person was shown;
+    /// one connected since, and not named, refuses again with `update_confirm`.
     pub fn update(&self, params: &Value, caller: &str, access: Option<&dyn MachineAccess>) -> Result<Value, RpcError> {
         let version = params["version"].as_str().map(str::trim).filter(|version| !version.is_empty()).ok_or_else(|| RpcError::invalid("version is required"))?.to_string();
         let stop: Vec<String> = match params.get("stop") {
@@ -514,7 +525,11 @@ impl MachineUpdates {
             Some(Value::Array(ids)) => ids.iter().map(|id| id.as_str().map(str::to_string).ok_or_else(|| RpcError::invalid("stop lists blocker ids"))).collect::<Result<_, _>>()?,
             Some(_) => return Err(RpcError::invalid("stop lists blocker ids")),
         };
-        let confirm_others = params["confirmOthers"].as_bool().unwrap_or(false);
+        let confirmed_others: Vec<String> = match params.get("confirmedOthers") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(ids)) => ids.iter().map(|id| id.as_str().map(str::to_string).ok_or_else(|| RpcError::invalid("confirmedOthers lists computer ids"))).collect::<Result<_, _>>()?,
+            Some(_) => return Err(RpcError::invalid("confirmedOthers lists computer ids")),
+        };
         let _starting = self.starting.lock().unwrap();
         let record = self.record();
         let status = self.status_of(record.clone(), Some(caller), access);
@@ -550,8 +565,9 @@ impl MachineUpdates {
         if !unagreed.is_empty() {
             return Err(refused("update_confirm", format!("Updating stops work the update cannot carry over: {}.", unagreed.join("; ")), &status));
         }
-        if !status.other_computers.is_empty() && !confirm_others {
-            let named: Vec<&str> = status.other_computers.iter().map(|computer| computer.label.as_str()).collect();
+        let unnamed: Vec<&str> = status.other_computers.iter().filter(|computer| !confirmed_others.contains(&computer.id)).map(|computer| computer.label.as_str()).collect();
+        if !unnamed.is_empty() {
+            let named = unnamed;
             return Err(refused("update_confirm", format!("Other computers are connected to this machine: {}.", named.join(", ")), &status));
         }
         let agreed: Vec<String> = status.blockers.iter().filter(|blocker| stop.contains(&blocker.id)).map(|blocker| blocker.id.clone()).collect();
@@ -684,6 +700,10 @@ mod tests {
         assert!(!settle(&mut record.clone(), "0.2.0", 1, |_| true));
         assert!(settle(&mut record, "0.3.0", 5, |_| true));
         assert_eq!(record.progress, Progress::Updated { from: "0.2.0".into(), to: "0.3.0".into(), at: 5 });
+        // The app's updater installed another version than the one asked for: still updated.
+        let mut other = Record { progress: Progress::AppUpdating { version: Some("0.3.0".into()), since: 0, step: None }, from: Some("0.2.0".into()), ..Record::default() };
+        assert!(settle(&mut other, "0.3.1", 5, |_| true));
+        assert_eq!(other.progress, Progress::Updated { from: "0.2.0".into(), to: "0.3.1".into(), at: 5 });
         let mut quiet = Record { progress: Progress::AppUpdating { version: Some("0.3.0".into()), since: 0, step: None }, from: Some("0.2.0".into()), ..Record::default() };
         assert!(settle(&mut quiet, "0.2.0", APP_PATIENCE_MS + 1, |_| true));
         assert!(matches!(quiet.progress, Progress::Failed { rolled_back: false, .. }));
@@ -696,8 +716,11 @@ mod tests {
         write_record(&path, &Record { progress: Progress::AppUpdating { version: Some("0.3.0".into()), since: 4, step: None }, from: Some("0.2.0".into()), ..Record::default() }).unwrap();
         report(dir.path(), &json!({ "phase": "downloading", "step": "12 MB of 80 MB" })).unwrap();
         assert_eq!(read_record(&path).progress, Progress::AppUpdating { version: Some("0.3.0".into()), since: 4, step: Some("12 MB of 80 MB".into()) });
+        // The window names what its updater found: that is the version it installs.
+        report(dir.path(), &json!({ "phase": "installing", "step": "0.3.1", "available": "0.3.1" })).unwrap();
+        assert_eq!(read_record(&path).progress, Progress::AppUpdating { version: Some("0.3.1".into()), since: 4, step: Some("0.3.1".into()) });
         report(dir.path(), &json!({ "phase": "failed", "message": "no disk space" })).unwrap();
-        assert!(matches!(read_record(&path).progress, Progress::Failed { ref version, ref message, .. } if version == "0.3.0" && message == "no disk space"));
+        assert!(matches!(read_record(&path).progress, Progress::Failed { ref version, ref message, .. } if version == "0.3.1" && message == "no disk space"));
         report(dir.path(), &json!({ "phase": "upToDate", "available": null })).unwrap();
         let record = read_record(&path);
         assert_eq!((record.progress, record.app_available), (Progress::Idle, None));

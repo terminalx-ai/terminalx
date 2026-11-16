@@ -268,7 +268,7 @@ class FakeRuntime implements WorkspaceTransport {
       case "machine.updateStatus":
         return ok({ ...MACHINE_UPDATE, checkedAt: params.refresh === true ? 2 : 1 });
       case "machine.update":
-        if (params.confirmOthers !== true || JSON.stringify(params.stop) !== JSON.stringify(["pty-7"])) {
+        if (JSON.stringify(params.confirmedOthers) !== JSON.stringify(["c2"]) || JSON.stringify(params.stop) !== JSON.stringify(["pty-7"])) {
           return { id: frame.id, ok: false, error: { code: "update_confirm", message: "Confirm the update", data: MACHINE_UPDATE } };
         }
         return ok({ ...MACHINE_UPDATE, progress: { phase: "downloading", version: params.version, since: 3 } });
@@ -1110,7 +1110,7 @@ describe("machine/3: a machine's update (PRO-354)", () => {
     const refused = await client.updateMachine({ version: "0.2.33" }).catch((error: unknown) => error);
     expect(refused).toBeInstanceOf(WorkspaceRpcError);
     expect(refused).toMatchObject({ code: "update_confirm", data: { blockers: [{ id: "pty-7" }] } });
-    const started = await client.updateMachine({ version: "0.2.33", stop: ["pty-7"], confirmOthers: true });
+    const started = await client.updateMachine({ version: "0.2.33", stop: ["pty-7"], confirmedOthers: ["c2"] });
     expect(started.progress).toEqual({ phase: "downloading", version: "0.2.33", since: 3 });
     const heard: string[] = [];
     const stop = client.onMachineUpdate((status) => heard.push(status.progress.phase));

@@ -190,7 +190,7 @@ for (const [viewportName, viewport] of [["design", { width: 1440, height: 900 }]
     failed += report(`${name}: machine.update`, {
       "it asks for 0.2.33": sent.version === "0.2.33",
       "it stops only the agent named": JSON.stringify(sent.stop) === JSON.stringify(["tab-1"]),
-      "it says the person was told about the other computer": sent.confirmOthers === true,
+      "it says the person was told about the other computer": JSON.stringify(sent.confirmedOthers) === JSON.stringify(["c-air"]),
     }, sent);
     await page.waitForTimeout(300);
     await shot("update-started");

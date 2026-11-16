@@ -6,6 +6,7 @@ import {
   featureList,
   machineFeature,
   machineFeatureMessage,
+  machineFeaturesMessage,
   machineHasFeature,
   machineIsNewer,
   machineVersionGap,
@@ -70,5 +71,14 @@ describe("machine features", () => {
     expect(machineIsNewer(null, "0.2.33")).toBe(false);
     expect(featureList([machineFeature("ports/1")!, machineFeature("pipeline/1")!])).toBe("Port forwarding and issue pipelines");
     expect(featureList([machineFeature("ports/1")!, machineFeature("session/2")!, machineFeature("pipeline/1")!])).toBe("Port forwarding, agent tabs and issue pipelines");
+  });
+
+  it("says once, naming the machine, everything it hides", () => {
+    const hidden = missingMachineFeatures(without("ports/1", "session/3", "pipeline/1", "machine/3"));
+    expect(machineFeaturesMessage("dev-server", "0.2.29", hidden)).toBe("dev-server runs TerminalX 0.2.29. Update it to forward ports, interrupt agents and run issue pipelines from here.");
+    expect(machineFeaturesMessage("ci-box", null, [machineFeature("ports/1")!])).toBe("ci-box runs an older TerminalX. Update it to forward ports from here.");
+    // Updating from here is the button beside the line, not something to update for.
+    expect(machineFeaturesMessage("dev-server", "0.2.29", [machineFeature("machine/3")!])).toBeNull();
+    expect(machineFeaturesMessage("dev-server", "0.2.29", [])).toBeNull();
   });
 });

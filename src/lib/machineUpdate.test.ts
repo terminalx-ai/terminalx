@@ -92,7 +92,7 @@ describe("machine.update", () => {
     expect(outcome).toEqual({ kind: "confirm", status: asked });
     expect(update.needsConfirmation(asked)).toBe(true);
     expect(update.needsConfirmation(status())).toBe(false);
-    expect(update.confirmedRequest("0.2.33", asked)).toEqual({ version: "0.2.33", stop: ["run-1"], confirmOthers: true });
+    expect(update.confirmedRequest("0.2.33", asked)).toEqual({ version: "0.2.33", stop: ["run-1"], confirmedOthers: ["c2"] });
     expect(update.getMachineUpdate("m1").status).toEqual(asked);
   });
 
@@ -103,9 +103,11 @@ describe("machine.update", () => {
     expect(update.getMachineUpdate("m1").error).toBe(outcome.kind === "failed" ? outcome.message : null);
   });
 
-  it("updates to what the machine offers, else to this desktop's version", () => {
+  it("updates to what the machine offers; an installer machine offering nothing has no newer TerminalX yet", () => {
     expect(update.updateTarget(status({ available: { version: "0.2.34" } }), "0.2.33")).toBe("0.2.34");
-    expect(update.updateTarget(status({ available: null }), "0.2.33")).toBe("0.2.33");
+    expect(update.updateTarget(status({ available: null }), "0.2.33")).toBeNull();
+    // An app machine's own updater finds its version: it is asked to catch up to this desktop's.
+    expect(update.updateTarget(status({ method: "app", available: null }), "0.2.33")).toBe("0.2.33");
     expect(update.updateTarget(null, null)).toBeNull();
   });
 });

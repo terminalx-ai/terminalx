@@ -467,13 +467,18 @@ async fn an_update_asks_first_about_work_it_stops_and_other_computers() {
     let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"] })).await;
     assert_eq!(error["code"], "update_confirm", "the other computers are asked about too");
     assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
-    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.8.0", "stop": ["tab:s1/t1"], "confirmOthers": true })).await), "update_unavailable", "only the release on offer");
+    // Confirmed before Studio connected: the computers shown then were others, so it asks again.
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["air"] })).await;
+    assert_eq!(error["code"], "update_confirm", "a computer not shown before is named first");
+    assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "confirmedOthers": "studio" })).await), "invalid_params");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.8.0", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await), "update_unavailable", "only the release on offer");
     assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "stop": "tab:s1/t1" })).await), "invalid_params");
     assert!(read_update_record(&m).progress == Progress::Idle, "nothing was started");
 
     // Agreed to both: it starts. This runtime has no binary of its own to
     // run the helper from, so it says the update could not start.
-    let (code, message) = refused(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmOthers": true })).await);
+    let (code, message) = refused(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await);
     assert_eq!(code, "internal", "{message}");
     match read_update_record(&m).progress {
         Progress::Failed { version, running, rolled_back, .. } => assert_eq!((version.as_str(), running.as_str(), rolled_back), ("9.9.9", env!("CARGO_PKG_VERSION"), false)),
