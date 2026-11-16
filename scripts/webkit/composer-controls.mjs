@@ -98,7 +98,12 @@ try {
       await page.evaluate(() => document.fonts.ready);
       return { page, errors };
     };
-    const shot = async (page, name) => { if (screenshots) await page.screenshot({ path: `${screenshots}/composer-controls-${name}-${scheme}.png` }); };
+    // A menu fades in: the capture waits for it, so the card is shown as it settles, not half drawn.
+    const shot = async (page, name) => {
+      if (!screenshots) return;
+      await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => {}))));
+      await page.screenshot({ path: `${screenshots}/composer-controls-${name}-${scheme}.png` });
+    };
 
     // ── The composer row.
     {
