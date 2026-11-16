@@ -63,6 +63,9 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { CloudPortsView } from "@/components/cloud/CloudPorts";
+import { PortForwardChip } from "@/components/cloud/PortForwardChip";
+import { PortToasts } from "@/components/cloud/PortToast";
+import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
 import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
@@ -153,6 +156,9 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
         <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
       )
     : null;
+  // The tab says how many ports are forwarded here now ("Ports 3", 14.11; "Ports 1", 21.08).
+  const { forwards } = usePortForwards(cloud.ports.connectionId, false);
+  const portsCount = cloud.ports.offered ? openForwardCount(forwards) : 0;
   // A machine session's terminals are the machine's, under the panel (21.08).
   const dock = cloud.machine ? <MachineTerminalDock cloud={cloud} /> : undefined;
   if (!cloud.fileSource) {
@@ -170,8 +176,14 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
                 ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
                 : "Changes, Files and Git appear once the workspace is connected."}
         </div>
+        {/* A machine's Ports stay while it reconnects: its forwards wait, and return with it (PRO-355). */}
+        {ports && cloud.machine && (
+          <section className="flex max-h-[60%] min-h-0 shrink-0 flex-col border-t border-hairline" aria-label="Ports" data-testid="cloud-panel-offline-ports">
+            {ports(true)}
+          </section>
+        )}
         {/* Where previews stand while there is no connection: restarting, stopped, or closed with it. */}
-        {ports && (
+        {ports && !cloud.machine && (
           <section className="shrink-0 border-t border-hairline" aria-label="Ports" data-testid="cloud-panel-offline-ports">
             <h2 className="flex items-center gap-1 px-3 pt-2 text-[11px] font-medium text-muted-foreground">
               <Globe className="size-3" /> Ports
@@ -202,6 +214,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
+      portsCount={portsCount}
       dock={dock}
     />
   );
@@ -596,7 +609,9 @@ export function SessionView({
   const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
-    <div className="flex h-full min-h-0 min-w-0 flex-1">
+    <div className="relative flex h-full min-h-0 min-w-0 flex-1">
+      {/* "Port N forwarded to 127.0.0.1:N" for each forward that opened unasked (14.10). */}
+      {cloud?.ports.offered && <PortToasts connectionId={cloud.ports.connectionId} where={machine ? `on ${machine.name}` : `in ${cloud.workspaceName}`} />}
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
@@ -790,6 +805,18 @@ export function SessionView({
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
               20px in a 40px-wide button (32px when the header is tight); one beside a label (Share) stays at the label's scale. */}
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
+            {/* PRO-355: ports forwarded to this Mac, and the "Forward ports to this Mac" popover (14.10, 21.08). */}
+            {cloud && cloud.ports.offered && !cloud.locked && !compact && (
+              <PortForwardChip
+                key={`ports:${cloud.workspaceKey}`}
+                workspaceKey={cloud.workspaceKey}
+                client={cloud.client}
+                state={cloud.ports.state}
+                connectionId={cloud.ports.connectionId}
+                mayOpen
+                follow={cloud.connected || !!machine}
+              />
+            )}
             {/* A lead's run in a word (18.01, 18.03): it needs you, or how many workers run. Opens the Run view. */}
             {runOffered && <RunPill run={run} onOpen={() => showRunView(session.id, true)} />}
             {/* The keys that open the Run view (Go → Run View), while this session leads a run (18.01). */}
