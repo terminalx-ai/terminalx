@@ -147,7 +147,8 @@ describe("the Machines section", () => {
     expect(label()).toBe("Needs update");
     setState("m1", { state: "accessRemoved" });
     expect(label()).toBe("Access removed");
-    expect(within(section("Mac mini")).getByRole("button").getAttribute("title")).toBe("Revoked on that Mac");
+    // PRO-352's away card adds Pair again under the row: read the row's own button.
+    expect(within(section("Mac mini")).getAllByRole("button")[0].getAttribute("title")).toBe("Revoked on that Mac");
   });
 
   it("says a last-seen time on the 24-hour clock (PRO-398)", () => {
