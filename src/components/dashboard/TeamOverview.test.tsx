@@ -88,5 +88,5 @@ it("keeps organization presence labels truthful in compact quota and action rows
   expect(screen.queryByText("0 online")).toBeNull();
   f.presence = { state: "live", activeMembers: [], workspaces: [] };
   view.rerender(<OrganizationPresenceCount orgId="org" />);
-  expect(screen.getByLabelText("cloud · 0 online").textContent).toBe("0 online");
+  expect(screen.getByLabelText("cloud · 0 online").textContent).toBe("cloud · 0 online");
 });

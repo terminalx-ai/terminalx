@@ -23,5 +23,5 @@ export function OrganizationPresenceCount({ orgId }: { orgId: string }) {
   const presence = useCloudPresence(orgId);
   const count = new Set(presence.activeMembers.map((person) => person.userId)).size;
   const label = presence.state === "live" ? `cloud · ${count} online` : presence.state === "loading" ? "Presence loading…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable";
-  return <span className="max-w-10 shrink-0 truncate text-[10px] text-faint" aria-label={label} title={label}>{presence.state === "live" ? `${count} online` : "—"}</span>;
+  return <span className="max-w-10 shrink-0 truncate text-[10px] text-faint" aria-label={label} title={label}>{presence.state === "live" ? <><span className="sr-only">cloud · </span>{count} online</> : "—"}</span>;
 }
