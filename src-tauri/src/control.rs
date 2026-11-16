@@ -504,6 +504,18 @@ impl ControlService {
                 }
                 // Operating computers (PRO-341, `machine_wire`).
                 if command.starts_with("runtime.machineHost.") {
+                    // Only a person makes a pairing code or lets a computer
+                    // in: never an agent or terminal this runtime started
+                    // (docs/MACHINES.md, "Who may answer"; `consent`).
+                    #[cfg(unix)]
+                    let params = {
+                        let mut params = params;
+                        if crate::serve_cli::consent::guards(command) {
+                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
+                            crate::serve_cli::consent::verify(run, &mut params)?;
+                        }
+                        params
+                    };
                     return match crate::machine_host::installed() {
                         Some(host) => host.execute(command, params),
                         None => Err(ControlError::new("unsupported", "This runtime does not host operating computers.", None::<String>)),
