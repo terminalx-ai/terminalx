@@ -572,7 +572,6 @@ fn quick_chat_folder(path: &str) -> Result<String> {
 
 /// Create a quick chat and tell listeners. Like any session, its index entry
 /// is written before an agent is started in it.
-#[cfg(test)]
 pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
     create_quick_chat_blocking_on(sink, req, None)
 }
