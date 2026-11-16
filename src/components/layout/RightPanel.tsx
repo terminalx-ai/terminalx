@@ -65,6 +65,7 @@ export function RightPanel({
   repositories,
   readOnlyReason,
   ports,
+  portsCount = 0,
   terminals = false,
   computer = false,
   browser = false,
@@ -105,6 +106,8 @@ export function RightPanel({
   readOnlyReason?: string | null;
   /** A cloud workspace's Ports tab (PRO-28), drawn only while it is the tab shown; absent for anyone who may not use previews. */
   ports?: () => ReactNode;
+  /** Ports forwarded to this Mac now, shown on the tab ("Ports 3", 14.11); none shown at 0. */
+  portsCount?: number;
   /** A local session's panel: shells in its folder, docked below the tabs. */
   terminals?: boolean;
   /** A local session's panel: the Computer tab, a desktop to watch and that agents can use. */
@@ -244,6 +247,11 @@ export function RightPanel({
               )}
             >
               {t.label}
+              {t.id === "ports" && portsCount > 0 && (
+                <span className="ml-1 font-normal tabular-nums text-faint" data-testid="panel-ports-count">
+                  {portsCount}
+                </span>
+              )}
               {t.id === "changes" && changesCount != null && changesCount > 0 && <span className="ml-1 font-mono text-xs text-faint" data-testid="panel-changes-count">{changesCount}</span>}
               {t.id === "branch" && checksMark === "failed" && <span className="ml-1.5 inline-block size-1.5 rounded-full bg-destructive" role="img" aria-label="failing" data-testid="panel-checks-failing" />}
             </button>

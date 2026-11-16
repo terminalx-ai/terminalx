@@ -84,7 +84,7 @@ try {
     const afterEscape = await alerts.count();
 
     failed += report(`error toast, ${colorScheme}`, {
-      "a failed pin raises \"Something went wrong\" naming the conversation and the error": text.startsWith("Something went wrong") && text.includes(`Couldn't pin “Local long session”: ${CAUSE}`),
+      "a failed pin raises \"Something went wrong\" naming the conversation and the error": text.startsWith("Something went wrong") && text.includes(`Couldn't pin “Local long session”:${CAUSE}`),
       "the error is set in monospace": /mono/i.test(mono) && mono !== bodyFont,
       "two different errors stack, the repeat is counted instead of copied": count === 2 && counted,
       "still on screen after 30 s": count === 2,

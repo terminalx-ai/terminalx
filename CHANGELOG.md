@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## 0.2.34
+
+- Machines (Experimental, Settings → Experimental → Machines): the desktop
+  connects to a paired machine directly first, falls back to the relay and
+  stays connected (PRO-345, #1020); each machine is a sidebar section with
+  its projects and sessions, and its sessions join the overview with a Where
+  column (PRO-346, #1027); Settings → Machines lists, adds, renames and
+  removes machines (PRO-349, #1029); an offline machine says Offline, a Mac
+  has one icon, and the pairing and settings details follow the design
+  (PRO-398, #1033, #1039).
+- Machines: open and drive a session that runs on another machine (send,
+  steer, stop, decide, its files, git and terminals) (PRO-347, #1036); create
+  a session on a machine from the new-session form, including issue starts
+  and handoffs (PRO-348, #1044); a machine's own page shows its agents, their
+  sign-in state and its resources (PRO-350, #1040); connection states say
+  what still works while a machine is away, and the composer holds typed
+  prompts until it is back (PRO-352, #1048); version differences are handled
+  and a machine can be updated from the desktop (PRO-354, #1030).
+- Install TerminalX on your own server with one command, run it as a
+  service and pair it from its terminal; the installer checks the release's
+  signature first (PRO-353, #1017).
+- Agent accounts: sign in to several Claude and Codex accounts and choose one
+  per session (#1016), and switch to another account on its own when one
+  reaches a usage threshold (#1028).
+- Organisations: create one from the app and set it up in one flow (GitHub,
+  repositories, compute, environment) (PRO-370, #1023); cloud limits are
+  unlimited unless one is set (PRO-371, #1022); a compute provider connected
+  at login.terminalx.ai is no longer asked for again (PRO-372, #1021); Create
+  in the new-session form starts a cloud workspace at once, without a second
+  confirmation (PRO-409, #1047).
+- Sidebar rows are named by session title, with compact rows, section and
+  project headings, a Pinned group and a View menu for grouping and sorting
+  (PRO-384, #1046); the fold chevron no longer covers the project icon
+  (PRO-373, #1024).
+- Command palette: Move to section is a palette view, actions are one-line
+  rows, and the palette and quick-open dialogs keep fixed positions
+  (PRO-401, #1037).
+- Phone: choose which notifications reach the phone by event, session,
+  machine and time (#1013), and the app matches the reviewed designs
+  (#1015, #1026).
+- Cloud workspaces: the runtime starts where `/home` is closed to it, which
+  had made every new workspace fail its bootstrap on 0.2.33's runtime
+  (#1034); a Box workspace's first launch is tested as the server sends it
+  (#1031); the runtime is released after every green CI on main (#1032); a
+  machine's direct endpoints are no longer cached empty (#1052).
+- CI fixes after the day's merges (#1035, #1041, #1043, #1050, #1052).
+
 ## 0.2.33
 
 - Orchestration runs (Experimental): the run's own lead can take a blocked

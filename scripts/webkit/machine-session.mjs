@@ -50,6 +50,8 @@ const fixture = (machines) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
   answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  // This desktop's version, which the header compares with the machine's since PRO-352; the stub's generic plugin answer is not a string.
+  answers["plugin:app|version"] = "0.2.33";
   answers.machines_list = [{ machineId: "m-mini", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5",
     directEndpoints: ["ws://192.168.1.20:6768/machine/1"], route: "relayAndNearby", pairedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: Date.now(), lastRoute: null, relay: null }];
   let view = { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.7:6768/machine/1" }, since: Date.now(), rttMs: 9 };
@@ -94,7 +96,9 @@ const fixture = (machines) => `(() => {
     if (view.state === "direct" || view.state === "relay") {
       link++;
       return { state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.2.33", authority: "manage", link,
-        capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "composer/2", "machine/1", "machine/2", "agent-commands/1"] };
+        capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "composer/2", "machine/1", "machine/2", "agent-commands/1",
+          // Every feature in machineFeatures.ts, so the machine reads as up to date and nothing is hidden.
+          "ports/1", "session/3", "session-status/1", "agent-pty/1", "composer/1", "composer/3", "workspace/1", "workspace/2", "cleanup/1", "pipeline/1", "pipeline/2", "machine/3", "machine/4"] };
     }
     return view.state === "reconnecting" ? { state: "reconnecting", attempt: 1, reason: "network", retryInMs: 2000 } : { state: "connecting", attempt: 1 };
   };
@@ -168,7 +172,7 @@ let failed = 0;
 for (const colorScheme of ["light", "dark"]) {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: fixture(true), colorScheme });
   await sidebar(page);
-  const row = page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`);
+  const row = page.locator(`[data-testid="machine-session-row"][title$="${TITLE}"]`);
   await row.waitFor();
   await row.click();
   const strip = page.locator('main [data-testid="machine-tab-strip"]');
@@ -270,7 +274,7 @@ for (const colorScheme of ["light", "dark"]) {
 
   // ---- An approval on the other session: session.decide with its request.
   {
-    await page.locator('[data-testid="machine-session-row"][title="Bisect the flaky relay e2e"]').click();
+    await page.locator('[data-testid="machine-session-row"][title$="Bisect the flaky relay e2e"]').click();
     const allow = page.locator("main").getByRole("button", { name: /^Allow/ }).first();
     await allow.waitFor();
     await shoot(page, `21.08-approval-${colorScheme}`);
@@ -286,7 +290,8 @@ for (const colorScheme of ["light", "dark"]) {
   {
     const frames = await page.evaluate(() => window.__PW_FRAMES__);
     const scoped = frames.filter((f) => /^(fs|git)\./.test(f.method));
-    const unscoped = scoped.filter((f) => f.params.projectId !== "p-tx");
+    // fs.cancel and fs.unwatch name a subscription the runtime resolves, not a project (needs_project in remote/machine.rs).
+    const unscoped = scoped.filter((f) => f.method !== "fs.cancel" && f.method !== "fs.unwatch" && f.params.projectId !== "p-tx");
     const local = frames.filter((f) => /\/(private\/)?(tmp|var\/folders)\/|\.raccoon-dev|Application Support/.test(JSON.stringify(f.params)));
     failed += report(`project scope (${colorScheme})`, {
       "files and git were asked for": scoped.length > 0,
@@ -297,7 +302,7 @@ for (const colorScheme of ["light", "dark"]) {
 
   // ---- 21.09: reconnecting.
   {
-    await page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`).click();
+    await page.locator(`[data-testid="machine-session-row"][title$="${TITLE}"]`).click();
     await strip.waitFor();
     await page.evaluate(() => window.__PW_MACHINE__({ state: "reconnecting", lostAt: Date.now() - 12_000, attempt: 1, retryInMs: 2000, trying: ["lan", "relay"] }));
     const notice = page.locator('main [data-testid="machine-session-reconnecting"]');
@@ -307,7 +312,14 @@ for (const colorScheme of ["light", "dark"]) {
     const m = await page.evaluate(() => ({
       notice: document.querySelector('main [data-testid="machine-session-reconnecting"]')?.textContent ?? null,
       chip: document.querySelector('main header [data-testid="machine-chip"]')?.textContent ?? null,
-      blocked: document.querySelector("main")?.textContent?.includes("Can't send until Mac mini is back") ?? false,
+      // The composer says so as its placeholder, which textContent does not include.
+      blocked: (() => {
+        const main = document.querySelector("main");
+        const reason = "Can't send until Mac mini is back";
+        if (main?.textContent?.includes(reason)) return true;
+        return [...(main?.querySelectorAll("[placeholder], [data-placeholder], [aria-placeholder]") ?? [])].some((element) =>
+          ["placeholder", "data-placeholder", "aria-placeholder"].some((name) => element.getAttribute(name)?.includes(reason)));
+      })(),
     }));
     failed += report(`reconnecting (${colorScheme})`, {
       "the session says it is reconnecting and the agent keeps working": /Reconnecting to Mac mini/.test(m.notice ?? "") && /The agent keeps working there/.test(m.notice ?? ""),

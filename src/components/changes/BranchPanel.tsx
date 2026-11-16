@@ -472,7 +472,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
                 ) : (
                   <>
                     <span className="min-w-0 flex-1 truncate text-xs" title={`${row.commit.subject}\n${row.commit.author} · ${relativeTime(row.commit.date)}`}>
-                      <span className="font-mono text-foreground">#{row.commit.shortSha}</span>
+                      <span className="font-mono text-foreground">{row.commit.shortSha}</span>
                       <span className="text-faint"> {row.commit.subject}</span>
                     </span>
                     {i === newestBase && (

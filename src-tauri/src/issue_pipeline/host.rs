@@ -415,7 +415,7 @@ impl Host for LocalHost {
             };
             settings.reviewer_choice(&tab.harness, &tab.model, tab.effort.as_deref(), &models)
         });
-        self.open_tab(author, tab, "Reviewer", chosen)
+        self.open_tab(author, tab, super::REVIEWER_TAB, chosen)
     }
 
     fn workspace_idle(&self, pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
@@ -478,7 +478,7 @@ impl Host for LocalHost {
     fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
         // A resolver writes the merge the author would have: it runs on the author's model.
         let tab = author.tab(&pipeline.author.tab_id).context("the author's conversation is gone")?;
-        self.open_tab(author, tab, "Conflict resolver", None)
+        self.open_tab(author, tab, super::RESOLVER_TAB, None)
     }
 
     fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {

@@ -3,15 +3,18 @@ import { recordRecentFile } from "@/lib/recentFiles";
 import { ask } from "@tauri-apps/plugin-dialog";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
+import { isLocalKey } from "@/types/target";
 import type { ChangeRange } from "./changes";
 import type { PrAssociation } from "./api";
 import { discardStashedBuffers } from "@/lib/workspaceFiles";
 import { clearSelectedReview, getTerminalState, selectSessionTab } from "@/lib/terminal";
 
 /**
- * Files live beside the transcript; diff and PR tabs fill the centre. Nothing
- * here persists unsaved text. Review tabs restore their locations after restart;
- * files come back from disk and unsaved buffers are guarded on close.
+ * A local session's files, diffs and pull requests are tabs of the session,
+ * beside its chat (PRO-402). A cloud workspace's files and a checkout's (no
+ * session) stay in the editor pane. Nothing here persists unsaved text. Tabs
+ * restore their locations after restart; files come back from disk and
+ * unsaved buffers are guarded on close.
  */
 export type ViewMode = "source" | "preview";
 
@@ -126,6 +129,30 @@ export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
   return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment" || entry.kind === "checkLog";
 }
 
+/**
+ * Whether files opened under this id are tabs of a local session: not a checkout with no
+ * session, and not a cloud, machine or guest session, whose files keep their own pane.
+ */
+function hasFileTabs(sessionId: string): boolean {
+  return !sessionId.startsWith("checkout:") && isLocalKey(sessionId);
+}
+
+/**
+ * A file a local session opened: a tab in the session's tab strip, beside the
+ * chat tab and never over it (PRO-402). A cloud workspace's file (`source`),
+ * a cloud session's and a checkout's stay in the editor pane (`EditorSplit`).
+ */
+export function isFileTab(entry: EditorEntry): boolean {
+  return !isReviewEditor(entry) && !entry.source && hasFileTabs(entry.sessionId);
+}
+
+/** An editor that can be a tab of its session: a review, or a file. */
+export type TabEditorEntry = ReviewEditorEntry | FileEditorEntry;
+/** Whether the editor is a tab of its session: a review, or a local session's file. */
+export function isTabEditor(entry: EditorEntry): boolean {
+  return isReviewEditor(entry) || isFileTab(entry);
+}
+
 /** An attachment tab as the file surfaces draw it: a read-only file with the attachment toolbar. */
 export function attachmentFile(entry: AttachmentEditorEntry): FileEditorEntry {
   const { media, ...rest } = entry;
@@ -137,7 +164,7 @@ const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
 /** Persist only locators, never snapshot contents, PR bodies or unsaved buffers. */
 export function serializeReviewTabs(value: Pick<State, "editors" | "active" | "collapsed">): string {
   return JSON.stringify({
-    editors: value.editors.filter(isReviewEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
+    editors: value.editors.filter(isTabEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
     active: value.active,
     collapsed: value.collapsed,
   });
@@ -168,6 +195,10 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         && reviewPath(e.root, e.rel) && e.attachment.path === `${e.root}/${e.rel}` && (e.attachment.sentAt === undefined || typeof e.attachment.sentAt === "string")) {
         editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
           dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: "attachment", media: e.media, attachment: { path: e.attachment.path, ...(e.attachment.sentAt ? { sentAt: e.attachment.sentAt } : {}) } });
+      } else if (["text", "image", "audio", "video"].includes(e.kind) && !e.attachment && hasFileTabs(e.sessionId) && reviewPath(e.root, e.rel) === e.rel) {
+        // A session's file tab: where the file is, never what was typed in it.
+        editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
+          dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: e.kind });
       } else if (e.kind === "conflict" && reviewPath(e.root, e.rel) && e.conflict && isCommit(e.conflict.head) && isCommit(e.conflict.mergeHead)
         && Number.isSafeInteger(e.conflict.conflicts) && e.conflict.conflicts >= 0) {
         const { head, mergeHead, conflicts } = e.conflict;
@@ -232,14 +263,23 @@ export function isMarkdown(rel: string): boolean {
 
 let nonce = 0;
 /**
- * Open (or focus) a file in the session's pane. A jump target implies the
- * reader wants a line, which only source can show, so it forces source mode.
+ * Open (or focus) a file. In a local session it is a tab of the session,
+ * beside the chat tab; a cloud workspace's file (`source`) and a checkout's
+ * open in the editor pane. A jump target implies the reader wants a line,
+ * which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   recordRecentFile(source ?? `local:${root}`, rel);
   const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const tab = !source && hasFileTabs(sessionId);
   const selected = getTerminalState().selected[sessionId];
-  if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
+  if (!tab && selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
+  // A session's file tab is shown by selecting it, like any tab of the session.
+  const show = (id: string) => {
+    if (!tab) return;
+    selectSessionTab(sessionId, { kind: "review", id });
+    setLastFocused("editor");
+  };
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
@@ -249,11 +289,13 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
       active: { ...state.active, [sessionId]: existing.id },
       collapsed,
     });
+    show(existing.id);
     return existing.id;
   }
   const id = JSON.stringify([sessionId, root, rel]);
   const entry: EditorEntry = {
     id,
+    ...(tab ? { created: new Date().toISOString() } : {}),
     sessionId,
     workspaceRoot,
     root,
@@ -266,6 +308,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     jump,
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
+  show(id);
   return id;
 }
 
@@ -298,7 +341,8 @@ export function openAttachment(sessionId: string, file: { path: string; name: st
   return openReview(entry);
 }
 
-export function openReview(entry: ReviewEditorEntry) {
+/** Open (or focus) a tab of a session: a review, or a file tab that was closed and is put back. */
+export function openReview(entry: TabEditorEntry) {
   // Reopening a review focuses its existing buffer without resetting its mode or scroll.
   const existing = state.editors.find((e) => e.id === entry.id);
   if (!existing) set({ editors: [...state.editors, { ...entry, created: entry.created ?? new Date().toISOString() }] });
@@ -450,9 +494,10 @@ export function dropEditors(match: (entry: EditorEntry) => boolean) {
 
 export function setActiveEditor(sessionId: string, id: string | null) {
   const entry = state.editors.find((e) => e.id === id && e.sessionId === sessionId);
-  if (entry && isReviewEditor(entry)) {
+  if (entry && isTabEditor(entry)) {
     selectSessionTab(sessionId, { kind: "review", id: entry.id });
-    if (!sessionId.startsWith("checkout:")) return;
+    // A file tab is also the session's active file, which the file tree marks.
+    if (isReviewEditor(entry) && !sessionId.startsWith("checkout:")) return;
   }
   set({ active: { ...state.active, [sessionId]: id }, collapsed: { ...state.collapsed, [sessionId]: false } });
 }
@@ -460,7 +505,7 @@ export function setActiveEditor(sessionId: string, id: string | null) {
 /** Called only after the backend's complete session list has arrived. */
 export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved?: boolean }[]) {
   const kept = new Set(sessions.filter((s) => !s.worktreeRemoved).map((s) => s.id));
-  dropEditors((e) => isReviewEditor(e) && !e.sessionId.startsWith("checkout:") && !kept.has(e.sessionId));
+  dropEditors((e) => isTabEditor(e) && !e.sessionId.startsWith("checkout:") && !kept.has(e.sessionId));
 }
 
 export function setEditorDirty(id: string, dirty: boolean) {

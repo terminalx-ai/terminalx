@@ -64,15 +64,22 @@ function highlight(line: string): ReactNode {
  * A script field: a real textarea laid over a coloured copy with line numbers. Both columns wrap the same way, so a
  * long line keeps its number beside it. Read-only fields stay selectable and focusable.
  */
-export function ScriptEditor({ label, value, onChange, readOnly, disabled, placeholder }: {
+export function ScriptEditor({ id, label, value, onChange, onBlur, readOnly, disabled, placeholder, minLines = 1, invalid, describedBy }: {
+  id?: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   readOnly?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  onBlur?: () => void;
+  /** Rows numbered even when empty, so a short command still reads as a code field. */
+  minLines?: number;
+  invalid?: boolean;
+  describedBy?: string;
 }) {
   const lines = value.split("\n");
+  while (lines.length < minLines) lines.push("");
   const text = "whitespace-pre-wrap break-all font-mono text-xs leading-5";
   return (
     <div className="relative py-2.5">
@@ -87,7 +94,10 @@ export function ScriptEditor({ label, value, onChange, readOnly, disabled, place
       </div>
       {!value && placeholder && <div aria-hidden className={cn(text, "pointer-events-none absolute left-10 right-3 top-2.5 text-faint")}>{placeholder}</div>}
       <textarea
+        id={id}
         aria-label={label}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
@@ -95,6 +105,7 @@ export function ScriptEditor({ label, value, onChange, readOnly, disabled, place
         disabled={disabled}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        onBlur={onBlur}
         className={cn(text, "absolute bottom-2.5 left-10 right-0 top-2.5 resize-none overflow-hidden bg-transparent pr-3 text-transparent caret-foreground outline-none selection:bg-(--selection) disabled:cursor-not-allowed")}
       />
     </div>
