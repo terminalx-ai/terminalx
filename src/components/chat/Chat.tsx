@@ -16,6 +16,8 @@ import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
 import { turnDivider } from "@/lib/turnDivider";
 import { GoalBanner } from "./GoalBanner";
+import { FirstMessage } from "./FirstMessage";
+import { useHeldFirstMessage } from "@/lib/firstMessage";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -148,6 +150,9 @@ export function Chat({
   const lastTop = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const turns = transcript.turns;
+  // A new session's first message, from Create until its own event is here (PRO-397).
+  const heldFirst = useHeldFirstMessage(sessionId, checkpointTabId);
+  const firstMessage = heldFirst && !turns.some((turn) => turn.prompt) ? heldFirst : null;
   /** Each drawn turn's height as last measured, by key; one never drawn is taken to be `ESTIMATED_TURN_PX`. */
   const heights = useRef(new Map<string, number>());
   /** The turns drawn while the reader is off the bottom, and the scroller's height. */
@@ -430,14 +435,14 @@ export function Chat({
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
           <SearchDisclosures value={find.disclosures}>
-          {!turns.length && !live && !sending && loading && (
+          {!turns.length && !live && !sending && !firstMessage && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
               <Loader2 className="size-3 animate-spin" aria-hidden />
               Loading the conversation…
             </p>
           )}
-          {!turns.length && !live && !sending && !loading && (
+          {!turns.length && !live && !sending && !firstMessage && !loading && (
             <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
               <RaccoonScene />
               <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
@@ -466,6 +471,7 @@ export function Chat({
             );
           })}
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
+          {firstMessage && <FirstMessage message={firstMessage} cwd={cwd} />}
           {sending && <SendingMessage message={sending} cwd={cwd} />}
           {transcript.compacting && (
             <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
