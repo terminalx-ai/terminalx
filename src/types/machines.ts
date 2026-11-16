@@ -143,7 +143,8 @@ export interface MachineRelayInfo {
  * - `relay`: connected through TerminalX Relay.
  * - `reconnecting`: a link was lost less than 30 s ago.
  * - `offline`: no route answered for 30 s; it keeps retrying every 10 s at most.
- * - `needsUpdate`: the runtime does not serve `machine/1`.
+ * - `needsUpdate`: the runtime does not serve `machine/1`, or refused `rpc.hello` with `update_required`; `side` says which computer updates.
+ * - `updating`: the machine is handing its runtime over to a new version; a lost link is expected (PRO-354).
  * - `accessRemoved`: the machine refused this computer's credential; nothing retries until "Try again".
  *
  * `localNetworkDenied`: macOS refused Local Network access to a `lan` address.
@@ -170,8 +171,23 @@ export type MachineConnectionState =
       localNetworkDenied?: boolean;
     }
   | { state: "offline"; lastSeenAt: number | null; retryInMs: number; localNetworkDenied?: boolean }
-  | { state: "needsUpdate"; version: string | null }
+  | {
+      state: "needsUpdate";
+      /** The machine's TerminalX version, when known. */
+      version: string | null;
+      /** Which side must update (PRO-354): the older machine, or this Mac when the machine is newer. */
+      side: MachineUpdateSide;
+    }
+  | {
+      /** The machine is handing its runtime over to a new version (PRO-354): "Updating · Back in under a minute". */
+      state: "updating";
+      version: string;
+      since: number;
+    }
   | { state: "accessRemoved" };
+
+/** Which computer must update for the two to work together. */
+export type MachineUpdateSide = "machine" | "thisMac";
 
 /** `machines_connections` and the `machines_connection_changed` event. */
 export interface MachineConnectionView {
@@ -210,3 +226,75 @@ export type MachinePairResult =
 export const MACHINE_CODE_PREFIX = "txm2." as const;
 export const MACHINE_CODE_TTL_MS = 5 * 60_000;
 export const MACHINE_APPROVAL_TTL_MS = 120_000;
+
+/**
+ * Versions and updates (PRO-354, docs/MACHINES.md "Versions and updates").
+ * `machine.updateStatus`, `machine.update` and `machine.updateChanged`
+ * (`machine/3`) answer this shape.
+ */
+
+/** How a machine updates: the installer's `~/.terminalx/versions`, its desktop app's updater, or neither. */
+export type MachineUpdateMethod = "installer" | "app" | "unmanaged";
+
+/** Work a handover cannot carry: it stops if the person goes ahead. */
+export interface MachineUpdateBlocker {
+  id: string;
+  kind: string;
+  title: string;
+}
+
+/** Another paired computer operating the machine right now. */
+export interface MachineUpdateOtherComputer {
+  id: string;
+  label: string;
+}
+
+export type MachineUpdatePhase = "downloading" | "verifying" | "trial" | "handingOver" | "cleaningUp";
+
+export type MachineUpdateProgress =
+  | { phase: "idle" }
+  | { phase: MachineUpdatePhase; version: string; since: number }
+  | { phase: "appUpdating"; version: string | null; since: number; step: string | null }
+  | { phase: "updated"; from: string; to: string; at: number }
+  | {
+      phase: "failed";
+      version: string;
+      at: number;
+      message: string;
+      /** The version the machine runs now. */
+      running: string;
+      /** The new version was started and the old one put back. */
+      rolledBack: boolean;
+    };
+
+export interface MachineUpdateStatus {
+  method: MachineUpdateMethod;
+  current: string;
+  /** The newest release this machine could update to; null when none is newer or it has not checked. */
+  available: { version: string } | null;
+  checkedAt: number | null;
+  blockers: MachineUpdateBlocker[];
+  otherComputers: MachineUpdateOtherComputer[];
+  /** Versions on disk, newest first (at most three). */
+  kept: string[];
+  progress: MachineUpdateProgress;
+}
+
+/** `machine.update`'s params. */
+export interface MachineUpdateRequest {
+  version: string;
+  /** Blocker ids the person agreed to stop. */
+  stop?: string[];
+  /** The person was told other computers are connected. */
+  confirmOthers?: boolean;
+}
+
+/** The window's report of its own updater run (`machines_app_update_report`). */
+export interface MachineAppUpdateReport {
+  phase: "checking" | "downloading" | "installing" | "restarting" | "upToDate" | "failed";
+  step?: string | null;
+  message?: string | null;
+}
+
+/** The Tauri event the desktop re-emits when another computer asks this Mac's app to update. */
+export const MACHINES_APP_UPDATE_REQUESTED_EVENT = "machines_app_update_requested" as const;
