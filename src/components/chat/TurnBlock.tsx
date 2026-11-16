@@ -4,7 +4,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, Copy, Image as ImageIcon, Keyboard, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
+import { Brain, Check, ChevronRight, CircleAlert, Clock, Copy, Image as ImageIcon, Keyboard, Navigation, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
@@ -61,9 +61,12 @@ interface TurnProps {
   /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
   divider?: string | null;
   onReset?: (endSeq: number) => void;
+  /** The agent's name, for what a message taken mid-turn says ("Codex reads it at its next tool call"). */
+  agent?: { id: string; name: string };
 }
 
 function TurnBody({
+  agent,
   turn,
   sessionId,
   checkpointTabId,
@@ -114,15 +117,15 @@ function TurnBody({
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-3.5">
-              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />))}
+              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />))}
             </div>
           )}
-          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} /> : null))}
+          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
           {turn.work.map((w) => (
-            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />
+            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />
           ))}
         </div>
       )}
@@ -286,7 +289,7 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
+function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string } }) {
   const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
@@ -298,7 +301,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
     case "tool_group":
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "message":
-      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} />;
+      // Taken while the agent worked (#551): steering, said above the bubble (PRO-380, 03.12).
+      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
       return (
         <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
@@ -475,7 +479,10 @@ function ReaderMessage({
   linkContext,
   className,
   onSendAgain,
+  steered,
 }: {
+  /** Said above a message the agent took mid-turn; the bubble is edged in blue and keeps its time inside. */
+  steered?: string;
   message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
@@ -484,12 +491,20 @@ function ReaderMessage({
 }) {
   const layout = usePrefs().transcriptLayout;
   const section = useSearchSection(`message:${message.seq}`);
+  const time = steered ? messageTime(message.messageTs) : null;
   return (
-    <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+    <div className={cn(className, "group/msg relative flex", steered ? cn("flex-col", layout === "chat" ? "items-end" : "items-stretch") : layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+      {steered && (
+        <p className="mb-1 flex items-center justify-end gap-1.5 text-[11px] text-info" data-testid="steered-note">
+          <Navigation aria-hidden className="size-[11px] shrink-0" />
+          {steered}
+        </p>
+      )}
       <div
         className={cn(
           "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed",
           layout === "chat" ? "max-w-[85%]" : "w-full",
+          steered && "ring-1 ring-info/30",
         )}
       >
         {message.images?.length ? (
@@ -553,10 +568,17 @@ function ReaderMessage({
             )}
           </div>
         )}
+        {time && <time dateTime={time.iso} title={time.full} className="mt-1 block text-right text-[11px] leading-4 text-faint">{time.short}</time>}
       </div>
-      <HoverTime ts={message.messageTs} />
+      {!steered && <HoverTime ts={message.messageTs} />}
     </div>
   );
+}
+
+/** What a message the agent took mid-turn says above it: Codex reads one at its next tool call. */
+export function steeringNote(agent?: { id: string; name: string }): string {
+  if (agent?.id === "codex") return `Sent mid-turn · ${agent.name} reads it at its next tool call`;
+  return agent ? `Sent mid-turn · ${agent.name} read it while it worked` : "Sent mid-turn";
 }
 
 /**

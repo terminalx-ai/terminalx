@@ -618,7 +618,8 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
-  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
+  // So does an edit open in the chat (a held follow-up's, PRO-380): `data-owns-escape` on it says so.
+  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane, [data-owns-escape]");
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
   // there the key is typed into the agent's own screen, like every other key.
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
@@ -657,6 +658,24 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // The goal card's Pause and Resume are Codex's own `/goal pause` and `/goal resume`, sent now rather than held
+  // behind the turn; Edit puts the goal in the composer to change (PRO-380).
+  const goalCommand = useCallback((command: string) => {
+    if (blockedRef.current) return;
+    setError(null);
+    void backend.send(tab.id, command, []).then((out) => {
+      for (const ev of out.events) applyEvent(ev);
+    }, (e) => setError(local ? safeError(e) : commandError(e)));
+  }, [backend, local, tab.id]);
+  const editGoal = useCallback((objective: string) => {
+    setDraft(tab.id, `/goal ${objective}`);
+    requestAnimationFrame(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(`[data-tab-composer="${CSS.escape(tab.id)}"] textarea[data-composer]`);
+      composer?.focus({ preventScroll: true });
+      composer?.setSelectionRange(composer.value.length, composer.value.length);
+    });
+  }, [tab.id]);
+  const chatAgent = useMemo(() => ({ id: tab.harness, name: agentLabel }), [tab.harness, agentLabel]);
   const steer = useCallback(async () => {
     const text = draft.trim();
     if (!text) return;
@@ -842,6 +861,9 @@ export function TabView({
       onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
+      agent={chatAgent}
+      onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? goalCommand : undefined}
+      onEditGoal={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? editGoal : undefined}
       footer={
         <>
         {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
@@ -879,7 +901,7 @@ export function TabView({
             </Button>
           </div>
         )}
-        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
+        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
         <Composer
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}
@@ -942,6 +964,7 @@ export function TabView({
           disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
           heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
+          onOpenCodexTab={counterpart?.id === "codex" ? () => openAgentHandoff(session, tab, "codex") : undefined}
         />
         </>
         )

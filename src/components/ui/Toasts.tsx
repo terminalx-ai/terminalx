@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { AlertCircle, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, TriangleAlert, X } from "@/icons";
+import { AlertCircle, Bot, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, Target, TriangleAlert, X } from "@/icons";
 import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
@@ -20,7 +20,8 @@ export function Toasts() {
   const attachmentNotices = useAttachmentNotices();
   const store = useSessionStore();
   const root = useRef<HTMLDivElement>(null);
-  const lift = useLiftOffComposer(root, attachmentNotices.length);
+  // Error toasts keep off the composer too: a failed held follow-up's (PRO-380) would sit over its Send.
+  const lift = useLiftOffComposer(root, attachmentNotices.length + errors.length);
   return (
     <div ref={root} className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto" style={lift ? { transform: `translateY(-${lift}px)` } : undefined}>
       <WorkspaceSetupToasts />
@@ -113,6 +114,9 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
         <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-add" />
       ) : toast.icon === "branch" ? (
         <GitBranch aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      ) : toast.icon === "target" ? (
+        // Not a failure: a goal sent where goals do not work, said in the colour of a warning.
+        <Target aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
       ) : (
         <CircleX aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
       )}
@@ -148,6 +152,7 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
             {action.icon === "branch" ? <GitBranch className="size-3.5" /> : null}
             {action.icon === "branch-plus" ? <GitBranchPlus className="size-3.5" /> : null}
+            {action.icon === "bot" ? <Bot className="size-3.5" /> : null}
             {action.label}
           </button>
         ))}
@@ -201,13 +206,14 @@ function useLiftOffComposer(element: RefObject<HTMLElement | null>, notices: num
       if (now.height === 0) return;
       // Where it rests: what is measured already includes the lift in force.
       const rest = { left: now.left, right: now.right, top: now.top + applied.current, bottom: now.bottom + applied.current };
-      const composers = [...document.querySelectorAll<HTMLElement>("[data-composer-box]")].map((box) => box.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
+      // The held follow-ups over a composer (PRO-380) are its controls too.
+      const composers = [...document.querySelectorAll<HTMLElement>("[data-composer-box], [data-held-tray]")].map((box) => box.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
       setLift(Math.max(0, Math.round(Math.min(liftClearOf(rest, composers), rest.top - TOP_MARGIN))));
     };
     measure();
     // A composer grows as the files offered to it are read in: follow it at once.
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    for (const box of document.querySelectorAll("[data-composer-box]")) observer?.observe(box);
+    for (const box of document.querySelectorAll("[data-composer-box], [data-held-tray]")) observer?.observe(box);
     const timer = window.setInterval(measure, 500);
     window.addEventListener("resize", measure);
     return () => {
