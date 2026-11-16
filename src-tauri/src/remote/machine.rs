@@ -35,9 +35,14 @@ pub const MACHINE_2: &str = "machine/2";
 /// updates (PRO-354)"; `machine_update.rs`).
 pub const MACHINE_3: &str = "machine/3";
 
-/// `machine/4` (PRO-357): `machine.rotateCredential`, a fresh device token
-/// each time a computer connects (docs/MACHINES.md, "Trust model").
+/// `machine/4` (PRO-350): `machine.agentSetup` and
+/// `machine.agentSetupRunning`, an agent's install or sign-in in a terminal
+/// on the machine (docs/MACHINES.md, "As built (PRO-350): the machine page").
 pub const MACHINE_4: &str = "machine/4";
+
+/// `machine/5` (PRO-357): `machine.rotateCredential`, a fresh device token
+/// each time a computer connects (docs/MACHINES.md, "Trust model").
+pub const MACHINE_5: &str = "machine/5";
 
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and

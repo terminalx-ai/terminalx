@@ -509,7 +509,7 @@ pub struct Established {
     pub frames: mpsc::UnboundedSender<Value>,
     /// Relay access, when it was asked for and the machine has a relay.
     pub relay_access: Option<RelayAccess>,
-    /// A fresh device token (`machine/4`, PRO-357), which the supervisor
+    /// A fresh device token (`machine/5`, PRO-357), which the supervisor
     /// keeps in place of the one it connected with.
     pub rotated_token: Option<Zeroizing<String>>,
 }
@@ -664,7 +664,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.
@@ -707,7 +707,7 @@ async fn establish(connection: &mut Connection, target: &Target, want_relay_acce
     // A fresh credential on every connection (PRO-357). The machine keeps the
     // old one working until this computer connects with the new one, so a
     // lost answer or a token that could not be saved locks nothing out.
-    let rotated_token = if granted(super::machine::MACHINE_4) {
+    let rotated_token = if granted(super::machine::MACHINE_5) {
         match request(connection, "machine.rotateCredential", json!({})).await? {
             Ok(answer) => answer["deviceToken"].as_str().filter(|token| (16..=256).contains(&token.len())).map(|token| Zeroizing::new(token.to_string())),
             Err(error) => {

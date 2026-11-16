@@ -62,7 +62,7 @@ async fn an_operating_computer_cannot_change_the_switch_or_reach_this_machines_o
         }
     }
     let rig = rig(TTL);
-    let mut computer = connected(&rig, "desk", [1; 32], "desk-token-0000000000000000", &["machine/1", "machine/4", "session/1"]).await;
+    let mut computer = connected(&rig, "desk", [1; 32], "desk-token-0000000000000000", &["machine/1", "machine/5", "session/1"]).await;
     let asked = [
         "settings.set",
         "machines.setAllowOperating",
@@ -195,7 +195,7 @@ fn no_terminalx_command_adds_or_removes_a_machine() {
 async fn a_credential_rotates_on_each_connection() {
     let rig = rig(TTL);
     let old = "desk-token-old-000000000000000";
-    let mut computer = connected(&rig, "desk", [5; 32], old, &["machine/1", "machine/4"]).await;
+    let mut computer = connected(&rig, "desk", [5; 32], old, &["machine/1", "machine/5"]).await;
     let rotated = computer.call("rotate", "machine.rotateCredential", json!({})).await;
     let new = rotated["result"]["deviceToken"].as_str().unwrap_or_else(|| panic!("a fresh token: {rotated}")).to_string();
     assert_ne!(new, old);
@@ -296,7 +296,7 @@ async fn disconnect_closes_the_connection_and_holds_the_computer_off_until_it_is
 async fn the_activity_log_records_what_a_computer_did_and_nothing_secret() {
     let rig = rig(TTL);
     let token = "desk-token-0000000000000000";
-    let mut computer = connected(&rig, "desk", [8; 32], token, &["machine/1", "machine/4"]).await;
+    let mut computer = connected(&rig, "desk", [8; 32], token, &["machine/1", "machine/5"]).await;
     let _ = computer.call("rotate", "machine.rotateCredential", json!({})).await;
     drop(computer);
     let entries = logged(&rig, &[Kind::Connected, Kind::Disconnected]).await;

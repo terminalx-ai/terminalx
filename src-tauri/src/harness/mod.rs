@@ -183,6 +183,13 @@ struct Setup {
     writes: &'static [&'static str],
     /// The CLI's own sign-in, after the binary.
     login: &'static [&'static str],
+    /// The sign-in for a person at another computer (a machine's page,
+    /// PRO-350), where the CLI has one that needs no browser on this
+    /// computer: its own login would wait for a callback on this
+    /// computer's loopback, which that person's browser cannot reach.
+    /// `None`: `login` works from anywhere (it prints an address and takes
+    /// the code pasted back).
+    login_elsewhere: Option<&'static [&'static str]>,
     /// A page of the provider's that answers when the network does, asked
     /// only after a failure, to tell an outage from a refusal.
     probe: &'static str,
@@ -209,6 +216,7 @@ const REGISTRY: &[Spec] = &[
             runner: &["bash"],
             writes: &[".local/bin", ".local/share/claude", ".claude"],
             login: &["auth", "login"],
+            login_elsewhere: None,
             probe: "https://claude.ai/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
@@ -229,6 +237,8 @@ const REGISTRY: &[Spec] = &[
             runner: &["env", "CODEX_NON_INTERACTIVE=1", "sh"],
             writes: &[".local/bin", ".codex"],
             login: &["login"],
+            // A device code: the address and code open in any browser.
+            login_elsewhere: Some(&["login", "--device-auth"]),
             probe: "https://chatgpt.com/codex/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },

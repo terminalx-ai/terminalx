@@ -141,7 +141,10 @@ export interface InspectedMachineCode {
 /** A machine this computer paired with (`machines.json`); `machines_set_route` answers the updated one. */
 export interface PairedMachine {
   machineId: string;
+  /** The name shown here: the machine's own, or the one given on this computer (`namedHere`). */
   name: string;
+  /** Renamed on this computer (PRO-350, `machines_rename`): the machine's own name no longer replaces it. */
+  namedHere?: boolean;
   os: MachineOs;
   version: string;
   publicKeyB64: string;
