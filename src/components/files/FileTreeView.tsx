@@ -514,9 +514,15 @@ function RootedFileTreeView({
             </button>
           )}
           {!source && (
-            <button type="button" aria-label="Open file by name" title="Open file by name" onClick={() => runShortcut("files.quickOpen")} className={cn(headerButton, "flex gap-1")}>
-              <FileSearch className="size-3.5" />
-              {quickOpenKeys && <KbdGroup keys={keycaps(quickOpenKeys)} />}
+            <button
+              type="button"
+              aria-label="Open file by name"
+              title={quickOpenKeys ? `Open file by name (${shortcutText(quickOpenKeys)})` : "Open file by name"}
+              onClick={() => runShortcut("files.quickOpen")}
+              className={cn(headerButton, "font-sans text-[11.5px]")}
+              data-testid="file-tree-quick-open"
+            >
+              {quickOpenKeys ? <span aria-hidden>{shortcutText(quickOpenKeys)}</span> : <FileSearch className="size-3.5" />}
             </button>
           )}
         </div>
@@ -703,7 +709,7 @@ function RootedFileTreeView({
                   ) : (
                     <ContextMenuItem disabled={!!row.escapes} onSelect={() => activate(row)}>
                       <Eye /> View
-                      <Keys keys={["↵"]} />
+                      <Keys text="↵" />
                     </ContextMenuItem>
                   )}
                   {!row.isDir && git && (
@@ -735,7 +741,7 @@ function RootedFileTreeView({
                   {!source && (
                     <ContextMenuItem onSelect={() => copy(abs(row.path))}>
                       <Copy /> Copy path
-                      <Keys keys={isMac ? ["⌥⌘C"] : keycaps("mod+alt+c")} />
+                      <Keys text={isMac ? "⌥⌘C" : shortcutText("mod+alt+c")} />
                     </ContextMenuItem>
                   )}
                   <ContextMenuItem onSelect={() => copy(row.path)}>
@@ -775,11 +781,14 @@ function RootedFileTreeView({
   );
 }
 
+/** A binding as one run of text: "⌘P" on a Mac, "Ctrl+P" elsewhere. */
+const shortcutText = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
+
 /** A menu item's keys at its end; kept out of the item's accessible name. */
-function Keys({ keys }: { keys: string[] }) {
+function Keys({ text }: { text: string }) {
   return (
     <span aria-hidden className="ml-auto pl-4 font-sans text-[11px] text-faint">
-      {keys.join("")}
+      {text}
     </span>
   );
 }

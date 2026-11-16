@@ -196,7 +196,7 @@ describe("FileTreeView", () => {
       expect(within(header).getByText("raccoon/feature")).toBeTruthy();
       expect(within(header).getByRole("button", { name: "Filter" })).toBeTruthy();
       expect(within(header).getByRole("button", { name: "New file" })).toBeTruthy();
-      expect(within(header).getByRole("button", { name: "Open file by name" })).toBeTruthy();
+      expect(within(header).getByRole("button", { name: "Open file by name" }).textContent).toMatch(/^(⌘P|Ctrl\+P)$/);
       const rows = screen.getAllByRole("treeitem");
       expect(rows.map((r) => r.getAttribute("data-path"))).toEqual(["src", "a.ts", "b.ts"]);
       for (const row of rows) expect(row.className).toMatch(/h-\[26px\].*font-mono|font-mono.*h-\[26px\]/);

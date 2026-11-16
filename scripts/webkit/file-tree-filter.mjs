@@ -73,6 +73,7 @@ try {
         branch: branch?.textContent,
         branchFont: branch ? getComputedStyle(branch).fontFamily : "",
         buttons,
+        quickOpen: node.querySelector('[data-testid="file-tree-quick-open"]')?.textContent ?? "",
         inside,
       };
     });
@@ -158,6 +159,7 @@ try {
       {
         "header: tree icon, checkout name and branch in mono": head.hasIcon && head.name === "p0" && head.branch === "raccoon/project-scripts" && /mono/i.test(head.branchFont),
         "header: filter, new file and open-by-name buttons inside the panel": head.buttons.join() === "Filter,New file,Open file by name" && head.inside,
+        "header: the open-by-name button reads its keys (⌘P)": /^(⌘P|Ctrl\+P)$/.test(head.quickOpen),
         "filter field hidden until the filter button is on": filterHiddenAtFirst,
         "rows are 26px with mono names and folder icons": rowLook.length > 0 && rowLook.every((r) => r.height === 26 && /mono/i.test(r.font) && r.folderIcon),
         "no root row; the tree starts at the top-level entries": before[0] === "docs" && before.includes("src") && before.includes("README.md"),
