@@ -210,7 +210,13 @@ impl OrganizationComputeService {
         // PRO-73: the per-person fields are optional. A server from before
         // them rejects an unknown key, so the webview sends each only to a
         // server that reported it.
-        const OPTIONAL: [&str; 3] = ["maxRunningWorkspacesPerMember", "maxCreatesPerMemberPerHour", "maxCreatesPerMemberPerDay"];
+        //
+        // PRO-371: `noLimitAware` marks a save from a desktop that knows a
+        // null `maxWorkspaces` is no limit. One from before it showed that
+        // null as 1 and would save the 1 back, so the server ignores an
+        // unmarked 1 over a stored null. Sent only to a server that said it
+        // has no workspace ceiling.
+        const OPTIONAL: [&str; 4] = ["maxRunningWorkspacesPerMember", "maxCreatesPerMemberPerHour", "maxCreatesPerMemberPerDay", "noLimitAware"];
         let object = policy.as_object().ok_or_else(|| OrganizationComputeError::local("cloud_workspace_request_invalid"))?;
         let required = object.len() - OPTIONAL.iter().filter(|key| object.contains_key(**key)).count();
         if required != KEYS.len() || !KEYS.iter().all(|key| object.contains_key(*key)) {
@@ -378,6 +384,26 @@ mod tests {
             assert!(request.contains(&format!(r#""maxRunningWorkspacesPerMember":{cap}"#)), "{request}");
             assert!(request.contains(r#""maxCreatesPerMemberPerHour":5"#) && request.contains(r#""maxCreatesPerMemberPerDay":null"#), "{request}");
         }
+    }
+
+    #[test]
+    fn forwards_a_save_without_a_workspace_limit_and_its_marker() {
+        let revision = AccountManager::context_revision(&context());
+        // PRO-371: no limit is a null, and the marker says this desktop means it.
+        let policy = json!({
+            "expectedVersion": 2, "maxWorkspaces": null, "maxRunningWorkspaces": null, "maxIdleSuspendMinutes": null,
+            "allowedMachineClasses": {}, "allowedLocations": {}, "noLimitAware": true
+        });
+        let (base, server) = serve_once("200 OK", VIEW);
+        service(&base).update_policy(&policy, &revision).unwrap();
+        let request = server.join().unwrap();
+        assert!(request.contains(r#""maxWorkspaces":null"#) && request.contains(r#""noLimitAware":true"#), "{request}");
+        // The marker is optional: an older server is not sent it.
+        let mut unmarked = policy.clone();
+        unmarked.as_object_mut().unwrap().remove("noLimitAware");
+        let (base, server) = serve_once("200 OK", VIEW);
+        service(&base).update_policy(&unmarked, &revision).unwrap();
+        assert!(!server.join().unwrap().contains("noLimitAware"));
     }
 
     #[test]

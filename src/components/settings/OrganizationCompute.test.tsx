@@ -34,6 +34,7 @@ const view = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<Comput
   canEdit: true,
   counts: { workspaces: 3, running: 2 },
   workspaceCeiling: 10,
+  noLimitAware: false,
   runningWorkspaceCeiling: null,
   createBudgetDefaults: null,
   contextRevision: "rev-1",
@@ -329,7 +330,7 @@ it("shows no Machine0 limits row while the server hides Machine0, unless the pol
 // every limit null, no ceilings, and no operator create budgets.
 const unlimited = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<ComputePolicyView["policy"]> = {}) =>
   view(
-    { workspaceCeiling: null, runningWorkspaceCeiling: null, createBudgetDefaults: { perHour: null, perDay: null }, counts: { workspaces: 60, running: 3 }, ...overrides },
+    { workspaceCeiling: null, noLimitAware: true, runningWorkspaceCeiling: null, createBudgetDefaults: { perHour: null, perDay: null }, counts: { workspaces: 60, running: 3 }, ...overrides },
     {
       maxWorkspaces: null,
       maxRunningWorkspaces: null,
@@ -381,10 +382,35 @@ it("shows every limit of a new organization as \"No limit\" and saves an empty f
         maxIdleSuspendMinutes: null,
         allowedMachineClasses: {},
         allowedLocations: {},
+        noLimitAware: true,
       },
       "rev-1",
     ),
   );
+});
+
+it("marks a save to a server that takes no limit, so a workspace limit of 1 is kept as typed (PRO-371)", async () => {
+  api.policy.mockResolvedValue(unlimited());
+  api.updatePolicy.mockResolvedValue(unlimited({}, { version: 4, maxWorkspaces: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  type("Maximum workspaces", "1");
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ maxWorkspaces: 1, noLimitAware: true }), "rev-1"));
+});
+
+it("sends no marker to a server before PRO-371, which refuses a key it does not know", async () => {
+  // That server always reports a ceiling.
+  api.policy.mockResolvedValue(view({ workspaceCeiling: 50, runningWorkspaceCeiling: 2 }, { maxWorkspaces: 50 }));
+  api.updatePolicy.mockResolvedValue(view({ workspaceCeiling: 50, runningWorkspaceCeiling: 2 }, { version: 4, maxWorkspaces: 1 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  type("Maximum workspaces", "1");
+  type("Maximum running workspaces", "1");
+  fireEvent.click(saveButton());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalled());
+  expect(api.updatePolicy.mock.calls[0][0]).toMatchObject({ maxWorkspaces: 1 });
+  expect(api.updatePolicy.mock.calls[0][0]).not.toHaveProperty("noLimitAware");
 });
 
 it("saves 500 workspaces and 100 running at once, and shows them again (PRO-371)", async () => {

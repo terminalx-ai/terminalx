@@ -71,6 +71,8 @@ describe("no limit unless one is set (PRO-371)", () => {
     const view = normalizePolicyView(newServer);
     expect(view.policy).toMatchObject({ maxWorkspaces: null, maxRunningWorkspaces: null, maxRunningWorkspacesPerMember: null, maxCreatesPerMemberPerHour: null, maxCreatesPerMemberPerDay: null });
     expect(view.workspaceCeiling).toBeNull();
+    // Its null ceiling is how it says a save may carry `noLimitAware`.
+    expect(view.noLimitAware).toBe(true);
     expect(view.runningWorkspaceCeiling).toBeNull();
     expect(view.createBudgetDefaults).toEqual({ perHour: null, perDay: null });
     expect(effectiveWorkspaceLimit(view)).toBeNull();
@@ -81,6 +83,11 @@ describe("no limit unless one is set (PRO-371)", () => {
     const view = normalizePolicyView(olderServer);
     expect(view.policy.maxWorkspaces).toBe(50);
     expect([view.workspaceCeiling, view.runningWorkspaceCeiling]).toEqual([50, 2]);
+    // No null ceiling from the server, no marker: a ceiling left out, or of another shape, is not one either.
+    expect(view.noLimitAware).toBe(false);
+    const { workspaceCeiling: _ceiling, ...withoutCeiling } = newServer;
+    expect(normalizePolicyView(withoutCeiling).noLimitAware).toBe(false);
+    expect(normalizePolicyView({ ...newServer, workspaceCeiling: "none" }).noLimitAware).toBe(false);
     expect(view.createBudgetDefaults).toEqual({ perHour: 10, perDay: 20 });
     expect(effectiveWorkspaceLimit(view)).toBe(50);
     expect(effectiveRunningLimit(view)).toBe(2);

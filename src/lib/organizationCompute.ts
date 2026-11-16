@@ -60,6 +60,12 @@ export interface ComputePolicyView {
    */
   workspaceCeiling: number | null;
   /**
+   * The server said, with a `workspaceCeiling` of null, that it takes an
+   * empty workspace limit (PRO-371). A save to it carries `noLimitAware`. An
+   * older server never sends that null, and refuses a key it does not know.
+   */
+  noLimitAware: boolean;
+  /**
    * The operator's cap on running workspaces (saas PRO-76). Null where the
    * operator set none (PRO-371), and from a server before PRO-76, where a
    * blank running limit meant "up to the workspace limit".
@@ -77,7 +83,19 @@ export interface ComputePolicyView {
 export type ComputePolicyEdit = Pick<
   ComputePolicy,
   "maxWorkspaces" | "maxRunningWorkspaces" | "maxIdleSuspendMinutes" | "allowedMachineClasses" | "allowedLocations"
-> & { expectedVersion: number; maxRunningWorkspacesPerMember?: number | null; maxCreatesPerMemberPerHour?: number | null; maxCreatesPerMemberPerDay?: number | null };
+> & {
+  expectedVersion: number;
+  maxRunningWorkspacesPerMember?: number | null;
+  maxCreatesPerMemberPerHour?: number | null;
+  maxCreatesPerMemberPerDay?: number | null;
+  /**
+   * Marks a save from a desktop that reads a null `maxWorkspaces` as no limit
+   * (PRO-371). One from before it showed that null as 1 and saved the 1 back,
+   * so the server ignores a 1 sent without this over a stored null: with it,
+   * a limit of 1 is saved as typed. Sent only when the view is `noLimitAware`.
+   */
+  noLimitAware?: true;
+};
 
 export type ComputeAlertCode =
   | "provisioning-paused"
@@ -203,6 +221,8 @@ export function normalizePolicyView(value: unknown): ComputePolicyView {
     // Null is the server's own word for "no ceiling" (PRO-371). A server from
     // before it reported one leaves the key out, and is held to the limit it has.
     workspaceCeiling: "workspaceCeiling" in value ? number(value.workspaceCeiling) : number(policy.maxWorkspaces),
+    // Only the server's own null: a key left out, or one of another shape, is not that word.
+    noLimitAware: value.workspaceCeiling === null,
     runningWorkspaceCeiling: number(value.runningWorkspaceCeiling),
     createBudgetDefaults: isObject(value.createBudgetDefaults)
       ? { perHour: number(value.createBudgetDefaults.perHour), perDay: number(value.createBudgetDefaults.perDay) }

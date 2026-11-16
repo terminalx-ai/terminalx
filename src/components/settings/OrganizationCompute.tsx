@@ -227,6 +227,8 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
           maxIdleSuspendMinutes: draft.maxIdleSuspendMinutes ? Number(draft.maxIdleSuspendMinutes) : null,
           allowedMachineClasses: allowLists(draft.machineClasses, current.policy.allowedMachineClasses),
           allowedLocations: allowLists(draft.locations, current.policy.allowedLocations),
+          // Tells a server since PRO-371 that a workspace limit of 1 here was typed, not an older desktop's stand-in for no limit.
+          ...(current.noLimitAware ? { noLimitAware: true as const } : {}),
         },
         current.contextRevision,
       ),
