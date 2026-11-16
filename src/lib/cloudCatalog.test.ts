@@ -1798,6 +1798,128 @@ describe("retained inbox catalog resync", () => {
     signIn();
     mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:1", account: "a" } };
   }
+  function feed(viewerUserId: string, name = "fresh"): CloudCatalogFeed {
+    return { viewerUserId, changed: true, cursor: name, reset: true,
+      organizations: [{ orgId: ORG, workspaces: [item("w", { name })], tombstones: [] }], deletedWorkspaceIds: [] };
+  }
+  function feedAccount() {
+    account();
+    mocks.account.status = { ...mocks.account.status, multiOrg: true, catalogFeed: true };
+  }
+  it("reauthorizes the viewer after a delayed startup feed despite fresh org lists, coalescing concurrent resyncs", async () => {
+    vi.useFakeTimers();
+    feedAccount();
+    const { configureCloudReadMarkers, cloudActivityRead } = await import("./cloudReadMarkers");
+    configureCloudReadMarkers("a", null);
+    let finishOld!: (value: CloudCatalogFeed) => void;
+    let finishFresh!: (value: CloudCatalogFeed) => void;
+    mocks.api.cloudCatalogFeed
+      .mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { finishFresh = resolve; }));
+    mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [{ ...item("w", { name: "listed" }),
+      readMarkers: [{ sessionId: "s", readAt: "2026-11-14T12:00:00Z" }] }] });
+    bootCloudCatalog();
+    const old = refreshCloudFeed();
+    const resync = resyncCloudInboxCatalog();
+    expect(resyncCloudInboxCatalog()).toBe(resync);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getCloudCatalog().orgs[ORG].source).toBe("live");
+    expect(getCloudCatalog().viewerUserId).toBeUndefined();
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+    finishOld(feed("discarded-viewer", "old-private"));
+    await old;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getCloudCatalog().viewerUserId).toBeUndefined();
+    expect(getCloudCatalog().orgs[ORG].workspaces[0].workspace.name).toBe("listed");
+    expect(mocks.api.cloudCatalogFeed.mock.calls).toEqual([[null], [null]]);
+    const fresh = feed("authenticated-viewer");
+    fresh.organizations[0].workspaces[0].following = true;
+    fresh.organizations[0].workspaces[0].readMarkers = [{ sessionId: "s", readAt: "2026-11-14T13:00:00Z" }];
+    finishFresh(fresh);
+    await resync;
+    expect(getCloudCatalog().viewerUserId).toBe("authenticated-viewer");
+    expect(getCloudCatalog().orgs[ORG].workspaces[0].following).toBe(true);
+    expect(cloudActivityRead(ORG, "w", "s", "2026-11-14T13:00:00Z")).toBe(true);
+    expect(serializeCatalog(getCloudCatalog())).not.toHaveProperty("viewerUserId");
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(2);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+    configureCloudReadMarkers(null, null);
+  });
+  it.each(["account", "revision", "aba", "privacy"])("fences the queued full feed across %s changes", async (change) => {
+    vi.useFakeTimers();
+    feedAccount();
+    let finish!: (value: CloudCatalogFeed) => void;
+    mocks.api.cloudCatalogFeed.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    bootCloudCatalog();
+    const old = refreshCloudFeed();
+    const resync = resyncCloudInboxCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    if (change === "privacy") {
+      mocks.privacyNative.mockResolvedValue({ enabled: true, managed: false });
+      await setDataPrivacy(true);
+    } else {
+      mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:2", account: change === "revision" ? "a" : "b" } };
+      if (change === "aba") mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:3", account: "a" } };
+    }
+    finish(feed("old-account-viewer", "old-private"));
+    await old; await resync;
+    expect(getCloudCatalog().viewerUserId).toBeUndefined();
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(1);
+    // Clean up the privacy state after stopping the boot listener, so teardown
+    // cannot start another feed in the deliberately unresolved fixture.
+    if (change === "privacy") {
+      resetCloudCatalog();
+      mocks.privacyNative.mockResolvedValue({ enabled: false, managed: false });
+      await setDataPrivacy(false);
+    }
+  });
+  it("rejects queued reauthorization after an observed A -> B -> A even when the original context value returns", async () => {
+    vi.useFakeTimers();
+    feedAccount();
+    let finish!: (value: CloudCatalogFeed) => void;
+    mocks.api.cloudCatalogFeed.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }))
+      .mockImplementation(() => new Promise(() => {}));
+    bootCloudCatalog();
+    const old = refreshCloudFeed();
+    const resync = resyncCloudInboxCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    for (const account of ["b", "a"]) {
+      mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:1", account } };
+      for (const listener of mocks.listeners) listener();
+    }
+    finish(feed("old-generation-viewer", "old-private"));
+    await old; await resync;
+    expect(getCloudCatalog().viewerUserId).toBeUndefined();
+    expect(getCloudCatalog().orgs[ORG]?.workspaces ?? []).toEqual([]);
+    expect(mocks.api.cloudCatalogFeed).toHaveBeenCalledTimes(3);
+  });
+  it("reauthorizes with a full feed rather than the pre-reconnect cursor", async () => {
+    vi.useFakeTimers();
+    feedAccount();
+    mocks.api.cloudCatalogFeed.mockResolvedValueOnce(feed("initial-viewer", "retained-cursor"))
+      .mockResolvedValueOnce(feed("current-viewer", "reauthorized"));
+    bootCloudCatalog();
+    await refreshCloudFeed();
+    await resyncCloudInboxCatalog();
+    expect(mocks.api.cloudCatalogFeed.mock.calls).toEqual([[null], [null]]);
+    expect(getCloudCatalog().viewerUserId).toBe("current-viewer");
+    expect(getCloudCatalog().orgs[ORG].workspaces[0].workspace.name).toBe("reauthorized");
+  });
+  it("does not apply the newly requested viewer if the context changes while that feed is in flight", async () => {
+    vi.useFakeTimers();
+    feedAccount();
+    let finish!: (value: CloudCatalogFeed) => void;
+    mocks.api.cloudCatalogFeed.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const resync = resyncCloudInboxCatalog();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.api.cloudCatalogFeed.mock.calls).toEqual([[null]]);
+    mocks.account.status = { ...mocks.account.status, context: { scope: "s", revision: "s:2", account: "b" } };
+    finish(feed("old-account-viewer", "old-private"));
+    await resync;
+    expect(getCloudCatalog().viewerUserId).toBeUndefined();
+    expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
+  });
   it("discards a pre-resync list and fetches current authorized markers beyond a coalesced hint", async () => {
     account();
     const { configureCloudReadMarkers, reconcileCloudReadMarker, cloudActivityRead } = await import("./cloudReadMarkers");
@@ -1852,4 +1974,15 @@ describe("retained inbox catalog resync", () => {
     mocks.privacyNative.mockResolvedValue({ enabled: false, managed: false });
     await setDataPrivacy(false);
   });
+});
+
+
+it("drops live presence at the persistence boundary without changing independent Following", async () => {
+  const { withoutLivePresence } = await import("./cloudCatalog");
+  const current = { workspace: { id: "visible", orgId: "org", createdBy: "new-owner", creator: { userId: "new-owner", displayName: "Current", photoUrl: null } }, latestOperation: null, following: true, presence: { activeMembers: [{ userId: "person", displayName: "Person", photoUrl: null }] } } as CloudWorkspaceListItem;
+  const stored = withoutLivePresence(current);
+  expect(stored).not.toHaveProperty("presence");
+  expect(stored.following).toBe(true);
+  expect(stored.workspace.creator?.userId).toBe("new-owner");
+  expect(current.presence?.activeMembers).toHaveLength(1);
 });

@@ -10,6 +10,8 @@ import type { StatusSession } from "@/lib/sessionRowStatus";
 
 export interface SessionTableRow extends DashboardTableRow {
   session?: StatusSession;
+  ownerCell?: ReactNode;
+  locationCell?: ReactNode;
   prs: readonly PrAssociation[];
   additions: number | null;
   deletions: number | null;
@@ -18,7 +20,7 @@ export interface SessionTableHandle { focusRow: (id: string) => void }
 const ROW_HEIGHT = 40;
 const HEADER_HEIGHT = 40;
 const OVERSCAN = 6;
-const WIDTHS: Record<TableColumnId, number> = { status: 112, name: 380, project: 160, branch: 180, agent: 140, pr: 120, changes: 112, owner: 160, updated: 112, created: 112 };
+const WIDTHS: Record<TableColumnId | "where", number> = { where: 140, status: 112, name: 380, project: 160, branch: 180, agent: 140, pr: 120, changes: 112, owner: 160, updated: 112, created: 112 };
 
 export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns, sort, onSort, selectedId, onFocus, onOpen, loading }: {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -32,7 +34,7 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
   onOpen: (id: string) => void;
   loading: boolean;
 }) {
-  const columns = useMemo(() => TABLE_COLUMNS.filter(({ id }) => !hiddenColumns.includes(id)), [hiddenColumns]);
+  const columns = useMemo(() => TABLE_COLUMNS.filter(({ id }) => !hiddenColumns.includes(id)).flatMap<{ id: TableColumnId | "where"; label: string }>((column) => column.id === "project" ? [column, { id: "where" as const, label: "Where" }] : [column]), [hiddenColumns]);
   const [viewport, setViewport] = useState({ top: 0, height: 480 });
   const [focusRequest, requestFocus] = useState(0);
   const pendingFocus = useRef<string | null>(null);
@@ -77,15 +79,15 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
     if (row) { row.focus({ preventScroll: true }); pendingFocus.current = null; }
   });
   return (
-    <div ref={containerRef} onScroll={measure} className="min-h-0 flex-1 overflow-auto scrollbar-thin px-4 pb-4">
+    <div ref={containerRef} onScroll={measure} className="min-h-0 min-w-0 flex-1 overflow-auto scrollbar-thin px-4 pb-4">
       <table aria-label="Sessions" aria-busy={loading} aria-rowcount={rows.length + 1} className="w-full table-fixed border-collapse text-left text-xs" style={{ minWidth: columns.reduce((sum, column) => sum + WIDTHS[column.id], 0) }}>
         <colgroup>{columns.map(({ id }) => <col key={id} style={{ width: WIDTHS[id] }} />)}</colgroup>
         <thead className="sticky top-0 z-10 bg-background">
           <tr style={{ height: HEADER_HEIGHT }} aria-rowindex={1}>
             {columns.map(({ id, label }) => (
               <th key={id} scope="col" aria-sort={sort.column === id ? sort.direction === "asc" ? "ascending" : "descending" : "none"} className="border-b border-border font-medium text-muted-foreground">
-                <button type="button" onClick={() => onSort(id)} className="flex w-full items-center gap-1 whitespace-nowrap px-3 py-2.5 text-left hover:text-foreground focus-visible:outline focus-visible:outline-ring">
-                  {label}
+                <button type="button" onClick={() => { if (id !== "where") onSort(id); }} disabled={id === "where"} className="flex w-full items-center gap-1 whitespace-nowrap px-3 py-2.5 text-left hover:text-foreground focus-visible:outline focus-visible:outline-ring">
+                  {id === "updated" ? "Last active" : label}
                   {sort.column === id && (sort.direction === "asc" ? <ArrowUp aria-hidden className="size-3" /> : <ArrowDown aria-hidden className="size-3" />)}
                 </button>
               </th>
@@ -107,7 +109,7 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
               data-session={row.id} data-focused={focused || undefined} style={{ height: ROW_HEIGHT }}
               className={cn("scroll-mt-10 cursor-default border-b border-border/50 outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50", focused && "bg-selected/50 ring-2 ring-inset ring-ring/50")}
             >
-              {columns.map(({ id }) => <td key={id} className={cn("truncate whitespace-nowrap px-3 py-2.5", id === "name" && "font-medium", (id === "branch" || id === "changes") && "font-mono")} title={row[id] === null ? undefined : String(row[id])}>{cell(row, id, tabbable)}</td>)}
+              {columns.map(({ id }) => <td key={id} className={cn("truncate whitespace-nowrap px-3 py-2.5", id === "name" && "font-medium", (id === "branch" || id === "changes") && "font-mono")} title={id === "where" || row[id] === null ? undefined : String(row[id])}>{cell(row, id, tabbable)}</td>)}
             </tr>;
           })}
           {end < rows.length && <tr aria-hidden="true"><td colSpan={columns.length} style={{ height: (rows.length - end) * ROW_HEIGHT, padding: 0, border: 0 }} /></tr>}
@@ -118,7 +120,9 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
   );
 }
 
-function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): ReactNode {
+function cell(row: SessionTableRow, column: TableColumnId | "where", tabbable: boolean): ReactNode {
+  if (column === "where") return row.locationCell ?? <span className="text-faint">—</span>;
+  if (column === "owner" && row.ownerCell) return row.ownerCell;
   // The workflow column keeps its grouping/sort meaning. The automatic badge
   // mounts only for visible rows, sharing the sidebar's cached status polling.
   if (column === "name") return <span className="flex min-w-0 items-center gap-2">

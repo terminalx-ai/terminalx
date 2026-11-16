@@ -14,9 +14,7 @@ import { MemberProfile } from "@/components/people/MemberProfile";
 
 /**
  * This person's access in words: Owner, Admin, Creator, Driver or Viewer.
- * The API's `manager` role is an organization owner's or admin's, so the
- * organization role says which of the two it is; the one person who manages
- * the shares without being a manager is the workspace's creator.
+ * Organization and creator provenance must come from their own evidence.
  */
 export function yourAccessText(
   you: CloudWorkspaceShares["you"],
@@ -28,11 +26,14 @@ export function yourAccessText(
   const approves = you.canApprove ? ", can approve permissions" : "";
   switch (you.role) {
     case "manager":
+      if (creator) return `Creator (you created this workspace: manages this workspace and who it is shared with)${approves}`;
       if (orgRole === "owner") return "Owner (the organization's owner: manages this workspace and who it is shared with)";
       if (orgRole === "admin") return "Admin (an organization admin: manages this workspace and who it is shared with)";
-      return "Owner or admin of the organization (manages this workspace and who it is shared with)";
+      return `${orgRole === "member" ? "Workspace Admin" : "Admin"} (manages this workspace and who it is shared with)${approves}`;
     case "driver":
-      if (you.canManageShares || creator) return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
+      if (creator) return you.canApprove
+        ? "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)"
+        : "Creator (you created this workspace: can send to agents and manage who it is shared with; typing in terminals also needs the right to approve permissions)";
       // Typing in a terminal (a shell, or an agent's own) needs the approval right too (PRO-88).
       return you.canApprove ? `Driver (can send to agents and type in terminals)${approves}` : "Driver (can send to agents; typing in terminals also needs the right to approve permissions)";
     case "viewer":
@@ -74,6 +75,10 @@ export function shareErrorMessage(error: unknown, who?: string): string {
       return `${who ?? "This person"} is no longer a member of this organization.`;
     case "cloud_workspace_share_not_found":
       return "That share was already revoked.";
+    case "cloud_workspace_last_admin":
+      return "A workspace must have at least one admin.";
+    case "cloud_workspace_runtime_unsupported":
+      return MANAGER_APPROVAL_REASON;
     case "cloud_workspace_not_found":
       return "This workspace no longer exists.";
     case "cloud_workspace_manager_required":
@@ -92,6 +97,16 @@ type AccessMode = "private" | "organization";
 type Access = AccessMode | "unknown";
 type Confirming = { kind: "share" } | { kind: "private" } | null;
 type Person = { userId: string; role: CloudShareRole; canApprove: boolean };
+
+function shareRoleLabel(role: CloudShareRole): string {
+  switch (role) {
+    case "viewer": return "Viewer";
+    case "driver": return "Driver";
+    case "manager": return "Admin";
+  }
+}
+
+const MANAGER_APPROVAL_REASON = "Admin without permission approval is not supported by this workspace runtime.";
 
 const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
 
@@ -269,8 +284,13 @@ export function CloudShareDialog({
     }
   };
 
-  const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) =>
-    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+  const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) => {
+    if (share.role === "manager" && !share.canApprove) {
+      setError(MANAGER_APPROVAL_REASON);
+      return Promise.resolve(false);
+    }
+    return change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
+  };
 
   /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
   const shareAfterVisible = async (person: Person) => {
@@ -430,13 +450,16 @@ export function CloudShareDialog({
                         >
                           <option value="viewer">Viewer</option>
                           <option value="driver">Driver</option>
+                          {share.role === "manager" && <option value="manager" disabled>Admin</option>}
                         </select>
                         <label className="flex items-center gap-1.5 text-muted-foreground">
                           <Switch
                             size="sm"
                             aria-label={`Can approve permissions: ${share.name || share.email}`}
                             checked={share.canApprove}
-                            disabled={busy !== null}
+                            disabled={busy !== null || (share.role === "manager" && share.canApprove)}
+                            title={share.role === "manager" && share.canApprove ? MANAGER_APPROVAL_REASON : undefined}
+                            aria-description={share.role === "manager" && share.canApprove ? MANAGER_APPROVAL_REASON : undefined}
                             onCheckedChange={(checked) => void put({ ...share, canApprove: checked })}
                           />
                           Can approve permissions
@@ -453,7 +476,7 @@ export function CloudShareDialog({
                       </>
                     ) : (
                       <span className="text-muted-foreground">
-                        {share.role === "driver" ? "Driver" : "Viewer"}
+                        {shareRoleLabel(share.role)}
                         {share.canApprove ? " · can approve" : ""}
                       </span>
                     )}

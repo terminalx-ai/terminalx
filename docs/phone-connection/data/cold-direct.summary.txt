@@ -1,0 +1,33 @@
+runs: 12
+  cold-01.jsonl: winner path direct
+  cold-02.jsonl: winner path direct
+  cold-03.jsonl: winner path direct
+  cold-04.jsonl: winner path direct
+  cold-05.jsonl: winner path direct
+  cold-06.jsonl: winner path direct
+  cold-07.jsonl: winner path direct
+  cold-08.jsonl: winner path direct
+  cold-09.jsonl: winner path direct
+  cold-10.jsonl: winner path direct
+  cold-11.jsonl: winner path direct
+  cold-12.jsonl: winner path direct
+| Step (from previous point to this point) | n | median ms | p90 ms |
+| --- | --- | --- | --- |
+| process start -> didFinishLaunching | 12 | 37 | 46 |
+| didFinishLaunching -> JS module eval | 12 | 46 | 47 |
+| JS module eval -> root render | 12 | 68 | 101 |
+| root render -> storage read done | 12 | 27 | 31 |
+| storage read done -> account check done | 12 | 0 | 0 |
+| account check done -> initial URL | 12 | 370 | 381 |
+| initial URL -> credential read | 12 | 8 | 8 |
+| credential read -> E2EE key loaded | 12 | 8 | 8 |
+| E2EE key loaded -> race start | 12 | 0 | 0 |
+| race start -> relay socket open | 12 | 36 | 90 |
+| relay socket open -> e2ee_ready | 12 | 62 | 162 |
+| e2ee_ready -> e2ee_authenticated | 12 | 23 | 155 |
+| e2ee_authenticated -> connected | 12 | 0 | 1 |
+| connected -> storage writes done | 12 | 9 | 19 |
+| storage writes done -> capabilities answered | 12 | 32 | 155 |
+| capabilities answered -> summaries answered | 12 | 748 | 890 |
+| summaries answered -> list rendered | 12 | 17 | 20 |
+| total: process start -> list rendered | 12 | 1609 | 1759 |

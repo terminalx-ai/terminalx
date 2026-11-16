@@ -96,6 +96,11 @@ User-facing webview choices are under `preferences`, for example:
     "reviewDiffLines": 400,
     "triesPerPiece": 3,
     "effortCeiling": "high",
+    "reaskVerifier": true,
+    "acceptBaseFailures": true,
+    "leadWhenLadderEnds": true,
+    "resumeAfterReset": true,
+    "leadTakesOver": true,
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
@@ -112,7 +117,15 @@ blocked (`triesPerPiece`, 1 to 6) and the effort escalation raises it no higher 
 (`effortCeiling`: `low`, `medium`, `high`, `xhigh` or `max`). A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
 the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
-value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
+value. Each budget value, and the window level, may be `"none"` for No limit. Four switches,
+app-wide only and each on unless the person turned it off, say which stops a run decides by
+itself because no person's judgment is needed: `reaskVerifier` (ask a verifier that gave no
+verdict again, then hand the review to the lead), `acceptBaseFailures` (accept a piece whose
+only failing check fails the same way on the commit it started from), `leadWhenLadderEnds`
+(hand a piece to the lead when no model is left above its last try's) and `resumeAfterReset`
+(go on when the usage window the run's points were spent in resets). Off, the run waits for
+the person at that stop. `leadTakesOver` (app-wide only, on unless the person turned it off)
+lets a run's own lead take a blocked piece over itself, also in a run a person approved. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -861,12 +874,19 @@ in this order and stop at the first that fails; the first four use no model:
    your branch merges into it without conflicts (`git merge-tree`).
 4. **Command checks.** Every `command` done-check, then the project's own check command if
    it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
-   failure keeps the exit code and the last 100 lines. They are run unasked only where a
+   failure keeps the exit code and the last 100 lines. A command that fails is run again on
+   the commit the try started from, in a checkout of the app's own: when it fails there the
+   same way (the same failing tests, or for a run that names none the same exit code and last
+   lines), the failure was already on the base and is not the piece's. The gate passes over it
+   (`onBase` on the command says how it came out there), the commands after it run, and no try
+   is used. A command stops at its first failure (a test binary, the part after `&&`), so the
+   result then always goes to a verifier (step 5) for what it did not get to run. A failure the
+   base does not have stands, and the next try is told so. They are run unasked only where a
    person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
    that starts runs without approval and asks its workers before a command, they are left
    unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
 5. **Review**, only when one of these holds: the piece has no `command` check, or its
-   commands were not run; the diff
+   commands were not run, or a failure the base has too was passed over; the diff
    touches a security area (the ones an issue pipeline runs its security pass for); the diff
    is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
    or the plan asks for one with a `review` or `vote` check.
@@ -896,14 +916,17 @@ pass, or fail with `file:line` evidence.
 
 A verifier waiting for a permission decision or question remains in verification. The run
 shows that the verifier needs you and links to its conversation. Answer there; the same
-verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
-invalid final reply still leaves the review inconclusive.
+verifier resumes, and the run consumes its eventual verdict. A verifier that stops, or ends
+its reply without a verdict block, is asked again in its own conversation (it still has the
+diff), up to two times (`askedAgain`). A verifier that is gone, or still gives none, leaves
+the review inconclusive.
 
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not
 re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
-answer (the verifier gave no verdict that can be read) leaves the piece `blocked` with that
-in its `note`: nothing says the result is wrong; read the diff yourself, or tell the person.
+answer (the verifier gave no verdict that can be read, after being asked again) is not a
+failure: nothing says the result is wrong. The piece is handed to you to review the diff
+yourself (see "A piece the run hands you"), with no person asked.
 
 Each try records its check under `verification`: `gates` (each one that ran, with `passed`,
 `detail`, and for the commands each `run`, `exitCode`, `millis` and, for one that failed,
@@ -929,9 +952,10 @@ conversation. A piece gets the run's `maxTries` tries (three unless Settings say
 
 Past three the last two steps alternate: the fourth try raises the effort on the model the
 third moved to, the fifth moves up a tier again, and so on. With one try per piece the piece
-is blocked after its first; with two it gets step 2 only. Once its tries are used, or at a
-move up when no model tier above it is installed, the piece is `blocked` and its `note` says
-what was tried and what failed last. The tries are also the most rounds of checking and
+is blocked after its first; with two it gets step 2 only. Once its tries are used, the piece is
+`blocked` and its `note` says what was tried and what failed last. At a move up when no model
+tier above it is installed (or it already ran on the top one), it is handed to you with the
+last worker's report, as a take-over would (see "A piece the run hands you"). The tries are also the most rounds of checking and
 fixing a piece gets: each try is checked once, and there is no further one unless the person
 widens the piece (below). A run keeps the tries and the ceiling it was created with: changing
 them in Settings affects runs created afterwards. The run does not fail on a blocked piece: it
@@ -940,17 +964,29 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
 
 #### A blocked piece
 
-- **Take over in lead.** `terminalx runs take-over <piece> --json` hands the piece to you:
+- **Take over in lead.** `terminalx runs take-over <piece> --json`, run from your own
+  conversation (no other session's), hands the piece to you, also in a run a person approved,
+  unless they turned off "Let the lead take over blocked pieces" in Settings → Orchestration
+  (then it is refused with `person_only`, and taking it over is theirs):
   you are sent its goal, what each try came to and where its work is, its worker's last
   report and the files it names outside the piece's own. The piece is `lead`. Finish it in
-  your own checkout (you are not held to its files), commit, then run
+  your own checkout, commit, then run
   `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
   your checkout, and when they pass the piece is `done` and what waits for it can start. It
   is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
   `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
   run's budget from the moment you are asked until the piece is settled. Nothing is merged
   while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
-  counts only what you committed.
+  counts only what you committed since you took the piece over. When that is nothing because
+  you brought the piece's branch in just before, it counts what that branch changed since its
+  try started, once your branch holds its tip. A piece the person asked you to take over is
+  not held to its files. One you took over yourself in a run they approved is: `finish`
+  refuses a change outside the files it owns (both sides of a rename count) with
+  `person_only`, naming them, and nothing is checked. Widening it is theirs, so tell them
+  which files it needs and why: their own Check and finish in the Run view runs the checks
+  on what you committed and, when they pass, accepts those files as their widening (they
+  join the piece's `owns`, and its note says so). Once a piece is with you, its earlier worker's reports no
+  longer move it.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
   (step `widened`), briefed with what went before. Without `--own` it takes the files the
@@ -959,8 +995,8 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   `failed`. A try after a widening that falls short blocks the piece again: there is no
   ladder after it. A person approved the files each piece owns, so in a run they approved
   only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
-  So are taking a piece over and skipping one in a run they approved: from the CLI those are
-  for a run that asked for no approval.
+  So is skipping one in a run they approved: from the CLI that is for a run that asked for no
+  approval.
 - **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
   piece's last worker the note in its own session and worktree, as yours (a person's note
   says it is theirs). The piece is `running`
@@ -970,8 +1006,40 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   out with it (`skipped` lists them all). The run is done once every other piece is merged.
   It asks no model, so it works while the run is paused on its budget.
 
-The person's choice is told to you in your session. Do not act on a blocked piece yourself
-unless the person asks you to; a piece you took over is yours to finish or skip.
+The person's choice is told to you in your session. Taking a blocked piece over is yours to
+decide when it fits: its goal and done-checks stay as planned, you finish it in your checkout,
+and `runs finish` checks it. Widening its files or leaving it out changes what a person
+approved: in a run they approved, ask them. A piece you took over is yours to finish, or, in a
+run nobody approved, to skip.
+
+When a piece is taken over, TerminalX stops its earlier workers that are still in a turn.
+A report that comes afterwards from a worker the piece no longer belongs to (it was taken
+over, or a newer try runs) changes nothing: it is listed among the run's `events`
+(`ignoredStaleReport`) and the piece stays where it is.
+
+#### A piece the run hands you
+
+Some stops need no person's judgment, and the run takes the next step itself: the piece's
+goal and files stay as they were approved, so this is not the person's take-over, and
+`person_only` does not apply to it. A piece is handed to you when no verifier gave a verdict
+(review the diff: when it does what the piece asks, bring the worker's commit into your
+checkout as it is; when not, fix it there) or when no model is left above its last try's
+(finish it). The piece is `blocked` with `toLead` until you are free: you take one piece at a
+time, and `toLead.waits` says what it waits for. Then it is `lead`, and you are sent its
+brief as with `runs take-over`, saying the run handed it to you. Finish it the same way, with
+`terminalx runs finish <piece> --json`. In a run a person approved you are held to the files
+the piece owns, as with a take-over of your own: `finish` refuses a change outside them, since
+widening a piece is the person's. Taking the piece is not theirs to decide, so you need not
+tell them you have it; if it needs files outside its own, tell them which and why, and their
+Check and finish accepts them.
+
+Every step a run takes by itself is in the run's `events` (`runs show`), each with `at`,
+`step`, `piece`, `message` and, where the message does not say it, what was `stuck`; the
+person sees them in the Run view, and you are sent each in your session. The steps are
+`askedVerifierAgain`, `handedToLead`, `acceptedBaseFailure`, `waitsForReset`,
+`wentOnAfterReset`, `ignoredStaleReport` and `stoppedOldWorker`. Leaving a piece out (`skip`)
+and widening its files (`widen`) still change what a person approved: in a run they approved,
+only they do those.
 
 So after `wait` returns, read the run, not only the reports: `sessions report` still lists
 the worker that fell short with its `failed` report (or with a `done` report whose result
@@ -1063,9 +1131,12 @@ in `usage`.
   workers on both logins keeps both and stops on whichever comes first. It becomes
   `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
   time), and you are told once. Workers already in a turn finish it. `runs start` is then
-  refused with `needs_you`; what you asked for starts when the person resumes the run
-  (raising the budget alone does not), or by itself once the window has reset and been read
-  again, if they asked for that, and you are told. Tell the person and end your turn; do not get the work done another way.
+  refused with `needs_you`. A run that spent its own `points` of a window goes on by itself
+  once that window has reset and been read again (`pause.resumeAt`, with `pause.byItself`):
+  you are told so, and there is nothing to ask the person; end your turn. A run past the
+  `ceiling`, or its `dollars`, goes on when the person resumes it (raising the budget alone
+  does not), or after the reset if they asked for that, and you are told. Tell the person and
+  end your turn; do not get the work done another way.
 - **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
   minutes unless the person changed it), no command or background task of its running, and
   its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is

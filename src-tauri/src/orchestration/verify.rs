@@ -99,6 +99,100 @@ pub struct CommandRun {
     /// The last [`OUTPUT_LINES`] lines it printed, kept for one that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// It failed, and was run again on the commit the result started from
+    /// (#1004): how it came out there. A failure that is already on the base
+    /// in the same way ([`same_failure`]) is not the result's, and the gate
+    /// passes over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_base: Option<Box<CommandRun>>,
+}
+
+impl CommandRun {
+    /// It failed here and fails on the base in the same way: the failure is not this result's.
+    pub fn base_failure(&self) -> bool {
+        !self.passed && self.on_base.as_deref().is_some_and(|base| same_failure(self, base))
+    }
+}
+
+/// What a check of a result's commands already knows of one commit (#1004):
+/// the commands as they ran there, among them failures the base has too. A
+/// command it names is not run again on that commit; a base failure among
+/// them is passed over, and the commands after it are run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Known {
+    pub commit: String,
+    pub runs: Vec<CommandRun>,
+}
+
+impl Known {
+    fn of<'a>(&'a self, commit: &str, run: &str) -> Option<&'a CommandRun> {
+        (self.commit == commit).then(|| self.runs.iter().find(|known| known.run == run && (known.passed || known.base_failure()))).flatten()
+    }
+}
+
+/// The failing tests a test run names in what it printed, normalised: `cargo
+/// test`'s `test a::b ... FAILED` and its `failures:` list, vitest's and
+/// jest's `FAIL`/`×` lines, pytest's `FAILED`, go's `--- FAIL:`. Timings are
+/// left out, so two runs of the same failure name it alike.
+pub fn failures(output: &str) -> BTreeSet<String> {
+    // `(12 ms)`, `12ms`, `(0.02s)`: how long a test took, which two runs of it do not share.
+    static TIMING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\s*\(?\b\d+(?:\.\d+)?\s?(?:ms|s|m)\b\)?").expect("a valid pattern"));
+    let timing = |text: &str| -> String { TIMING.replace_all(text, "").trim().to_string() };
+    let mut found = BTreeSet::new();
+    let mut listing = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "failures:" {
+            listing = true;
+            continue;
+        }
+        if listing {
+            // cargo lists each failing test indented under `failures:`, after their output.
+            if line.starts_with("    ") && !trimmed.is_empty() && !trimmed.contains(' ') {
+                found.insert(trimmed.to_string());
+                continue;
+            }
+            if trimmed.starts_with("test result:") {
+                listing = false;
+            }
+        }
+        if let Some(name) = trimmed.strip_prefix("test ").and_then(|rest| rest.strip_suffix(" ... FAILED")) {
+            found.insert(name.trim().to_string());
+        } else if let Some(name) = trimmed.strip_prefix("--- FAIL: ") {
+            found.insert(timing(name));
+        } else if let Some(name) = trimmed.strip_prefix("FAILED ") {
+            found.insert(timing(name.split(" - ").next().unwrap_or(name)));
+        } else if let Some(name) = trimmed.strip_prefix("FAIL ") {
+            found.insert(timing(name));
+        } else if let Some(name) = trimmed.strip_prefix("× ").or_else(|| trimmed.strip_prefix("✗ ")).or_else(|| trimmed.strip_prefix("✕ ")) {
+            found.insert(timing(name));
+        }
+    }
+    found
+}
+
+/// The last lines of what a command printed, with every digit as `#`: two
+/// runs that end on the same error, at other times, read alike.
+fn ending(output: &str) -> Vec<String> {
+    let lines: Vec<String> = output.lines().map(str::trim).filter(|line| !line.is_empty()).map(|line| line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect()).collect();
+    lines[lines.len().saturating_sub(5)..].to_vec()
+}
+
+/// Whether `here` failed the way `base` failed, so its failure is already on
+/// the base and not the result's. Strict on purpose: a run that names failing
+/// tests passes only when every test it names fails on the base too; one that
+/// names none (a build that did not compile) only when the base exited with
+/// the same code and ended on the same lines. A command that did not finish,
+/// or was not run, is never one: nothing says how it would have ended.
+pub fn same_failure(here: &CommandRun, base: &CommandRun) -> bool {
+    if here.passed || base.passed || here.exit_code.is_none() || base.exit_code.is_none() || here.run != base.run {
+        return false;
+    }
+    let (ours, theirs) = (failures(here.output.as_deref().unwrap_or_default()), failures(base.output.as_deref().unwrap_or_default()));
+    if !ours.is_empty() {
+        return ours.is_subset(&theirs);
+    }
+    theirs.is_empty() && here.exit_code == base.exit_code && ending(here.output.as_deref().unwrap_or_default()) == ending(base.output.as_deref().unwrap_or_default())
 }
 
 /// How one gate came out.
@@ -180,6 +274,20 @@ pub fn numstat(text: &str) -> Vec<FileChange> {
         .collect()
 }
 
+/// `git diff --numstat --no-renames -z` as each file it changed: a path is never quoted, and a
+/// rename is the file it removed and the file it added, so both are named. What the lead
+/// changed for a piece it is held to is read this way: a file renamed into the piece's
+/// files from outside them still changes a file outside them.
+pub fn numstat_z(text: &str) -> Vec<FileChange> {
+    text.split('\0')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(3, '\t');
+            let (added, removed, path) = (fields.next()?, fields.next()?, fields.next()?);
+            (!path.is_empty()).then(|| FileChange { path: path.to_string(), added: added.parse().ok(), removed: removed.parse().ok() })
+        })
+        .collect()
+}
+
 /// What a verifier's session used.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,13 +347,59 @@ pub struct Verifier {
     pub waiting: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
+    /// How often it was asked again for a verdict it did not give (#1004), at
+    /// most [`VERDICT_ASKS`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub asked_again: u32,
+    /// It gave no verdict, and is to be asked again: what was wrong with its
+    /// reply. Cleared once the ask is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_again: Option<String>,
+    /// A digest of the reply it was last asked again about, and when it was
+    /// asked: that reply, read again before the new turn shows, is not its answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<i64>,
 }
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// How often a verifier that gave no verdict is asked again in its own
+/// conversation before the lead reviews the diff itself (#1004).
+pub const VERDICT_ASKS: u32 = 2;
+/// How long the reply a verifier was asked again about, or a stop, is taken
+/// for the turn the ask has not opened yet. Past it, that is its answer.
+pub const ASK_AGAIN_GRACE_MS: i64 = 10 * 60_000;
 
 impl Verifier {
     /// It has said what it will say.
     pub fn settled(&self) -> bool {
         self.verdict.is_some() || self.problem.is_some()
     }
+
+    /// A short digest of a reply, to know it again.
+    pub fn digest(reply: &str) -> String {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(reply.as_bytes()))[..16].to_string()
+    }
+
+    /// What it read just now is what it was asked again about, or the stop
+    /// before the ask's turn opened, and the ask is recent: not yet its answer.
+    pub fn not_yet(&self, reply: Option<&str>, now_ms: i64) -> bool {
+        let recent = self.asked_at.is_some_and(|at| now_ms - at < ASK_AGAIN_GRACE_MS);
+        recent && reply.is_none_or(|reply| self.unread.as_deref() == Some(Self::digest(reply).as_str()))
+    }
+}
+
+/// What a verifier that gave no verdict is sent in its own conversation:
+/// what was wrong with its reply, and the block again. It still has the diff.
+pub fn ask_again_prompt(problem: &str, asked: u32) -> String {
+    format!(
+        "TerminalX could not read a verdict from your last reply: {problem}\n\nThis is ask {asked} of {VERDICT_ASKS}. Do not start the review again: you have read the diff. Give your verdict in at most {ANSWER_WORDS} words, and end your reply with the block in exactly this form:\n\n```{VERDICT_FENCE}\n{{\"verdict\": \"pass\", \"evidence\": []}}\n```\n\n`verdict` is \"pass\" or \"fail\". For \"fail\", `evidence` lists each problem as `path/to/file:line: what is wrong`."
+    )
 }
 
 /// The model step of a verification.
@@ -505,7 +659,7 @@ pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeo
     let started = Instant::now();
     // What no worker of a run may do, a check of its result does not do either.
     if let Some((_, found)) = super::guard::refused(run) {
-        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` pushes, merges or deploys, and a check of a result does none of those.")) };
+        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` pushes, merges or deploys, and a check of a result does none of those.")), on_base: None };
     }
     let mut process = std::process::Command::new("/bin/sh");
     // Both streams in the order they were written: the end of a test run is on either.
@@ -518,11 +672,13 @@ pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeo
         Err(error) => (None, format!("The command could not be started: {error}")),
     };
     let passed = exit_code == Some(0);
-    CommandRun { run: run.to_string(), project, exit_code, passed, millis: started.elapsed().as_millis() as u64, output: (!passed).then(|| tail(&output, OUTPUT_LINES)) }
+    CommandRun { run: run.to_string(), project, exit_code, passed, millis: started.elapsed().as_millis() as u64, output: (!passed).then(|| tail(&output, OUTPUT_LINES)), on_base: None }
 }
 
 /// Gate 4: every command of the piece, then the project's own, stopping at the first that fails.
-fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, changed: bool, timeout: Duration, commit: &str) -> Option<GateResult> {
+/// What `known` says of a command on this commit stands for it: it is not run again, and a
+/// failure the base has too is passed over (#1004).
+fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, changed: bool, timeout: Duration, commit: &str, known: &Known) -> Option<GateResult> {
     let mut wanted: Vec<(&str, bool)> = piece.done_checks.iter().filter_map(|check| match check { Check::Command { run } => Some((run.as_str(), false)), _ => None }).collect();
     // The project's standard check, for a piece that changed files; not twice when the plan names it too.
     if let Some(project) = project_check.map(str::trim).filter(|project| changed && !project.is_empty() && !wanted.iter().any(|(run, _)| run == project)) {
@@ -539,8 +695,11 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
     note_clean(checkout, commit, None);
     let mut runs = Vec::new();
     for (run, project) in wanted {
-        let ran = run_command(&checkout.cwd, run, project, timeout);
-        let failed = !ran.passed;
+        let ran = match known.of(commit, run) {
+            Some(known) => known.clone(),
+            None => run_command(&checkout.cwd, run, project, timeout),
+        };
+        let failed = !ran.passed && !ran.base_failure();
         runs.push(ran);
         if failed {
             break;
@@ -551,8 +710,15 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
     let theirs: String = after.lines().filter(|line| !before.contains(line) || earlier.iter().any(|noted| noted == line)).map(|line| format!("{line}\n")).collect();
     note_clean(checkout, commit, Some(&theirs));
     let last = runs.last().expect("at least one command ran");
-    let mut gate = match last.passed {
-        true => GateResult::passed(Gate::Commands, match runs.len() { 1 => "1 command exited 0.".to_string(), count => format!("{count} commands exited 0.") }),
+    let on_base: Vec<&CommandRun> = runs.iter().filter(|ran| ran.base_failure()).collect();
+    let mut gate = match last.passed || last.base_failure() {
+        true if on_base.is_empty() => GateResult::passed(Gate::Commands, match runs.len() { 1 => "1 command exited 0.".to_string(), count => format!("{count} commands exited 0.") }),
+        true => {
+            let passed = runs.len() - on_base.len();
+            let named: Vec<String> = on_base.iter().map(|ran| format!("`{}` exited {}", ran.run, ran.exit_code.map_or("?".into(), |code| code.to_string()))).collect();
+            let rest = match passed { 0 => String::new(), 1 => " The other command exited 0.".to_string(), count => format!(" The other {count} commands exited 0.") };
+            GateResult::passed(Gate::Commands, format!("{} here and on the commit the result started from alike, so {} not the result's.{rest}", named.join("; "), if on_base.len() == 1 { "that failure is" } else { "those failures are" }))
+        }
         false => {
             let how = match last.exit_code { Some(code) => format!("exited {code}"), None if last.millis == 0 => "was not run".to_string(), None => "did not finish".to_string() };
             let whose = if last.project { "The project's check" } else { "The done-check" };
@@ -566,7 +732,7 @@ fn commands(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, cha
 /// Gates 2 to 4 on a worker's result, in order, stopping at the first that
 /// fails. No model is asked anything. `project_check` is the project's own
 /// check command, run after the piece's when the piece changed files.
-pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, timeout: Duration) -> Checked {
+pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, timeout: Duration, known: &Known) -> Checked {
     let base = piece.tries.last().and_then(|attempt| attempt.base_commit.as_deref()).unwrap_or(&checkout.base);
     let mut checked = Checked { base: base.to_string(), ..Checked::default() };
     // Every gate reads this one commit, by its id: what is accepted is what was checked.
@@ -595,7 +761,7 @@ pub fn gates(checkout: &Checkout, piece: &Piece, project_check: Option<&str>, ti
         // Not TerminalX's to run unasked here: said, and left to a reader.
         checked.facts.commands_not_run = piece.done_checks.iter().any(|check| matches!(check, Check::Command { .. }));
     } else {
-        let wanted = commands(checkout, piece, project_check, !checked.facts.files.is_empty(), timeout, &commit);
+        let wanted = commands(checkout, piece, project_check, !checked.facts.files.is_empty(), timeout, &commit, known);
         if let Some(gate) = wanted {
             let passed = gate.passed;
             checked.gates.push(gate);
@@ -873,6 +1039,54 @@ impl Drop for Checking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ran(exit: Option<i32>, output: &str) -> CommandRun {
+        CommandRun { run: "cargo t".into(), project: false, exit_code: exit, passed: exit == Some(0), millis: 1, output: Some(output.into()), on_base: None }
+    }
+
+    #[test]
+    fn a_test_runs_failures_are_read_by_name_whatever_runner_printed_them() {
+        let cargo = "test a::b ... ok\ntest store::tests::reads_it ... FAILED\n\nfailures:\n\n---- store::tests::reads_it stdout ----\npanicked\n\nfailures:\n    store::tests::reads_it\n    store::tests::writes_it\n\ntest result: FAILED. 1 passed; 2 failed";
+        assert_eq!(failures(cargo).into_iter().collect::<Vec<_>>(), ["store::tests::reads_it", "store::tests::writes_it"]);
+        assert_eq!(failures(" FAIL  src/lib/run.test.ts > keeps the order (12 ms)\n × keeps the order 12ms").into_iter().collect::<Vec<_>>(), ["keeps the order", "src/lib/run.test.ts > keeps the order"]);
+        assert_eq!(failures("FAILED tests/test_io.py::test_reads - AssertionError: 1 != 2").into_iter().collect::<Vec<_>>(), ["tests/test_io.py::test_reads"]);
+        assert_eq!(failures("--- FAIL: TestReads (0.02s)").into_iter().collect::<Vec<_>>(), ["TestReads"]);
+        assert!(failures("error[E0425]: cannot find value `x` in this scope").is_empty());
+    }
+
+    #[test]
+    fn a_failure_is_the_bases_only_when_the_base_fails_the_same_way() {
+        let flaky = "test computer::probe ... FAILED\nfailures:\n    computer::probe\ntest result: FAILED. 9 passed; 1 failed; finished in 4.10s";
+        // The same test, in another time: the base's.
+        assert!(same_failure(&ran(Some(101), flaky), &ran(Some(101), &flaky.replace("4.10s", "3.92s"))));
+        // Fewer failures than the base has: still the base's. More: one is the result's.
+        let two = "test computer::probe ... FAILED\ntest computer::list ... FAILED";
+        assert!(same_failure(&ran(Some(101), flaky), &ran(Some(101), two)));
+        assert!(!same_failure(&ran(Some(101), two), &ran(Some(101), flaky)));
+        // The base passes, did not finish, or another command ran there: never the base's.
+        assert!(!same_failure(&ran(Some(101), flaky), &ran(Some(0), "")));
+        assert!(!same_failure(&ran(Some(101), flaky), &ran(None, flaky)));
+        assert!(!same_failure(&ran(Some(101), flaky), &CommandRun { run: "cargo t other".into(), ..ran(Some(101), flaky) }));
+        // No test named (a build that does not compile): the same exit and the same last lines, numbers aside.
+        let build = "Compiling app v0.1.0\nerror[E0425]: cannot find value `x` in this scope\n --> src/lib.rs:12:5\nerror: could not compile `app` (lib) due to 1 previous error";
+        assert!(same_failure(&ran(Some(101), build), &ran(Some(101), &build.replace("12:5", "14:5"))));
+        assert!(!same_failure(&ran(Some(101), build), &ran(Some(101), &build.replace("`x`", "`y`"))));
+        assert!(!same_failure(&ran(Some(101), build), &ran(Some(1), build)));
+        assert!(!same_failure(&ran(Some(101), build), &ran(Some(101), flaky)), "a base that names a failing test failed otherwise");
+    }
+
+    #[test]
+    fn a_verifier_asked_again_reads_its_old_reply_as_no_answer_for_a_while() {
+        let mut verifier = Verifier { session: None, model: "sonnet".into(), effort: None, verdict: None, evidence: Vec::new(), problem: None, waiting: None, tokens: None, asked_again: 1, ask_again: None, unread: Some(Verifier::digest("Looks right.")), asked_at: Some(1_000) };
+        assert!(verifier.not_yet(Some("Looks right."), 2_000));
+        assert!(verifier.not_yet(None, 2_000), "a stop read before the ask's turn opened");
+        assert!(!verifier.not_yet(Some("Still looks right."), 2_000));
+        assert!(!verifier.not_yet(Some("Looks right."), 1_000 + ASK_AGAIN_GRACE_MS), "past the grace, that is its answer");
+        verifier.asked_at = None;
+        assert!(!verifier.not_yet(Some("Looks right."), 2_000));
+        let prompt = ask_again_prompt("The reply has no `terminalx-verdict` block.", 2);
+        assert!(prompt.contains("This is ask 2 of 2.") && prompt.contains("Do not start the review again") && verdict(&format!("Pass.\n\n```{VERDICT_FENCE}\n{{\"verdict\": \"pass\", \"evidence\": []}}\n```")).is_ok());
+    }
     use crate::orchestration::{plan, routing};
     use serde_json::json;
     use std::path::Path;
@@ -933,7 +1147,7 @@ mod tests {
         write(&checkout.cwd, "src/store/typed.rs", "pub struct Typed;\n");
         commit(&checkout.cwd, "typed store");
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "test -f src/store/typed.rs"}, {"type": "command", "run": "grep -q Typed src/store/typed.rs"}]}));
-        let checked = gates(&checkout, &piece, None, QUICK);
+        let checked = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&checked), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true)]);
         assert_eq!(checked.facts.files, ["src/store/mod.rs", "src/store/typed.rs"]);
         // Two lines added and one changed in one file, one line in the other.
@@ -956,7 +1170,7 @@ mod tests {
         // 150 lines on one stream, the reason on the other, then a command that must not run.
         let noisy = "i=1; while [ $i -le 150 ]; do echo \"line $i\"; i=$((i+1)); done; echo 'test store::reads_default ... FAILED' >&2; exit 3";
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "true"}, {"type": "command", "run": noisy}, {"type": "command", "run": "touch never-run"}]}));
-        let checked = gates(&checkout, &piece, Some("touch project-check-ran"), QUICK);
+        let checked = gates(&checkout, &piece, Some("touch project-check-ran"), QUICK, &Known::default());
         assert_eq!(names(&checked), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, false)]);
         let gate = &checked.gates[2];
         assert_eq!(gate.commands.len(), 2, "the command after the one that failed did not run");
@@ -980,7 +1194,7 @@ mod tests {
     fn a_command_that_does_not_finish_is_stopped_and_fails() {
         let (_dir, checkout) = worktree();
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "sleep 30"}]}));
-        let checked = gates(&checkout, &piece, None, Duration::from_millis(300));
+        let checked = gates(&checkout, &piece, None, Duration::from_millis(300), &Known::default());
         let ran = &checked.gates[2].commands[0];
         assert_eq!((ran.exit_code, ran.passed), (None, false));
         assert!(ran.millis < 10_000, "stopped at the deadline, not after the sleep: {} ms", ran.millis);
@@ -997,7 +1211,7 @@ mod tests {
         // Left dirty too: the branch gate would fail, and the command would leave a file, if either ran.
         write(&checkout.cwd, "scratch.txt", "left behind\n");
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "touch command-ran"}]}));
-        let checked = gates(&checkout, &piece, None, QUICK);
+        let checked = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&checked), [(Gate::Scope, false)]);
         let detail = checked.gates[0].detail.as_deref().unwrap();
         assert!(detail.starts_with("The change touches files outside what the piece owns:\n- docs/notes.md\n- src/session.rs\nThis piece owns only: src/store/**."), "{detail}");
@@ -1006,7 +1220,7 @@ mod tests {
 
         // A piece that owns nothing may change nothing.
         let reader = super::tests::piece(json!({"kind": "search", "owns": []}));
-        let checked = gates(&checkout, &reader, None, QUICK);
+        let checked = gates(&checkout, &reader, None, QUICK, &Known::default());
         assert!(checked.gates[0].detail.as_deref().unwrap().contains("This piece owns no files: it may change nothing."));
     }
 
@@ -1016,7 +1230,7 @@ mod tests {
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "touch command-ran"}]}));
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
         // Changed, and not committed.
-        let dirty = gates(&checkout, &piece, None, QUICK);
+        let dirty = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&dirty), [(Gate::Scope, true), (Gate::Branch, false)]);
         let detail = dirty.gates[1].detail.as_deref().unwrap();
         assert!(detail.starts_with("The work is not all committed.") && detail.contains(" M src/store/mod.rs"), "{detail}");
@@ -1028,11 +1242,11 @@ mod tests {
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    9\n}\n");
         commit(&checkout.cwd, "nine");
         // On the lead's branch now: not where the piece's result belongs.
-        let elsewhere = gates(&checkout, &piece, None, QUICK);
+        let elsewhere = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(elsewhere.gates.last().map(|gate| (gate.gate, gate.passed)), Some((Gate::Branch, false)));
         assert!(elsewhere.gates.last().unwrap().detail.as_deref().unwrap().starts_with("The worktree is on `lead`, not on the piece's branch `piece`."));
         git(&checkout.cwd, &["checkout", "-q", "piece"]);
-        let conflicted = gates(&checkout, &piece, None, QUICK);
+        let conflicted = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&conflicted), [(Gate::Scope, true), (Gate::Branch, false)]);
         let detail = conflicted.gates[1].detail.as_deref().unwrap();
         assert!(detail.starts_with("Merging the lead's branch `lead` into this result conflicts in:\n- src/store/mod.rs\n"), "{detail}");
@@ -1046,7 +1260,7 @@ mod tests {
         write(&checkout.cwd, "src/session.rs", "fn session() { let _ = 2; }\n");
         commit(&checkout.cwd, "session");
         git(&checkout.cwd, &["checkout", "-q", "piece"]);
-        let merged = gates(&checkout, &piece, None, QUICK);
+        let merged = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&merged), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true)]);
         // What the lead's branch changed since is not the piece's change.
         assert_eq!(merged.facts.files, ["src/store/mod.rs"]);
@@ -1057,18 +1271,18 @@ mod tests {
         let (_dir, checkout) = worktree();
         let piece = piece(json!({}));
         // Nothing changed: only the piece's own command.
-        let unchanged = gates(&checkout, &piece, Some("echo checked >> ../project-check.log; true"), QUICK);
+        let unchanged = gates(&checkout, &piece, Some("echo checked >> ../project-check.log; true"), QUICK, &Known::default());
         assert_eq!(unchanged.gates[2].commands.iter().map(|ran| (ran.run.as_str(), ran.project)).collect::<Vec<_>>(), [("true", false)]);
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
         commit(&checkout.cwd, "two");
-        let changed = gates(&checkout, &piece, Some("test -d src/store"), QUICK);
+        let changed = gates(&checkout, &piece, Some("test -d src/store"), QUICK, &Known::default());
         assert_eq!(changed.gates[2].commands.iter().map(|ran| (ran.run.as_str(), ran.project, ran.passed)).collect::<Vec<_>>(), [("true", false, true), ("test -d src/store", true, true)]);
         // A project check that fails fails the piece, and says whose check it was.
-        let failing = gates(&checkout, &piece, Some("echo 'lint: 2 errors'; exit 1"), QUICK);
+        let failing = gates(&checkout, &piece, Some("echo 'lint: 2 errors'; exit 1"), QUICK, &Known::default());
         assert_eq!(names(&failing).last(), Some(&(Gate::Commands, false)));
         assert!(failing.gates[2].detail.as_deref().unwrap().starts_with("The project's check `echo 'lint: 2 errors'; exit 1` exited 1."), "{:?}", failing.gates[2].detail);
         // The plan's own command is not run a second time as the project's.
-        let same = gates(&checkout, &piece, Some("true"), QUICK);
+        let same = gates(&checkout, &piece, Some("true"), QUICK, &Known::default());
         assert_eq!(same.gates[2].commands.len(), 1);
     }
 
@@ -1077,7 +1291,7 @@ mod tests {
         let (_dir, checkout) = worktree();
         write(&checkout.cwd, "src/store/api_keys.rs", "pub fn rotate() {}\n");
         commit(&checkout.cwd, "keys");
-        let checked = gates(&checkout, &piece(json!({})), None, QUICK);
+        let checked = gates(&checkout, &piece(json!({})), None, QUICK, &Known::default());
         assert!(checked.passed());
         assert_eq!(checked.facts.security_areas, crate::issue_pipeline::categories::security_areas(&["src/store/api_keys.rs".to_string()], &checked.diff));
         assert!(!checked.facts.security_areas.is_empty(), "a file of API keys is a security area");
@@ -1115,7 +1329,7 @@ mod tests {
     }
 
     fn checked_with(diff: String, files: &[&str], lines: u32) -> Checked {
-        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, changes: Vec::new(), security_areas: Vec::new(), commands_not_run: false, commit: None }, diff, base: "lead".into() }
+        Checked { gates: vec![GateResult::passed(Gate::Scope, "2 files changed, all within what the piece owns."), GateResult::passed(Gate::Branch, "Committed, clean, and `lead` merges into it without conflicts."), GateResult { gate: Gate::Commands, passed: true, detail: Some("1 command exited 0.".into()), commands: vec![CommandRun { run: "cargo t store::settings".into(), project: false, exit_code: Some(0), passed: true, millis: 37_400, output: None, on_base: None }] }], facts: Facts { files: files.iter().map(|file| file.to_string()).collect(), changed_lines: lines, changes: Vec::new(), security_areas: Vec::new(), commands_not_run: false, commit: None }, diff, base: "lead".into() }
     }
 
     #[test]
@@ -1188,7 +1402,7 @@ mod tests {
         commit(&checkout.cwd, "two");
         let checked_commit = git(&checkout.cwd, &["rev-parse", "HEAD"]).trim().to_string();
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "echo late > src/store/late.rs && git add -A && git commit -q -m late"}]}));
-        let checked = gates(&checkout, &piece, None, QUICK);
+        let checked = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&checked), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true), (Gate::Branch, false)]);
         assert!(checked.gates[3].detail.as_deref().unwrap().starts_with(&format!("The branch moved while its commands ran: they were run on {}", &checked_commit[..12])), "{:?}", checked.gates[3].detail);
         assert_eq!(checked.facts.commit, Some(checked_commit));
@@ -1221,7 +1435,7 @@ mod tests {
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
         commit(&checkout.cwd, "two");
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "touch command-ran"}]}));
-        let checked = gates(&checkout, &piece, Some("touch project-check-ran"), QUICK);
+        let checked = gates(&checkout, &piece, Some("touch project-check-ran"), QUICK, &Known::default());
         assert_eq!(names(&checked), [(Gate::Scope, true), (Gate::Branch, true)]);
         assert!(checked.facts.commands_not_run && checked.passed());
         assert!(!checkout.cwd.join("command-ran").exists() && !checkout.cwd.join("project-check-ran").exists());
@@ -1235,7 +1449,7 @@ mod tests {
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    2\n}\n");
         commit(&checkout.cwd, "two");
         for run in ["touch ran-first && git push origin HEAD", "sh -c 'npm publish'"] {
-            let checked = gates(&checkout, &piece(json!({"doneChecks": [{"type": "command", "run": "true"}]})), Some(run), QUICK);
+            let checked = gates(&checkout, &piece(json!({"doneChecks": [{"type": "command", "run": "true"}]})), Some(run), QUICK, &Known::default());
             let ran = checked.gates[2].commands.last().unwrap();
             assert_eq!((ran.project, ran.passed, ran.exit_code), (true, false, None));
             assert!(ran.output.as_deref().unwrap().starts_with("TerminalX did not run it: `"), "{:?}", ran.output);
@@ -1251,47 +1465,47 @@ mod tests {
         commit(&checkout.cwd, "two");
         // A check that writes into the worktree: a snapshot, and a tracked file changed.
         let piece = piece(json!({"doneChecks": [{"type": "command", "run": "echo snap > snapshot.new && echo '// touched' >> src/session.rs"}]}));
-        assert!(gates(&checkout, &piece, None, QUICK).passed());
+        assert!(gates(&checkout, &piece, None, QUICK, &Known::default()).passed());
         assert!(!git(&checkout.cwd, &["status", "--porcelain"]).is_empty());
         // Again on the same commit (the app stopped mid-check, or a verifier's branch check restarted it).
-        let again = gates(&checkout, &piece, None, QUICK);
+        let again = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&again), [(Gate::Scope, true), (Gate::Branch, true), (Gate::Commands, true)]);
         // Only what the commands left is passed over. The worker, back in the same worktree, edits
         // without committing and reports the same commit again: that is still uncommitted work.
         write(&checkout.cwd, "src/store/mod.rs", "pub fn read() -> u8 {\n    3\n}\n");
-        let edited = gates(&checkout, &piece, None, QUICK);
+        let edited = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&edited), [(Gate::Scope, true), (Gate::Branch, false)]);
         let detail = edited.gates[1].detail.as_deref().unwrap();
         assert!(detail.contains(" M src/store/mod.rs") && !detail.contains("snapshot.new") && !detail.contains("src/session.rs"), "{detail}");
         git(&checkout.cwd, &["checkout", "-q", "--", "src/store/mod.rs"]);
-        assert!(gates(&checkout, &piece, None, QUICK).passed(), "and a third run still knows what the first left");
+        assert!(gates(&checkout, &piece, None, QUICK, &Known::default()).passed(), "and a third run still knows what the first left");
         // Commands that never finished (the app stopped mid-check) account for nothing: the worktree
         // must be clean as for a first check, whatever they may have left.
         let mark = checkout.marks.as_ref().unwrap().read_dir().unwrap().next().unwrap().unwrap().path();
         let finished = std::fs::read_to_string(&mark).unwrap();
         std::fs::write(&mark, format!("{}\nrunning\n", git(&checkout.cwd, &["rev-parse", "HEAD"]).trim())).unwrap();
-        assert_eq!(names(&gates(&checkout, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
+        assert_eq!(names(&gates(&checkout, &piece, None, QUICK, &Known::default())), [(Gate::Scope, true), (Gate::Branch, false)]);
         // When the worker works or reports again the note is taken away: what is there from then on is its own.
         std::fs::write(&mark, &finished).unwrap();
-        assert!(gates(&checkout, &piece, None, QUICK).passed());
+        assert!(gates(&checkout, &piece, None, QUICK, &Known::default()).passed());
         forget_clean(checkout.marks.as_ref().unwrap(), &checkout.cwd);
-        assert_eq!(names(&gates(&checkout, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
+        assert_eq!(names(&gates(&checkout, &piece, None, QUICK, &Known::default())), [(Gate::Scope, true), (Gate::Branch, false)]);
         // And a check that ends after it was taken away writes none: its commands ran while the worker was back at work.
         git(&checkout.cwd, &["checkout", "-q", "--", "src/session.rs"]);
         std::fs::remove_file(checkout.cwd.join("snapshot.new")).unwrap();
         let slow = super::tests::piece(json!({"doneChecks": [{"type": "command", "run": format!("rm -f '{}' && echo late > late.new", mark.display())}]}));
-        assert!(gates(&checkout, &slow, None, QUICK).passed());
+        assert!(gates(&checkout, &slow, None, QUICK, &Known::default()).passed());
         assert!(!mark.exists(), "no note is written over one that was taken away");
         std::fs::remove_file(checkout.cwd.join("late.new")).unwrap();
         assert_eq!(git(&checkout.cwd, &["status", "--porcelain"]), "");
-        assert!(gates(&checkout, &piece, None, QUICK).passed());
+        assert!(gates(&checkout, &piece, None, QUICK, &Known::default()).passed());
         // The note of it is the app's own, outside the checkout: nothing a worker writes in its worktree stands in for it.
         assert!(checkout.marks.as_ref().unwrap().read_dir().unwrap().count() == 1 && !checkout.marks.as_ref().unwrap().starts_with(&checkout.cwd));
         let unmarked = Checkout { marks: None, ..checkout.clone() };
-        assert_eq!(names(&gates(&unmarked, &piece, None, QUICK)), [(Gate::Scope, true), (Gate::Branch, false)]);
+        assert_eq!(names(&gates(&unmarked, &piece, None, QUICK, &Known::default())), [(Gate::Scope, true), (Gate::Branch, false)]);
         // A new commit is a new result: its worktree must be clean again.
         git(&checkout.cwd, &["commit", "-q", "--allow-empty", "-m", "three"]);
-        let moved = gates(&checkout, &piece, None, QUICK);
+        let moved = gates(&checkout, &piece, None, QUICK, &Known::default());
         assert_eq!(names(&moved), [(Gate::Scope, true), (Gate::Branch, false)]);
         assert!(moved.gates[1].detail.as_deref().unwrap().contains("snapshot.new"));
     }
@@ -1332,8 +1546,8 @@ mod tests {
         let verifiers = said.iter().enumerate().map(|(index, said)| {
             let session = Some(SessionRef { session_id: "w1".into(), tab_id: Some(format!("v{index}")) });
             match said {
-                Some((decision, evidence)) => Verifier { session, model: "sonnet".into(), effort: None, verdict: Some(*decision), evidence: if evidence.is_empty() { Vec::new() } else { vec![evidence.to_string()] }, problem: None, waiting: None, tokens: None },
-                None => Verifier { session, model: "sonnet".into(), effort: None, verdict: None, evidence: Vec::new(), problem: Some("The reply has no `terminalx-verdict` block.".into()), waiting: None, tokens: None },
+                Some((decision, evidence)) => Verifier { session, model: "sonnet".into(), effort: None, verdict: Some(*decision), evidence: if evidence.is_empty() { Vec::new() } else { vec![evidence.to_string()] }, problem: None, waiting: None, tokens: None, asked_again: 0, ask_again: None, unread: None, asked_at: None },
+                None => Verifier { session, model: "sonnet".into(), effort: None, verdict: None, evidence: Vec::new(), problem: Some("The reply has no `terminalx-verdict` block.".into()), waiting: None, tokens: None, asked_again: 0, ask_again: None, unread: None, asked_at: None },
             }
         }).collect();
         Review { reasons: Vec::new(), voters, threshold, verifiers, prompt_chars: 0 }

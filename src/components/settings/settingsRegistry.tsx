@@ -415,6 +415,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.triesPerPiece" },
   }),
   defineSetting({
+    id: "orchestrator.leadTakesOver", section: "orchestrator", title: "Let the lead take over blocked pieces",
+    description: "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
+    searchTerms: ["orchestrator", "lead", "take over", "takeover", "blocked", "piece", "finish", "approval", "approved", "person", "ask"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.leadTakesOver" },
+  }),
+  defineSetting({
     id: "orchestrator.budgetDollars", section: "orchestrator", title: "Budget per run, API key",
     description: "Dollars spent on an API key; then the run pauses and asks you.",
     searchTerms: ["orchestrator", "budget", "dollars", "cost", "spend", "api key", "money", "no limit", "unlimited"], scope: "user",
@@ -449,6 +455,30 @@ export const SETTINGS_ROWS = [
     description: "Changed lines. A result this size or smaller whose commands pass is accepted without a model; a larger one is read by a verifier session first. From 1 to 100000.",
     searchTerms: ["orchestrator", "verify", "verifier", "review", "diff", "lines", "threshold", "check", "tokens"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reviewDiffLines" },
+  }),
+  defineSetting({
+    id: "orchestrator.reaskVerifier", section: "orchestrator", title: "Ask the reviewer again when it gives no verdict",
+    description: "Up to 2 more times, in its own conversation. If there is still none, the lead reviews the diff itself. Off, the piece waits for you.",
+    searchTerms: ["orchestrator", "verifier", "reviewer", "verdict", "ask again", "retry", "review", "lead", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.reaskVerifier" },
+  }),
+  defineSetting({
+    id: "orchestrator.acceptBaseFailures", section: "orchestrator", title: "Accept a piece whose only failing check also fails on the base",
+    description: "A failing check is run again on the commit the piece started from. If it fails there the same way, it is not the piece's: no try is used, and a verifier reads the result for what the check did not get to run. Off, it counts against the piece's tries.",
+    searchTerms: ["orchestrator", "base", "flaky", "failing", "test", "check", "done check", "main", "accept", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.acceptBaseFailures" },
+  }),
+  defineSetting({
+    id: "orchestrator.leadWhenLadderEnds", section: "orchestrator", title: "Hand a piece to the lead when no higher model is left",
+    description: "The lead finishes it in its own checkout, with the last worker's report. Off, the piece waits for you.",
+    searchTerms: ["orchestrator", "ladder", "model", "tier", "escalate", "take over", "lead", "blocked", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.leadWhenLadderEnds" },
+  }),
+  defineSetting({
+    id: "orchestrator.resumeAfterReset", section: "orchestrator", title: "Go on when the usage window resets",
+    description: "A run that used its points of a window goes on by itself once the window resets. Pause when a window passes still stops every run. Off, it waits for you.",
+    searchTerms: ["orchestrator", "budget", "points", "window", "reset", "resume", "subscription", "pause", "automatic", "decide"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.resumeAfterReset" },
   }),
   defineSetting({
     id: "orchestrator.routing", section: "orchestrator", title: "Starting model by kind of piece",

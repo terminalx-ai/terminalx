@@ -48,6 +48,13 @@ pub enum Action {
     Http { generation: u64, tag: String, method: String, url: String, body: Option<Value> },
 }
 
+/// Native-only action plus its original operation. No serde or wire authority.
+/// Legacy adapter constructors keep using Action until their writer integration.
+pub(crate) struct ProviderAction {
+    pub context: crate::session::provider_authority::OperationContext,
+    pub action: Action,
+}
+
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,
 /// their hook plumbing and their transcript, and in the stand-in they draw
 /// for a long paste.

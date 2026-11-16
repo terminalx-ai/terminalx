@@ -1,9 +1,8 @@
+import type { DesktopInboxEvent } from "./api";
+
 /** Exact accepted PRO-125 shapes; native transport lives on the shared contracts branch. */
 export interface ReadMarker { sessionId: string; readAt: string }
-export type InboxEvent =
-  | { id: string; type: "workspace.share-removed"; workspaceId: string; createdAt: string }
-  | { id: string; type: "workspace.share-added" | "workspace.reassigned"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
-  | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: ReadMarker; createdAt: string };
+export type InboxEvent = DesktopInboxEvent;
 export interface InboxPage { cursor: string; events: InboxEvent[]; hasMore?: boolean }
 export interface InboxTransport {
   phase2DesktopContractsAvailable(): Promise<boolean>;

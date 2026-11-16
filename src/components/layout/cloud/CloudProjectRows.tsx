@@ -1,3 +1,4 @@
+import { PresenceFaces } from "@/components/dashboard/TeamOverview";
 import { CloudWorkspaceAttention } from "@/components/cloud/CloudWorkspaceAttention";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { ManualStatusMenu } from "@/components/session/ManualStatus";
@@ -238,6 +239,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
           )}
         </button>
         {only && <ShareBadge you={only.item.workspace.you} sharedWith={only.item.workspace.sharedWith} className={yieldsToRowActions} />}
+        {only && <PresenceFaces orgId={project.orgId} workspaceId={only.item.workspace.id} othersOnly compact />}
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
           {/* A member is not shown a + that could only be refused; the menu's "New session" says why. */}
           {mayStart === true && (
@@ -473,6 +475,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
         >
           <GitBranch className="size-3.5 shrink-0 text-faint" />
           <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspace.name}</span>
+          <PresenceFaces orgId={workspace.orgId} workspaceId={workspace.id} othersOnly compact />
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
           <span className={cn("flex shrink-0 items-center gap-1 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
             <span aria-hidden className={cn("size-1.5 rounded-full", DOT[activity.tone])} />

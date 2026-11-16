@@ -5479,6 +5479,18 @@ pub struct OrchestratorPatch {
     /// The effort escalation stops at; `null` follows the app, for a project.
     #[serde(default, deserialize_with = "given")]
     effort_ceiling: Option<Option<String>>,
+    /// What a run decides on its own (#1004); app-wide only.
+    #[serde(default)]
+    reask_verifier: Option<bool>,
+    #[serde(default)]
+    accept_base_failures: Option<bool>,
+    #[serde(default)]
+    lead_when_ladder_ends: Option<bool>,
+    #[serde(default)]
+    resume_after_reset: Option<bool>,
+    /// Whether the run's own lead may take a blocked piece over; app-wide only.
+    #[serde(default)]
+    lead_takes_over: Option<bool>,
     /// Cells of the routing table, by kind and then by agent. A cell given
     /// as `null` loses its override: it follows the app again (for a
     /// project) or the built-in table (for the app).
@@ -5573,6 +5585,9 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if patch.workers_per_run.is_some() || patch.workers_at_once.is_some() || patch.stall_minutes.is_some() {
                 return Err("Worker limits and the stall time are set for the whole app, not for one project.".into());
             }
+            if patch.reask_verifier.is_some() || patch.accept_base_failures.is_some() || patch.lead_when_ladder_ends.is_some() || patch.resume_after_reset.is_some() || patch.lead_takes_over.is_some() {
+                return Err("What a run decides on its own, and whether the lead takes blocked pieces over, are set for the whole app, not for one project.".into());
+            }
             if let Some(value) = patch.review_diff_lines { project.review_diff_lines = value; }
             if let Some(value) = patch.tries_per_piece { project.tries_per_piece = value; }
             if let Some(value) = patch.effort_ceiling { project.effort_ceiling = value; }
@@ -5596,6 +5611,11 @@ pub fn set_orchestrator_settings(patch: OrchestratorPatch) -> CmdResult<crate::s
             if let Some(value) = patch.review_diff_lines { orchestrator.review_diff_lines = value.ok_or("Say over how many changed lines a result is read by a verifier.")?; }
             if let Some(value) = patch.tries_per_piece { orchestrator.tries_per_piece = value.ok_or("Say how many tries a piece gets.")?; }
             if let Some(value) = patch.effort_ceiling { orchestrator.effort_ceiling = value.ok_or("Say how high escalation may raise the effort.")?; }
+            if let Some(value) = patch.reask_verifier { orchestrator.reask_verifier = value; }
+            if let Some(value) = patch.accept_base_failures { orchestrator.accept_base_failures = value; }
+            if let Some(value) = patch.lead_when_ladder_ends { orchestrator.lead_when_ladder_ends = value; }
+            if let Some(value) = patch.resume_after_reset { orchestrator.resume_after_reset = value; }
+            if let Some(value) = patch.lead_takes_over { orchestrator.lead_takes_over = value; }
         }
     }
     store::settings::save(&settings).map_err(err)?;

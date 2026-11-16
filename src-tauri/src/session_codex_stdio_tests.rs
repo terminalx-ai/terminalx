@@ -17,6 +17,7 @@ thread_local! {
     static HANDOFF_FENCED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static EMPTY_WRITE: std::cell::Cell<Option<std::io::ErrorKind>> = const { std::cell::Cell::new(None) };
     static AFTER_EMPTY_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_PARTIAL_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static WRITTEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 pub(super) fn try_write_stdin(child: &crate::harness::host::LiveChild, bytes: &[u8]) -> std::io::Result<usize> {
@@ -24,6 +25,10 @@ pub(super) fn try_write_stdin(child: &crate::harness::host::LiveChild, bytes: &[
     let result = child.try_write_stdin(bytes);
     if let Ok(count) = result { WRITTEN.with(|written| written.set(written.get() + count)); }
     result
+}
+pub(super) fn after_partial_write() {
+    let hook = AFTER_PARTIAL_WRITE.with(|hook| hook.borrow_mut().take());
+    if let Some(run) = hook { run(); }
 }
 pub(super) fn after_empty_write() {
     let hook = AFTER_EMPTY_WRITE.with(|hook| hook.borrow_mut().take());
@@ -107,7 +112,7 @@ fn empty_write_retries_revalidate_mobile_and_shared_authority() {
             }
             EMPTY_WRITE.with(|hook| hook.set(Some(kind)));
             WRITTEN.with(|written| written.set(0));
-            manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None).unwrap();
+            manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None).unwrap();
             let written = WRITTEN.with(|written| written.get());
             let events: Vec<AgentEvent> = store::read_lines(&store::log_path("stdio-owner", "tab").unwrap()).unwrap();
             let usable = matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(engine) if !engine.blocked && !engine.exited);
@@ -526,7 +531,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     let (writer, runtime) = (manager.clone(), Arc::downgrade(&rt));
     HANDOFF_FENCED.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
         assert!(crate::issue_pipeline::admission::held("stdio-owner", "tab"));
-        writer.write_codex_frame(&runtime, &launch, interrupt, None, None).expect("a completed turn's queued interrupt must retire without failing its owner");
+        writer.write_codex_frame(&runtime, &launch, interrupt, None, None, None).expect("a completed turn's queued interrupt must retire without failing its owner");
     })));
     let refused = manager.codex_stdio_to_terminal("stdio-owner", "tab").unwrap_err();
     assert!(refused.to_string().contains("saved conversation is not available"), "{refused:#}");
@@ -1860,7 +1865,7 @@ fn child_fixture() {
         drop(rt);
         // There is deliberately no child: a stale, entirely unsent control
         // must retire before touching stdin and without failing the owner.
-        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, None, None).unwrap();
+        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, None, None, None).unwrap();
         assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(e) if !e.blocked));
         return;
     }
@@ -1889,7 +1894,7 @@ fn child_fixture() {
         let (blocked, full_pipe) = mpsc::channel();
         let writer = std::thread::spawn(move || {
             FULL_PIPE.with(|hook| *hook.borrow_mut() = Some(blocked));
-            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame, None, None)).unwrap();
+            finished.send(writer_manager.write_codex_frame(&runtime, &launch, frame, None, None, None)).unwrap();
         });
         full_pipe.recv_timeout(WAIT).unwrap();
         // Buffered stdout and Stop must both advance despite the full stdin.
@@ -1903,12 +1908,16 @@ fn child_fixture() {
             engine.handle(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}}"#).unwrap();
             drop(rt);
             let error = result.recv_timeout(WAIT).unwrap().unwrap_err();
-            assert!(error.to_string().contains("partial write"), "expired partial frame must fail, got {error:#}");
+            assert!(error.is::<PartialFrameRetired>(), "expired partial frame must retire its exact child: {error:#}");
+            assert!(error.chain().any(|cause| cause.to_string().contains("expired after a partial write")),
+                "expired partial frame must preserve its cause, got {error:#}");
             manager.stop("stdio-owner", "tab").unwrap();
         } else {
             manager.stop("stdio-owner", "tab").unwrap();
             let error = result.recv_timeout(WAIT).unwrap().unwrap_err();
-            assert!(error.to_string().contains("cancelled"), "expected Stop cancellation, got {error:#}");
+            assert!(error.is::<PartialFrameRetired>(), "Stop must retire the partial frame without replay: {error:#}");
+            assert!(error.chain().any(|cause| cause.to_string().contains("Codex launch was cancelled")),
+                "expected original Stop cancellation cause, got {error:#}");
         }
         writer.join().unwrap();
         assert!(child.terminal_receipt().is_some());
@@ -2241,7 +2250,7 @@ fn phase2_collaboration_v2_native_writer_rechecks_original_policy_and_mode_after
         })));
         EMPTY_WRITE.with(|hook| hook.set(Some(std::io::ErrorKind::WouldBlock)));
         WRITTEN.with(|written| written.set(0));
-        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None).unwrap();
+        manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None).unwrap();
         assert_eq!(WRITTEN.with(|written| written.get()), 0, "{change}: unsafe native input reached child stdin");
         manager.stop("stdio-owner", "tab").unwrap();
     }
@@ -2354,7 +2363,179 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
         let snapshot: Snapshot=serde_json::from_value(json!({"v":2,"revision":"1","members":[{"userId":"guest","role":"driver","canApprove":false,"writeSource":"everyone"}]})).unwrap();policy.install_v2(snapshot).unwrap();
         let permit=Permit::new(policy.clone(),"guest",policy.runtime_policy.stamp("guest"),Action::Drive);
         let authority=Authority { collaboration:Some(permit),session:"stdio-owner".into(),tab:"tab".into(),seq:Some(seq),mobile:None,shared:None,privacy:None };
-        WRITTEN.with(|written| written.set(0)); manager.write_codex_frame(&Arc::downgrade(&rt_arc),&launch,frame,Some(authority),None).unwrap();
+        WRITTEN.with(|written| written.set(0)); manager.write_codex_frame(&Arc::downgrade(&rt_arc),&launch,frame,Some(authority),None,None).unwrap();
         assert_eq!(WRITTEN.with(|written| written.get())>0,allowed,"raw report {report}");manager.stop("stdio-owner","tab").unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_only_original_launch() {
+    use crate::remote::collab::v2::{Snapshot, Permit, Action};
+    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "valid", "explicit-valid", "implicit-valid", "v1"] {
+        let _home = store::temp_home();
+        let root = store::root().unwrap();
+        let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
+            "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":index::now()}]})).unwrap();
+        index::save(&[entry]).unwrap();
+        let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)), Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+        let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+        let report = json!({"approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[]},"approvalsReviewer":"user"});
+        let (engine, mut frame) = phase2_reported_engine(&root, report.clone());
+        // Keep real request validity, enlarging only its JSON payload beyond
+        // the OS pipe capacity. The real child reads nothing until released.
+        let mut value: Value = serde_json::from_str(&frame.line).unwrap();
+        value["params"]["input"][0]["text"] = json!("x".repeat(2 * 1024 * 1024));
+        frame.line = value.to_string();
+        let expected = format!("{}\n", frame.line);
+        let launch = engine.launch.clone();
+        let mut rt = rt_arc.lock().unwrap();
+        rt.engine = Engine::CodexStdio(engine);
+        let seq = manager.publish(&mut rt, Payload::UserMessage { author: None, text: "original".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+        rt.stdio_followups.active = Some((seq, false));
+        rt.open_turn();
+        let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+        let args = vec!["-c".into(), "while [ ! -f release ]; do sleep 0.01; done; cat > received".into()];
+        let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
+        rt.child_pid = Some(child.pid); rt.child = Some(child.clone()); drop(rt);
+        let rpc = crate::remote::server::WorkspaceRpc::new(&root, 1, Arc::new(crate::sink::BroadcastSink::new(64)), manager.terminals.clone(), Some(manager.clone())).unwrap();
+        let policy = rpc.collab.clone();
+        let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
+        let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"driver","canApprove":false,"writeSource":source}]})).unwrap() };
+        if change != "v1" { policy.install_v2(snapshot("1", if change == "explicit-valid" { "explicit" } else if change == "implicit-valid" { "implicit" } else { "everyone" })).unwrap(); }
+        let (peer, _notifications) = crate::remote::server::Peer::for_user("partial".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
+        let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Drive).for_peer(&peer);
+        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None, privacy: None };
+        let attached_peer = peer.clone();
+        let (writer, runtime, work) = (manager.clone(), rt_arc.clone(), root.clone());
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false)); let saw_wait = observed.clone();
+        let at_wait = Arc::new(std::sync::atomic::AtomicUsize::new(0)); let paused = at_wait.clone();
+        let queued_local = Arc::new(Mutex::new(None)); let saved_local = queued_local.clone();
+        let successor = Arc::new(Mutex::new(None)); let saved_successor = successor.clone();
+        AFTER_PARTIAL_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            paused.store(WRITTEN.with(|written| written.get()), std::sync::atomic::Ordering::SeqCst);
+            assert!(paused.load(std::sync::atomic::Ordering::SeqCst) > 0);
+            saw_wait.store(true, std::sync::atomic::Ordering::SeqCst);
+            // This callback runs only AFTER real WouldBlock and after guards
+            // drop. A second thread must complete replacement while no child
+            // is draining stdin; a timeout catches retained admission.
+            let release_path = work.join("release");
+            let (done, completed) = mpsc::channel();
+            let updater = std::thread::spawn(move || {
+                match change {
+                    "revision" => {
+                        let mut rt = runtime.lock().unwrap();
+                        let local = writer.publish(&mut rt, Payload::UserMessage { author: None, text: "queued local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+                        rt.queued.push(PendingMessage { message: QueuedMessage { id: local.to_string(), text: "queued local".into(), images: vec![] }, privacy: None, seq: local });
+                        *saved_local.lock().unwrap() = Some(local);
+                        drop(rt);
+                        policy.install_v2(snapshot("2", "everyone")).unwrap();
+                    }
+                    "source" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
+                    "generation" => { let _guard = policy.enter_admission(); policy.runtime_policy.set_generation(2); }
+                    "attachment" => rpc.disconnect(&attached_peer),
+                    "pending" => { index::update_tab("stdio-owner", "tab", |tab| { tab.requested_permission_mode = Some("bypassPermissions".into()); Ok(()) }).unwrap(); }
+                    "mode" => { if let Engine::CodexStdio(engine) = &mut runtime.lock().unwrap().engine { engine.actual_stance = None; } }
+                    "stop" => writer.stop("stdio-owner", "tab").unwrap(),
+                    "replacement" => {
+                        let (engine, _) = phase2_reported_engine(&work, report);
+                        let next_launch = engine.launch.clone();
+                        let mut rt = runtime.lock().unwrap();
+                        rt.engine = Engine::CodexStdio(engine);
+                        let next_seq = writer.publish(&mut rt, Payload::UserMessage { author: None, text: "independent local".into(), images: vec![], files: vec![], baseline: None, queued: true, cwd: None }, None).seq;
+                        rt.stdio_followups.active = Some((next_seq, false)); rt.open_turn();
+                        let sink = Arc::new(StdioSink { manager: writer.clone(), rt: runtime.clone(), launch: next_launch, startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+                        let args = vec!["-c".into(), "cat > replacement".into()];
+                        let next = writer.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &work, env: &[], unset: &[] }, sink).unwrap();
+                        rt.child_pid = Some(next.pid); rt.child = Some(next.clone());
+                        *saved_successor.lock().unwrap() = Some((next, next_seq));
+                    }
+                    "valid" | "explicit-valid" | "implicit-valid" | "v1" => {
+                        if matches!(change, "explicit-valid" | "implicit-valid") {
+                            index::update_tab("stdio-owner", "tab", |tab| { tab.requested_permission_mode = Some("bypassPermissions".into()); Ok(()) }).unwrap();
+                            if let Engine::CodexStdio(engine) = &mut runtime.lock().unwrap().engine { engine.actual_stance = None; }
+                        }
+                        // Still acquire admission on another thread while the
+                        // pipe is full, even for the positive control.
+                        let _guard = policy.enter_admission();
+                    }
+                    _ => unreachable!(),
+                }
+                done.send(()).unwrap();
+            });
+            completed.recv_timeout(WAIT).expect("policy/Stop/replacement blocked behind partial frame admission");
+            updater.join().unwrap();
+            if matches!(change, "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
+        })));
+        WRITTEN.with(|written| written.set(0));
+        let result = manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None);
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst), "{change}: no real partial+WouldBlock");
+        let written = WRITTEN.with(|written| written.get());
+        if matches!(change, "valid" | "explicit-valid" | "implicit-valid" | "v1") {
+            result.unwrap();
+            assert_eq!(written, expected.len());
+            child.close_stdin();
+            let until = Instant::now() + WAIT;
+            while std::fs::read(root.join("received")).unwrap_or_default().len() != expected.len() {
+                assert!(Instant::now() < until, "child did not receive complete frame"); std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(std::fs::read(root.join("received")).unwrap(), expected.as_bytes());
+        } else {
+            assert!(result.is_err(), "{change}");
+            assert!(written > 0 && written < expected.len(), "{change}");
+            assert_eq!(written, at_wait.load(std::sync::atomic::Ordering::SeqCst), "{change}: remainder after revocation");
+            if !matches!(change, "replacement" | "stop") {
+                assert!(matches!(&rt_arc.lock().unwrap().engine, Engine::CodexStdio(engine) if engine.blocked), "{change}: original engine was not retired");
+            }
+            if change == "revision" {
+                assert_eq!(manager.queued("stdio-owner", "tab").len(), 1);
+                let local = queued_local.lock().unwrap().unwrap();
+                assert!(!store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == local)));
+            }
+            assert!(child.try_write_stdin(b"must stay closed").is_err());
+            if change == "replacement" {
+                let successor = successor.lock().unwrap(); let (next, next_seq) = successor.as_ref().unwrap();
+                let rt = rt_arc.lock().unwrap();
+                assert!(rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, next)));
+                assert!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.blocked && !engine.exited));
+                assert_eq!(rt.stdio_followups.active, Some((*next_seq, false)), "old failure consumed newer local request");
+                assert!(!store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().iter().any(|event| matches!(event.payload, Payload::PromptWithdrawn { prompt_seq, .. } if prompt_seq == *next_seq)));
+                assert!(std::fs::read(root.join("replacement")).unwrap_or_default().is_empty());
+            }
+        }
+        manager.stop("stdio-owner", "tab").unwrap();
+    }
+}
+
+#[test]
+fn phase2_collaboration_v2_native_queued_local_frame_does_not_borrow_dispatcher_tls() {
+    use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+    let _home = store::temp_home(); let root = store::root().unwrap();
+    let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
+        "tabs":[{"id":"tab","harness":"codex","transport":"experimentalCodexStdio","permissionMode":"auto","created":index::now()}]})).unwrap();
+    index::save(&[entry]).unwrap();
+    let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)), Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    let rt_arc = manager.runtime("stdio-owner", "tab").unwrap();
+    let (engine, frame) = phase2_reported_engine(&root, json!({"approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[]}}));
+    let launch = engine.launch.clone();
+    let mut rt = rt_arc.lock().unwrap(); rt.engine = Engine::CodexStdio(engine);
+    let (tx, rx) = mpsc::sync_channel(4); rt.stdio_writer = Some(tx);
+    let policy = Arc::new(Collaboration::new()); let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
+    let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"driver","canApprove":false,"writeSource":source}]})).unwrap() };
+    policy.install_v2(snapshot("1", "everyone")).unwrap();
+    let stale = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Drive);
+    policy.install_v2(snapshot("2", "explicit")).unwrap();
+    // A local successor dispatched inside a stale remote completion must
+    // stay local at the actual queue boundary, despite nonempty caller TLS.
+    stale.with(|| manager.apply_codex_actions(&mut rt, vec![StdioAction::Write(frame)])).unwrap();
+    let delivery = rx.recv_timeout(WAIT).unwrap();
+    assert!(delivery.sender.is_none() && delivery.collaboration.is_none());
+    let sink = Arc::new(StdioSink { manager: manager.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
+    let args = vec!["-c".into(), "cat > received".into()];
+    let child = manager.host.spawn(&rt.key(), SpawnSpec { program: Path::new("/bin/sh"), args: &args, cwd: &root, env: &[], unset: &[] }, sink).unwrap();
+    rt.child_pid = Some(child.pid); rt.child = Some(child); drop(rt);
+    WRITTEN.with(|written| written.set(0));
+    stale.with(|| manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, delivery.line, delivery.sender, delivery.privacy, delivery.collaboration)).unwrap();
+    assert!(WRITTEN.with(|written| written.get()) > 0, "physical writer borrowed unrelated stale TLS");
+    manager.stop("stdio-owner", "tab").unwrap();
 }

@@ -183,6 +183,10 @@
     "orchestrator": {
       "additionalProperties": false,
       "properties": {
+        "acceptBaseFailures": {
+          "description": "A failing check is run again on the commit the piece started from. If it fails there the same way, it is not the piece's: no try is used, and a verifier reads the result for what the check did not get to run. Off, it counts against the piece's tries.",
+          "type": "boolean"
+        },
         "budgetDollars": {
           "anyOf": [
             {
@@ -223,6 +227,14 @@
             "max"
           ],
           "type": "string"
+        },
+        "leadTakesOver": {
+          "description": "The run's lead may finish a blocked piece in its own checkout without asking, also in a plan you approved. Leaving a piece out and widening its files stay yours. Off, it asks you.",
+          "type": "boolean"
+        },
+        "leadWhenLadderEnds": {
+          "description": "The lead finishes it in its own checkout, with the last worker's report. Off, the piece waits for you.",
+          "type": "boolean"
         },
         "pieceLimit": {
           "description": "A larger plan is refused, and the lead is told the limit.",
@@ -330,8 +342,16 @@
           "description": "Override for this repository whether a run asks first, how many pieces it may have, the mode its workers run in, the model each kind of piece starts on, and its budget.",
           "type": "object"
         },
+        "reaskVerifier": {
+          "description": "Up to 2 more times, in its own conversation. If there is still none, the lead reviews the diff itself. Off, the piece waits for you.",
+          "type": "boolean"
+        },
         "requireApproval": {
           "description": "Show the plan and wait for Approve. Off, the workers start at once.",
+          "type": "boolean"
+        },
+        "resumeAfterReset": {
+          "description": "A run that used its points of a window goes on by itself once the window resets. Pause when a window passes still stops every run. Off, it waits for you.",
           "type": "boolean"
         },
         "reviewDiffLines": {
