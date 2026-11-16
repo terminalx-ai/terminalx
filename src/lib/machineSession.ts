@@ -248,6 +248,8 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     () => ({
       ...cloudBackend,
       readOnlyReason: cloudBackend.readOnlyReason ?? sendBlocked,
+      // The composer keeps a prompt typed meanwhile; the person sends it once the machine is back.
+      sendHeldReason: sendBlocked,
       caps: { ...cloudBackend.caps, write: cloudBackend.caps.write && !sendBlocked },
       // A tab's agent signs in on the machine, from its page there (21.09), not through an organization's logins.
       signIn: (tabId: string) => {

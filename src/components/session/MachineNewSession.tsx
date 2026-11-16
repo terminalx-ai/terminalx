@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Check, ChevronDown, Cloud, Folder, GitBranch, Laptop, Plus } from "@/icons";
 import { WorkspaceRpcError, type MachineProject, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { RemoteGit, runtimeResources, type RemoteBranch } from "@terminalx/portable/workspaceGit";
+import { RemoteGit, type RemoteBranch } from "@terminalx/portable/workspaceGit";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { MachineIcon, machineViewStatus } from "@/components/machines/connectionStatus";
+import { MachineMessage } from "@/components/machines/MachineMessage";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import { useMachineCatalog } from "@/lib/machineCatalog";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
@@ -12,7 +13,7 @@ import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { machineFeatureMessage } from "@/lib/machineFeatures";
 import { useClientState } from "@/lib/machineUpdate";
 import { agentSignIn, machineWhereRow, pickMachineProject, type MachineAgentReport } from "@/lib/machineNewSession";
-import { runningSessionCount } from "@/components/machines/useRunningSessions";
+import { runningSessionCount, useFreeMemory } from "@/components/machines/useRunningSessions";
 import { errorMessage, type Issue } from "@/lib/api";
 import { runNewSessionHere, startCloudSessionIn, startMachineSessionIn, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
@@ -45,6 +46,12 @@ export interface MachineDraft {
   projects: MachineProject[];
   /** The project the session is created in. */
   project: MachineProject | null;
+  /**
+   * The project the form was on here, when the machine has none of that name
+   * (21.09: "terminalx isn't a project on dev-server yet"); null otherwise,
+   * and while its projects are not read yet.
+   */
+  missingProject: string | null;
   /** Its agents (`runtime.agents`); null until read. */
   agents: MachineAgentReport[] | null;
   /** This Mac's agent list narrowed to the ones the machine has, so the pickers name what it can run. */
@@ -85,6 +92,7 @@ export function useMachineDraft(localHarnesses: HarnessInfo[], wantedName: strin
       client,
       projects,
       project: pickMachineProject(projects, preset.projectId, wantedName),
+      missingProject: !preset.projectId && wantedName && entry && !projects.some((project) => project.name === wantedName) ? wantedName : null,
       agents,
       harnesses,
     };
@@ -112,23 +120,6 @@ function WhereItem({ icon, name, detail, chosen, disabled, onSelect, testId }: {
       {chosen && <Check className="mr-1 mt-[3px] !size-3.5 shrink-0 !text-accent" aria-hidden />}
     </DropdownMenuItem>
   );
-}
-
-/** Free memory on a connected machine, read once when its row is drawn (`lifecycle.resources`). */
-function useFreeMemory(client: WorkspaceRpcClient | null): number | null {
-  const [free, setFree] = useState<number | null>(null);
-  useEffect(() => {
-    setFree(null);
-    if (!client) return;
-    let live = true;
-    runtimeResources(client)
-      .then((resources) => live && setFree(resources?.memory?.availableBytes ?? null))
-      .catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, [client]);
-  return free;
 }
 
 /** One paired machine in the menu: its route, its running sessions and free memory, or why it cannot be chosen. */
@@ -411,6 +402,8 @@ export function MachineFormLine({ draft, agentId, agentName }: { draft: MachineD
     );
   }
   return (
+    <>
+    {draft.missingProject && <MachineMessage kind="projectMissing" name={draft.name} project={draft.missingProject} className="mt-2" />}
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint" data-testid="machine-form-line">
       <span>Runs on {draft.name}; this Mac can sleep</span>
       <span className="ml-auto flex items-center gap-x-4">
@@ -433,6 +426,7 @@ export function MachineFormLine({ draft, agentId, agentName }: { draft: MachineD
         )}
       </span>
     </div>
+    </>
   );
 }
 
