@@ -239,7 +239,7 @@ fn the_keychain_entry_of_a_directory_is_never_the_persons_own() {
 
 /// A stand-in `claude` for `auth login` / `auth logout`: it signs in as
 /// `$FAKE_EMAIL` into `$CLAUDE_CONFIG_DIR` and records what it was given.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 fn fake_claude(dir: &Path, email: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join(format!("claude-{}", email.replace('@', "-at-")));
@@ -260,6 +260,7 @@ esac
     script
 }
 
+#[cfg(feature = "desktop")]
 fn settle(store: &Store<'_>, attempt: &str, sign_out: &dyn SignOut, local: &Identity) -> Finished {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -271,7 +272,7 @@ fn settle(store: &Store<'_>, attempt: &str, sign_out: &dyn SignOut, local: &Iden
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn adding_runs_the_agents_own_login_in_a_new_directory_and_the_same_email_is_not_added_twice() {
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +337,7 @@ fn adding_runs_the_agents_own_login_in_a_new_directory_and_the_same_email_is_not
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn signing_in_again_runs_in_that_accounts_directory_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -368,11 +369,12 @@ fn signing_in_again_runs_in_that_accounts_directory_only() {
     assert!(login::start_in(&store, Agent::Claude, Some(LOCAL), &programs, Some(&person), &sign_out).is_err(), "This Mac's login signs in with the agent itself");
 }
 
+#[cfg(feature = "desktop")]
 fn identity_of(root: &Path, id: &str) -> Identity {
     crate::agent_local_login::identity_in("claude", &account_dir(root, Agent::Claude, id))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "desktop"))]
 #[test]
 fn removing_an_account_signs_it_out_first_and_deletes_only_its_own_files() {
     let dir = tempfile::tempdir().unwrap();
