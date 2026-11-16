@@ -35,6 +35,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "appearance.usageDisplay",
   "appearance.usageRefresh",
   "machines.allowOperating",
+  "machines.thisMac",
   "machines.pairingCode",
   "machines.yours",
   "machines.computers",

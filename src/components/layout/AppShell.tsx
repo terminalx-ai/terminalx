@@ -30,8 +30,9 @@ import { cn } from "@/lib/cn";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
 import { SessionView } from "@/components/session/SessionView";
+import { MachineSessionHost } from "@/components/machines/MachineSessionHost";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
-import { isCloudKey, isMachineKey } from "@/types/target";
+import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
@@ -56,6 +57,9 @@ import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialo
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
+import { updateMachineSession } from "@/lib/machineCatalog";
+import { setMachineDashboardEnabled } from "@/lib/machineDashboard";
+import { startAppUpdateResponder } from "@/lib/machineUpdate";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
@@ -264,7 +268,9 @@ export function AppShell() {
   useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
   useShortcut("session.archive", () => {
     const id = getSessionStore().selectedSessionId;
-    if (id && !isCloudKey(id)) void archiveSession(id, true).catch(() => {});
+    // A cloud session is archived from its workspace; a machine session on its machine (PRO-346).
+    if (id && isLocalKey(id)) void archiveSession(id, true).catch(() => {});
+    else if (machineKeyKind(id) === "session") void updateMachineSession(id as string, { archived: true }).catch(() => {});
   });
   useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
@@ -289,11 +295,19 @@ export function AppShell() {
   const experimentalSwitches = useExperimentalSettings();
   const machinesOn = experimentalSwitches?.machines === true;
   useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
+  // Machine sessions join the overview, the dock badge, notices and attention stepping only while it is on (PRO-346).
+  useEffect(() => setMachineDashboardEnabled(machinesOn), [machinesOn]);
+  // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
+  useEffect(() => {
+    void startAppUpdateResponder();
+  }, []);
   // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
   const selectedWorkspace = store.selectedCloudWorkspace ?? null;
   const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
   const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
+  // A session on a paired machine (`machine:<m>:<p>:<s>`, PRO-346) opens as a session (PRO-347) while Machines is on.
+  const machineSession = machinesOn && machineKeyKind(store.selectedSessionId) === "session" ? store.selectedSessionId : null;
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
@@ -389,7 +403,14 @@ export function AppShell() {
             )}
             </PanelPresence>
 
-            {cloudKey ? (
+            {machineSession ? (
+              // A machine's session in the same SessionView as a local or cloud one (PRO-347, 21.08).
+              <main className={MAIN}>
+                <ErrorBoundary key={machineSession} label="the session">
+                  <MachineSessionHost sessionKey={machineSession} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+              </main>
+            ) : cloudKey ? (
               <main className={MAIN}>
                 <ErrorBoundary key={cloudKey} label="the session">
                   <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />

@@ -154,6 +154,11 @@ function measure(page) {
     out.tabs = [...dialog.querySelectorAll('[role="tab"]')].map((tab) => [tab.textContent, tab.getAttribute("aria-selected")]);
     out.wrappedButtons = [...dialog.querySelectorAll("button")].filter(shown).filter((button) => getComputedStyle(button).whiteSpace !== "nowrap" && button.textContent.trim()).map((button) => button.textContent.trim());
     const transcript = dialog.querySelector('[data-testid="server-transcript"]');
+    // PRO-398: the code field shows the whole code and has no focus ring while locked; the waiting spinner is the arc; the footer's commands are mono.
+    const code = dialog.querySelector("textarea#machine-code");
+    out.code = code ? { whole: code.scrollHeight <= code.clientHeight + 1, readOnly: code.readOnly, focused: document.activeElement === code, ring: getComputedStyle(code).boxShadow } : null;
+    out.waitingMark = [...dialog.querySelectorAll('[role="status"]')].find((el) => el.textContent.includes("Waiting for approval"))?.querySelector("[data-icon]")?.getAttribute("data-icon") ?? null;
+    out.noteCommands = [...dialog.querySelectorAll('[data-testid="headless-agents-note"] code')].map((el) => [el.textContent, getComputedStyle(el).fontFamily === mono]);
     out.transcript = transcript ? [...transcript.children].map((line) => line.textContent.replace(/\u00a0/g, " ").trimEnd()) : null;
     const panel = dialog.querySelector("[data-terminal]");
     out.panelInside = panel ? panel.getBoundingClientRect().right <= r.right + 0.5 && panel.scrollWidth <= panel.clientWidth + 1 : null;
@@ -251,11 +256,44 @@ try {
       await settings.getByRole("button", { name: "Create pairing code" }).click();
       await settings.getByTestId("machine-pairing-code").waitFor();
       await take("settings");
-      const section = await settings.getByTestId("machines-settings").evaluate((el) => ({ text: el.textContent, scroll: el.scrollWidth <= el.clientWidth + 1 }));
+      const section = await settings.getByTestId("machines-settings").evaluate((el) => {
+        const style = (node) => (node ? { size: parseFloat(getComputedStyle(node).fontSize), weight: Number(getComputedStyle(node).fontWeight), height: node.getBoundingClientRect().height } : null);
+        const button = (label) => [...el.querySelectorAll("button")].find((node) => node.textContent.trim() === label) ?? null;
+        const leaf = (label) => [...el.querySelectorAll("h3, div")].find((node) => node.children.length === 0 && node.textContent === label) ?? null;
+        const add = button("Add a machine");
+        const create = button("Create a new code");
+        const yours = leaf("Your machines");
+        const after = (first, second) => !!first && !!second && !!(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+        return {
+          text: el.textContent,
+          scroll: el.scrollWidth <= el.clientWidth + 1,
+          headings: ["Your machines", "Computers that can operate this Mac"].map((label) => style(leaf(label))),
+          add: add ? { ...style(add), primary: add.classList.contains("bg-primary"), plus: !!add.querySelector('[data-icon="plus"]'), besideHeading: !!yours && Math.abs(add.getBoundingClientRect().bottom - yours.parentElement.getBoundingClientRect().bottom) <= 1 } : null,
+          codeAfterYours: after(el.querySelector('[aria-label="Your machines"]') ?? yours, create),
+          revoke: style(button("Revoke")),
+          macIcons: [...el.querySelectorAll('[data-testid="paired-machine"], [data-testid="operating-computer"]')]
+            .filter((row) => !/build-box/.test(row.textContent))
+            .map((row) => row.querySelector("[data-icon]")?.getAttribute("data-icon") ?? ""),
+          small: [...el.querySelectorAll("*")]
+            .filter((node) => node.closest('[data-setting-id="machines.yours"], [data-setting-id="machines.computers"]'))
+            .filter((node) => [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim()) && parseFloat(getComputedStyle(node).fontSize) < 12)
+            .map((node) => node.textContent.trim().slice(0, 30)),
+        };
+      });
       failed += report(`${name}, Settings → Machines`, {
         "operate switch, code, Add a machine and the computers show": ["Let other computers operate this Mac", "works once", "Add a machine", "Computers that can operate this Mac", "Paresh’s MacBook Air", "build-box"].every((said) => section.text.includes(said)),
         "the section does not scroll sideways": section.scroll,
         "revoking does not claim to remove all access": !/removes all access|all of its access/.test(section.text),
+        // PRO-398, screen 21.02.
+        "the intro and the Your machines line are the screen's": section.text.includes("Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.")
+          && section.text.includes("Computers this Mac can operate. Each one appears as a section in the sidebar."),
+        "section headings are 14 px semibold": section.headings.every((heading) => heading?.size === 14 && heading.weight === 600),
+        // The screen draws it h-8: 32 px, the app's default button.
+        "Add a machine is the primary button with +, 32 px tall, beside Your machines": !!section.add && section.add.primary && section.add.plus && section.add.besideHeading && Math.abs(section.add.height - 32) <= 0.5,
+        "no pairing code sits between the switch and Your machines": section.codeAfterYours,
+        "a Mac has the monitor icon": section.macIcons.length > 0 && section.macIcons.every((icon) => icon === "monitor"),
+        "Revoke is 13 px": section.revoke?.size === 13,
+        "no text in the two lists is under 12 px": section.small.length === 0,
       }, section);
 
       // 21.04, each state.
@@ -288,6 +326,9 @@ try {
         ...commonChecks(m),
         "the machine card, fingerprint, steps and expiry show": ["Mac mini", "macOS 26.1 · TerminalX 0.2.33", "Mac mini shows the same one", "Compare this fingerprint with the one on Mac mini.", "Choose Allow there."].every((said) => m.text.includes(said)) && /The code expires in \d:\d\d and works once\./.test(m.text),
         "the relay hint follows owner decision 4": m.text.includes("TerminalX Relay is used once this Mac and Mac mini are signed in to the same account"),
+        "the code field shows the whole code": m.code?.whole === true,
+        "the locked code field is read-only with no focus ring": m.code?.readOnly === true && m.code.ring === "none",
+        "the waiting spinner is the arc": m.waitingMark === "loader-circle",
       }, m);
       await dialog.getByRole("radio", { name: "Only this network" }).click();
       await page.evaluate(() => window.__MACHINES__.pair({ paired: true }));
@@ -354,9 +395,10 @@ try {
           && m.steps.length === 3 && m.stepNumbers.join() === "1,2,3" && m.steps[0].startsWith("Install TerminalX on the server") && m.steps[1].startsWith("Create a pairing code there") && m.steps[2].startsWith("Paste the code here"),
         "the install command and what it supports": m.steps[0]?.includes(INSTALL_COMMAND) && m.steps[0]?.includes("Linux x64 and arm64, and macOS. Installs a user service that starts at boot."),
         "the On the server panel: placeholders for the server, this Mac by name": JSON.stringify(m.transcript) === JSON.stringify([
-          "$ terminalx-serve pair", "TerminalX <version> · <OS> <arch>", "Name        <server name>", "Machine ID  <machine ID>", "", "Pairing code, valid for 5:00, works once:", "txm2.…", "",
+          "you@server ~ $ terminalx-serve pair", "TerminalX <version> · <OS> <arch>", "Name        <server name>", "Machine ID  <machine ID>", "", "Pairing code, valid for 5:00, works once:", "txm2.…", "",
           "Waiting for a computer to pair…", "✓Paresh’s MacBook Pro asks to operate this server. Fingerprint <fingerprint>.", "Allow? [y/N]"]),
         "the panel fits the dialog": m.panelInside === true,
+        "the footer's agent commands are mono": JSON.stringify(m.noteCommands) === JSON.stringify([["claude", true], ["codex login --device-auth", true]]),
         "the footer note, Cancel, and Continue off": m.text.includes("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.") && (await dialog.getByRole("button", { name: "Continue" }).isDisabled()),
       }, m);
       await dialog.getByRole("button", { name: "Copy install command" }).click();

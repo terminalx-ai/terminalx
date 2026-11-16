@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { Loader2, Lock, Monitor, Server } from "@/icons";
+import { LoaderCircle, Lock } from "@/icons";
 import { cn } from "@/lib/cn";
-import type { MachineConnectionState, MachineRouteUsed, PairedMachine } from "@/types/machines";
+import type { MachineConnectionState, MachineRouteKind, MachineRouteUsed, PairedMachine } from "@/types/machines";
+import { PlatformIcon } from "./machineText";
 
 /**
  * How a machine's connection reads (screens 21.01, 21.08 and 21.09): a short
  * label beside its name, the hover text of its header chip, and a colour.
  */
-export type MachineTone = "connecting" | "connected" | "reconnecting" | "offline" | "warning" | "removed" | "idle";
+export type MachineTone = "connecting" | "connected" | "reconnecting" | "offline" | "warning" | "updating" | "removed" | "idle";
 
 export function machineTone(state: MachineConnectionState): MachineTone {
   switch (state.state) {
@@ -22,6 +23,8 @@ export function machineTone(state: MachineConnectionState): MachineTone {
       return "offline";
     case "needsUpdate":
       return "warning";
+    case "updating":
+      return "updating";
     case "accessRemoved":
       return "removed";
     default:
@@ -29,9 +32,9 @@ export function machineTone(state: MachineConnectionState): MachineTone {
   }
 }
 
-/** "14:02" in the reader's locale. */
+/** "14:02": the 24-hour clock the screens use (21.09), whatever the reader's locale. */
 export function clockTime(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
 /** The machine's last contact: the offline state's, else the record's. */
@@ -60,6 +63,8 @@ export function machineStateLabel(state: MachineConnectionState, machine: Paired
     }
     case "needsUpdate":
       return "Needs update";
+    case "updating":
+      return "Updating";
     case "accessRemoved":
       return "Access removed";
     default:
@@ -86,12 +91,58 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
     case "offline":
       return "Sessions there keep running";
     case "needsUpdate":
-      return "Runs an older TerminalX";
+      return state.side === "thisMac" ? "Runs a newer TerminalX than this Mac" : "Runs an older TerminalX";
+    case "updating":
+      return "Back in under a minute";
     case "accessRemoved":
       return "Revoked on that Mac";
     default:
       return "Not connected from this Mac";
   }
+}
+
+const ROUTE_WORDS: Record<MachineRouteKind, string> = { lan: "this network", tailscale: "Tailscale", relay: "Relay" };
+
+/**
+ * The routes a reconnect is trying, in the order it tries them (21.09):
+ * "Trying this network, then Relay." Each route keeps its own name, as
+ * {@link routeText} does: Tailscale is not "this network".
+ */
+function tryingText(trying: MachineRouteKind[]): string | null {
+  const routes = (["lan", "tailscale", "relay"] as const).filter((kind) => trying.includes(kind)).map((kind) => ROUTE_WORDS[kind]);
+  if (routes.length === 0) return null;
+  return `Trying ${routes.length === 1 ? routes[0] : `${routes.slice(0, -1).join(", ")}, then ${routes[routes.length - 1]}`}.`;
+}
+
+/**
+ * What a machine's view says under its tabs while it is not connected (21.09).
+ * It reads the machine's own state, so it agrees with the chip and the
+ * sidebar: an offline machine is offline, with no transport retry counter.
+ */
+export function machineViewStatus(state: MachineConnectionState, name: string): string {
+  switch (state.state) {
+    case "reconnecting":
+      return [`Reconnecting to ${name}.`, tryingText(state.trying), "The agent keeps working there."].filter(Boolean).join(" ");
+    case "offline":
+      return `${name} isn’t reachable. Sessions there keep running.`;
+    case "needsUpdate":
+      // PRO-354: the newer side says which computer updates.
+      return state.side === "thisMac" ? `${name} runs a newer TerminalX than this Mac. Update this Mac to connect.` : `${name} runs an older TerminalX. Update TerminalX there to connect.`;
+    case "updating":
+      return `${name} is updating. Back in under a minute. Sessions there keep running.`;
+    case "accessRemoved":
+      return `${name} no longer allows this Mac. Pair again to reconnect.`;
+    case "idle":
+      return `Not connected to ${name}.`;
+    default:
+      // Connecting, or the link is up and the view's own channel is opening.
+      return `Connecting to ${name}…`;
+  }
+}
+
+/** {@link machineViewStatus} in a word or two, for a tab's connection chip: the chip's own label, or Connecting while the view's channel opens. */
+export function machineViewLabel(state: MachineConnectionState): string {
+  return state.state === "direct" || state.state === "relay" ? "Connecting" : machineStateLabel(state, null);
 }
 
 /** "Direct over Tailscale", "Direct on this network" or "Through TerminalX Relay". */
@@ -113,6 +164,7 @@ const TONE_TEXT: Record<MachineTone, string> = {
   reconnecting: "text-warning",
   offline: "text-faint",
   warning: "text-warning",
+  updating: "text-info",
   removed: "text-destructive",
   idle: "text-faint",
 };
@@ -123,6 +175,7 @@ const TONE_DOT: Record<MachineTone, string> = {
   reconnecting: "bg-warning",
   offline: "bg-faint",
   warning: "bg-warning",
+  updating: "bg-info",
   removed: "bg-destructive",
   idle: "bg-faint",
 };
@@ -132,20 +185,18 @@ export function toneText(tone: MachineTone): string {
   return TONE_TEXT[tone];
 }
 
-/** A dot for a settled state, a spinner while it is reaching the machine (21.09). */
+/** A dot for a settled state, an arc spinner in the state's colour while it is reaching the machine (21.09). */
 export function MachineStateMark({ state, className }: { state: MachineConnectionState; className?: string }) {
   const tone = machineTone(state);
-  if (tone === "connecting" || tone === "reconnecting") {
-    return <Loader2 className={cn("size-3 shrink-0 animate-spin", TONE_TEXT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
+  if (tone === "connecting" || tone === "reconnecting" || tone === "updating") {
+    return <LoaderCircle className={cn("size-3 shrink-0 animate-spin", TONE_TEXT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
   }
   return <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[tone], className)} aria-hidden data-testid="machine-state-mark" data-tone={tone} />;
 }
 
-/** A monitor for a Mac, a server for Linux (21.01). */
+/** A monitor for a Mac, a server for Linux (21.01): the same icon Settings draws. */
 export function MachineIcon({ machine, className }: { machine: PairedMachine | null; className?: string }) {
-  const linux = machine?.os.family === "linux";
-  const Icon = linux ? Server : Monitor;
-  return <Icon className={className} aria-hidden data-icon={linux ? "server" : "monitor"} />;
+  return <PlatformIcon platform={machine?.os.family ?? null} className={className} />;
 }
 
 /** Re-render every second while `on`, so "Lost it N seconds ago" counts. */
@@ -189,7 +240,7 @@ export function MachineChip({ machine, name, state }: { machine: PairedMachine |
 export function MachineLocation({ machine, name, state }: { machine: PairedMachine | null; name: string; state: MachineConnectionState }) {
   const path = machinePathText(state);
   return (
-    <div className="flex h-8 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on this Mac.`}>
+    <div className="flex h-9 min-w-0 shrink-0 items-center gap-2 border-b border-hairline px-3 text-[12px]" data-testid="machine-location" title={`Commands run on ${name}, not on this Mac.`}>
       <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="shrink-0 font-medium text-foreground">Runs on {name}</span>
       <span className="min-w-0 truncate text-faint">· its files, terminals and git; this Mac can sleep</span>

@@ -4,6 +4,7 @@ import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQu
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
+import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
@@ -15,6 +16,7 @@ import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, SignInNotice, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
@@ -894,6 +896,8 @@ export function TabView({
             if (viewError) clearTabViewError(tab.id);
             setDraft(tab.id, v);
             if (collabLive && v) presenceTyping(shared!.key);
+            // Not switched to another account while the person types here (#981).
+            if (local && v) noteComposerTyping(session.id, tab.id);
           }}
           onSend={send}
           sentAfter={sentAfter}
@@ -1043,7 +1047,14 @@ export function TabView({
         </Button>
       </div>
     )}
-    {signIn && <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />}
+    {signIn && (signIn.machine ? (
+      // A machine's agent signs in there, from its page (21.09), not through an organization's logins.
+      <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="machine-agent-sign-in">
+        {cloudAgentLabel(tab.harness)} isn't signed in on {signIn.machine}. Sign in from its page.
+      </p>
+    ) : (
+      <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />
+    ))}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
     {earlier.length > 0 && (
       // The tab held other conversations before this one: another agent was run in its terminal, or the same one on something else.

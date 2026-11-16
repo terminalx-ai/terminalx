@@ -226,6 +226,7 @@ async function deliver(hostId: string, event: HostNotification): Promise<void> {
       title: shown.title,
       body: shown.body,
       ...(shown.subtitle ? { subtitle: shown.subtitle } : {}),
+      threadIdentifier: shown.thread,
       sound: shown.sound ? "default" : false,
       data: { ...shown.data, silent: !shown.sound },
     },

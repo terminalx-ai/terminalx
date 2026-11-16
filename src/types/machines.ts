@@ -29,6 +29,14 @@ export interface PairedComputer {
   approvedAt: number;
   lastSeenAt: number | null;
   connected: boolean;
+  /**
+   * `host_id` of the computer's client key (base64url, 16 characters), the
+   * source of the short key label on its row. Null for a record with no
+   * client key; absent from a runtime older than PRO-349.
+   */
+  keyId?: string | null;
+  /** How it is connected now; null when it is not. Absent from a runtime older than PRO-349. */
+  route?: MachineRouteKind | null;
 }
 
 /** A computer asking to operate this machine, waiting for Allow. */
@@ -110,6 +118,8 @@ export interface PairedMachine {
   lastRoute?: MachineRouteUsed | null;
   /** Where this computer reaches the machine through the relay; null without a relay credential. Never the credential. */
   relay?: MachineRelayInfo | null;
+  /** From `machine.describe`: a desktop app (true) or headless (false); absent until it was connected (PRO-349). */
+  hasWindow?: boolean;
 }
 
 /**
@@ -143,7 +153,8 @@ export interface MachineRelayInfo {
  * - `relay`: connected through TerminalX Relay.
  * - `reconnecting`: a link was lost less than 30 s ago.
  * - `offline`: no route answered for 30 s; it keeps retrying every 10 s at most.
- * - `needsUpdate`: the runtime does not serve `machine/1`.
+ * - `needsUpdate`: the runtime does not serve `machine/1`, or refused `rpc.hello` with `update_required`; `side` says which computer updates.
+ * - `updating`: the machine is handing its runtime over to a new version; a lost link is expected (PRO-354).
  * - `accessRemoved`: the machine refused this computer's credential; nothing retries until "Try again".
  *
  * `localNetworkDenied`: macOS refused Local Network access to a `lan` address.
@@ -170,8 +181,23 @@ export type MachineConnectionState =
       localNetworkDenied?: boolean;
     }
   | { state: "offline"; lastSeenAt: number | null; retryInMs: number; localNetworkDenied?: boolean }
-  | { state: "needsUpdate"; version: string | null }
+  | {
+      state: "needsUpdate";
+      /** The machine's TerminalX version, when known. */
+      version: string | null;
+      /** Which side must update (PRO-354): the older machine, or this Mac when the machine is newer. */
+      side: MachineUpdateSide;
+    }
+  | {
+      /** The machine is handing its runtime over to a new version (PRO-354): "Updating · Back in under a minute". */
+      state: "updating";
+      version: string;
+      since: number;
+    }
   | { state: "accessRemoved" };
+
+/** Which computer must update for the two to work together. */
+export type MachineUpdateSide = "machine" | "thisMac";
 
 /** `machines_connections` and the `machines_connection_changed` event. */
 export interface MachineConnectionView {
@@ -210,3 +236,79 @@ export type MachinePairResult =
 export const MACHINE_CODE_PREFIX = "txm2." as const;
 export const MACHINE_CODE_TTL_MS = 5 * 60_000;
 export const MACHINE_APPROVAL_TTL_MS = 120_000;
+
+/**
+ * Pairing through the account (PRO-349, docs/MACHINES.md "Pairing through the
+ * account"; terminalx-server `machine-relay-access.md`).
+ *
+ * `machines_account_list`: the account's computers from `GET /v1/account/hosts`.
+ * - `signedIn: false`: no TerminalX account is signed in on this Mac.
+ * - `installation`: this Mac's client installation as the account sees it;
+ *   only `ready` lists machines.
+ */
+export type MachineAccountDirectory =
+  | { signedIn: false }
+  | { signedIn: true; installation: "ready" | "approvalRequired" | "reauthenticationRequired"; machines: AccountMachine[] };
+
+/**
+ * One computer on the account.
+ * - `online`: `reachability: "live"` and it advertises `machine-operating.v1`.
+ * - `offline`: it advertises it, but is not live; `lastSeenAt` says when it was.
+ * - `notAvailable`: "Let other computers operate this Mac" is off there (no `machine-operating.v1`).
+ */
+export interface AccountMachine {
+  hostId: string;
+  /** `host_id(hostPublicKeyB64)`: equals a paired machine's `machineId`. */
+  machineId: string;
+  name: string;
+  /** `macos`, `linux`, … as the account lists it; null when it does not say. */
+  platform: string | null;
+  environmentKind: "native" | "wsl" | "ssh" | null;
+  availability: "online" | "offline" | "notAvailable";
+  lastSeenAt: number | null;
+  /** This Mac's own entry: listed, never connectable. */
+  thisMac: boolean;
+  /** Already in Your machines. */
+  paired: boolean;
+}
+
+/**
+ * `machines_account_request { hostId }`: asks the machine for a one-time grant
+ * and waits (up to five minutes) for its sealed offer. The answer is the
+ * offer as a `txm2.` code, so the dialog inspects it, shows the fingerprint
+ * and pairs it exactly as a pasted code. Refused with a string starting
+ * `machine_offline:`, `machine_not_available:`, `grant_refused:`,
+ * `grant_expired:`, `key_mismatch:`, `not_signed_in:` or `cancelled:`.
+ */
+export interface MachineAccountOffer {
+  code: string;
+  grantRequestId: string;
+}
+
+/**
+ * Versions and updates (PRO-354, docs/MACHINES.md "Versions and updates").
+ * `machine.updateStatus`, `machine.update` and `machine.updateChanged`
+ * (`machine/3`) answer this shape.
+ */
+
+export type {
+  MachineUpdateBlocker,
+  MachineUpdateMethod,
+  MachineUpdateOtherComputer,
+  MachineUpdatePhase,
+  MachineUpdateProgress,
+  MachineUpdateRequest,
+  MachineUpdateStatus,
+} from "@terminalx/portable/workspace";
+
+/** The window's report of its own updater run (`machines_app_update_report`). */
+export interface MachineAppUpdateReport {
+  phase: "checking" | "downloading" | "installing" | "restarting" | "upToDate" | "failed";
+  step?: string | null;
+  message?: string | null;
+  /** The version this Mac's updater found: the machine's `available` for an app machine. */
+  available?: string | null;
+}
+
+/** The Tauri event the desktop re-emits when another computer asks this Mac's app to update. */
+export const MACHINES_APP_UPDATE_REQUESTED_EVENT = "machines_app_update_requested" as const;

@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage, invoke } from "@/lib/api";
 import type {
   InspectedMachineCode,
+  MachineAccountDirectory,
+  MachineAccountOffer,
   MachineConnectionView,
   MachineHostView,
   MachinePairingCode,
@@ -32,6 +34,16 @@ export const machinesApi = {
   connections: () => invoke<MachineConnectionView[]>("machines_connections"),
   /** "Try again": nudge the machine's owner; after access removed or needs update it tries once more. */
   reconnect: (machineId: string) => invoke<unknown>("machines_reconnect", { machineId }),
+  /** Forget a paired machine: its connection, record and credentials. Its sessions stay on it. */
+  remove: (machineId: string) => invoke<boolean>("machines_remove", { machineId }),
+  /** The account's computers (PRO-349). */
+  accountList: () => invoke<MachineAccountDirectory>("machines_account_list"),
+  /** Ask a computer on the account for a one-time grant; its offer comes back as a code. */
+  accountRequest: (hostId: string) => invoke<MachineAccountOffer>("machines_account_request", { hostId }),
+  /** Stop waiting for a grant. */
+  accountCancel: () => invoke<unknown>("machines_account_cancel"),
+  /** After pairing with an account offer: consume the grant when paired, revoke it when not. */
+  accountFinish: (grantRequestId: string, paired: boolean) => invoke<unknown>("machines_account_finish", { grantRequestId, paired }),
 };
 
 interface MachineHostState {

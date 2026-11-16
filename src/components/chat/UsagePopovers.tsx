@@ -5,7 +5,9 @@ import { Button } from "@/components/ui/button";
 import { useStatus } from "@/lib/status";
 import { checkAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
 import { agentAccounts } from "@/lib/agentAccounts";
-import { accountUsageNotice, agentAccountUsage, LOCAL_ACCOUNT, tabAccountFirst, windowIsStale } from "@/lib/accountUsage";
+import { accountFull, accountUsageNotice, agentAccountUsage, LOCAL_ACCOUNT, tabAccountFirst, windowIsStale, type AccountUsage } from "@/lib/accountUsage";
+import { accountLabel, switchesIn, takesAccounts } from "@/lib/agentAccounts";
+import { useAgentAccounts, useLaunchAccountChoice } from "@/lib/useSessionAgent";
 import { tabAccount, type UsageWindow } from "@/lib/api";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import type { Turn } from "@/lib/transcript";
@@ -36,8 +38,20 @@ function UsageWindows({ windows, now }: { windows: readonly UsageWindow[]; now: 
   })}</>;
 }
 
+/** "Full" beside an account automatic switching would move tabs off (#981). */
+function FullMark({ account, threshold, now }: { account: AccountUsage; threshold: number | null; now: number }) {
+  if (threshold == null || !accountFull(account, threshold, now)) return null;
+  return <span className="ml-1.5 shrink-0 rounded-sm bg-warning/15 px-1 text-[11px] text-warning" title={`At or past ${threshold}% of a window`} data-testid="account-full">Full</span>;
+}
+
 function AccountDetails({ agent, local, accountId }: { agent: string; local: boolean; accountId: string | null }) {
   const { usage } = useStatus();
+  // Automatic switching (#981): full accounts are marked, and where new sessions start is said.
+  const view = useAgentAccounts(local && takesAccounts(agent) ? agent : null);
+  const switching = switchesIn(view, null);
+  const threshold = switching ? view!.autoSwitch!.setting.threshold : null;
+  const moved = useLaunchAccountChoice(switching ? agent : null, view, null, view?.defaultAccount ?? null);
+  const newSessions = switching ? moved?.label ?? accountLabel(view, view?.defaultAccount) : null;
   const [account, setAccount] = useState<AgentReadiness | null>(null);
   // With several accounts (#980): the tab's own first, under its label, then the others.
   const accounts = local ? tabAccountFirst(agentAccountUsage(usage, agent), accountId) : [];
@@ -55,7 +69,7 @@ function AccountDetails({ agent, local, accountId }: { agent: string; local: boo
   const ownNotice = own ? accountUsageNotice(own) : null;
   return <>
     <dl className="text-xs">
-      {own && <Detail label="Account">{own.label}</Detail>}
+      {own && <Detail label="Account"><span className="inline-flex items-baseline">{own.label}<FullMark account={own} threshold={threshold} now={now} /></span></Detail>}
       <Detail label="Login method">{local ? account?.loginMethod ?? (account?.state === "signed_out" ? "Signed out" : "Unavailable") : "Unavailable in this workspace"}</Detail>
       <Detail label="Plan">{local ? account?.plan ?? "Unavailable" : "Unavailable"}</Detail>
     </dl>
@@ -67,11 +81,14 @@ function AccountDetails({ agent, local, accountId }: { agent: string; local: boo
     {accounts.length > 1 && <div className="mt-3 border-t border-hairline pt-3 text-xs" aria-label={`Other ${agentName(agent)} accounts`}>
       <p className="mb-1 font-medium">Other {agentName(agent)} accounts</p>
       {accounts.slice(1).map((other) => <section key={other.accountId} className="py-1" aria-label={other.label}>
-        <p className="truncate text-muted-foreground" title={other.label}>{other.label}</p>
+        <p className="flex min-w-0 items-baseline text-muted-foreground" title={other.label}><span className="truncate">{other.label}</span><FullMark account={other} threshold={threshold} now={now} /></p>
         {accountUsageNotice(other) && <p className="text-muted-foreground">{accountUsageNotice(other)}</p>}
         <UsageWindows windows={other.windows} now={now} />
       </section>)}
     </div>}
+    {newSessions && <p className="mt-3 border-t border-hairline pt-3 text-xs text-muted-foreground" data-testid="new-sessions-account">
+      New sessions start on {newSessions}{moved?.reason ? `: ${moved.reason}.` : "."}
+    </p>}
   </>;
 }
 
