@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { ChevronDown, TriangleAlert } from "@/icons";
+import { ChevronDown, ShieldCheck, TriangleAlert } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import {
   DropdownMenu,
@@ -26,41 +26,57 @@ import { AccountRadioItems } from "./SessionAgentControls";
  * models and permissions one level in. The mode is always on the button, so
  * what the agent may do unasked is never a menu away (PRO-162); Bypass is
  * marked as a warning and Plan in the composer's plan colour.
+ *
+ * With `split`, as the new-session box shows them: two chips, the model and
+ * effort on one and the permission mode on its own, each with its own menu.
  */
-export function AgentMenu({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
+export function AgentMenu({ selection, disabled = false, split = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean; split?: boolean }) {
   const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
   const menu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const modeMenu = useRowMenu();
   const modelText = unavailableModel ? `Unavailable: ${unavailableModel}` : (model ? runningModelName(model) : (harness?.name ?? "Agent"));
   const effortText = effort ? (EFFORT_LABEL[effort] ?? effort) : null;
   const permission = PERMISSION_MODES.find((m) => m.id === mode);
   const modeText = permission?.label ?? mode;
   const bypass = modeIsUnguarded(mode);
 
+  const modeTone = bypass ? "text-warning" : mode === "plan" ? "text-info" : "text-muted-foreground";
+  const modeHint = bypass ? "The agent runs commands and edits files without asking" : permission?.hint;
+  const permissions = (
+    <DropdownMenuRadioGroup value={mode} onValueChange={selectMode}>
+      {PERMISSION_MODES.map((m) => (
+        <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
+          <span>{m.label}</span>
+          <span className="text-[11px] text-faint">{m.hint}</span>
+        </DropdownMenuRadioItem>
+      ))}
+    </DropdownMenuRadioGroup>
+  );
+
   return (
+    <>
     <DropdownMenu {...menu.root}>
       <DropdownMenuTrigger asChild {...menu.trigger}>
         <button
           type="button"
           disabled={disabled}
           data-testid="agent-menu"
-          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}${account ? ` on ${account.label}` : ""}, ${modeText}`}
+          aria-label={`${modelText}${effortText ? ` ${effortText}` : ""}${account ? ` on ${account.label}` : ""}${split ? "" : `, ${modeText}`}`}
           title={`${harness?.name ?? "Agent"}${account ? ` · ${account.label}` : ""} · ${modeText}`}
-          className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-[13px] text-foreground transition-colors hover:bg-veil-raised disabled:opacity-50"
+          className={cn("flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-foreground transition-colors hover:bg-veil-raised disabled:opacity-50", split ? "text-[12.5px]" : "text-[13px]")}
         >
-          {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
-          <span className="truncate" data-testid="agent-model">{modelText}</span>
+          {harness && <AgentMark id={harness.id} className={split ? "size-[13px]" : "size-3.5"} decorative brand />}
+          <span className={cn("truncate", split && "font-medium")} data-testid="agent-model">{modelText}</span>
           {effortText && <span className="shrink-0 text-muted-foreground" data-testid="agent-effort">{effortText}</span>}
           {account && <span className="min-w-0 max-w-[9rem] truncate text-[12px] text-muted-foreground" data-testid="agent-account">{account.label}</span>}
-          <span
-            data-testid="agent-mode"
-            className={cn("flex shrink-0 items-center gap-1 text-[11.5px]", bypass ? "text-warning" : mode === "plan" ? "text-info" : "text-muted-foreground")}
-            title={bypass ? "The agent runs commands and edits files without asking" : permission?.hint}
-          >
-            <span aria-hidden className="text-faint">·</span>
-            {bypass && <TriangleAlert className="size-3" aria-hidden />}
-            {bypass ? "Bypass" : modeText}
-          </span>
-          <ChevronDown className="size-3.5 shrink-0 text-faint" />
+          {!split && (
+            <span data-testid="agent-mode" className={cn("flex shrink-0 items-center gap-1 text-[11.5px]", modeTone)} title={modeHint}>
+              <span aria-hidden className="text-faint">·</span>
+              {bypass && <TriangleAlert className="size-3" aria-hidden />}
+              {bypass ? "Bypass" : modeText}
+            </span>
+          )}
+          <ChevronDown className={cn("shrink-0 text-faint", split ? "size-3" : "size-3.5")} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[15rem]">
@@ -137,24 +153,42 @@ export function AgentMenu({ selection, disabled = false }: { selection: ReturnTy
           </>
         )}
 
-        <DropdownMenuSeparator />
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <span>Permissions</span>
-            <span className="ml-auto pl-3 text-[11px] text-faint">{permission?.label ?? mode}</span>
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="min-w-[14rem]">
-            <DropdownMenuRadioGroup value={mode} onValueChange={selectMode}>
-              {PERMISSION_MODES.map((m) => (
-                <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
-                  <span>{m.label}</span>
-                  <span className="text-[11px] text-faint">{m.hint}</span>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
+        {!split && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <span>Permissions</span>
+                <span className="ml-auto pl-3 text-[11px] text-faint">{permission?.label ?? mode}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="min-w-[14rem]">{permissions}</DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
+    {split && (
+      <DropdownMenu {...modeMenu.root}>
+        <DropdownMenuTrigger asChild {...modeMenu.trigger}>
+          <button
+            type="button"
+            disabled={disabled}
+            data-testid="agent-mode"
+            aria-label={`Permissions: ${modeText}`}
+            title={modeHint}
+            className={cn("flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12.5px] transition-colors hover:bg-veil-raised disabled:opacity-50", modeTone)}
+          >
+            {bypass ? <TriangleAlert className="size-[13px]" aria-hidden /> : <ShieldCheck className="size-[13px]" aria-hidden />}
+            {bypass ? "Bypass" : modeText}
+            <ChevronDown className="size-3 text-faint" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[14rem]">
+          <DropdownMenuLabel>Permissions</DropdownMenuLabel>
+          {permissions}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )}
+    </>
   );
 }
