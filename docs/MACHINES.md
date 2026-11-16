@@ -1787,7 +1787,9 @@ its own user:
   `KERN_PROCARGS2`, directory from `PROC_PIDVNODEPATHINFO`. Before PRO-355 a
   Mac answered `detected: false` and listed nothing.
 
-The runtime's own listeners (its pid) are left out of the list.
+The runtime's own listeners (its pid) are left out of the list. `ports.list`
+stays a driver's call (`Role::Driver`, as before): naming the processes adds
+nothing a terminal on the machine would not show the same person.
 
 **Forwards on this Mac.** Every listener binds `127.0.0.1` only, as for a
 cloud workspace (docs/CLOUD-PREVIEWS.md): nothing on the network can reach a
@@ -1799,8 +1801,11 @@ asked for and two switches (`CloudPortSettings` in `src/lib/api.ts`):
 - **Forward new ports automatically** (`auto`, off by default): while on and
   connected, the desktop reads `ports.list` every 2 s (request ids under
   `ports-`, never shown to the web view) and forwards each port that starts
-  listening after the switch was turned on, skipping 32768–60999. Ports
-  already listening when it was turned on are left to the person.
+  listening after the switch was turned on, skipping 32768–60999, on the same
+  local port when free (a random one for a port below 1024), at most 16 at
+  once per connection. Ports already listening when it was turned on, and a
+  port the person stopped, are left to the person. While Forwarding is off a
+  new forward is refused with `cloud_port_forwarding_off`.
 
 A machine's forwards **end with the connection and return with it**: when the
 link drops (`reconnecting`, `offline`) the listeners close and the forwards
