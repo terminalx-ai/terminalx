@@ -1,22 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ListFilter, Search, X } from "@/icons";
+import { X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "@/components/ui/menu";
 import { AgentCard, AgentCardSkeleton, CloudAgentCard } from "@/components/dashboard/AgentCard";
 import { useHotkey } from "@/lib/hotkeys";
-import { selectSession, useSessionStore } from "@/lib/sessions";
+import { openNewSession, selectSession, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries } from "@/lib/summaries";
 import {
   bucketSessions,
   COLUMNS,
   DASHBOARD_STATES,
   filterSessions,
-  TABLE_COLUMNS,
-  toggleTableColumn,
   nextDashboardSort,
   sortDashboardRows,
-  sessionColumn,
   DONE_PAGE,
   hasFilters,
   NO_FILTERS,
@@ -24,10 +21,13 @@ import {
   type DashboardState,
   type DashboardFilters,
 } from "@/lib/dashboard";
+import { sessionStatus, statusText } from "@terminalx/portable/sessionStatus";
+import { useAccount } from "@/lib/account";
 import { usePref } from "@/lib/prefs";
-import { loadRosterIn, usePeople } from "@/lib/cloudPeople";
+import { loadRosterIn, usePeople, userIdForEmail } from "@/lib/cloudPeople";
 import { useDashboardPrs } from "@/lib/dashboardPrs";
 import { SessionTable, type SessionTableRow, type SessionTableHandle } from "./SessionTable";
+import { ActiveNow, DisplayMenu, FilterChip, InclusionChip, NewSessionButton, PeopleChip, SearchField, SortChip, type OverviewPerson } from "./OverviewToolbar";
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { SessionEntry } from "@/types/session";
@@ -67,13 +67,19 @@ export function AgentDashboard() {
   const [cursor, setCursor] = useState<string | null>(null);
   const [preferences, setPreferences] = usePref("dashboard");
   const personName = usePeople(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  // Local sessions count as yours: under your cloud user id once a roster names it.
+  const identity = useAccount().status.identity;
+  const me = userIdForEmail(identity?.email);
+  const localOwner = me ?? "local";
 
   const cloud = useCloudDashboard(true);
   const { visibleIds } = useOrganizationVisibility();
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
-  const sessions = useMemo<CardSession[]>(() => [...store.sessions.map((session) => ({ ...session, ownerId: "local" })), ...visibleCloud], [store.sessions, visibleCloud]);
+  const sessions = useMemo<CardSession[]>(() => [...store.sessions.map((session) => ({ ...session, ownerId: localOwner })), ...visibleCloud], [store.sessions, visibleCloud, localOwner]);
   const localLive = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
-  const summarySessions = useMemo(() => store.sessions.filter((s) => s.tabs.length && (!s.archived || filters.columns.includes("archived"))), [store.sessions, filters.columns]);
+  const archivedShown = (filters.archived ?? "hide") !== "hide";
+  const summarySessions = useMemo(() => store.sessions.filter((s) => s.tabs.length && (!s.archived || archivedShown)), [store.sessions, archivedShown]);
   const summaries = useSessionSummaries(summarySessions, store.loaded && preferences.view === "board");
   const cloudLive = useMemo(() => visibleCloud.filter((s) => !s.archived && s.tabs.length > 0), [visibleCloud]);
   // Cloud projects to filter by and name: `cloud:<orgId>:<identity>` → "acme/api · Acme".
@@ -93,8 +99,9 @@ export function AgentDashboard() {
   // The filter holds project paths; choosing "Quick chats" stands for every quick chat's own path.
   const pathFilters = useMemo(
     // The key itself stays in the list: with no quick chat left it still matches nothing, rather than turning the filter off.
-    () => (filters.projects.includes(QUICK_CHATS_FILTER) ? { ...filters, projects: [...filters.projects, ...quickPaths] } : filters),
-    [filters, quickPaths],
+    // The people filter is kept with the preferences, on this Mac.
+    () => ({ ...filters, owners: preferences.owners, projects: filters.projects.includes(QUICK_CHATS_FILTER) ? [...filters.projects, ...quickPaths] : filters.projects }),
+    [filters, quickPaths, preferences.owners],
   );
   const filtered = useMemo(
     () => filterSessions(sessions, { query, filters: pathFilters, projectName }),
@@ -104,12 +111,19 @@ export function AgentDashboard() {
     ...bucketSessions(filtered),
     archived: filtered.filter((s) => s.archived).sort((a, b) => b.modified.localeCompare(a.modified)),
   }), [filtered]);
-  const boardColumns = filters.columns.includes("archived") ? DASHBOARD_STATES.filter((state) => filters.columns.includes(state.id)) : COLUMNS;
+  const archivedState = DASHBOARD_STATES.filter((state) => state.id === "archived");
+  const boardColumns = filters.archived === "only" ? archivedState : filters.archived === "show" ? [...COLUMNS, ...archivedState] : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
   const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
   // usePeople notifies on roster changes while keeping its resolver identity.
-  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" ? "This Mac" : personName(id)]));
+  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" ? identity?.name?.trim() || "You" : personName(id)]));
   const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
+  // Everyone with a session here, and how recently they worked: the people picker and Active now.
+  const people = useMemo<OverviewPerson[]>(() => [...owners].map(([id, name]) => {
+    const theirs = sessions.filter((session) => session.ownerId === id && !session.archived);
+    const activeAt = theirs.map((session) => session.lastMessageAt ?? session.modified).sort().at(-1) ?? null;
+    return { id, name, you: id === localOwner, activeAt, working: theirs.some((session) => session.tabs.some((tab) => tab.status === "in_progress")) };
+  }).sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)), [owners, sessions, localOwner]);
   const orgs = JSON.stringify([...new Set(visibleCloud.map((session) => session.orgId))].sort());
   useEffect(() => {
     for (const orgId of JSON.parse(orgs) as string[]) void loadRosterIn(orgId).catch(() => undefined);
@@ -142,17 +156,21 @@ export function AgentDashboard() {
     return {
       id: session.id,
       session,
-      status: DASHBOARD_STATES.find((state) => state.id === (session.archived ? "archived" : sessionColumn(session)))!.label,
+      // The session's own status, as its badge reads it ('Checks failing · PR #781'), not the board's bucket.
+      status: statusText(sessionStatus(session.rowStatus ?? session)),
       name: session.title,
       project: projectName(session.projectPath),
+      where: local ? "Local" : "Cloud",
+      cloud: !local,
       branch: session.worktreeRemoved ? session.removedWorkspace?.branch ?? null : session.branch ?? null,
       agent: [...new Set(session.tabs.map((tab) => harnessNames.get(tab.harness) ?? tab.harness))].join(", "),
+      agentId: session.tabs[0]?.harness ?? null,
       pr: recorded[0]?.number ?? null,
       prs: recorded,
       additions, deletions,
       changes: additions === null || deletions === null ? null : additions + deletions,
       owner: session.ownerId ? owners.get(session.ownerId) ?? null : null,
-      updated: session.modified,
+      updated: session.lastMessageAt ?? session.modified,
       created: session.created ?? null,
     };
   }), preferences.sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, preferences.sort, preferences.view]);
@@ -188,6 +206,11 @@ export function AgentDashboard() {
   useHotkey("up", () => move(0, -1));
   useHotkey("right", () => move(1, 0));
   useHotkey("left", () => move(-1, 0));
+  useHotkey("/", () => {
+    if (menuIsOpen()) return false;
+    searchRef.current?.focus();
+    return true;
+  });
   useHotkey("enter", (event) => {
     // Native buttons (sort, view, links) retain Enter even with a row selected.
     if (menuIsOpen() || (event.target instanceof Element && event.target.closest("button, a"))) return false;
@@ -198,157 +221,91 @@ export function AgentDashboard() {
     return true;
   });
 
-  const total = localLive.length + cloudLive.length + (filters.columns.includes("archived") ? sessions.filter((s) => s.archived && s.tabs.length).length : 0);
+  const total = localLive.length + cloudLive.length + (archivedShown ? sessions.filter((s) => s.archived && s.tabs.length).length : 0);
   const loading = !store.loaded || (preferences.view === "board" && summaries.loading && total > 0);
 
   return (
     <div className="@container flex min-h-0 flex-1 flex-col">
-      <header className="flex shrink-0 flex-wrap items-center gap-2 px-4 pb-3 pt-1">
-        <h1 className="text-[15px] font-semibold">Agents</h1>
-        <span className="rounded-full bg-veil-raised px-2 py-0.5 text-[11px] text-muted-foreground tabular-nums">{total} total</span>
-        <div role="group" aria-label="Dashboard view" className="flex items-center rounded-md bg-well p-0.5">
-          {(["board", "table"] as const).map((view) => (
-            <Button key={view} size="sm" variant={preferences.view === view ? "secondary" : "ghost"}
-              aria-pressed={preferences.view === view} onClick={() => setPreferences({ ...preferences, view })}>
-              {view === "board" ? "Board" : "Table"}
-            </Button>
+      <header className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-1.5 @min-[1100px]:flex-nowrap border-b border-hairline px-4 py-2.5">
+        <SearchField inputRef={searchRef} query={query} onQuery={setQuery} />
+        <PeopleChip people={people} selected={preferences.owners} onChange={(owners) => setPreferences({ ...preferences, owners })} />
+        <InclusionChip kind="automations" value={filters.automations ?? "hide"} onChange={(automations) => setFilters((f) => ({ ...f, automations }))} />
+        <InclusionChip kind="archived" value={filters.archived ?? "hide"} onChange={(archived) => setFilters((f) => ({ ...f, archived }))} />
+        <SortChip sort={preferences.sort} onChange={(sort) => setPreferences({ ...preferences, sort })} />
+        <DisplayMenu preferences={preferences} onChange={setPreferences} />
+        <FilterChip count={filters.projects.length + filters.harnesses.length + filters.columns.length}>
+          <DropdownMenuLabel>Project</DropdownMenuLabel>
+          {hasQuickChats && (
+            <DropdownMenuCheckboxItem
+              checked={filters.projects.includes(QUICK_CHATS_FILTER)}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, QUICK_CHATS_FILTER) }))}
+            >
+              <span className="truncate">{QUICK_CHATS_LABEL}</span>
+            </DropdownMenuCheckboxItem>
+          )}
+          {store.projects.map((p) => (
+            <DropdownMenuCheckboxItem
+              key={p.path}
+              checked={filters.projects.includes(p.path)}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, p.path) }))}
+            >
+              <span className="truncate">{p.name}</span>
+            </DropdownMenuCheckboxItem>
           ))}
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          {preferences.view === "table" && <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm">Columns</Button></DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Visible columns</DropdownMenuLabel>
-              {TABLE_COLUMNS.map(({ id, label }) => (
-                <DropdownMenuCheckboxItem key={id}
-                  checked={!preferences.hiddenColumns.includes(id)}
-                  disabled={!preferences.hiddenColumns.includes(id) && preferences.hiddenColumns.length === TABLE_COLUMNS.length - 1}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setPreferences({ ...preferences, hiddenColumns: toggleTableColumn(preferences.hiddenColumns, id) })}>
-                  {label}
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>}
-
-          <div className="flex h-7 items-center gap-1.5 rounded-md bg-well px-2">
-            <Search className="size-3.5 shrink-0 text-faint" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setQuery("");
-                e.stopPropagation();
-              }}
-              placeholder="Search sessions, workspaces or projects…"
-              aria-label="Search sessions"
-              className="w-56 bg-transparent text-xs outline-none placeholder:text-faint"
-            />
-            {query && (
-              <button type="button" aria-label="Clear search" className="text-faint hover:text-foreground" onClick={() => setQuery("")}>
-                <X className="size-3.5" />
-              </button>
-            )}
-          </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant={hasFilters(filters) ? "secondary" : "ghost"} size="sm" className="gap-1.5">
-                <ListFilter />
-                Filter
-                {hasFilters(filters) && (
-                  <span className="rounded-full bg-accent/20 px-1.5 text-[10px] text-foreground tabular-nums">
-                    {filters.projects.length + filters.harnesses.length + filters.columns.length + (filters.owners?.length ?? 0) + Number(!!filters.automated)}
-                  </span>
-                )}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="max-h-(--radix-dropdown-menu-content-available-height) w-56 overflow-y-auto scrollbar-thin">
-              <DropdownMenuLabel>Project</DropdownMenuLabel>
-              {hasQuickChats && (
-                <DropdownMenuCheckboxItem
-                  checked={filters.projects.includes(QUICK_CHATS_FILTER)}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, QUICK_CHATS_FILTER) }))}
-                >
-                  <span className="truncate">{QUICK_CHATS_LABEL}</span>
-                </DropdownMenuCheckboxItem>
-              )}
-              {store.projects.map((p) => (
-                <DropdownMenuCheckboxItem
-                  key={p.path}
-                  checked={filters.projects.includes(p.path)}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, p.path) }))}
-                >
-                  <span className="truncate">{p.name}</span>
-                </DropdownMenuCheckboxItem>
-              ))}
-              {[...cloudProjects].map(([key, name]) => (
-                <DropdownMenuCheckboxItem
-                  key={key}
-                  checked={filters.projects.includes(key)}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, key) }))}
-                >
-                  <span className="truncate">{name}</span>
-                </DropdownMenuCheckboxItem>
-              ))}
+          {[...cloudProjects].map(([key, name]) => (
+            <DropdownMenuCheckboxItem
+              key={key}
+              checked={filters.projects.includes(key)}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, key) }))}
+            >
+              <span className="truncate">{name}</span>
+            </DropdownMenuCheckboxItem>
+          ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>Agent</DropdownMenuLabel>
+          {harnesses.map((h) => (
+            <DropdownMenuCheckboxItem
+              key={h.id}
+              checked={filters.harnesses.includes(h.id)}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={() => setFilters((f) => ({ ...f, harnesses: toggleFilter(f.harnesses, h.id) }))}
+            >
+              <AgentMark id={h.id} decorative />
+              <span className="truncate">{h.name}</span>
+            </DropdownMenuCheckboxItem>
+          ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>Status</DropdownMenuLabel>
+          {COLUMNS.map((c) => (
+            <DropdownMenuCheckboxItem
+              key={c.id}
+              checked={filters.columns.includes(c.id)}
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={() => setFilters((f) => ({ ...f, columns: toggleFilter(f.columns, c.id) }))}
+            >
+              {c.label}
+            </DropdownMenuCheckboxItem>
+          ))}
+          {hasFilters(filters) && (
+            <>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel>Agent</DropdownMenuLabel>
-              {harnesses.map((h) => (
-                <DropdownMenuCheckboxItem
-                  key={h.id}
-                  checked={filters.harnesses.includes(h.id)}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setFilters((f) => ({ ...f, harnesses: toggleFilter(f.harnesses, h.id) }))}
-                >
-                  <AgentMark id={h.id} decorative />
-                  <span className="truncate">{h.name}</span>
-                </DropdownMenuCheckboxItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>Status</DropdownMenuLabel>
-              {DASHBOARD_STATES.map((c) => (
-                <DropdownMenuCheckboxItem
-                  key={c.id}
-                  checked={filters.columns.includes(c.id)}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={() => setFilters((f) => ({ ...f, columns: toggleFilter(f.columns, c.id) }))}
-                >
-                  {c.label}
-                </DropdownMenuCheckboxItem>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuCheckboxItem checked={!!filters.automated} onSelect={(e) => e.preventDefault()}
-                onCheckedChange={(automated) => setFilters((f) => ({ ...f, automated: automated === true }))}>
-                Started by automation
-              </DropdownMenuCheckboxItem>
-              {owners.size > 0 && <>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel>Owner</DropdownMenuLabel>
-                {[...owners].sort((a, b) => a[1].localeCompare(b[1])).map(([id, name]) => (
-                  <DropdownMenuCheckboxItem key={id} checked={!!filters.owners?.includes(id)}
-                    onSelect={(e) => e.preventDefault()}
-                    onCheckedChange={() => setFilters((f) => ({ ...f, owners: toggleFilter(f.owners ?? [], id) }))}>
-                    <span className="truncate" title={name}>{name}</span>
-                  </DropdownMenuCheckboxItem>
-                ))}
-              </>}
-              {hasFilters(filters) && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setFilters(NO_FILTERS)}>
-                    <X /> Clear filters
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+              <DropdownMenuItem onSelect={() => setFilters((f) => ({ ...NO_FILTERS, automations: f.automations, archived: f.archived }))}>
+                <X /> Clear filters
+              </DropdownMenuItem>
+            </>
+          )}
+        </FilterChip>
+        <div className="ml-auto flex shrink-0 items-center gap-3">
+          <ActiveNow people={people} />
+          <NewSessionButton onClick={() => openNewSession()} />
         </div>
       </header>
 
       {preferences.view === "table" ? (
-        <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort}
+        <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={preferences.sort} compact={preferences.compact}
           onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(preferences.sort, column) })}
           selectedId={cursor} onFocus={setCursor}
           onOpen={(id) => {
@@ -357,7 +314,7 @@ export function AgentDashboard() {
           }}
           loading={loading}
         />
-      ) : <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
+      ) : <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pt-3 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
         <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {boardColumns.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>

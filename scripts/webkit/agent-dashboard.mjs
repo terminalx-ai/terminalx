@@ -128,8 +128,8 @@ try {
       assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, `${context}: fixture reports no app update`);
       // The sidebar's destination is "Dashboard, <counts>" since the chat-first sidebar (#484); it was "Agent Dashboard".
       await page.getByRole("button", { name: /^Dashboard/ }).click();
-      await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
-      await page.getByText(`${count * 8} total`, { exact: true }).waitFor();
+      // PRO-385: the toolbar row (02.01) replaced the "Agents" heading and its total.
+      await page.getByRole("button", { name: "New session", exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();
       assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, "layout fixture reports no available update");
       await page.evaluate(async ({ textScale }) => {
