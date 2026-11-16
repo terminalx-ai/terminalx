@@ -706,3 +706,26 @@ describe("an empty chat", () => {
     expect(screen.getByText("Nothing here yet. Ask for something below.")).toBeTruthy();
   });
 });
+
+// PRO-378 review: a turn that failed with no recovery standing leaves the tab idle, not live; Retry is still offered.
+describe("a failed last turn", () => {
+  const base = { sessionId: "s", tabId: "t", harness: "claude" };
+  const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
+  const events: AgentEvent[] = [
+    { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "first", queued: false } },
+    { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "turn_completed", status: "error", finalText: "Anthropic error: overloaded (529)", authFailed: false } },
+    { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "user_message", text: "second", queued: false } },
+    { ...base, id: "e4", seq: 4, ts: at(4), payload: { type: "error", message: "Anthropic error: overloaded (529)", fatal: false } },
+    { ...base, id: "e5", seq: 5, ts: at(5), payload: { type: "turn_completed", status: "error", finalText: "Anthropic error: overloaded (529)", authFailed: false } },
+  ] as AgentEvent[];
+
+  it("offers Retry on an idle tab, for the last turn only, and sends that turn's prompt again", () => {
+    const onRetry = vi.fn();
+    render(<TooltipProvider><Chat sessionId="s" transcript={buildTranscript(events, false)} stream={[]} live={false} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onRetry={onRetry} /></TooltipProvider>);
+    const cards = screen.getAllByTestId("turn-failure");
+    expect(cards).toHaveLength(2);
+    expect(within(cards[0]).queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.click(within(cards[1]).getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledWith(3);
+  });
+});

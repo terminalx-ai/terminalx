@@ -63,7 +63,7 @@ it("counts and displays increment/decrement statements and Markdown separators a
 
 // PRO-378: what each kind of row says after its target.
 import { commitLine, exitCodeOf, gitStep, readLineCount, searchCounts, stepDuration } from "./ToolCallRow";
-import { removedFirst, snippetStart, textStart, unifiedRows } from "./DiffBlock";
+import { removedFirst, snippetStart, unifiedRows } from "./DiffBlock";
 import { fireEvent } from "@testing-library/react";
 
 it("names git steps and reads a commit's hash and message", () => {
@@ -107,6 +107,12 @@ it("orders a diff's removed lines before the added ones and numbers it where the
   expect(removedFirst([{ kind: "ctx", text: "a" }, { kind: "add", text: "b" }, { kind: "del", text: "c" }]).map((l) => l.kind)).toEqual(["ctx", "del", "add"]);
   expect(snippetStart("Here's the result:\n    41→one\n    42→two", "one\ntwo")).toBe(41);
   expect(snippetStart("    41→one", "missing")).toBeNull();
-  expect(textStart("x\ny\nnew\n", "new")).toBe(3);
   expect(unifiedRows("@@ -10,2 +10,2 @@\n ctx\n+new\n-old").map((l) => `${l.kind}${l.oldNo ?? ""}/${l.newNo ?? ""}`)).toEqual(["ctx10/10", "del11/", "add/11"]);
+});
+
+it("leaves an edit's diff unnumbered when its result quotes no snippet, rather than guess from the file", () => {
+  const call: ToolCall = { callId: "e", name: "Edit", toolType: "file_edit", input: { file_path: "/repo/a.ts" }, seq: 1, edits: [{ path: "/repo/a.ts", kind: "update", oldText: "a", newText: "b" }], result: { text: "The file /repo/a.ts has been updated successfully.", isError: false } };
+  render(<ToolCallRow call={call} cwd="/repo" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Expand Edited/ }));
+  expect([...screen.getByTestId("diff-block").querySelectorAll("[data-diff-line]")].map((row) => row.textContent)).toEqual(["−a", "+b"]);
 });

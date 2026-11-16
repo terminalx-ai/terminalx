@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { cn } from "@/lib/cn";
 import { LinkedText } from "./LinkedText";
-import { fs } from "@/lib/api";
 import { diffLines, patchLines, type DiffLine } from "@/lib/diff";
 
 /**
@@ -9,16 +8,14 @@ import { diffLines, patchLines, type DiffLine } from "@/lib/diff";
  * LCS over the two fragments, which is right for Edit's old/new pairs and for small Writes; whole-file diffs in the
  * changes panel go through the editor's merge view instead.
  *
- * Its gutters number the lines where the edit sits in the file, when that can be told: from the numbered snippet an
- * edit's result quotes, or, failing that, from where the new text is in the file now. Otherwise the gutters are empty
- * rather than counting from the fragment's own first line.
+ * Its gutters number the lines where the edit sits in the file only when the edit itself says so: the numbered
+ * snippet its result quotes, or a new file's first line. Searching the file as it is now could land on the wrong
+ * copy of short or repeated text, or on a file edited since, so otherwise the gutters stay off.
  */
 export function DiffBlock({
-  path,
   oldText,
   newText,
   kind,
-  cwd,
   resultText,
   maxLines = 40,
 }: {
@@ -32,9 +29,9 @@ export function DiffBlock({
   maxLines?: number;
 }) {
   const lines = useMemo(() => removedFirst(diffLines(oldText, newText)), [oldText, newText]);
-  const found = useEditStart(path, newText, cwd, kind === "create" ? undefined : resultText);
-  // A new file starts at its first line.
-  const start = kind === "create" ? 1 : found;
+  const quoted = useMemo(() => (kind !== "create" && resultText ? snippetStart(resultText, newText) : null), [kind, resultText, newText]);
+  // A new file starts at its first line; any other edit only where its own result says.
+  const start = kind === "create" ? 1 : quoted;
   const shown = lines.slice(0, maxLines);
   const hidden = lines.length - shown.length;
   return (
@@ -84,30 +81,6 @@ export function snippetStart(resultText: string, newText: string): number | null
     if (want.every((text, k) => rows[i + k] === undefined || rows[i + k].text === text)) return rows[i].no;
   }
   return null;
-}
-
-/** The new text's first line number in `content`, when it is there. */
-export function textStart(content: string, newText: string): number | null {
-  if (!newText.trim()) return null;
-  const at = content.indexOf(newText);
-  return at < 0 ? null : content.slice(0, at).split("\n").length;
-}
-
-function useEditStart(path: string, newText: string, cwd: string | undefined, resultText: string | undefined): number | null {
-  const quoted = useMemo(() => (resultText ? snippetStart(resultText, newText) : null), [resultText, newText]);
-  const [found, setFound] = useState<number | null>(null);
-  useEffect(() => {
-    // Only a local tab has the file to look in; a cloud tab's checkout is not on this computer.
-    if (quoted != null || !cwd || !newText.trim() || resultText === undefined) return;
-    let live = true;
-    const abs = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd.replace(/[\\/]+$/, "")}/${path}`;
-    void Promise.resolve()
-      .then(() => fs.readText(abs))
-      .then((file) => { if (live && !file.binary) setFound(textStart(file.content, newText)); })
-      .catch(() => undefined);
-    return () => { live = false; };
-  }, [quoted, cwd, path, newText]);
-  return quoted ?? found;
 }
 
 function DiffRow({ line, numbered }: { line: DiffLine; numbered: boolean }) {

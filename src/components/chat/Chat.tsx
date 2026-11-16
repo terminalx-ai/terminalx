@@ -108,6 +108,7 @@ export function Chat({
   onSecondOpinion,
   onReset,
   onRetryInNewChat,
+  onRetry,
 }: {
   sessionId: string;
   checkpointTabId?: string;
@@ -140,6 +141,11 @@ export function Chat({
   onReset?: (endSeq: number, target: ResetTarget) => void;
   /** Take a failed turn's prompt to a new chat. */
   onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Send a failed turn's prompt again, as a new message. Not tied to `live`: a turn that failed with no recovery
+   * standing leaves the tab idle, and sending wakes the agent as the composer would.
+   */
+  onRetry?: (seq: number) => void;
 }) {
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
@@ -467,7 +473,7 @@ export function Chat({
                 onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
                 workingSince={isLast ? transcript.workingSince : undefined}
                 // A failed last turn can go again: its prompt, sent as a new message.
-                onRetry={isLast && live && !sending ? onSendAgain : undefined}
+                onRetry={isLast && !t.live && !sending ? onRetry : undefined}
                 onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
               />
             );

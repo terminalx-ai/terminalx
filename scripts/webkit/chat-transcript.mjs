@@ -65,7 +65,7 @@ const root = createRoot(document.getElementById('root'));
 window.draw = ({ fold = true, reset = false, failed = false } = {}) => {
   setPrefs({ foldToolCalls: fold, transcriptLayout: 'chat', promptMap: false, turnChanges: false });
   root.render(<TooltipProvider><div style={{ height: '100vh', display: 'flex' }} className="bg-chat">
-    <Chat key={failed ? 'failed' : 'running'} cwd="/repo" sessionId="s" transcript={failed ? failedLast : transcript} stream={[]} live progressing answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<div className="h-24" />} onSendAgain={() => {}} onSecondOpinion={() => {}} onRetryInNewChat={() => {}} onReset={() => {}} />
+    <Chat key={failed ? 'failed' : 'running'} cwd="/repo" sessionId="s" transcript={failed ? failedLast : transcript} stream={[]} live progressing answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={<div className="h-24" />} onSendAgain={() => {}} onRetry={() => {}} onSecondOpinion={() => {}} onRetryInNewChat={() => {}} onReset={() => {}} />
     {reset && <ResetChatDialog sessionId="s" tabId="t" endSeq={9} target={{ turn: 2, removed: [3, 4], files: 3 }} agent="Claude Code" onClose={() => {}} onWarning={() => {}} />}
   </div></TooltipProvider>);
 };
