@@ -73,6 +73,7 @@ try {
         const row = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: /Push org events to the desktop/ }).first();
         await row.hover();
         await page.getByRole("button", { name: "Menu for Push org events to the desktop", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Issue and pull request" }).click();
         await page.getByRole("menuitem", { name: "Link pull request…" }).click();
         const dialog = page.getByRole("dialog", { name: "Link a pull request" });
         await dialog.getByRole("option").first().waitFor();
@@ -87,7 +88,7 @@ try {
           "centred on the conversation column": Math.abs(centre) <= 1,
           "inside the column": geometry.dialog[0] >= geometry.column[0] && geometry.dialog[1] <= geometry.column[1],
           "near the column's top": Math.abs(geometry.dialog[2] - geometry.column[2] - 104) <= 1,
-          "says where the action lives": (await dialog.getByTestId("link-pr-where").textContent()) === "Session more › Link pull request…",
+          "says where the action lives": (await dialog.getByTestId("link-pr-where").textContent()) === "Session more › Issue and pull request › Link pull request…",
         }, geometry);
       } else {
         await page.getByRole("button", { name: "Branch", exact: true }).click();

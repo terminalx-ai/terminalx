@@ -203,7 +203,7 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
           {linkError && <p role="alert" className="mt-2 text-xs text-destructive">{linkError}</p>}
           <div className="flex items-center justify-end gap-2 pb-4 pt-4">
             {/* Where this dialog lives, for next time (design 05.19). */}
-            <span className="mr-auto truncate text-[11.5px] text-faint" data-testid="link-pr-where">Session more › Link pull request…</span>
+            <span className="mr-auto truncate text-[11.5px] text-faint" data-testid="link-pr-where">Session more › Issue and pull request › Link pull request…</span>
             <Button type="button" variant="outline" className="h-8 rounded-md px-3 text-[12.5px] text-muted-foreground" onClick={onClose} disabled={linking}>
               Cancel
             </Button>
