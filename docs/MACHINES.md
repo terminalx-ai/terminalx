@@ -1099,8 +1099,10 @@ that connection. The resume token goes in the Keychain (service
 A later relay connection first asks the director for the cell
 (`POST <directorUrl>/v1/resolve` `{ v: 1, relayHostId, resumeToken }`, as the
 phone does), falls back to the saved cell, and connects with `credential` the
-resume token. A relay that refuses the credential (`4401`, `4404`) deletes it;
-the next direct connection asks again.
+resume token. A relay that refuses the credential (`4401`) deletes it; the
+next direct connection asks again. `4404` is the machine offline at the relay
+(the relay's `HOST_OFFLINE`), not a refusal: the credential is kept and the
+round moves on, and the next round tries the relay again.
 
 **One owner per machine.** The desktop holds at most one supervisor per
 `machineId`; `machine_remote_attach` returns the existing connection id when

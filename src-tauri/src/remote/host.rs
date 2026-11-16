@@ -387,6 +387,18 @@ pub struct RelayInvite {
 /// builds it"): the computers it paired are admitted by their relay device id
 /// and token, and a connection for any other device is a phone, which goes
 /// to the window.
+/// The machine refused a paired computer's device token or key on the relay.
+#[derive(Debug)]
+struct ComputerRefused;
+
+impl std::fmt::Display for ComputerRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("device token refused")
+    }
+}
+
+impl std::error::Error for ComputerRefused {}
+
 /// Each method may read the registry file, so the relay host calls them off
 /// its async tasks.
 pub trait MachineRoutes: Send + Sync + 'static {
@@ -994,7 +1006,20 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let (device, computer) = self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await?;
+        let (device, computer) = match self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await {
+            Ok(admitted) => admitted,
+            Err(error) if error.is::<ComputerRefused>() => {
+                // As on the direct route: the reason, sealed, then `4401`, so
+                // a revoked computer stops retrying instead of taking the
+                // relay for unreachable (docs/MACHINES.md "As built (PRO-345)").
+                let refused = json!({ "type": "pairing_refused", "v": 1, "reason": "code-inactive" });
+                let _ = send_sealed(&mut socket, &mut session, &refused).await;
+                let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 4401.into(), reason: "credential refused".into() };
+                let _ = socket.close(Some(frame)).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
@@ -1039,7 +1064,7 @@ impl RelayHost {
             let (device_id, token, key) = (relay_device_id.to_string(), token.to_string(), client_key_b64.to_string());
             let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, &key, cancel))
                 .await??
-                .ok_or_else(|| anyhow!("device token refused"))?;
+                .ok_or(ComputerRefused)?;
             let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
             return Ok((device, Some((computer_id, tracked))));
         }

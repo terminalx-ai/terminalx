@@ -304,38 +304,42 @@ enum Said {
     Machine(MachineConnectionState),
 }
 
+/// What a supervisor says, in the order it said it. It sends the web
+/// view's state before the machine state on the same task, so reading the
+/// client channel first whenever both have something keeps that order.
 struct Watch {
-    said: mpsc::UnboundedReceiver<Said>,
-    seen: Vec<Said>,
+    client: mpsc::UnboundedReceiver<ClientEvent>,
+    machine: mpsc::UnboundedReceiver<MachineConnectionState>,
 }
 
 fn start(env: Arc<Env>, script: Arc<Script>) -> (MachineSupervisor, Watch) {
-    let (events, mut client_events) = mpsc::unbounded_channel();
-    let (said, receiver) = mpsc::unbounded_channel();
-    let machine_said = said.clone();
+    let (events, client) = mpsc::unbounded_channel();
+    let (states, machine) = mpsc::unbounded_channel();
     let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
-        let _ = machine_said.send(Said::Machine(view.state.clone()));
-    });
-    tokio::spawn(async move {
-        while let Some(event) = client_events.recv().await {
-            let _ = said.send(match event {
-                ClientEvent::State(state) => Said::Web(state),
-                ClientEvent::Message(message) => Said::Message(message),
-            });
-        }
+        let _ = states.send(view.state.clone());
     });
     let supervisor = MachineSupervisor::start(MACHINE, env, script, events, on_state);
-    (supervisor, Watch { said: receiver, seen: Vec::new() })
+    (supervisor, Watch { client, machine })
 }
 
 impl Watch {
+    async fn next(&mut self) -> Said {
+        tokio::select! {
+            biased;
+            Some(event) = self.client.recv() => match event {
+                ClientEvent::State(state) => Said::Web(state),
+                ClientEvent::Message(message) => Said::Message(message),
+            },
+            Some(state) = self.machine.recv() => Said::Machine(state),
+        }
+    }
+
     /// Everything said until `wanted` holds of something, within ten seconds.
     async fn until(&mut self, what: &str, wanted: impl Fn(&Said) -> bool) -> Vec<Said> {
         let mut said = Vec::new();
         let found = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let next = self.said.recv().await.expect("the supervisor runs");
-                self.seen.push(next.clone());
+                let next = self.next().await;
                 said.push(next.clone());
                 if wanted(&next) {
                     return;
@@ -351,8 +355,8 @@ impl Watch {
     async fn quiet(&mut self, within: Duration) -> Vec<Said> {
         let mut said = Vec::new();
         let _ = tokio::time::timeout(within, async {
-            while let Some(next) = self.said.recv().await {
-                said.push(next);
+            loop {
+                said.push(self.next().await);
             }
         })
         .await;
@@ -570,5 +574,22 @@ async fn losing_the_link_reconnects_on_the_route_that_last_worked() {
     watch.until("reconnecting", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Reconnecting { .. }))).await;
     watch.until("connected again", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
     assert_eq!(script.dialed()[2], direct(TAILSCALE_IP), "the route that last worked goes first");
+    supervisor.stop();
+}
+
+#[tokio::test]
+async fn the_machine_refusing_the_device_token_on_the_relay_link_is_access_removed_and_keeps_the_relay_credential() {
+    // No direct address answers; the relay takes the resume credential and
+    // the machine behind it refuses the device token.
+    let script = Script::new(Duration::from_millis(1), &[("relay", Answer::Fail(DialFailure::AccessRemoved))]);
+    let env = Env::new(target(&[LAN], MachineRoute::RelayAndNearby, None, Some("user-1")), Some("user-1"));
+    let (supervisor, mut watch) = start(env.clone(), script.clone());
+    let said = watch.until("access removed", |said| machine_state(said, |state| *state == MachineConnectionState::AccessRemoved)).await;
+    assert!(said.iter().any(|said| matches!(said, Said::Web(ClientState::Stopped))), "{said:?}");
+    assert_eq!(script.dialed(), vec![direct(LAN), Route::Relay]);
+    assert_eq!(env.dropped.load(Ordering::SeqCst), 0, "the relay credential was not what was refused");
+    supervisor.nudge();
+    assert!(watch.quiet(Duration::from_millis(1_000)).await.is_empty());
+    assert_eq!(script.dialed().len(), 2, "nothing retried");
     supervisor.stop();
 }

@@ -387,7 +387,7 @@ pub enum DialFailure {
     AccessRemoved,
     /// The runtime does not grant `machine/1`.
     NeedsUpdate { version: Option<String> },
-    /// The relay refused the resume credential (`4401`, `4404`).
+    /// The relay refused the resume credential (`4401`; `4404` is the machine offline).
     RelayCredentialRefused,
     Unreachable { local_network_denied: bool, reason: String },
 }
@@ -549,7 +549,9 @@ async fn open_relay(target: &Target) -> Result<Connection, DialFailure> {
     let route = RelayRoute { cell_url: &cell_url, relay_host_id: &relay.info.relay_host_id, public_key_b64: &target.public_key_b64, client_secret: Some(*target.client_secret) };
     let mut connection = match relay_connect(&route, &Credential::Resume(relay.resume_token.to_string()), None, deadline).await {
         Ok(connection) => connection,
-        Err(Closed { code: Some(4401 | 4404), .. }) => return Err(DialFailure::RelayCredentialRefused),
+        // Only `4401` is the credential refused; `4404` is the machine
+        // offline at the relay, which retries the same credential.
+        Err(Closed { code: Some(CREDENTIAL_REFUSED), .. }) => return Err(DialFailure::RelayCredentialRefused),
         Err(closed) => return Err(DialFailure::unreachable(closed.reason)),
     };
     prove(&mut connection, target, deadline).await?;
@@ -1023,6 +1025,8 @@ impl Run {
             you: None,
             link: Some(link),
         };
+        // The record first: whoever hears `connected` reads the route it names.
+        self.record(&established.described, &route).await;
         *self.shared.outbound.lock().unwrap() = Some(established.frames.clone());
         let live = Live { id: link, route, frames: established.frames, since: now_ms(), rtt_ms: established.rtt_ms, connected };
         self.attempt = 0;
@@ -1031,7 +1035,6 @@ impl Run {
         self.last_seen_at = Some(live.since);
         self.emit(live.connected.clone());
         self.set_state(self.connected_state(&live));
-        self.record(&established.described, &live.route).await;
         if let Some(access) = established.relay_access {
             self.start_provision(access);
         }
@@ -1228,7 +1231,7 @@ impl Run {
             };
             if let Some(closed) = lost {
                 self.shared.outbound.lock().unwrap().take();
-                if live.route == Route::Relay && matches!(closed.code, Some(4401 | 4404)) {
+                if live.route == Route::Relay && closed.code == Some(CREDENTIAL_REFUSED) {
                     let env = self.env.clone();
                     let _ = tokio::task::spawn_blocking(move || env.drop_relay()).await;
                 }
