@@ -163,9 +163,23 @@ fn every_account_above_the_threshold_stops_switching() {
     assert_eq!(to(&decision), Some("b"));
     let Decision::Switch { reason, .. } = decision else { unreachable!() };
     assert!(reason.most_room);
-    // At its limit, with nothing else under the threshold: no account is available.
-    let at_limit = [account("a", &[("five_hour", 100.0)]), account("b", &[("five_hour", 91.0)])];
-    let Decision::Stay(Stay::NoneAvailable { earliest_reset, .. }) = decide(&ask(Why::LimitHit, "a", &at_limit)) else { panic!("none available") };
+    // At its limit it cannot go on: it moves where there is the most room,
+    // though that account is above the threshold too (an unattended run
+    // keeps going).
+    let at_limit = [account("a", &[("five_hour", 100.0)]), account("b", &[("five_hour", 91.0)]), account("c", &[("five_hour", 95.0)])];
+    for why in [Why::LimitHit, Why::Between] {
+        let decision = decide(&ask(why, "a", &at_limit));
+        assert_eq!(to(&decision), Some("b"), "{why:?}");
+        let Decision::Switch { reason, .. } = decision else { unreachable!() };
+        assert!(reason.most_room);
+    }
+    // A limit error on it says the same.
+    let mut limited = account("a", &[("five_hour", 60.0)]);
+    limited.limited = Some(Limited { at: NOW - 30_000, resets_at: Some(NOW + HOUR) });
+    assert_eq!(to(&decide(&ask(Why::LimitHit, "a", &[limited, account("b", &[("five_hour", 91.0)])]))), Some("b"));
+    // Every other account at its limit as well: none is available, and the earliest reset is said.
+    let all_out = [account("a", &[("five_hour", 100.0)]), account("b", &[("five_hour", 100.0)])];
+    let Decision::Stay(Stay::NoneAvailable { earliest_reset, .. }) = decide(&ask(Why::LimitHit, "a", &all_out)) else { panic!("none available") };
     assert_eq!(earliest_reset, Some(NOW + HOUR));
 }
 
@@ -261,4 +275,18 @@ fn the_log_keeps_thirty_days() {
 fn hot_accounts_are_near_the_threshold() {
     let candidates = [account("a", &[("five_hour", 74.0)]), account("b", &[("five_hour", 76.0)]), account("c", &[("seven_day", 99.0)])];
     assert_eq!(hot(&candidates, 90.0, NOW), ["b", "c"]);
+}
+
+#[test]
+fn a_plan_seen_lacking_a_model_is_forgotten_after_a_while() {
+    let mut memory = Memory::default();
+    memory.lacks("claude", "b", "Claude-Opus-4-1", NOW);
+    let mut b = account("b", &[("five_hour", 10.0)]);
+    memory.annotate("claude", &mut b, Some("claude-opus-4-1"), NOW + HOUR);
+    assert!(b.lacks_model, "the same model, in any case");
+    memory.annotate("claude", &mut b, Some("claude-sonnet-4-5"), NOW + HOUR);
+    assert!(!b.lacks_model, "another model is not affected");
+    memory.prune(NOW + LACKS_MS);
+    memory.annotate("claude", &mut b, Some("claude-opus-4-1"), NOW + LACKS_MS);
+    assert!(!b.lacks_model, "learned again, not kept forever");
 }

@@ -443,14 +443,15 @@ pub fn decide(ask: &Ask<'_>) -> Decision {
     }
 
     // Nothing has room. Every other usable account past the threshold but
-    // none at its limit: no cycling between them. A new session starts on
-    // the one with the most room; a running tab stays.
+    // none at its limit: no cycling between them. A new session, or a tab
+    // whose own account is at its limit and so cannot go on, moves to the
+    // one with the most room; any other running tab stays.
     let usable: Vec<&Candidate> = others.iter().copied()
         .filter(|candidate| candidate.signed_in && candidate.checked && candidate.kind == Kind::Subscription && fresh(candidate, now) && !candidate.lacks_model)
         .collect();
     let at_limit = |candidate: &Candidate| full(candidate, model, threshold, now).is_some_and(|full| full.at_limit);
     if !usable.is_empty() && usable.iter().all(|candidate| !at_limit(candidate)) {
-        if ask.why == Why::Launch {
+        if ask.why == Why::Launch || from_full.at_limit {
             let best = usable.iter().copied().max_by(|a, b| room(a, model, now).total_cmp(&room(b, model, now)));
             if let Some(best) = best.filter(|best| room(best, model, now) > room(current, model, now)) {
                 return Decision::Switch { to: best.id.clone(), reason: Reason { from_label: current.label.clone(), full: from_full, most_room: true } };
@@ -498,6 +499,12 @@ pub struct TabMemory {
     pub none_told_at: Option<i64>,
     /// The model its agent last reported.
     pub reported_model: Option<String>,
+    /// Since when its held follow-ups wait for a switch being decided, so
+    /// the next goes on the account it moves to.
+    pub queue_held_at: Option<i64>,
+    /// The switch was looked at for this turn's end and did not happen:
+    /// held follow-ups go where the tab is, until a new turn starts.
+    pub queue_passed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +515,10 @@ pub struct JustSwitched {
     pub at: i64,
     /// The model before the switch, to learn a plan that lacks it.
     pub model_before: Option<String>,
+    /// The model the tab's own settings ask for (not the agent's default):
+    /// the resumed agent is started with it, so another one reported after
+    /// the switch is the plan's fallback, not a default of that account.
+    pub model_asked: Option<String>,
     /// The switch followed a limit hit: a continue message is owed.
     pub limit_hit: bool,
     /// The one other account already tried after a failure.
@@ -518,6 +529,8 @@ pub struct JustSwitched {
 pub const PROVING_MS: i64 = 2 * 60_000;
 /// How long a failed switch keeps an account from being chosen again.
 pub const FAILED_MS: i64 = 30 * 60_000;
+/// How long a plan seen falling back from a model is kept from it.
+pub const LACKS_MS: i64 = 6 * 60 * 60_000;
 
 /// What the runtime remembers about tabs and accounts between decisions.
 /// Lost when the runtime restarts, which is safe: each fact only holds a
@@ -533,10 +546,13 @@ pub struct Memory {
     arrivals: Vec<(String, String, i64)>,
     /// (agent, account) whose switch failed: not chosen until signed in again.
     failed: HashMap<(String, String), i64>,
-    /// (agent, account) → models its plan fell back from.
-    lacks: HashMap<(String, String), HashSet<String>>,
+    /// (agent, account) → models its plan fell back from, and when.
+    lacks: HashMap<(String, String), HashMap<String, i64>>,
     /// Pane id → when the person last typed into it.
     typed_panes: HashMap<String, i64>,
+    /// What the usage store would say, set by a test in its place.
+    #[cfg(test)]
+    pub usage_for_tests: Option<Vec<crate::status::usage::AccountUsage>>,
 }
 
 fn key(agent: &str, id: &str) -> (String, String) {
@@ -586,8 +602,8 @@ impl Memory {
     }
 
     /// `account`'s plan answered with another model than `model`.
-    pub fn lacks(&mut self, agent: &str, account: &str, model: &str) {
-        self.lacks.entry(key(agent, account)).or_default().insert(model.to_ascii_lowercase());
+    pub fn lacks(&mut self, agent: &str, account: &str, model: &str, now: i64) {
+        self.lacks.entry(key(agent, account)).or_default().insert(model.to_ascii_lowercase(), now);
     }
 
     pub fn forget_tab(&mut self, tab: &str) {
@@ -602,6 +618,11 @@ impl Memory {
         self.typed_panes.retain(|_, at| now - *at < 60_000);
         // A sign-in renewed in Settings is not seen here: try a failed account again after a while.
         self.failed.retain(|_, at| now - *at < FAILED_MS);
+        // A plan can change, and one fallback is thin evidence: learn it again.
+        for models in self.lacks.values_mut() {
+            models.retain(|_, at| now - *at < LACKS_MS);
+        }
+        self.lacks.retain(|_, models| !models.is_empty());
     }
 
     /// What a candidate of `agent` carries from memory.
@@ -614,7 +635,7 @@ impl Memory {
             candidate.signed_in = false;
         }
         if let Some(model) = model {
-            candidate.lacks_model = self.lacks.get(&k).is_some_and(|models| models.contains(&model.to_ascii_lowercase()));
+            candidate.lacks_model = self.lacks.get(&k).and_then(|models| models.get(&model.to_ascii_lowercase())).is_some_and(|at| now - at < LACKS_MS);
         }
     }
 }

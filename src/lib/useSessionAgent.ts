@@ -261,8 +261,14 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     accounts: accountsShown ? accounts : null,
     /** The account the launch starts on, as the picker shows it. */
     account,
-    /** What a launch request carries as `account`: the account shown, or nothing with one account. */
-    accountId: account?.id,
+    /**
+     * What a launch request carries as `account`: the account shown, or
+     * nothing with one account. When the account shown is automatic
+     * switching's choice (#981), the one it moves off: the runtime decides
+     * again as the tab starts, moves it, and says so in the conversation
+     * and the switch log.
+     */
+    accountId: automatic && account?.id === automatic.account ? resolved?.id : account?.id,
     /** Why automatic switching chose `account` rather than the default (#981), or `null`. */
     accountReason: automatic && account?.id === automatic.account ? automatic.reason : null,
     selectAccount: (id: string) => {

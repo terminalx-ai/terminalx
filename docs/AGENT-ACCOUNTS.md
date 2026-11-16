@@ -181,19 +181,27 @@ agent's entry in `agent-logins.json` (`autoSwitch`, unknown fields kept):
 **Decision.** One pure function, `agent_accounts::auto_switch::decide`, in the
 runtime (terminalx-serve). An account is *available* when it is signed in,
 checked, not full, its usage read in the last 30 minutes, and its plan was not
-seen lacking the tab's model. An account a tab left counts again only after
+seen lacking the tab's model (a model the tab's settings ask for, which the
+agent fell back from right after a switch onto it; remembered six hours). An
+account a tab left counts again only after
 its window resets or its usage drops 10 points below the threshold. When
-every account is above the threshold the tab stays; when none has room the
-tab says so with the earliest reset. Several tabs leaving one account are
+every account is above the threshold the tab stays, unless its own account
+is at its limit: then it moves to the one with the most room, so an
+unattended run goes on. When every account is at its limit the tab says so
+with the earliest reset. Several tabs leaving one account are
 spread: each recent arrival costs an account 10 points of room for 5 minutes.
 
 **When.** Between turns only: never during a turn, a permission request, a
 question, a compaction, background work, or within 20 s of typing in the
 composer or the terminal. At most one automatic switch per tab per 5 minutes;
 a move by hand resets that pause. A limit hit mid-turn switches as soon as the
-turn ends and sends `continue`. A new tab whose account is full starts on the
+turn ends and sends `continue`. Follow-ups held for the tab wait while a
+switch is owed at a turn's end and are sent on the new account (after the
+`continue`); one the person sends now goes where the tab is. A new tab whose account is full starts on the
 chosen account instead ("Started on Personal: Work is at 93 % …"), and New
-Session's account picker shows that choice and why.
+Session's account picker shows that choice and why. The picker sends the
+account it moved off, so the runtime decides again as the tab starts and the
+move is said in the conversation and kept in the log.
 
 **How.** The switch is #980's *Continue with*: restart on the other account
 and resume. A switch refused (the agent reports a sign-out within 2 minutes)

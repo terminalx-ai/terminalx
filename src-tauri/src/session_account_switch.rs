@@ -31,6 +31,10 @@ const LOOP_INTERVAL: Duration = Duration::from_secs(30);
 /// A turn's end is looked at a moment later: whatever the turn's end itself
 /// restarts or delivers goes first.
 const AFTER_TURN: Duration = Duration::from_millis(1_500);
+/// Held follow-ups wait for a switch being decided at most this long.
+const QUEUE_HOLD_MS: i64 = 2 * 60_000;
+/// A switch this recent is the one a held queue waited for.
+const JUST_NOW_MS: i64 = 10_000;
 /// "No account has room" is said again in a tab no sooner than this.
 const NONE_TOLD_AGAIN_MS: i64 = 30 * 60_000;
 /// The event the desktop raises its notifications from.
@@ -99,6 +103,8 @@ struct TabFacts {
     title: String,
     current: String,
     model: Option<String>,
+    /// The model the tab's settings ask for, if not the agent's default.
+    model_asked: Option<String>,
 }
 
 impl SessionManager {
@@ -139,6 +145,9 @@ impl SessionManager {
 
     /// Each of `switching`'s accounts as a decision sees it, in the setting's order.
     fn switch_candidates(&self, switching: &Switching, model: Option<&str>, now: i64) -> Vec<Candidate> {
+        #[cfg(test)]
+        let usage = self.switch_memory().usage_for_tests.clone().unwrap_or_else(|| self.status.usage.accounts_now());
+        #[cfg(not(test))]
         let usage = self.status.usage.accounts_now();
         let memory = self.switch_memory();
         switching.listed.iter().map(|listed| {
@@ -244,13 +253,15 @@ impl SessionManager {
         match payload {
             Payload::ContextCompactionStarted => { self.switch_memory().tab(&key).compacting = true; }
             Payload::ContextCompacted { .. } | Payload::TurnCompleted { .. } => { self.switch_memory().tab(&key).compacting = false; }
-            // The person, or a run, prompted the tab: a limit hit before is no longer owed a switch.
+            // The person, or a run, prompted the tab: a limit hit before is
+            // no longer owed a switch, and its next end is looked at afresh.
             Payload::UserMessage { queued: false, .. } => {
                 let mut memory = self.switch_memory();
                 let tab = memory.tab(&key);
-                if tab.just_switched.as_ref().is_none_or(|just| now - just.at > 10_000) {
+                if tab.just_switched.as_ref().is_none_or(|just| now - just.at > JUST_NOW_MS) {
                     tab.limit_pending = false;
                 }
+                tab.queue_passed = false;
             }
             Payload::TurnStarted { model: Some(model), .. } | Payload::UsageUpdate(crate::events::Usage { model: Some(model), .. }) => {
                 self.account_model_reported(&key, model, now);
@@ -279,17 +290,20 @@ impl SessionManager {
         }
     }
 
-    /// The model `tab`'s agent reports: after a switch, one other than the
-    /// model before says the new account's plan lacks that one.
+    /// The model `tab`'s agent reports. After a switch, one other than the
+    /// model before says the new account's plan lacks that one, but only
+    /// when the tab's settings ask for a model: the resumed agent was then
+    /// started with it, so the account's own `/model` default cannot explain
+    /// the change. The lesson expires ([`auto_switch::LACKS_MS`]).
     fn account_model_reported(&self, key: &str, model: &str, now: i64) {
         let mut memory = self.switch_memory();
         let tab = memory.tab(key);
         let learned = tab.just_switched.as_ref()
-            .filter(|just| now - just.at < auto_switch::PROVING_MS)
+            .filter(|just| now - just.at < auto_switch::PROVING_MS && just.model_asked.is_some())
             .and_then(|just| just.model_before.as_ref().filter(|before| !before.eq_ignore_ascii_case(model)).map(|before| (just.agent.clone(), just.to.clone(), before.clone())));
         tab.reported_model = Some(model.to_string());
         if let Some((agent, account, before)) = learned {
-            memory.lacks(&agent, &account, &before);
+            memory.lacks(&agent, &account, &before, now);
         }
     }
 
@@ -308,6 +322,89 @@ impl SessionManager {
         if !rt.turn_open {
             self.account_switch_soon(&rt.session_id, &rt.tab_id);
         }
+    }
+
+    /// Whether `rt`'s held follow-ups wait (#981): a switch is owed at this
+    /// turn's end (its account hit its limit, or is full), so the next one
+    /// is sent once the tab is on the account it moves to. Asked, under the
+    /// tab's lock, before held follow-ups are scheduled and delivered; a
+    /// hold starts the switch at once when the turn is over, and the queue
+    /// is let go when the switch is decided ([`Self::account_switch_settled`]).
+    pub(super) fn account_switch_holds_queue(&self, rt: &TabRuntime) -> bool {
+        // "Send now": the person's choice goes where the tab is.
+        if rt.held_queue.next.is_some() || !matches!(rt.engine, Engine::Cli(_) | Engine::CodexStdio(_)) {
+            return false;
+        }
+        let key = key_of(&rt.session_id, &rt.tab_id);
+        let now = now_ms();
+        let (limit_pending, last_switch_at, reported) = {
+            let memory = self.switch_memory();
+            let tab = memory.tabs.get(&key);
+            if tab.is_some_and(|tab| tab.queue_passed) {
+                return false;
+            }
+            if tab.and_then(|tab| tab.queue_held_at).is_some_and(|at| now - at < QUEUE_HOLD_MS) {
+                return true;
+            }
+            (tab.is_some_and(|tab| tab.limit_pending), tab.and_then(|tab| tab.last_switch_at), tab.and_then(|tab| tab.reported_model.clone()))
+        };
+        let Some(switching) = Switching::of(&rt.harness) else { return false };
+        let Ok(entry) = index::get(&rt.session_id) else { return false };
+        if !switching.setting.switches_in(crate::session_ops::project_key(&entry)) {
+            return false;
+        }
+        let owed = limit_pending || entry.tab(&rt.tab_id).is_some_and(|tab| {
+            let model = reported.or_else(|| (!tab.model.is_empty() && tab.model != "default").then(|| tab.model.clone()));
+            let candidates = self.switch_candidates(&switching, model.as_deref(), now);
+            matches!(auto_switch::decide(&auto_switch::Ask {
+                why: Why::Between,
+                current: crate::session_ops::tab_running_account(tab).unwrap_or(LOCAL),
+                model: model.as_deref(),
+                candidates: &candidates,
+                threshold: switching.setting.threshold(),
+                order: switching.setting.order,
+                last_switch_at,
+                now,
+            }), Decision::Switch { .. })
+        });
+        if !owed {
+            return false;
+        }
+        self.switch_memory().tab(&key).queue_held_at = Some(now);
+        if !rt.turn_open {
+            let (manager, session, tab) = (self.clone(), rt.session_id.clone(), rt.tab_id.clone());
+            std::thread::spawn(move || manager.consider_account_switch(&session, &tab));
+        }
+        true
+    }
+
+    /// A switch held `tab`'s follow-ups and is now decided: let them go. Not
+    /// switched, they go where the tab is. Switched, they go on the new
+    /// account once its agent is back (after the `continue` a limit hit is
+    /// owed): the restart's own end schedules them, or this does when the
+    /// restart is over already.
+    fn account_switch_settled(&self, session_id: &str, tab_id: &str) {
+        let key = key_of(session_id, tab_id);
+        let now = now_ms();
+        let switched = {
+            let mut memory = self.switch_memory();
+            let Some(tab) = memory.tabs.get_mut(&key) else { return };
+            if tab.queue_held_at.take().is_none() {
+                return;
+            }
+            let switched = tab.just_switched.as_ref().is_some_and(|just| now - just.at < JUST_NOW_MS);
+            if !switched {
+                tab.queue_passed = true;
+            }
+            switched
+        };
+        let Ok(rt_arc) = self.runtime(session_id, tab_id) else { return };
+        let rt = rt_arc.lock().unwrap();
+        // A restart still under way would refuse them: its end schedules them.
+        if switched && (rt.restart_claim.is_some() || rt.stdio_starting) {
+            return;
+        }
+        self.schedule_held(&rt);
     }
 
     /// A turn of `rt`'s agent has ended: whether it moves is looked at
@@ -331,6 +428,7 @@ impl SessionManager {
         if let Err(error) = self.try_account_switch(session_id, tab_id, false) {
             log::warn!("automatic account switch of {session_id}/{tab_id}: {error:#}");
         }
+        self.account_switch_settled(session_id, tab_id);
     }
 
     /// What `tab` is, when it may be switched now; `None` when it is busy
@@ -367,12 +465,14 @@ impl SessionManager {
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).context("tab gone")?;
         let reported = self.switch_memory().tabs.get(&key).and_then(|tab| tab.reported_model.clone());
+        let model_asked = (!tab.model.is_empty() && tab.model != "default").then(|| tab.model.clone());
         Ok(Some(TabFacts {
             harness: tab.harness.clone(),
             project: crate::session_ops::project_key(&entry).map(str::to_owned),
             title: entry.title.clone(),
             current: crate::session_ops::tab_running_account(tab).unwrap_or(LOCAL).to_string(),
-            model: reported.or_else(|| (!tab.model.is_empty() && tab.model != "default").then(|| tab.model.clone())),
+            model: reported.or_else(|| model_asked.clone()),
+            model_asked,
         }))
     }
 
@@ -423,7 +523,7 @@ impl SessionManager {
             tab.limit_pending = false;
             tab.just_switched = Some(auto_switch::JustSwitched {
                 agent: agent.into(), from: facts.current.clone(), to: to.into(), at: now,
-                model_before: tab.reported_model.clone(), limit_hit, retried: retry,
+                model_before: tab.reported_model.clone(), model_asked: facts.model_asked.clone(), limit_hit, retried: retry,
             });
         }
         let log = |outcome: Outcome, reason: String, to: Option<(&str, &str)>| auto_switch::append_log(&auto_switch::LogEntry {
@@ -619,3 +719,7 @@ impl SessionManager {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "session_account_switch_tests.rs"]
+mod tests;
