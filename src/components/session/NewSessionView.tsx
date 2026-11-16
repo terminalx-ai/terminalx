@@ -45,7 +45,9 @@ import { ORCHESTRATE_TITLE, orchestratePrompt, useOrchestrateOffered } from "@/l
 import { showRunView } from "@/lib/orchestration";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { WorkStatus } from "@/types/session";
-import { cloudStartError, quoteText, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
+import { cloudStartError, quoteText, useCloudDraft, useCloudIdleOptions, useCloudProjectChoices } from "./CloudNewSession";
+import { IdleSuspendSelect } from "@/components/cloud/IdleSuspendSelect";
+import { initialIdleSuspend } from "@/lib/idleSuspend";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { PHASES, failureMessage, isClientError, phaseOf } from "@/lib/cloudCreate";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -190,6 +192,10 @@ export function NewSessionView({
   // On a machine a session always gets a new worktree beside its project there.
   const useWorktree = isGit && (!!machine || !!pullRequest || !!preset?.fromBranch || (controlledUseWorktree ?? localUseWorktree));
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
+  // "Stop when idle" (PRO-410): only when Create makes a new workspace; a reused or woken one keeps its own window.
+  const idleOptions = useCloudIdleOptions(cloudPlan?.kind === "create" ? cloud!.project!.orgId : null);
+  const [idleChoice, setIdleChoice] = useState<number | null>(null);
+  const idleMinutes = idleOptions ? initialIdleSuspend(idleOptions.choices, idleOptions.defaultMinutes, idleChoice) : null;
   const cloudModelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   // A machine's agents, models and efforts are its own.
@@ -351,6 +357,7 @@ export function NewSessionView({
     prompt: text,
     useWorktree,
     ...(pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value, pipelineSettings: pipelineLaunch.settings } : {}),
+    ...(idleMinutes !== null ? { idleSuspendMinutes: idleMinutes } : {}),
   });
 
   /**
@@ -397,7 +404,8 @@ export function NewSessionView({
           unsettled.form.agent === request.agent &&
           unsettled.form.model === request.model &&
           unsettled.form.effort === (request.effort ?? "") &&
-          unsettled.form.mode === request.mode;
+          unsettled.form.mode === request.mode &&
+          (unsettled.form.idleSuspendMinutes ?? null) === (request.idleSuspendMinutes ?? null);
         const prepared = resend ? unsettled : await prepareCloudCreate(project, request);
         unsettledCreate.current = null;
         setStarting(`Creating the workspace on ${quoteText(prepared.quote, prepared.providerLabel).machine}…`);
@@ -891,6 +899,11 @@ export function NewSessionView({
           </div>
 
           {machine && <MachineFormLine draft={machine} agentId={harness?.id ?? null} agentName={harness?.name ?? null} />}
+          {cloudPlan?.kind === "create" && idleOptions && idleMinutes !== null && (
+            <div className="mt-2 px-1" data-testid="cloud-idle-line">
+              <IdleSuspendSelect choices={idleOptions.choices} value={idleMinutes} cap={idleOptions.cap} disabled={busy} onChange={setIdleChoice} testId="cloud-idle-suspend" />
+            </div>
+          )}
           {!remote && (
             <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs text-faint">
               {signedIn.map((item) => (
