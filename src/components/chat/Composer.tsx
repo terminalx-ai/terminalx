@@ -1,9 +1,9 @@
-import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/reviewComments";
+import { captureReviewSend, markReviewsSent, pendingReviewCount, restoreReviewSend } from "@/lib/reviewComments";
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { ArrowUp, AtSign, ChevronDown, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -559,10 +559,20 @@ export function Composer({
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
 
+  // Review comments added from a diff wait in the draft (PRO-392): said above the box until they are sent or removed.
+  const reviewsReady = pendingReviewCount(tab.id, draft);
+
   return (
     <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
+      {reviewsReady > 0 && (
+        <div data-testid="review-comments-ready" className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <MessageSquare aria-hidden className="size-3.5 shrink-0 text-mention" />
+          <span className="shrink-0">{reviewsReady} review {reviewsReady === 1 ? "comment" : "comments"} ready to send</span>
+          <span className="min-w-0 truncate text-faint">· {reviewsReady === 1 ? "it goes" : "they go"} to the agent as one message</span>
+        </div>
+      )}
       {reviewReceiptError && <div role="alert" className="mb-2 text-xs text-warning">Message accepted, but review comments could not be marked Sent: {reviewReceiptError.message} <button type="button" onClick={() => void reviewReceiptError.retry().then(() => setReviewReceiptError(null), (error) => setReviewReceiptError({ ...reviewReceiptError, message: String(error) }))}>Retry marking Sent</button></div>}
       <div
         className={cn(
