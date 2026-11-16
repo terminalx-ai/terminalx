@@ -467,6 +467,31 @@ it.each([true, false])("retains boot backfill activity across a stale list (veri
   expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt, hasMessages: true });
 });
 
+describe("projects changed outside the window", () => {
+  it("lists a project added by the CLI and keeps the reader's project", async () => {
+    const added = { path: "/repos/other", name: "Other" };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_projects") return { projects: [{ path: projectPath, name: "Raccoon" }, added], lastSelected: projectPath };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    mocks.listeners.get("projects_changed")!({ payload: null });
+    await vi.waitFor(() => expect(sessions.getSessionStore().projects.map((project) => project.path)).toEqual([projectPath, added.path]));
+    expect(sessions.getSessionStore().lastProject).toBe(projectPath);
+  });
+
+  it("stops starting New Session in a project the CLI removed", async () => {
+    const other = { path: "/repos/other", name: "Other" };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_projects") return { projects: [other], lastSelected: other.path };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    expect(sessions.getSessionStore().lastProject).toBe(projectPath);
+    mocks.listeners.get("projects_changed")!({ payload: null });
+    await vi.waitFor(() => expect(sessions.getSessionStore().projects).toEqual([other]));
+    expect(sessions.getSessionStore().lastProject).toBe(other.path);
+  });
+});
+
 describe("a new live connection", () => {
   const reads = ["list_projects", "list_sessions", "list_harnesses", "list_workspaces", "chats_dir"];
 

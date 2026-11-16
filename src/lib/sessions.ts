@@ -368,7 +368,10 @@ export function openTarget(target: OpenTarget) {
 async function refreshProjects() {
   try {
     const projects = await api.listProjects();
-    set({ projects: projects.projects });
+    // A project removed outside this window (`terminalx projects remove`) is
+    // no longer the one New Session starts in: take the store's choice.
+    const gone = state.lastProject !== null && !projects.projects.some((project) => project.path === state.lastProject);
+    set(gone ? { projects: projects.projects, lastProject: projects.lastSelected ?? projects.projects[0]?.path ?? null } : { projects: projects.projects });
   } catch {
     /* keep what is listed; the next change tries again */
   }
