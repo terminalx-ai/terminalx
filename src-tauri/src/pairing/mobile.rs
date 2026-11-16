@@ -203,6 +203,16 @@ struct TurnNotes {
     limited: bool,
     /// A failure met before the turn ended, which an aborted end is down to.
     failure: Option<crate::recovery::RecoveryKind>,
+    /// `failure` is a non-fatal error's: the agent's carrying on after it
+    /// (`carries_on`) shows the turn got past it, and clears it.
+    passing: bool,
+}
+
+/// What an agent does only while its turn goes on: after a non-fatal error,
+/// the error did not end it.
+fn carries_on(payload: &Payload) -> bool {
+    matches!(payload, Payload::AssistantText { .. } | Payload::Reasoning { .. } | Payload::ToolCallStarted { .. }
+        | Payload::ToolCallCompleted { .. } | Payload::FileEdits { .. } | Payload::ModelRequestStarted)
 }
 
 /// The filter a connection's latest `notifications.subscribe` named, and that
@@ -425,7 +435,7 @@ impl MobileRuntime {
                 if matches!(&event.payload, Payload::RateLimited { .. }) && !rejected { return None; }
                 let mut turns = self.turns.lock().unwrap();
                 let notes = turns.entry(tab_key).or_default();
-                if rejected { notes.failure = Some(crate::recovery::RecoveryKind::UsageLimit); }
+                if rejected { (notes.failure, notes.passing) = (Some(crate::recovery::RecoveryKind::UsageLimit), false); }
                 if std::mem::replace(&mut notes.limited, true) { return None; }
                 (NoticeKind::UsageLimit, crate::recovery::RecoveryKind::UsageLimit.message().to_string(), None, None)
             }
@@ -449,9 +459,19 @@ impl MobileRuntime {
                     None => (NoticeKind::Finished, text.unwrap_or_else(|| "An agent turn finished on your Mac.".into()), None, None),
                 }
             }
-            // An error mid-turn is no notice of its own: the turn it ends says so.
+            // An error mid-turn is no notice of its own: the turn it ends says
+            // so. A non-fatal one only if nothing the agent did followed it.
             payload if crate::recovery::failure(payload).is_some() => {
-                self.turns.lock().unwrap().entry(tab_key).or_default().failure = crate::recovery::failure(payload);
+                let mut turns = self.turns.lock().unwrap();
+                let notes = turns.entry(tab_key).or_default();
+                notes.failure = crate::recovery::failure(payload);
+                notes.passing = matches!(payload, Payload::Error { fatal: false, .. });
+                return None;
+            }
+            payload if carries_on(payload) => {
+                if let Some(notes) = self.turns.lock().unwrap().get_mut(&tab_key) {
+                    if notes.passing { (notes.failure, notes.passing) = (None, false); }
+                }
                 return None;
             }
             _ => return None,
@@ -3320,6 +3340,14 @@ mod tests {
         let errored = notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap();
         assert_eq!((errored.kind, errored.body.as_str()), (NoticeKind::Failed, crate::recovery::RecoveryKind::Disconnected.message()), "aborted by an error, not by the person: told in the error's allowlisted words");
         assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Finished, "the error was that turn's, not the next one's");
+        // A non-fatal error the agent went on past: a person's stop later is still theirs.
+        assert!(notice(&runtime, Payload::Error { message: "Connection write failed: broken pipe".into(), fatal: false, detail: None }).is_none());
+        assert!(notice(&runtime, Payload::ModelRequestStarted).is_none());
+        assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Finished, "stopped by the person after the agent carried on");
+        // A fatal one stays the turn's, whatever follows it.
+        assert!(notice(&runtime, Payload::Error { message: "Connection write failed: broken pipe".into(), fatal: true, detail: None }).is_none());
+        assert!(notice(&runtime, Payload::ModelRequestStarted).is_none());
+        assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Failed, "a fatal error ended it");
         assert!(notice(&runtime, Payload::ApiRetry { attempt: 3, max_retries: 3, reason: Some("overloaded".into()) }).is_none());
         assert_eq!(notice(&runtime, ended(TurnStatus::Aborted, None, false)).unwrap().kind, NoticeKind::Failed, "retries ran out");
         assert!(notice(&runtime, Payload::ApiRetry { attempt: 1, max_retries: 3, reason: None }).is_none());
