@@ -101,6 +101,11 @@ export interface SessionBackend {
   caps: SessionBackendCaps;
   /** Why writes are off, shown wherever they would be. Null while they are allowed. */
   readOnlyReason: string | null;
+  /**
+   * Why a send waits (a machine that is away, 21.09): the composer keeps what
+   * is typed and sends nothing until it is null. Absent where sends never wait.
+   */
+  sendHeldReason?: string | null;
   /** The session id the agent event logs are keyed by (the runtime's own id for a cloud session). */
   logSessionId: string;
   /** Start showing a tab: load its log (local), or its checkpoint and live stream (cloud). Returns the cleanup. */

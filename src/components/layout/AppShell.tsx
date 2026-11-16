@@ -58,7 +58,7 @@ import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
 import { updateMachineSession } from "@/lib/machineCatalog";
-import { setMachineDashboardEnabled } from "@/lib/machineDashboard";
+import { setMachineDashboardEnabled, useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { startAppUpdateResponder } from "@/lib/machineUpdate";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
@@ -499,14 +499,16 @@ function UnselectedWorkspace({
   const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   // A cloud or project-less draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.newSessionChat));
+  const panelAvailable = !!cwd && !!project && !(view === "new" && (store.cloudSessionPreset || store.machineSessionPreset || store.newSessionChat));
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, or over a cloud or project-less draft.
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(view === "new" && store.newSessionChat));
+  // A machine draft (PRO-348) has a project there, whatever this Mac has; only while Machines is on.
+  const machinesShown = useMachineDashboardEnabled();
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(machinesShown && store.machineSessionPreset) && !(view === "new" && store.newSessionChat));
 
   return (
     <>

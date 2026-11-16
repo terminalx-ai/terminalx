@@ -176,6 +176,55 @@ async fn one_connection_lists_three_projects_and_starts_a_session_in_each() {
     assert!(call(&m.rpc, &peer, "lifecycle.resources", json!({})).await.is_ok());
 }
 
+/// `git` in `dir`, which must succeed.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// New session on a machine (PRO-348): `session.create` cuts a worktree of the
+/// named project from the chosen branch (`session-base/1`), and a resend of
+/// the same request is the same session, never a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_is_cut_from_the_chosen_branch_once() {
+    let m = machine_rpc();
+    let (path, id) = project(&m.path("code"), "api");
+    git(&path, &["add", "README.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "readme"]);
+    git(&path, &["checkout", "-qb", "feature"]);
+    std::fs::write(path.join("FEATURE.md"), "only on feature\n").unwrap();
+    git(&path, &["add", "FEATURE.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "feature"]);
+    git(&path, &["checkout", "-q", "main"]);
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|granted| granted == "session-base/1"), "{hello}");
+    let request = json!({ "agent": "claude", "model": "opus", "title": "From feature", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-from-feature" });
+    let made = call(&m.rpc, &peer, "session.create", request.clone()).await.unwrap();
+    let cwd = PathBuf::from(made["session"]["cwd"].as_str().unwrap());
+    assert_ne!(cwd, path, "a worktree of its own: {made}");
+    assert!(cwd.join("FEATURE.md").is_file(), "cut from feature: {made}");
+    assert!(!path.join("FEATURE.md").exists(), "the project's own checkout stays on main");
+    // The same request again (a resend after a dropped connection) is answered with the same session.
+    let again = call(&m.rpc, &peer, "session.create", request).await.unwrap();
+    assert_eq!(again["sessionId"], made["sessionId"]);
+    let sessions = call(&m.rpc, &peer, "session.list", json!({})).await.unwrap();
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1, "{sessions}");
+    // Without a worktree there is nothing to cut, and the base is not used.
+    let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
+    assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);
+    // Never something git could read as an option or a revision expression.
+    for bad in ["-x", "main..feature", "feature@{1}", "a b", "", "HEAD~1"] {
+        let refused = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": bad, "clientRequestId": format!("create-bad-{}", bad.len()) })).await;
+        assert_eq!(code(refused), "invalid_params", "{bad:?}");
+    }
+    // A client that did not ask for `session-base/1` cannot name a base.
+    let (older, _) = Peer::new("computer-2".into(), Authority::Manage);
+    let want: Vec<&str> = protocol::served(true).into_iter().filter(|name| *name != "session-base/1").collect();
+    call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
+    let refused = call(&m.rpc, &older, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-older" })).await;
+    assert_eq!(code(refused), "capability_not_granted");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let m = machine_rpc();

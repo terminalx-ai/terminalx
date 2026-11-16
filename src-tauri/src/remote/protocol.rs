@@ -23,6 +23,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   running turn. Live only: it is never queued, receipted or resent.
 /// - `session-repository/1`: `session.create.repository` carries the selected
 ///   identity and advertised directory; mismatch/missing checkout fails closed.
+/// - `session-base/1` (PRO-348): `session.create.baseRef` names the branch a
+///   new worktree is cut from; without it the project's default branch is.
 /// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
@@ -77,8 +79,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 25] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+pub const CAPABILITIES: [&str; 26] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
 ];
 
@@ -319,7 +321,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
         "git/1" => &["git."],
-        "session/1" | "session/2" | "session/3" | "session-repository/1" => &["session."],
+        "session/1" | "session/2" | "session/3" | "session-repository/1" | "session-base/1" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
         "keys/1" => &["keys."],

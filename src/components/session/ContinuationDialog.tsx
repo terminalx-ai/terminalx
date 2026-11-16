@@ -17,6 +17,10 @@ import { SessionAgentControls } from "./SessionAgentControls";
 import { PipelineLaunchControls } from "./PipelineLaunchControls";
 import { HandoffScene } from "./HandoffScene";
 import { Fold } from "@/components/ui/Fold";
+import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
+import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
+import { machineWhereRow } from "@/lib/machineNewSession";
+import { openMachineDraft } from "./MachineNewSession";
 import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -71,6 +75,12 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
   const [chosen, setChosen] = useState<LaunchSettings | null>(null);
+  // Runs on (PRO-348): this Mac, or a paired machine while Machines is on. A machine gets the new-session form with the handoff in it.
+  const machinesOn = useMachineDashboardEnabled();
+  const connections = useMachineConnections();
+  const [runsOn, setRunsOn] = useState<string | null>(null);
+  const runsOnShown = machinesOn && !into && !reviewPrompt && connections.machines.length > 0;
+  const onMachine = runsOnShown && runsOn ? machineConnection(connections, runsOn) : null;
   const models = useModels();
   const prefs = usePrefs();
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
@@ -190,7 +200,37 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
     return () => { canceled = true; };
   }, [session.id, source.id, attempt, initialHarness, reviewPrompt]);
 
+  /**
+   * Hand off to a machine: the context is read again for another computer (no
+   * path of this Mac in it), and the new-session form opens on the machine
+   * with it as the prompt. The session starts there when Create is pressed.
+   */
+  const continueOnMachine = async () => {
+    if (!onMachine?.machine || startingRef.current) return;
+    const name = onMachine.machine.name;
+    startingRef.current = true;
+    setStarting(true);
+    setError(null);
+    try {
+      const portable = await agent.prepareContinuation(session.id, source.id, true);
+      // A runtime older than this app still names its transcript: nothing of it could be read there.
+      if (portable.transcriptPath) throw new Error("This Mac's runtime is older than the app. Quit and reopen TerminalX to hand off to another machine.");
+      const prompt = continuationPrompt(portable, "focused").replace(
+        "Inspect the current workspace, including git status and relevant files. Workspace files are authoritative when they differ from the history. This is the same shared workspace, branch, and uncommitted changes; subsequent edits affect it as usual.",
+        `This is a new session on another computer, ${name}, in a new worktree of its project there. Inspect the current working directory before continuing. Files the history mentions are on the other computer; do not assume they are present here.`,
+      );
+      openMachineDraft(onMachine.machine.machineId, { prompt });
+      close();
+    } catch (e) {
+      if (active.current) setError(errorMessage(e));
+    } finally {
+      startingRef.current = false;
+      if (active.current) setStarting(false);
+    }
+  };
+
   const start = async () => {
+    if (onMachine) return continueOnMachine();
     if (loading || startingRef.current || !context || !settings || sent || !destinationReady) return;
     startingRef.current = true;
     const plan = launchedPlan.current ?? { sameSession: !!sameSession, target, settings };
@@ -292,7 +332,21 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
           {agentName} · {selection.model?.label ?? (settings.model || "Agent default")} · Plan (read-only)
         </p>}
-        {!into && !reviewPrompt && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
+        {runsOnShown && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
+          Runs on
+          <select aria-label="Runs on" data-testid="handoff-runs-on" className="h-8 rounded-md border bg-background px-2 text-xs" disabled={locked} value={runsOn ?? ""} onChange={(event) => setRunsOn(event.target.value || null)}>
+            <option value="">This Mac</option>
+            {connections.machines.map((machine) => {
+              const { state } = machineConnection(connections, machine.machineId);
+              const row = machineWhereRow({ state, machine, running: null, freeBytes: null, agents: null, projects: null, wantedProject: null });
+              return <option key={machine.machineId} value={machine.machineId} disabled={!row.enabled}>{machine.name}{row.enabled ? "" : ` · ${row.detail}`}</option>;
+            })}
+          </select>
+        </label>}
+        {onMachine && <p className="mt-4 text-xs text-muted-foreground" data-testid="handoff-on-machine">
+          Opens the new-session form on {onMachine.machine?.name ?? "the machine"} with this handoff as its prompt, carrying the recent conversation. Choose the project, branch and agent there; nothing starts until you press Create.
+        </p>}
+        {!onMachine && !into && !reviewPrompt && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
           Project
           <select aria-label="Project" className="h-8 rounded-md border bg-background px-2 text-xs" disabled={locked} value={inferProject && !discoveryReady ? "__resolving__" : selectedProject ?? ""} onChange={(event) => { setProjectChoice(event.target.value || null); setWorkspaceRevision((n) => n + 1); setWorktree(false); }}>
             {inferProject && !discoveryReady && <option disabled value="__resolving__">Choose a project or wait for workspace discovery</option>}
@@ -301,8 +355,8 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
             {projects.map((project) => <option key={project.path} value={project.path}>{project.name}</option>)}
           </select>
         </label>}
-        {!reviewPrompt && project && !sameSession && matchingWorkspace && <p className="mt-4 text-xs text-muted-foreground">In the existing workspace: {context?.cwd}</p>}
-        {!reviewPrompt && discoveryReady && project && !sameSession && !matchingWorkspace && (isGit ? (
+        {!onMachine && !reviewPrompt && project && !sameSession && matchingWorkspace && <p className="mt-4 text-xs text-muted-foreground">In the existing workspace: {context?.cwd}</p>}
+        {!onMachine && !reviewPrompt && discoveryReady && project && !sameSession && !matchingWorkspace && (isGit ? (
           <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
             <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
             <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
@@ -320,7 +374,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
           <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
           <p className="text-xs text-faint" aria-hidden>&nbsp;</p>
           <span className="mt-3 h-0" aria-hidden />
-        </div> : !reviewPrompt && <>
+        </div> : !reviewPrompt && !onMachine && <>
           {/* Two rows of the same make: a label, then controls across the full width at one height, so the
               pills and the context switch line up edge to edge. */}
           <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">
@@ -363,7 +417,8 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
           {inInput && <Button disabled={pressing} onClick={() => void pressEnter()}>{pressing ? <><LoaderCircle className="size-4 animate-spin" />Pressing Enter…</> : inInput.pressed ? "Press Enter Again" : "Press Enter"}</Button>}
-          {!sent && <Button disabled={loading || starting || !context || !settings || !destinationReady} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
+          {!sent && onMachine && <Button disabled={starting || !onMachine.machine} onClick={() => void continueOnMachine()} data-testid="handoff-continue-on-machine">{starting ? <><LoaderCircle className="size-4 animate-spin" />Preparing…</> : `Continue on ${onMachine.machine?.name ?? "the machine"}`}</Button>}
+          {!sent && !onMachine && <Button disabled={loading || starting || !context || !settings || !destinationReady} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

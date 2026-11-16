@@ -107,7 +107,7 @@ const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }))
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
 // PRO-346: machine sessions in the overview, badge and notices follow the switch; Archive goes to the machine.
 const machineSessions = vi.hoisted(() => ({ enabled: vi.fn(), update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
-vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled }));
+vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled, useMachineDashboardEnabled: () => runShortcut.machines }));
 vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
 vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));

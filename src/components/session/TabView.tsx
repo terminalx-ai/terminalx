@@ -32,6 +32,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { getTerminalState, openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
+import { MachineMessage } from "@/components/machines/MachineMessage";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
@@ -938,7 +939,8 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
+          heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
         />
         </>
@@ -1049,9 +1051,9 @@ export function TabView({
     )}
     {signIn && (signIn.machine ? (
       // A machine's agent signs in there, from its page (21.09), not through an organization's logins.
-      <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="machine-agent-sign-in">
-        {cloudAgentLabel(tab.harness)} isn't signed in on {signIn.machine}. Sign in from its page.
-      </p>
+      <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="machine-agent-sign-in">
+        <MachineMessage kind="signIn" name={signIn.machine} agent={cloudAgentLabel(tab.harness)} />
+      </div>
     ) : (
       <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />
     ))}
