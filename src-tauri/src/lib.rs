@@ -73,6 +73,7 @@ mod organization_workspace_config;
 pub mod computer;
 mod control;
 mod cloud_control;
+mod machine_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]

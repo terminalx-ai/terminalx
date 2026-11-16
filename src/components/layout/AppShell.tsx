@@ -92,6 +92,7 @@ import { MachineApprovalHost } from "@/components/machines/MachineApprovalDialog
 import { ConnectedBar } from "@/components/pairing/ConnectedBar";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
+import { bootMachineControl } from "@/lib/machineControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { onTemplateSettingsRequest, openLocalProject } from "@/lib/projectStart";
@@ -180,6 +181,8 @@ export function AppShell() {
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();
+    // `terminalx … --machine` (PRO-356): native code has checked the switch and the machine first.
+    void bootMachineControl();
     void bootFloating();
     void bootMergedCleanup();
   }, []);
