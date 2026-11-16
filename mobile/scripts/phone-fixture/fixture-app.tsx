@@ -18,7 +18,8 @@ import { updateNotificationSettings } from "../../src/notifications/store";
 import type { LockScreenShow } from "../../src/notifications/model";
 import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../../src/pairing/contracts";
 import type { AccountHost } from "../../src/pairing/account-client";
-import { savePairedHost, type StoredHost } from "../../src/store/hosts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { HOSTS_KEY, type StoredHost } from "../../src/store/hosts";
 import type { HostConnection, ConnectionStage } from "../../src/transport/connection";
 import { useWaited, WAITING_AFTER_MS } from "../../src/state/connection-view";
 
@@ -284,8 +285,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       writeSaved(studio.id, "models", MODELS, cacheEpoch(studio.id)),
       ...Object.keys(CONVERSATIONS).map((tabId) => writeSaved(studio.id, `tab:${JSON.stringify(["review", tabId])}`, TAB, cacheEpoch(studio.id))),
       seedNotifications(),
-      // Paired as on a real phone, so what reads the store (a notification's machine name) finds them; one at a time, as each save rewrites the list.
-      HOSTS.reduce((saved, host) => saved.then(() => savePairedHost(host, { v: 1, deviceToken: "fixture" })), Promise.resolve()),
+      // The paired machines' list as a real phone keeps it, so what reads the store (a notification's machine name) finds them.
+      // Only the list: the fixture's ad hoc build has no keychain for the credentials beside it.
+      AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(HOSTS)),
     ]).then(() => setReady(true));
   }, []);
   // On connecting, as the app does: catch up on what the Mac sent while away, then subscribe.

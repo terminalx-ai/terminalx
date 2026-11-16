@@ -55,3 +55,5 @@ name: Notification settings, iOS off (22.07)
     element: "Notifications.*"
 - tapOn: "Notifications.*"
 - tapOn: { point: "84%,18%" }
+# Out to the home screen, so the next flow's launch has no "Settings" link back in its status bar.
+- pressKey: home
