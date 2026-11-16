@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
@@ -347,6 +348,45 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   expireNotice(id);
 }
 
+/** What the runtime says when automatic account switching (#981) moved a tab, or found no account with room. */
+export interface AccountSwitchNotice {
+  sessionId: string;
+  tabId: string;
+  agent: string;
+  outcome: "switched" | "started" | "noneAvailable" | "failed";
+  /** The line the tab's conversation shows. */
+  text: string;
+  /** The setting asks for a notification of this. */
+  notify: boolean;
+}
+
+/**
+ * One notification per automatic switch, and one when no account has room,
+ * for a tab that is not in view; none when the setting is off for it or the
+ * tab is muted. The conversation line says it in the tab itself.
+ */
+export function noteAccountSwitch(notice: AccountSwitchNotice) {
+  if (!notice.notify || (notice.outcome !== "switched" && notice.outcome !== "noneAvailable")) return;
+  const session = getSessions().sessions.find((candidate) => candidate.id === notice.sessionId);
+  if (!session || session.parent) return;
+  if (isTabMuted(session, notice.tabId, getSessions().chatsPath)) return;
+  const onScreen = looking() && getSessions().selectedSessionId === session.id;
+  if (onScreen) return;
+  const title = notice.outcome === "switched" ? `${session.title?.trim() || "A session"} switched accounts` : `${session.title?.trim() || "A session"} is out of usage`;
+  const body = notice.text;
+  if (!looking()) {
+    if (!sendsBanner()) return;
+    raised = { sessionId: session.id, tabId: notice.tabId };
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  const kind: NoticeKind = notice.outcome === "switched" ? "done" : "waiting";
+  const id = `account-switch:${session.id}:${notice.tabId}:${Date.now()}`;
+  notices = [...notices.filter((n) => !(n.sessionId === session.id && n.tabId === notice.tabId)), { id, sessionId: session.id, tabId: notice.tabId, kind, title, body, at: Date.now() }];
+  emit();
+  expireNotice(id);
+}
+
 /** Automation failures use the same focus-aware path as agent attention. */
 export function noteAutomationFailure(name: string, run: AutomationRun) {
   const title = `${name} failed`;
@@ -490,6 +530,8 @@ export function startNotifications() {
     publishPresence();
   });
   subscribeFloating(publishPresence);
+  // Each window hears each switch and decides for itself, as for a status change.
+  void Promise.resolve().then(() => listen<AccountSwitchNotice>("account_switch", ({ payload }) => noteAccountSwitch(payload))).catch(() => {});
   // Cloud sessions and the badge are the main window's: the floating window shows neither.
   if (appWindow() !== "main") return;
   // Secondary windows are made by this run. Discard presence from a previous

@@ -106,6 +106,37 @@ pub async fn agent_accounts_set_default(harness: String, account_id: Option<Stri
     blocking(move || super::set_default(&harness, account_id.as_deref(), project_id.as_deref())).await
 }
 
+/// Switch accounts automatically (#981): the agent's setting as Settings sent it.
+#[tauri::command]
+pub async fn agent_accounts_set_auto_switch(harness: String, setting: super::auto_switch::Setting) -> CmdResult<AgentAccounts> {
+    blocking(move || super::set_auto_switch(&harness, setting)).await
+}
+
+/// "Never switch accounts in this project" (#981), on or off.
+#[tauri::command]
+pub async fn agent_accounts_set_never_switch(harness: String, project_id: String, never: bool) -> CmdResult<AgentAccounts> {
+    blocking(move || super::set_never_switch(&harness, &project_id, never)).await
+}
+
+/// The automatic switches of the last 30 days, newest first (#981).
+#[tauri::command]
+pub async fn agent_accounts_switch_log() -> CmdResult<Vec<super::auto_switch::LogEntry>> {
+    blocking(move || super::auto_switch::read_log(chrono::Utc::now().timestamp_millis())).await
+}
+
+/// The account a new session of `harness` starts on when automatic
+/// switching moves it off `account_id` (#981), and why; `None` otherwise.
+#[tauri::command]
+pub async fn agent_accounts_launch_choice(state: tauri::State<'_, crate::AppState>, harness: String, project_id: Option<String>, account_id: Option<String>) -> CmdResult<Option<crate::session::account_switch::LaunchChoice>> {
+    let sessions = state.sessions();
+    blocking(move || match sessions {
+        Ok(sessions) => sessions.launch_account_choice(&harness, project_id.as_deref(), account_id.as_deref()),
+        // No runtime yet: nothing chooses another account.
+        Err(_) => Ok(None),
+    })
+    .await
+}
+
 /// One account's login state, from the agent's own status in its directory.
 #[tauri::command]
 pub async fn agent_accounts_readiness(harness: String, account_id: String) -> CmdResult<crate::harness::readiness::Readiness> {
@@ -121,7 +152,7 @@ mod tests {
         let file = include_str!("commands.rs");
         let source = &file[..file.find("#[cfg(test)]").unwrap()];
         let commands = source.matches("#[tauri::command]").count();
-        assert_eq!(commands, 11);
+        assert_eq!(commands, 15);
         assert_eq!(source.matches("#[tauri::command]\npub async fn agent_accounts_").count(), commands);
         assert_eq!(source.matches("blocking(move ||").count(), commands);
     }

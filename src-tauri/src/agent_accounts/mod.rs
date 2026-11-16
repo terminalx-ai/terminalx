@@ -32,6 +32,7 @@ use serde_json::{Map, Value};
 
 use crate::agent_keys::{Agent, Entry, Mode, Saved, Store};
 
+pub mod auto_switch;
 pub mod claude_dir;
 #[cfg(feature = "desktop")]
 pub mod commands;
@@ -275,6 +276,19 @@ pub struct AgentAccounts {
     pub default_account: String,
     /// Project id → account id.
     pub project_defaults: BTreeMap<String, String>,
+    /// Switching accounts automatically (#981).
+    pub auto_switch: AutoSwitchView,
+}
+
+/// The automatic switching setting as Settings shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoSwitchView {
+    /// Offered: the agent has two or more subscription accounts.
+    pub offered: bool,
+    pub setting: auto_switch::Setting,
+    /// Every account in the setting's order, checked or not.
+    pub accounts: Vec<auto_switch::Listed>,
 }
 
 /// The default label: "email · plan", or what kind of sign-in it is.
@@ -336,7 +350,42 @@ fn view(root: &Path, agent: Agent, entry: &Entry) -> AgentAccounts {
         });
     }
     let project_defaults = entry.project_defaults.iter().filter(|(_, id)| exists(entry, id)).map(|(project, id)| (project.clone(), id.clone())).collect();
-    AgentAccounts { agent: agent.id(), accounts, default_account: default, project_defaults }
+    let setting = entry.auto_switch.clone().unwrap_or_default();
+    let auto_switch = AutoSwitchView { offered: auto_switch::offered(&accounts), accounts: auto_switch::ordered(&setting, &accounts), setting };
+    AgentAccounts { agent: agent.id(), accounts, default_account: default, project_defaults, auto_switch }
+}
+
+/// Save `agent`'s automatic switching setting as Settings sent it (#981).
+pub(crate) fn set_auto_switch_in(store: &Store<'_>, agent: Agent, setting: auto_switch::Setting) -> Result<AgentAccounts> {
+    store.update(agent, |entry| {
+        let mut setting = auto_switch::checked(setting, |id| exists(entry, id))?;
+        // Kept from the file: what this build does not know, and the
+        // projects' own choices, which are made in each project's settings.
+        if let Some(before) = &entry.auto_switch {
+            setting.never_projects = before.never_projects.clone();
+            for (key, value) in &before.rest {
+                setting.rest.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        entry.auto_switch = Some(setting);
+        Ok(())
+    })?;
+    list_in(store, agent)
+}
+
+/// "Never switch accounts in this project" (#981): on or off for `project`.
+pub(crate) fn set_never_switch_in(store: &Store<'_>, agent: Agent, project: &str, never: bool) -> Result<AgentAccounts> {
+    ensure!(!project.trim().is_empty() && project.len() <= 4096, "That is not a project.");
+    store.update(agent, |entry| {
+        let setting = entry.auto_switch.get_or_insert_with(Default::default);
+        setting.never_projects.retain(|known| known != project);
+        if never {
+            setting.never_projects.push(project.to_string());
+            setting.never_projects.sort();
+        }
+        Ok(())
+    })?;
+    list_in(store, agent)
 }
 
 pub(crate) fn list_in(store: &Store<'_>, agent: Agent) -> Result<AgentAccounts> {
@@ -653,6 +702,14 @@ pub fn relabel(harness: &str, id: &str, label: &str) -> Result<AgentAccounts> {
 
 pub fn set_default(harness: &str, id: Option<&str>, project: Option<&str>) -> Result<AgentAccounts> {
     set_default_in(&crate::agent_keys::store()?, crate::agent_keys::agent_of(harness)?, id, project)
+}
+
+pub fn set_auto_switch(harness: &str, setting: auto_switch::Setting) -> Result<AgentAccounts> {
+    set_auto_switch_in(&crate::agent_keys::store()?, crate::agent_keys::agent_of(harness)?, setting)
+}
+
+pub fn set_never_switch(harness: &str, project: &str, never: bool) -> Result<AgentAccounts> {
+    set_never_switch_in(&crate::agent_keys::store()?, crate::agent_keys::agent_of(harness)?, project, never)
 }
 
 /// Save another key for `harness` as an `apiKey` account of its own.
