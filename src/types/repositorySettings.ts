@@ -9,6 +9,8 @@ export interface RepositoryFilesPreview {
   fromIncludeFile: boolean;
   error?: string | null;
   warning?: string | null;
+  /** How many ignored files the patterns were checked against; absent from an older runtime. */
+  ignoredChecked?: number;
   patterns: { pattern: string; matches: string[]; omitted?: number; error: string | null; /** Why a valid pattern matched nothing; null when it matched. */ reason?: string | null }[];
 }
 

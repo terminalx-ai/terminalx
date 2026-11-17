@@ -79,6 +79,8 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert!(result.from_include_file);
     assert_eq!(result.patterns.len(), 1);
     assert_eq!(result.patterns[0].matches, patterns(&["config/local/app.json"]));
+    // Settings says how many ignored files the patterns were checked against (PRO-387).
+    assert!(result.ignored_checked >= 2, "{}", result.ignored_checked);
     let created = git::create_worktree(repo.path(), "included", Some("main")).unwrap();
     assert!(Path::new(&created.path).join("config/local/app.json").is_file());
     assert!(!Path::new(&created.path).join(".env").exists());

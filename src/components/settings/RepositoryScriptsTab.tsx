@@ -91,8 +91,8 @@ function ScriptsPage({ project }: { project: Project }) {
   // The project file is opened from the title bar's one Open button (PRO-388), not from here.
   return <section aria-label={`${project.name} scripts`} className="flex flex-col gap-6">
     <header className="min-w-0">
-      <h3 className="text-xl font-semibold tracking-tight">Scripts</h3>
-      <p className="mt-1 text-[13px] text-muted-foreground">Commands that run when a workspace is set up, run or removed.</p>
+      <h3 className="text-sm font-medium">Scripts</h3>
+      <p className="mt-0.5 text-[12.5px] text-muted-foreground">Commands that run when a workspace is set up, run or removed.</p>
     </header>
     {scriptsNeedTrust && !notNow && <div role="region" aria-label="Repository trust" className="-mt-2 flex items-center gap-3 rounded-lg border border-warning/50 bg-warning/5 px-4 py-3">
       <ShieldAlert className="size-4 shrink-0 self-start text-warning" aria-hidden />

@@ -5,7 +5,7 @@ import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSou
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, Bot, Building2, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, Bot, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,10 @@ import { userFileKeys } from "@/lib/settingSources";
 import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_ROWS, SettingControlSlots, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
+import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
+import { issues } from "@/lib/api";
+import { shortPath } from "@/lib/paths";
+import type { Project } from "@/types/session";
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, settingsSearchSummary, type SettingSearchMatch } from "@/lib/settingsSearch";
@@ -78,6 +82,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [section, setSection] = useState<SettingsSection>(initial.section);
   const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
   const [target, setTarget] = useState<string | null>(() => isRowLink(initialTab) ? initial.id : null);
+  // A project page chosen in the sidebar; without one, the page holding the row asked for (PRO-387).
+  const [projectPage, setProjectPage] = useState<ProjectPage | null>(null);
   const content = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
@@ -145,10 +151,16 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const project = repositories.find((candidate) => candidate.path === projectPath)
     ?? (section === "repositories" && target ? repositories[0] : undefined);
 
+  const page: ProjectPage = section === "repositories" && project
+    ? (() => { const wanted = projectPage ?? projectPageForRow(target); return projectPages(project).some((entry) => entry.page === wanted) ? wanted : "general"; })()
+    : "general";
+  const pageLabel = PROJECT_PAGES.find((entry) => entry.page === page)!.label;
+
   useEffect(() => {
     setSection(initial.section);
     setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
     setTarget(isRowLink(initialTab) ? initial.id : null);
+    setProjectPage(null);
     setQuery("");
     setSelected(0);
     setSelectionRequest((request) => request + 1);
@@ -185,7 +197,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
     observer.observe(root, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [section, projectPath, project?.path, target, openRequest, selectionRequest, highlightRow]);
+  }, [section, projectPath, project?.path, projectPage, target, openRequest, selectionRequest, highlightRow]);
 
   useEffect(() => {
     resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
@@ -206,10 +218,12 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     inputRef.current?.focus();
     inputRef.current?.select();
   }, { global: true });
-  const choose = (next: SettingsSection, path?: string, row?: SettingId) => {
+  // A page chosen in the sidebar opens at its top with no row marked; only search and links name a row (PRO-387).
+  const choose = (next: SettingsSection, path?: string, row?: SettingId, page?: ProjectPage) => {
     if (!row) clearHighlight();
     setSection(next);
     setProjectPath(path);
+    setProjectPage(page ?? null);
     setTarget(row ?? null);
     changeQuery("");
     setSelectionRequest((request) => request + 1);
@@ -284,14 +298,30 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 </button>
               )}
               {group === "Projects" ? (
-                // One row a repository, its badge and name, opening its settings: no expander holding a single item.
+                // A project's row opens its General page and, while open, lists its pages beneath it (design 11.02).
                 repositories.length ? repositories.map((repository) => {
-                  const selected = section === "repositories" && project?.path === repository.path;
+                  const open = section === "repositories" && project?.path === repository.path;
+                  const Chevron = open ? ChevronDown : ChevronRight;
                   return (
-                    <button key={repository.path} type="button" title={repository.path} aria-current={selected ? "page" : undefined} className={navClass(selected)} onClick={() => choose("repositories", repository.path)}>
-                      <ProjectGlyph project={repository} size={16} />
-                      <span className="truncate">{repository.name}</span>
-                    </button>
+                    <div key={repository.path}>
+                      <button type="button" title={repository.path} aria-expanded={open} className={navClass(false)} onClick={() => choose("repositories", repository.path, undefined, "general")}>
+                        <ProjectGlyph project={repository} size={16} />
+                        <span className={cn("truncate", open && "font-medium text-foreground")}>{repository.name}</span>
+                        <Chevron aria-hidden className="ml-auto size-3 shrink-0 text-faint" />
+                      </button>
+                      {open && <div role="group" aria-label={`${repository.name} settings`} className="ml-[15px] grid gap-px border-l border-hairline py-0.5 pl-2">
+                        {projectPages(repository).map((entry) => {
+                          const current = entry.page === page;
+                          const Icon = entry.icon;
+                          return <button key={entry.page} type="button" aria-current={current ? "page" : undefined} onClick={() => choose("repositories", repository.path, undefined, entry.page)}
+                            className={cn("flex h-7 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+                              current ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground")}>
+                            <Icon aria-hidden className="size-3.5 shrink-0" />
+                            <span className="truncate">{entry.label}</span>
+                          </button>;
+                        })}
+                      </div>}
+                    </div>
                   );
                 }) : <p className="px-2 py-2 text-xs text-faint">No projects added.</p>
               ) : Object.entries(SETTINGS_SECTIONS).filter(([key, entry]) => entry.group === group && offered(key)).map(([key, entry]) => (
@@ -305,8 +335,20 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
         </nav>
       </aside>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Open settings.json, top right of every page (PRO-140); a project page names the project's own file (PRO-388). */}
-        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end gap-2 px-3 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : undefined} /></div>
+        {/* Open settings.json, top right of every page (PRO-140); a project page opens the project's own file (PRO-388). */}
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-2 px-3 empty:hidden">
+          {/* A project page says where it is: ⚙ › Projects › project › page (design 11.02). */}
+          {section === "repositories" && project && !searching && <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 pl-2 text-[12px] text-faint">
+            <Settings aria-hidden className="size-3.5 shrink-0" />
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span className="whitespace-nowrap">Projects</span>
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span className="min-w-0 truncate">{project.name}</span>
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span aria-current="page" className="whitespace-nowrap text-muted-foreground">{pageLabel}</span>
+          </nav>}
+          <div className="ml-auto flex shrink-0 items-center gap-2 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : null} /></div>
+        </div>
         <div className="flex min-h-0 flex-1">
         <section ref={content} className={cn(
           "min-w-0 flex-1 overflow-y-auto scrollbar-thin",
@@ -376,19 +418,19 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               <p className="mt-1 text-[12px] text-faint">Try fewer letters, or <button type="button" className="text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => choose("shortcuts")}>search keyboard shortcuts</button>.</p>
             </div>}
           </div>}
-          <div hidden={searching} data-search-page={section} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}`}>
-            {/* Design 09.02: the title just under the title bar, a one-line subtitle beneath it; a page's own buttons beside them. */}
-            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0 flex-1 basis-48">
-                <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{section === "repositories" && project ? project.name : SETTINGS_SECTIONS[section].title}</h2>
-                <p id="settings-section-subtitle" className="mt-1 text-[13px] text-muted-foreground">{SETTINGS_SECTIONS[section].subtitle}</p>
-              </div>
+          <div hidden={searching} data-search-page={section} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
+            <div className={cn("flex flex-wrap items-start justify-between gap-3", section === "repositories" && project ? "mb-3" : "mb-5")}>
+              {section === "repositories" && project ? <div className="min-w-0 flex-1 basis-48">
+                {/* One title a page, the page's name, with the project beneath it (design 11.02, 11.10). */}
+                <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="break-words text-[22px] font-semibold tracking-tight outline-none">{pageLabel}</h2>
+                <ProjectPageSubtitle project={project} page={page} />
+              </div> : <div className="min-w-0 flex-1 basis-48"><h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2><p id="settings-section-subtitle" className="mt-1 text-[13px] text-muted-foreground">{SETTINGS_SECTIONS[section].subtitle}</p></div>}
               {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
               <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
             </div>
             <SettingsHeaderSlotProvider value={headerSlot}>
               <SettingControlSlots.Provider value={searching ? slots : null}>
-                {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+                {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
               </SettingControlSlots.Provider>
             </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />
@@ -399,6 +441,20 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       <CantSaveToast settingTitle={userKeySettingTitle} />
     </main>
   );
+}
+
+/** Beneath a project page's title: its folder and GitHub repository, or what Settings files lists. */
+function ProjectPageSubtitle({ project, page }: { project: Project; page: ProjectPage }) {
+  const [repository, setRepository] = useState<{ path: string; name: string | null } | null>(null);
+  useEffect(() => {
+    if (project.kind === "folder") return;
+    let live = true;
+    Promise.resolve().then(() => issues.githubRepo(project.path)).then((name) => { if (live) setRepository({ path: project.path, name: name ?? null }); }, () => {});
+    return () => { live = false; };
+  }, [project.path, project.kind]);
+  if (page === "settingsFiles") return <p className="mt-1 text-[13px] text-muted-foreground">Where {project.name}’s values come from, highest first. Edits made in an editor show up here within a second.</p>;
+  const name = repository?.path === project.path ? repository.name : null;
+  return <p className="mt-1 break-words text-[13px] text-muted-foreground"><span className="font-mono text-[12px]">{shortPath(project.path)}</span>{name && <> · {name}</>}</p>;
 }
 
 /**

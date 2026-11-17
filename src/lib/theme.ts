@@ -142,6 +142,12 @@ export function setMode(mode: Mode) {
   emit();
 }
 
+/** Light if the window shows dark now, dark if light; a dark-only theme stays as it is. */
+export function toggleMode() {
+  if (!hasLightMode(state.theme)) return;
+  setMode(state.resolvedMode === "dark" ? "light" : "dark");
+}
+
 media?.addEventListener("change", () => {
   if (state.mode !== "system") return;
   state = { ...state, resolvedMode: resolveMode(state.theme, state.mode) };

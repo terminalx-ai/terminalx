@@ -91,7 +91,7 @@ it("Open settings.json opens the user file, names its broken line, and opens it 
 
   openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: "vscode" }));
 
@@ -117,8 +117,9 @@ it("on a project page the one Open button names and opens the project's own file
   expect(screen.getAllByRole("button", { name: /^Open / })).toHaveLength(1);
   openMenu(screen.getByRole("button", { name: "More ways to open .terminalx/settings.json" }));
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-    "Project settings.terminalx/settings.json", "Your local overrides.terminalx/settings.local.json", "Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path",
+  // The menu as design 11.10 draws it (PRO-387): yours, then the project's shared and local files.
+  expect(within(menu).getAllByRole("menuitem").slice(0, 3).map((item) => item.textContent)).toEqual([
+    "Your settings~/.raccoon/settings.json", "Project · shared.terminalx/settings.json · committed", "Project · local.terminalx/settings.local.json · ignored by git",
   ]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: /Your settings/ }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
@@ -193,4 +194,31 @@ it("the badges legend lists only the badges it is given", async () => {
   render(<BadgeLegend kinds={["yours"]} />);
   const legend = screen.getByRole("region", { name: "Badges" });
   expect(within(legend).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Your valueyour own settings"]);
+});
+
+it("on a project's pages opens the project's shared file and lists its two files, with 1–4 opening in an app (PRO-387)", async () => {
+  await boot();
+  const { OpenSettingsFileButton } = await import("./SettingSources");
+  const answer = mocks.invoke.getMockImplementation()!;
+  const layer = (layer: string, name: string, git: string, exists = true) => ({ layer, path: `/repo/.terminalx/${name}`, displayPath: `~/repo/.terminalx/${name}`, exists, keys: 2, git, problem: null });
+  mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => {
+    if (command === "settings_files_list") return [layer("repositoryLocal", "settings.local.json", "ignored"), layer("repositoryShared", "settings.json", "committed")];
+    if (command === "configuration_watch") return 1;
+    return answer(command, args);
+  });
+  render(<OpenSettingsFileButton projectPath="/repo" />);
+  const button = await screen.findByRole("button", { name: "Open .terminalx/settings.json" });
+  fireEvent.click(button);
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/repo/.terminalx/settings.json", editor: null }));
+  openMenu(screen.getByRole("button", { name: "More ways to open .terminalx/settings.json" }));
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getAllByRole("menuitem").slice(0, 3).map((item) => item.textContent)).toEqual([
+    "Your settings~/.raccoon/settings.json",
+    "Project · shared.terminalx/settings.json · committed",
+    "Project · local.terminalx/settings.local.json · ignored by git",
+  ]);
+  expect(within(menu).getAllByRole("menuitem")[1].hasAttribute("data-current")).toBe(true);
+  fireEvent.keyDown(menu, { key: "4" });
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/repo/.terminalx/settings.json", editor: "zed" }));
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 });

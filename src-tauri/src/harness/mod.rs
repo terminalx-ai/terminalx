@@ -292,6 +292,11 @@ pub fn display_name(harness: &str) -> &'static str {
     REGISTRY.iter().find(|spec| spec.id == harness).map_or("The agent", |spec| spec.name)
 }
 
+/// The npm package an agent's releases are published as, the first one when it has several.
+pub fn npm_package(harness: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.id == harness).and_then(|spec| spec.packages.first().copied())
+}
+
 /// Programs that run a script named by their first argument that is not an
 /// option. A CLI installed with a package manager is one of these running the
 /// package's entry file.

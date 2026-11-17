@@ -68,10 +68,6 @@
           "description": "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.",
           "type": "boolean"
         },
-        "machines": {
-          "description": "Settings → Machines: let other computers that run TerminalX operate this Mac, and operate others from here. While it is on, agents in this Mac’s sessions can operate the paired machines with the terminalx command line.",
-          "type": "boolean"
-        },
         "nativeCodex": {
           "description": "New Codex sessions connect to Codex directly, so the chat shows when it compacts. Needs Codex 0.164.0 or newer; opening the terminal view moves a session to Codex’s own terminal.",
           "type": "boolean"

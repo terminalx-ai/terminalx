@@ -6,9 +6,9 @@ import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { bootFloating, saveFloatingSettings, useFloating } from "@/lib/floating";
 import { suspendHotkeys } from "@/lib/hotkeys";
-import { bindingText, chordOf, conflictOf, isMac, isModifierKey, keycaps, useKeymap } from "@/lib/shortcuts";
+import { bindingText, chordOf, conflictOf, isMac, isModifierKey, useKeymap } from "@/lib/shortcuts";
+import { ChordCap, SHORTCUT_CARD, SHORTCUT_GROUP_TITLE } from "./Keycap";
 
-const KEYCAP = "rounded-md bg-veil-raised px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground hairline";
 /** What the window's shortcut is when the reader has not chosen one; the same default the backend has. */
 export const DEFAULT_FLOATING_SHORTCUT = "alt+shift+space";
 
@@ -82,8 +82,9 @@ export function SystemShortcutSection() {
   const shadowed = shortcut ? conflictOf(shortcut, "app.quickChat", keymap) : null;
   return (
     <RegisteredSetting setting="shortcuts.systemWide"><section aria-label="System-wide shortcuts" data-testid="system-shortcuts">
-      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">System-wide</div>
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-1.5" data-system-shortcut="floating.toggle">
+      <div className={SHORTCUT_GROUP_TITLE}>System-wide</div>
+      <div className={SHORTCUT_CARD}>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-3 py-2" data-system-shortcut="floating.toggle">
         <div className="min-w-0 flex-1 basis-56">
           <div className="text-[13px]">Show or hide the floating chat window</div>
           <div className="text-xs leading-relaxed text-muted-foreground">Works from any app, whether or not TerminalX has the focus.</div>
@@ -102,9 +103,7 @@ export function SystemShortcutSection() {
             </button>
           ) : shortcut ? (
             <button type="button" onClick={() => setRecording(true)} className="flex items-center gap-1 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40" aria-label={`Change ${bindingText(shortcut)}`} title="Click to change">
-              {keycaps(shortcut).map((cap, index) => (
-                <kbd key={index} className={cn(KEYCAP, status?.shortcutError && "text-warning")}>{cap}</kbd>
-              ))}
+              <ChordCap binding={shortcut} className={cn(status?.shortcutError && "text-warning")} />
             </button>
           ) : (
             <span className="text-xs text-faint">Off</span>
@@ -127,13 +126,14 @@ export function SystemShortcutSection() {
           )}
         </div>
       </div>
+      </div>
       {(problem || status?.shortcutError) && (
-        <p role="alert" className="rounded-md bg-warning/10 px-2.5 py-1.5 text-xs leading-relaxed text-warning" data-testid="system-shortcut-error">
+        <p role="alert" className="mt-2 rounded-md bg-warning/10 px-2.5 py-1.5 text-xs leading-relaxed text-warning" data-testid="system-shortcut-error">
           {problem ?? status?.shortcutError}
         </p>
       )}
       {!problem && !status?.shortcutError && shadowed && shortcut && (
-        <p className="text-xs leading-relaxed text-muted-foreground">
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
           {bindingText(shortcut)} is also “{shadowed.label}” inside TerminalX. The system-wide shortcut is pressed first, so that one will not run.
         </p>
       )}

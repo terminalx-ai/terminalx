@@ -96,14 +96,14 @@ describe("Settings search", () => {
     const listbox = screen.getByRole("listbox", { name: "Settings search results" });
     const pages = within(listbox).getAllByRole("group");
     expect(pages.map((page) => document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(expected.map((page) => page.title));
-    expect(pages[0].textContent).toContain("Appearance");
+    expect(pages[0].textContent).toContain("General");
     pages.forEach((page, index) => expect(within(page).getAllByRole("option")).toHaveLength(expected[index].matches.length));
     const first = within(pages[0]).getByRole("option");
     expect(first.textContent).toContain("Text size");
     expect(first.textContent).toContain("Scales the transcript and composer.");
     expect(first.querySelector("mark")?.textContent).toBe("Text");
     // Rows, not sections: the old section results are gone.
-    expect(within(listbox).queryByRole("option", { name: /^Appearance/ })).toBeNull();
+    expect(within(listbox).queryByRole("option", { name: /^General/ })).toBeNull();
   });
 
   it("lists what 'font' finds by page with its count, marks the matched text, and Enter opens and highlights the first row", () => {
@@ -115,8 +115,8 @@ describe("Settings search", () => {
     expect(found.length).toBeGreaterThan(0);
     expect(found.length).toBeLessThanOrEqual(SETTINGS_SEARCH_LIMIT);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “font”");
-    // The app's font setting is Appearance › Text size; it is listed under its page.
-    expect(within(screen.getByRole("group", { name: "Appearance" })).getByRole("option", { name: /Text size/ })).toBeTruthy();
+    // The app's font setting is General › Text size (PRO-377); it is listed under its page.
+    expect(within(screen.getByRole("group", { name: "General" })).getByRole("option", { name: /Text size/ })).toBeTruthy();
     expect(screen.getByText(/^\d+ settings? on \d+ pages? · /)).toBeTruthy();
     expect(screen.getByText(`${settingsSearchSummary(found)} · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
     const listbox = screen.getByRole("listbox", { name: "Settings search results" });
@@ -159,10 +159,10 @@ describe("Settings search", () => {
       const scrolled = vi.mocked(Element.prototype.scrollIntoView);
       scrolled.mockClear();
       fireEvent.keyDown(input, { key: "Enter" });
-      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
       expect(screen.queryByRole("listbox")).toBeNull();
       expect(input.value).toBe("");
-      const target = row("appearance.textSize")!;
+      const target = row("general.textSize")!;
       expect(document.activeElement).toBe(target);
       expect(scrolled.mock.contexts).toContain(target);
       expect(scrolled).toHaveBeenCalledWith({ block: "start" });
@@ -178,16 +178,16 @@ describe("Settings search", () => {
   });
 
   it("draws the highlight from design tokens and drops its transition under reduced motion", () => {
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
-    const section = row("appearance.textSize")!.closest("section")!;
-    expect(row("appearance.textSize")!.dataset.settingHighlight).toBe("on");
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
+    const section = row("general.textSize")!.closest("section")!;
+    expect(row("general.textSize")!.dataset.settingHighlight).toBe("on");
     expect(section.className).toContain("[&_[data-setting-highlight=on]]:bg-selected");
     expect(section.className).toContain("motion-reduce:[&_[data-setting-highlight]]:transition-none");
   });
 
   it("highlights only the latest row: opening another moves the highlight, and a plain section clears it", () => {
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
-    const first = row("appearance.textSize")!;
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
+    const first = row("general.textSize")!;
     expect(first.dataset.settingHighlight).toBe("on");
     fireEvent.change(search(), { target: { value: "theme" } });
     fireEvent.keyDown(search(), { key: "Enter" });
@@ -238,8 +238,8 @@ describe("Settings search", () => {
     expect(result.textContent).toContain("Text size");
     expect(active()).toBe(result.id);
     fireEvent.click(result);
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
-    expect(document.activeElement).toBe(row("appearance.textSize"));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    expect(document.activeElement).toBe(row("general.textSize"));
   });
 
   it("opens a clicked result on its row", () => {
@@ -485,7 +485,7 @@ describe("Usage auto-refresh interval", () => {
       },
     };
     try {
-      render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+      render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
       const group = screen.getByRole("radiogroup", { name: "Usage auto-refresh interval" });
       const choices = within(group).getAllByRole("radio");
       expect(choices.map((choice) => choice.textContent)).toEqual(["Off", "1 min", "2 min", "5 min", "15 min"]);
@@ -513,20 +513,20 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
   });
 
   it("opens and focuses a row, keeps manual navigation, and handles a repeated request", () => {
-    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
-    const row = () => view.container.querySelector('[data-setting-id="appearance.textSize"]');
+    const view = render(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
+    const row = () => view.container.querySelector('[data-setting-id="general.textSize"]');
     expect(document.activeElement).toBe(row());
-    fireEvent.click(screen.getByRole("button", { name: "General" }));
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={2} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     expect(document.activeElement).toBe(row());
   });
 
   it("keeps row controls connected to the original preference keys", () => {
     setPrefs({ fontScale: "md", transcriptLayout: "wide" });
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
     fireEvent.click(within(screen.getByRole("radiogroup", { name: "Text size" })).getByRole("radio", { name: "Large" }));
     expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).fontScale).toBe("lg");
     fireEvent.click(within(screen.getByRole("radiogroup", { name: "Transcript layout" })).getByRole("radio", { name: "Chat" }));
@@ -534,26 +534,26 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
   });
 
   it("clears an active search and focuses and highlights a repeated external row link", () => {
-    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
+    const view = render(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
     input.focus();
     fireEvent.change(input, { target: { value: "theme" } });
     expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
     expect(view.container.querySelector("[data-setting-highlight]")).toBeNull();
 
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={2} onBack={vi.fn()} />);
 
     expect((input as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("listbox")).toBeNull();
-    expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="appearance.textSize"]'));
-    expect(view.container.querySelector<HTMLElement>('[data-setting-id="appearance.textSize"]')!.dataset.settingHighlight).toBe("on");
+    expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="general.textSize"]'));
+    expect(view.container.querySelector<HTMLElement>('[data-setting-id="general.textSize"]')!.dataset.settingHighlight).toBe("on");
   });
 });
 
 it("does not move focus out of an open dialog when a row link arrives", () => {
   function WithDialog() {
     return <>
-      <SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />
+      <SettingsPage initialTab="general.textSize" onBack={vi.fn()} />
       <Dialog open><DialogContent aria-describedby={undefined}><DialogTitle>Confirm sign in</DialogTitle><button>Continue</button></DialogContent></Dialog>
     </>;
   }

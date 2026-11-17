@@ -43,10 +43,8 @@ pub struct Project {
     /// review and a merge. Absent is every default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_pipeline: Option<IssuePipelineSettings>,
-    /// `terminalx issues` may comment on the issues of this project's GitHub
-    /// repository and move their status without the person being asked each
-    /// time. Assigning, labelling, creating and Linear issues still ask. Off
-    /// by default.
+    /// Legacy persisted preference, retained for compatibility only. Issue
+    /// approval is deletion-only and never consults this field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_issue_updates: bool,
     /// What the reader calls a branch in the sidebar, by branch name. A
@@ -970,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_ask_before_updating_issues_until_the_project_says_otherwise() {
+    fn legacy_agent_issue_preference_round_trips_for_compatibility() {
         let _home = crate::store::temp_home();
         let older: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
         assert!(!older.agent_issue_updates);

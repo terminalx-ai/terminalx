@@ -36,6 +36,7 @@ import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
+import { toggleMode } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
@@ -63,7 +64,6 @@ import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { startMachineConnections } from "@/lib/machineConnections";
 import { updateMachineSession } from "@/lib/machineCatalog";
-import { setMachineDashboardEnabled, useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { startAppUpdateResponder } from "@/lib/machineUpdate";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
@@ -288,6 +288,7 @@ export function AppShell() {
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
+  useShortcut("app.toggleMode", toggleMode);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
   useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
@@ -302,23 +303,20 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
-  // Experimental → Machines: every paired machine stays attached while it is on (PRO-345).
+  // Every paired machine stays attached while the window is open (PRO-345). With none paired this reads
+  // the empty list and connects to nothing (PRO-360).
   const experimentalSwitches = useExperimentalSettings();
-  const machinesOn = experimentalSwitches?.machines === true;
-  useEffect(() => (machinesOn ? startMachineConnections() : undefined), [machinesOn]);
-  // Machine sessions join the overview, the dock badge, notices and attention stepping only while it is on (PRO-346).
-  useEffect(() => setMachineDashboardEnabled(machinesOn), [machinesOn]);
+  useEffect(() => startMachineConnections(), []);
   // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
   useEffect(() => {
     void startAppUpdateResponder();
   }, []);
-  // A cloud workspace, or a paired machine while Machines is on, in the main slot (PRO-23, PRO-345).
-  const selectedWorkspace = store.selectedCloudWorkspace ?? null;
-  const cloudWorkspace = isMachineKey(selectedWorkspace) && !machinesOn ? null : selectedWorkspace;
+  // A cloud workspace, or a paired machine, in the main slot (PRO-23, PRO-345).
+  const cloudWorkspace = store.selectedCloudWorkspace ?? null;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
   const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
-  // A session on a paired machine (`machine:<m>:<p>:<s>`, PRO-346) opens as a session (PRO-347) while Machines is on.
-  const machineSession = machinesOn && machineKeyKind(store.selectedSessionId) === "session" ? store.selectedSessionId : null;
+  // A session on a paired machine (`machine:<m>:<p>:<s>`, PRO-346) opens as a session (PRO-347).
+  const machineSession = machineKeyKind(store.selectedSessionId) === "session" ? store.selectedSessionId : null;
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
@@ -404,6 +402,7 @@ export function AppShell() {
                 onToggle={toggleSidebar}
                 onOpenSettings={openSettings}
                 onOpenAccount={openAccountSettings}
+                onOpenHome={showHome}
                 onNewSession={newSession}
                 onOpenIssues={showIssues}
                 onOpenAgents={showAgents}
@@ -465,7 +464,7 @@ export function AppShell() {
         )}
       </div>
 
-      {status.settings.visible || runtimeSwitch ? (
+      {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
         <ErrorBoundary label="the status bar" fallback={null}>
           <Suspense fallback={statusBarFallback}>
             <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />
@@ -518,9 +517,8 @@ function UnselectedWorkspace({
   // Home always offers the welcome actions, including after a project has been added.
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, or over a cloud or project-less draft.
-  // A machine draft (PRO-348) has a project there, whatever this Mac has; only while Machines is on.
-  const machinesShown = useMachineDashboardEnabled();
-  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !(machinesShown && store.machineSessionPreset) && !(view === "new" && store.newSessionChat));
+  // A machine draft (PRO-348) has a project there, whatever this Mac has.
+  const startScreen = view === "home" || ((view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset && !store.machineSessionPreset && !(view === "new" && store.newSessionChat));
 
   return (
     <>

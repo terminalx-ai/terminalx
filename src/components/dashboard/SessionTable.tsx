@@ -50,7 +50,7 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
   onOpen: (id: string) => void;
   loading: boolean;
   compact?: boolean;
-  /** Offer the Where column: a machine is paired and Experimental → Machines is on. */
+  /** Offer the Where column: a machine is paired. */
   where?: boolean;
 }) {
   const rowHeight = compact ? COMPACT_ROW_HEIGHT : ROW_HEIGHT;

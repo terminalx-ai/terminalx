@@ -1190,13 +1190,55 @@ describe("autocorrect in the composer (#525)", () => {
 // #637: hold the delivery promise independently of any agent response.
 // #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
 describe("pending send acknowledgment", () => {
-  it.each(["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
+  it.each(["/goal Reduce p95 latency below 120 ms", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
     const onSend = vi.fn();
     render(<TestComposer onSend={onSend} />);
     const field = screen.getByRole("textbox");
     fireEvent.change(field, { target: { value: command } });
     fireEvent.keyDown(field, { key: "Enter" });
     await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(command, []));
+  });
+
+  // PRO-380 (03.20): a bare /goal says nothing to set; it stays, with the composer edged red and a hint under it.
+  it.each(["/goal", "/goal   "])("keeps %j in a Codex composer and says what is missing", async (command) => {
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: command } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect((await screen.findByRole("alert")).textContent).toBe("Type a goal after /goal, like “/goal ship saved views with tests”");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.value).toBe(command);
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "/goal ship it" } });
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+    fireEvent.change(field, { target: { value: "/goal" } });
+    // Said again only when it is sent again.
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+  });
+
+  it("does not send a /goal to Claude Code and offers a Codex tab", async () => {
+    const { getErrorToasts, dismissError } = await import("@/lib/errorToasts");
+    const onSend = vi.fn();
+    const openCodex = vi.fn();
+    function Claude() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={{ ...tab, harness: "claude", title: "Review saved views" }} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} onOpenCodexTab={openCodex} />;
+    }
+    render(<Claude />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "/goal Keep the overview tests green" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    const toast = getErrorToasts().at(-1)!;
+    expect(toast.title).toBe("Goals work in Codex chats only");
+    expect(toast.action).toBe("“Review saved views” runs Claude Code, which has no goals. Your text is still in the composer");
+    expect(toast.icon).toBe("target");
+    expect(toast.copy).toBe(false);
+    toast.actions![0].run();
+    expect(openCodex).toHaveBeenCalled();
+    expect(field.value).toBe("/goal Keep the overview tests green");
+    expect(onSend).not.toHaveBeenCalled();
+    dismissError(toast.id);
   });
 
   it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {

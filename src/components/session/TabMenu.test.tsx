@@ -315,6 +315,23 @@ describe("a tab's right-click menu", () => {
     expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
   });
 
+  it.each([
+    { status: "idle", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: false, disabled: false },
+    { status: "completed", markedUnread: false, readOnly: false, disabled: true },
+    { status: "completed", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: true, disabled: true },
+    { status: "idle", markedUnread: true, readOnly: true, disabled: true },
+  ] as const)("Mark as unread: $status, markedUnread=$markedUnread, readOnly=$readOnly", async ({ status, markedUnread, readOnly, disabled }) => {
+    Object.assign(backend.sessions.find((entry) => entry.id === "a")!.tabs[0], { status, markedUnread });
+    await refreshSessions();
+    render(<Menu tab="agent:a1" readOnlyReason={readOnly ? "View only" : undefined} />);
+
+    expect(item("Mark as unread").getAttribute("aria-disabled")).toBe(disabled ? "true" : null);
+    await choose("Mark as unread");
+    expect(backend.callsOf("set_tab_unread")).toEqual(disabled ? [] : [{ sessionId: "a", tabId: "a1", unread: true }]);
+  });
+
   it("does what the design's new items say (PRO-381)", async () => {
     const at = (seq: number, payload: object) => ({ id: `e${seq}`, sessionId: "a", tabId: "a2", harness: "codex", seq, ts: "2026-11-16T10:00:00Z", payload });
     backend.events["a/a2"] = [
