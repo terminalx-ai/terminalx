@@ -21,9 +21,8 @@ import { CloudCatalog } from "./catalog";
  * - `managerToken`: a mobile access token of its creator.
  * - `driverToken`: a mobile access token of an organization member it is shared with as a driver.
  * - `mobileLifecycleLocalDocker`: true once the server's mobile lifecycle routes serve the stack's
- *   local-docker provider. Today they take a fixed provider set (`MOBILE_SUPPORTED_PROVIDERS`: box,
- *   hetzner, machine0) and ignore the providers header, so a manager's resume of a local-docker
- *   workspace is `cloud_workspace_not_found` there, and the manager's Start cannot run on the stack.
+ *   local-docker provider. Older stacks with a fixed provider set in the mobile
+ *   lifecycle routes return `cloud_workspace_not_found` for a manager's resume.
  */
 interface TestServer {
   origin: string;
@@ -36,13 +35,6 @@ interface TestServer {
 
 const configPath = process.env.TERMINALX_CLOUD_TEST_SERVER;
 const server: TestServer | null = configPath ? JSON.parse(readFileSync(configPath, "utf8")) : null;
-
-/** The stack's provider is local-docker, which a phone build does not list: it is added, as the stack asks of every client. */
-const withLocalDocker: typeof fetch = (input, init) => {
-  const headers = new Headers(init?.headers);
-  headers.set("X-TerminalX-Cloud-Workspace-Providers", `${headers.get("X-TerminalX-Cloud-Workspace-Providers") ?? ""},local-docker`);
-  return fetch(input, { ...init, headers });
-};
 
 function memoryStorage() {
   const values = new Map<string, string>();
@@ -59,7 +51,7 @@ function memoryStorage() {
 
 function phone(token: string): CloudCatalog {
   const storage = memoryStorage();
-  const api = new CloudApi({ origin: server!.origin, accessToken: async () => token, fetch: withLocalDocker });
+  const api = new CloudApi({ origin: server!.origin, accessToken: async () => token });
   return new CloudCatalog({ api, secrets: storage, storage, clientInstallationId: `server-test-${token.slice(0, 6)}`, appVersion: "test" });
 }
 
