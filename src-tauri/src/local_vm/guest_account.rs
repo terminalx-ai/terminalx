@@ -77,6 +77,7 @@ pub(super) fn current_user() -> Result<User> {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn check_legacy_user() -> Result<()> {
     let user = current_user()?;
     if user.short_name != "lume"
@@ -88,4 +89,70 @@ pub(super) fn check_legacy_user() -> Result<()> {
         bail!("Legacy guest runtime requires its original non-root lume account");
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+const OWNER_HOME: &str = "/var/lib/terminalx-owner";
+
+/// Check the OS identity, not merely HOME: changing HOME cannot separate a
+/// key holder from processes running under the same UID.
+#[cfg(any(target_os = "linux", test))]
+fn validate_linux_owner(user: &User, home: Option<&Path>, groups: usize) -> Result<()> {
+    if user.short_name != "terminalx-owner"
+        || user.uid == 0
+        || user.gid == 0
+        || user.home != OWNER_HOME
+        || home != Some(Path::new(OWNER_HOME))
+        || groups != 0
+    {
+        bail!("Linux key holder requires the isolated terminalx-owner account and no supplementary groups");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn check_linux_owner() -> Result<()> {
+    let user = current_user()?;
+    // SAFETY: a zero-sized query does not dereference the null group buffer.
+    let groups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if groups < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    validate_linux_owner(&user, dirs::home_dir().as_deref(), groups as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owner() -> User {
+        // A dedicated system account can have a UID below 1000.
+        User { short_name: "terminalx-owner".into(), uid: 991, gid: 991, home: OWNER_HOME.into() }
+    }
+
+    #[test]
+    fn linux_owner_role_requires_os_identity_not_a_home_override() {
+        let home = Some(Path::new(OWNER_HOME));
+        assert!(validate_linux_owner(&owner(), home, 0).is_ok());
+        let mut worker = owner();
+        worker.short_name = "cua".into();
+        assert!(validate_linux_owner(&worker, home, 0).is_err());
+        worker.short_name = "terminalx-owner".into();
+        worker.home = "/home/cua".into();
+        assert!(validate_linux_owner(&worker, home, 0).is_err());
+        assert!(validate_linux_owner(&owner(), Some(Path::new("/home/cua")), 0).is_err());
+        assert!(validate_linux_owner(&owner(), None, 0).is_err());
+    }
+
+    #[test]
+    fn linux_owner_role_rejects_root_and_supplementary_access() {
+        let home = Some(Path::new(OWNER_HOME));
+        let mut root = owner();
+        root.uid = 0;
+        assert!(validate_linux_owner(&root, home, 0).is_err());
+        root = owner();
+        root.gid = 0;
+        assert!(validate_linux_owner(&root, home, 0).is_err());
+        assert!(validate_linux_owner(&owner(), home, 1).is_err());
+    }
 }
