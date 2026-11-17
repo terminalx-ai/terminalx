@@ -1,3 +1,4 @@
+import { SettingsDescription } from "./SettingsDescription";
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
@@ -385,7 +386,7 @@ function BrowserRuntimeRow() {
 }
 
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
-export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
+export function AgentsTab({ onOpenSkills, showIntroduction = true }: { onOpenSkills?: () => void; showIntroduction?: boolean }) {
   const prefs = usePrefs();
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
@@ -420,7 +421,7 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   };
   return (
     <div className="flex flex-col gap-3">
-      <p className="-mt-4 text-[13px] text-muted-foreground">The agent CLIs TerminalX runs on this Mac. Each keeps its own login; local work needs no TerminalX account.</p>
+      {showIntroduction && <SettingsDescription section="agents" />}
       <RegisteredSetting setting="agents.setup"><div>
         <AgentsPanel harnesses={store.harnesses} checkRun={checkRun} busy={busy} onRecheck={() => void recheck()} />
       </div></RegisteredSetting>

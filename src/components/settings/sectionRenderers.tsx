@@ -32,11 +32,11 @@ interface SectionContext {
 export const settingsSectionRenderers: Record<SettingsSection, (context: SectionContext) => ReactNode> = {
   account: () => <AccountTab />,
   devices: () => <DevicesTab />,
-  machines: () => <MachinesSettings />,
+  machines: () => <MachinesSettings showIntroduction={false} />,
   general: ({ onOpenUsage }) => <GeneralTab onOpenUsage={onOpenUsage} />,
   appearance: () => <AppearanceTab />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
-  agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
   localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,

@@ -20,15 +20,15 @@ export const ORCHESTRATOR_RUNS_DESCRIPTION =
 // PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
 export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
-// PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has a one-line subtitle.
+// PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has one introductory description.
 export const SETTINGS_SECTIONS = {
   general: { title: "General", group: "Personal", entry: "general.websiteLinks", subtitle: "How TerminalX opens links, shows its work, and where your settings live." },
   account: { title: "Account", group: "Personal", entry: "account.identity", subtitle: "Your TerminalX account, this Mac’s name and what it shares." },
   appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme", subtitle: "Theme, text size, the sidebar and the status bar." },
   shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
   devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: "Phones paired with this Mac." },
-  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Computers that operate this Mac, and the ones it operates." },
-  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "Installed agents, their sign-ins, and how they work while you wait." },
+  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them." },
+  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "The agent CLIs TerminalX runs on this Mac, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account." },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: "Variables for new agent and shell tabs, kept in the Keychain." },
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
