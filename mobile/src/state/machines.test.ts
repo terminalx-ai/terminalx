@@ -67,6 +67,28 @@ describe("machine states", () => {
     expect(list.available[0]!.icon).toBe("server");
   });
 
+  it("lists a headless server paired from its terminal with a server mark (PRO-359)", () => {
+    const list = machineList(input({
+      hosts: [
+        // Paired by `terminalx-serve pair --phone`: direct only, no account entry, no window.
+        stored("server", { hostName: "build-01", headless: true, platform: "linux", lastConnectedAt: NOW - 3_600_000 }),
+        // A Mac serving with `terminalx-serve` and no TerminalX app is a server too.
+        stored("mac-mini", { hostName: "Mac mini", headless: true, platform: "macos" }),
+        stored("desk", { hostName: "Studio MacBook", headless: false, platform: "macos" }),
+        // Paired before PRO-359: nothing said, the name decides.
+        stored("older", { hostName: "Office iMac" }),
+      ],
+      activeHostId: "server",
+      connection: "connected",
+    }));
+    expect(list.paired.map((machine) => [machine.name, machine.icon, machine.state])).toEqual([
+      ["build-01", "server", "Connected"],
+      ["Mac mini", "server", "Last connected 1 day ago"],
+      ["Studio MacBook", "laptop", "Last connected 1 day ago"],
+      ["Office iMac", "desktop", "Last connected 1 day ago"],
+    ]);
+  });
+
   it("uses names typed on this phone, keeps hidden machines apart, and tells twins apart", () => {
     const named = account(7, { displayName: "Mac Studio" });
     const hidden = account(8, { displayName: "Mac Studio" });

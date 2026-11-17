@@ -375,6 +375,7 @@ mod tests {
             pending: None,
             code: None,
             paused_until: None,
+            phones: Default::default(),
             relay_state: wire::RelayState::Off,
             relay: None,
         };
@@ -410,6 +411,7 @@ mod tests {
             pending: None,
             code: None,
             paused_until: None,
+            phones: Default::default(),
             relay_state,
             relay,
         };

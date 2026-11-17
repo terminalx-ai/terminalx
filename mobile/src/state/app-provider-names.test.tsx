@@ -9,7 +9,7 @@ const fake = vi.hoisted(() => ({
   credentialRead: null as null | (() => Promise<string | null>),
   stage: null as null | ((stage: string, attempt: number) => void),
   connected: null as null | (() => void),
-  describe: vi.fn(),
+  describeHost: vi.fn(),
   summaries: vi.fn(),
   forgetPairing: vi.fn(),
   start: vi.fn(),
@@ -75,7 +75,7 @@ vi.mock("../transport/connection", () => ({
 vi.mock("../data/host-api", () => ({
   isSessionSummary: (value: any) => typeof value?.id === "string" && Array.isArray(value.tabs),
   HostApi: class { resetConnection() {}
-    describe = fake.describe;
+    describeHost = fake.describeHost;
     forgetPairing = fake.forgetPairing;
     summaries = fake.summaries;
   },
@@ -98,13 +98,15 @@ let root: Root;
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 const connected = async () => { await act(async () => fake.stage!("connected", 0)); await settle(); };
 const shown = () => app.hosts.map((host) => hostDisplayName(host));
+// A desktop's answer before PRO-359: a name, nothing about a window.
+const named = (name: string) => ({ name, hasWindow: null, platform: null });
 
 beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   fake.storage.clear();
   fake.credentialRead = null;
-  for (const mock of [fake.summaries, fake.describe, fake.forgetPairing, fake.start, fake.stop, fake.restart, fake.reportError, fake.retryNow]) mock.mockReset();
-  fake.describe.mockResolvedValue(null);
+  for (const mock of [fake.summaries, fake.describeHost, fake.forgetPairing, fake.start, fake.stop, fake.restart, fake.reportError, fake.retryNow]) mock.mockReset();
+  fake.describeHost.mockResolvedValue(null);
   fake.summaries.mockResolvedValue([]);
   fake.forgetPairing.mockResolvedValue(true);
   fake.paired = HOST;
@@ -201,25 +203,25 @@ it("refreshes the machine row and active host after the connection records a new
 
 it("gives an entry paired as Paired Mac its real name on the next connection, and follows a rename of the computer", async () => {
   expect(shown()).toEqual(["Paired Mac"]);
-  fake.describe.mockResolvedValue("  Paresh’s Mac mini\u0000 ");
+  fake.describeHost.mockResolvedValue(named("  Paresh’s Mac mini\u0000 "));
   await act(async () => app.connectHost(app.hosts[0]!));
   await connected();
   expect(shown()).toEqual(["Paresh’s Mac mini"]);
   expect(hostDisplayName(app.activeHost!)).toBe("Paresh’s Mac mini");
   // Renamed in System Settings: picked up on the next connection.
-  fake.describe.mockResolvedValue("Studio Mac");
+  fake.describeHost.mockResolvedValue(named("Studio Mac"));
   await connected();
   expect(shown()).toEqual(["Studio Mac"]);
   expect((await readHosts())[0]!.hostName).toBe("Studio Mac");
 });
 
 it("keeps a name typed on the phone through reconnects and a rename of the computer, until it is cleared", async () => {
-  fake.describe.mockResolvedValue("Paresh’s Mac mini");
+  fake.describeHost.mockResolvedValue(named("Paresh’s Mac mini"));
   await act(async () => app.connectHost(app.hosts[0]!));
   await connected();
   await act(async () => app.renameHost(HOST.id, "  My desk  "));
   expect(shown()).toEqual(["My desk"]);
-  fake.describe.mockResolvedValue("Renamed Mac");
+  fake.describeHost.mockResolvedValue(named("Renamed Mac"));
   await connected();
   expect(shown()).toEqual(["My desk"]);
   expect(await readHosts()).toMatchObject([{ customName: "My desk", hostName: "Renamed Mac" }]);
@@ -227,10 +229,29 @@ it("keeps a name typed on the phone through reconnects and a rename of the compu
   expect(shown()).toEqual(["Renamed Mac"]);
 });
 
+it("marks a computer with no TerminalX window as a headless server, and keeps it through reconnects (PRO-359)", async () => {
+  fake.describeHost.mockResolvedValue({ name: "build-01", hasWindow: false, platform: "linux" });
+  await act(async () => app.connectHost(app.hosts[0]!));
+  await connected();
+  expect(app.activeHost).toMatchObject({ hostName: "build-01", headless: true, platform: "linux" });
+  expect((await readHosts())[0]).toMatchObject({ headless: true, platform: "linux" });
+  // The connection saves its own copy of the host on reconnect: what the computer said stays.
+  await act(async () => updateStoredHost({ ...HOST, lastConnectedAt: 300 }));
+  expect((await readHosts())[0]).toMatchObject({ headless: true, platform: "linux", hostName: "build-01", lastConnectedAt: 300 });
+  // An older runtime that does not say leaves it as it was.
+  fake.describeHost.mockResolvedValue(named("build-01"));
+  await connected();
+  expect((await readHosts())[0]).toMatchObject({ headless: true });
+  // A Mac whose window opens again is no server.
+  fake.describeHost.mockResolvedValue({ name: "build-01", hasWindow: true, platform: "macos" });
+  await connected();
+  expect((await readHosts())[0]).toMatchObject({ headless: false, platform: "macos" });
+});
+
 it("keeps the fallback when an older desktop does not say its name", async () => {
   await act(async () => app.connectHost(app.hosts[0]!));
   await connected();
-  expect(fake.describe).toHaveBeenCalled();
+  expect(fake.describeHost).toHaveBeenCalled();
   expect(shown()).toEqual(["Paired Mac"]);
 });
 

@@ -7,6 +7,7 @@
 //! is attached, so an authenticated connection ends right after
 //! `e2ee_authenticated`, which is as far as pairing needs.
 use super::crypto::{E2eeClientHandshake, E2eeSession};
+use base64::{engine::general_purpose, Engine as _};
 use super::*;
 use crate::keychain::testing::MemorySecrets;
 use serde_json::json;

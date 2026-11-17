@@ -32,19 +32,19 @@ use super::PAIRING_MESSAGE_BYTES_LIMIT;
 
 /// The relay cell's `maxPayloadLength` (`terminalx-server`,
 /// `apps/relay/src/cell/cell-server.ts`). One larger message closes both legs.
-pub(super) const RELAY_MESSAGE_BYTES_LIMIT: usize = 1024 * 1024;
+pub(crate) const RELAY_MESSAGE_BYTES_LIMIT: usize = 1024 * 1024;
 /// The largest message either side reassembles from fragments: the same as
 /// the largest single message a direct connection reads.
-pub(super) const FRAGMENTED_MESSAGE_BYTES_LIMIT: usize = PAIRING_MESSAGE_BYTES_LIMIT;
+pub(crate) const FRAGMENTED_MESSAGE_BYTES_LIMIT: usize = PAIRING_MESSAGE_BYTES_LIMIT;
 /// The version of fragments this desktop sends and reads.
-pub(super) const FRAGMENTS_VERSION: u8 = 1;
+pub(crate) const FRAGMENTS_VERSION: u8 = 1;
 /// Nonce, Poly1305 tag and the sealed header: session id, direction, kind and counter.
 const E2EE_FRAME_OVERHEAD: usize = 24 + 16 + 32 + 1 + 1 + 8;
 const FRAGMENT_MAGIC: u8 = b'f';
 const FRAGMENT_HEADER_BYTES: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Transport {
+pub(crate) enum Transport {
     Direct,
     Relay,
 }
@@ -62,7 +62,7 @@ impl Transport {
     }
 
     /// The largest plaintext that crosses as one text frame: sealed, then base64 encoded.
-    pub(super) const fn text_plaintext_limit(self) -> usize {
+    pub(crate) const fn text_plaintext_limit(self) -> usize {
         self.wire_budget() / 4 * 3 - E2EE_FRAME_OVERHEAD
     }
 
@@ -80,7 +80,7 @@ impl Transport {
 
 /// How large a transcript reply may be. Both include the whole RPC response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ReplyLimits {
+pub(crate) struct ReplyLimits {
     /// A page of events. It always fits one frame: quick to show, and within
     /// reach of a phone that does not reassemble fragments.
     pub page: usize,
@@ -90,26 +90,26 @@ pub(super) struct ReplyLimits {
 }
 
 /// One connection's transport, and whether its phone reassembles fragments.
-pub(super) struct Wire {
+pub(crate) struct Wire {
     transport: Transport,
     fragments: AtomicBool,
 }
 
 /// What becomes of one outgoing message.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Delivery {
+pub(crate) enum Delivery {
     Frame,
     Fragments,
     TooLarge,
 }
 
 impl Wire {
-    pub(super) fn new(transport: Transport) -> Self {
+    pub(crate) fn new(transport: Transport) -> Self {
         Self { transport, fragments: AtomicBool::new(false) }
     }
 
     /// The phone asked for fragments. True when this desktop sends them.
-    pub(super) fn negotiate(&self, version: Option<u64>) -> bool {
+    pub(crate) fn negotiate(&self, version: Option<u64>) -> bool {
         let agreed = version == Some(u64::from(FRAGMENTS_VERSION));
         if agreed {
             self.fragments.store(true, Ordering::SeqCst);
@@ -117,12 +117,12 @@ impl Wire {
         agreed
     }
 
-    pub(super) fn fragments(&self) -> bool {
+    pub(crate) fn fragments(&self) -> bool {
         self.fragments.load(Ordering::SeqCst)
     }
 
     /// The largest message this connection carries in any form.
-    pub(super) fn message_limit(&self) -> usize {
+    pub(crate) fn message_limit(&self) -> usize {
         if self.fragments() {
             FRAGMENTED_MESSAGE_BYTES_LIMIT
         } else {
@@ -130,12 +130,12 @@ impl Wire {
         }
     }
 
-    pub(super) fn reply_limits(&self, cap: usize) -> ReplyLimits {
+    pub(crate) fn reply_limits(&self, cap: usize) -> ReplyLimits {
         let page = self.transport.text_plaintext_limit().min(cap);
         ReplyLimits { page, single: if self.fragments() { cap.max(page) } else { page } }
     }
 
-    pub(super) fn delivery(&self, plaintext_bytes: usize) -> Delivery {
+    pub(crate) fn delivery(&self, plaintext_bytes: usize) -> Delivery {
         if plaintext_bytes <= self.transport.text_plaintext_limit() {
             Delivery::Frame
         } else if self.fragments() && plaintext_bytes <= FRAGMENTED_MESSAGE_BYTES_LIMIT {
@@ -145,13 +145,13 @@ impl Wire {
         }
     }
 
-    pub(super) fn fragments_of<'a>(&self, message: &'a [u8]) -> impl Iterator<Item = Vec<u8>> + 'a {
+    pub(crate) fn fragments_of<'a>(&self, message: &'a [u8]) -> impl Iterator<Item = Vec<u8>> + 'a {
         encode_fragments(message, self.transport.fragment_data_limit())
     }
 
     /// Sent instead of a reply this connection cannot carry: that request
     /// fails, the connection stays up.
-    pub(super) fn too_large_response(&self, id: &str, plaintext_bytes: usize) -> Value {
+    pub(crate) fn too_large_response(&self, id: &str, plaintext_bytes: usize) -> Value {
         let advice = match (self.transport, self.fragments()) {
             (Transport::Relay, false) => " Update TerminalX on this phone, or connect on the same Wi-Fi as your Mac.",
             _ => " Open it on your Mac instead.",
@@ -173,7 +173,7 @@ impl Wire {
     }
 }
 
-pub(super) fn megabytes(bytes: usize) -> String {
+pub(crate) fn megabytes(bytes: usize) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
@@ -192,7 +192,7 @@ fn encode_fragments(message: &[u8], data_limit: usize) -> impl Iterator<Item = V
 
 /// Rebuilds the messages a phone sent as fragments.
 #[derive(Default)]
-pub(super) struct Reassembly {
+pub(crate) struct Reassembly {
     message: Option<(usize, Vec<u8>)>,
 }
 
@@ -200,7 +200,7 @@ impl Reassembly {
     /// One binary frame's plaintext. A whole message once its last part
     /// arrives; `None` for an earlier part, or for a binary frame that is not
     /// a fragment. A malformed or out of order part is an error.
-    pub(super) fn push(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub(crate) fn push(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>> {
         if frame.first() != Some(&FRAGMENT_MAGIC) {
             return Ok(None);
         }

@@ -257,6 +257,9 @@ have to keep TerminalX open and logged in, and a server could never be a host.
   window attached, it refuses the phone as unreachable, which is what a phone
   sees today when the window is closed. PRO-341's criterion "Phone pairing on
   the same Mac keeps working, with the same fingerprint" holds either way.
+  **Amended by PRO-359:** with no window taking phones, the runtime now serves
+  the phone itself instead of refusing it (see "As built (PRO-359)" below).
+  A window that takes phones still gets every phone, as before.
 - **Paired computers are kept apart from phones.** They go in their own registry
   file in the runtime's data directory, never in `devices.json`. `DeviceScope`
   is a strict enum (`src-tauri/src/pairing/model.rs:73`), and `devices.json`
@@ -1960,6 +1963,68 @@ which runs in a child process because data privacy is one switch per process.
   connections and refuses it with `pairing_refused` `disconnected` until
   `runtime.machineHost.letBack`, which needs a person like Allow. The operating
   computer shows Disconnected and does not retry until "Try again".
+
+### As built (PRO-359): phones on a Mac with the window closed, and on a headless server
+
+Why the protocol changed: a phone could not reach a Mac whose window was
+closed, or a server with no window at all. The runtime that already holds the
+direct port now answers phones too, with nothing new on the phone's wire.
+
+- **Who serves a phone.** The direct listener (`machine_host/direct.rs`) passes
+  a phone to the window while one has registered `phoneRoute`, as since PRO-341.
+  Without one, the runtime serves it (`machine_host/phones.rs`). It uses the same
+  E2EE v2 handshake with the machine's one host key, the same `devices.json`
+  records and the same RPC. The RPC moved from the desktop-only `pairing` module
+  into the shared `phone` module, so both builds compile it. When a window
+  registers a phone route, the runtime closes the phones it serves; they
+  reconnect and reach the window. With the switch off, the window owns the port
+  and serves phones as before (decision 9 holds).
+- **Writes.** A phone served by the runtime writes through the runtime's own
+  owner operations (`local_runtime::mobile::execute`) under a lease the runtime
+  holds for its phones (`Lifetime::hold`), as a window holds one for its own. It
+  is taken when the first phone connects and released when hosting stops or a
+  window takes phones. While it is held the runtime is not idle.
+- **`devices.json` is shared.** The window and the runtime both read and write
+  it. Nothing is cached: every change reads, changes and writes the file under
+  `devices.lock` (`phone/registry.rs`), so neither process undoes the other's
+  change. A phone revoked by the window or removed at sign-out is refused at its
+  next request. Each tick, the runtime also closes such phones and ends their
+  grants, and it fences by the account mirror's binding generation, as the
+  window does. It reads that generation once a tick, not on every message, and
+  judges no phone while `account.json` cannot be read.
+- **Notices stay in their process.** The runtime's phone host publishes its
+  `mobile_notification` events on a sink that keeps them in the runtime
+  (`phone/sink.rs`). Every runtime event also streams to the window, so the
+  window's phones would otherwise get each notice twice.
+- **`host.describe`** answers `{ name, hasWindow, platform }`. `hasWindow` is
+  false on a runtime no desktop app launched (`TERMINALX_LOCAL_DESKTOP`), and
+  the phone shows such a machine with the server icon. Older phones read only
+  `name`; older computers send only `name`, and the phone keeps what it had.
+- **The runtime answers phones** with `pairing.getEndpoints` as
+  `{ v: 1, directEndpoints, relay: null }`, and refuses
+  `pairing.provisionRelay`: it has no relay route for phones until PRO-368
+  registers a signed-in machine with the relay. A phone keeps any relay bundle
+  it has and uses its direct route.
+- **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
+  window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
+  no relay; the strict offer schema is unchanged). It prints the link as a
+  half-block QR and as text, then asks "Allow? [y/N]" with the fingerprint the
+  phone shows. If hosting is off it asks to turn it on first, since phones use
+  the same listener. While a TerminalX window is open (`Status.phones.windowOpen`)
+  it sends the person to Settings → Devices before asking anything, and the
+  runtime refuses the code (`window_takes_phones`) while a window serves phones.
+- **Runtime IPC** (`machine_wire.rs`): `runtime.machineHost.phoneCode`,
+  `phoneApprove` and `phoneDecline`. The first two are consent-guarded like
+  `createCode`/`approve`. `phoneRevoke` is refused while a window serves phones,
+  since the window holds their connections and grants. `Status.phones`
+  (`connected`, `code`, `pending`) is `#[serde(default)]`, so a window reading
+  an older runtime sees none.
+- **`terminalx-serve devices`** lists paired phones after the computers, and
+  `devices revoke <id>` removes either.
+- **Not yet.** A headless machine is listed on the phone from the account only
+  once it registers with the relay (PRO-368). Until then the phone lists it once
+  paired from its terminal. The account list already shows Linux and SSH
+  machines as servers.
 
 ## Session feature parity
 

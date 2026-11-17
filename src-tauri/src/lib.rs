@@ -161,6 +161,9 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+/// The phone protocol, which the window and the runtime both serve (PRO-359).
+#[cfg(unix)]
+mod phone;
 #[cfg(feature = "desktop")]
 mod machines;
 /// The operating computer's side of pairing by code (`machines/pair.rs`),
