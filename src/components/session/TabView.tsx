@@ -1,3 +1,4 @@
+import { localCommands } from "@/lib/localCommands";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
@@ -24,7 +25,7 @@ import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MES
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer, type Handoff } from "@/components/chat/Composer";
-import { goalCommand } from "@/lib/goalCommand";
+import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -382,10 +383,16 @@ export function TabView({
   const changeHeldQueue = useCallback(async (change: HeldQueueChange) => {
     if (blockedRef.current) throw new Error(blockedRef.current);
     if (!backend.changeHeldQueue) throw new Error("This session does not support held follow-ups.");
+    if (change.type === "edit") {
+      const item = heldQueue.items.find(item => item.id === change.id);
+      const problem = goalCommandProblem(change.text, tab.harness, !!(item?.images.length || item?.files?.length), (backend.commands?.(tab) ?? (local ? localCommands(session.cwd, tab.harness) : null))?.known()?.commands ?? []);
+      if (problem === "unsupported") throw new Error("Goals work in Codex chats only. Open a Codex tab to set a goal, or change this held message's text.");
+      if (problem === "empty") throw new Error("Type a goal after /goal, like “/goal ship saved views with tests”.");
+    }
     const out = await backend.changeHeldQueue(tab.id, change);
     for (const event of out.events) applyEvent(event);
     if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
-  }, [backend, tab.id]);
+  }, [backend, tab, heldQueue, local, session.cwd]);
   const send = useCallback(
     async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.

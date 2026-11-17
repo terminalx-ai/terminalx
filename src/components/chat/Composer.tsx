@@ -1,3 +1,4 @@
+import { localCommands } from "@/lib/localCommands";
 import { captureReviewSend, markReviewsSent, pendingReviewCount, restoreReviewSend } from "@/lib/reviewComments";
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
@@ -5,7 +6,7 @@ import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, CircleAlert, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { showError } from "@/lib/errorToasts";
-import { goalCommand } from "@/lib/goalCommand";
+import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { openSettingRow } from "@/lib/settingsLinks";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -47,35 +48,7 @@ import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
-const commandCache = new Map<string, ComposerCommandList>();
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
-
-const commandsAsked = new Map<string, Promise<ComposerCommandList>>();
-
-/** A local tab's commands: asked of the harness once per directory. */
-function localCommands(cwd: string, harness: string): ComposerCommands {
-  const key = `${cwd}|${harness}`;
-  return {
-    key,
-    known: () => commandCache.get(key) ?? null,
-    load: () => {
-      const known = commandCache.get(key);
-      if (known) return Promise.resolve(known);
-      const pending = commandsAsked.get(key);
-      if (pending) return pending;
-      const asked = filesApi
-        .slashCommands(cwd, harness)
-        .then((commands) => {
-          const list = { commands, note: null };
-          commandCache.set(key, list);
-          return list;
-        })
-        .finally(() => commandsAsked.delete(key));
-      commandsAsked.set(key, asked);
-      return asked;
-    },
-  };
-}
 
 /** Break the line at the caret, through the input event the draft is read from. */
 export function insertNewLine(el: HTMLTextAreaElement) {
@@ -460,14 +433,14 @@ export function Composer({
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
     if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
-    const goal = goalCommand(text);
-    if (goal !== null && !(tab.harness !== "codex" && commands.some((c) => c.name === "goal"))) {
+    const goalProblem = goalCommandProblem(text, tab.harness, !!sendable.length, commands);
+    if (goalProblem) {
       // Goals are Codex's (#256): a bare "/goal" says nothing to set, and another agent has none to set.
-      if (tab.harness === "codex" && !goal && !sendable.length) {
+      if (goalProblem === "empty") {
         setEmptyGoal(true);
         return;
       }
-      if (tab.harness !== "codex") {
+      if (goalProblem === "unsupported") {
         const name = tab.title?.trim();
         showError(`${name ? `“${name}”` : "This tab"} runs ${agentName(tab.harness)}, which has no goals. Your text is still in the composer`, undefined, {
           title: "Goals work in Codex chats only",
