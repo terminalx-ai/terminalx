@@ -213,12 +213,8 @@ pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> an
         Decided::MarkFailed => true,
     };
     if rejected && command.kind == "send" {
-        if let Some(ids) = attachments::named(command.plaintext).map(|mut ids| {
-            ids.extend(attachments::named_files(command.plaintext).unwrap_or_default());
-            ids
-        }) {
-            agents.attachments.remove_owned(command.actor_id, &ids);
-        }
+        // Every id it names, even in a list that made it invalid.
+        agents.attachments.remove_owned(command.actor_id, &attachments::named_any(command.plaintext));
     }
     decided
 }

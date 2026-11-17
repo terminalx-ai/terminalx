@@ -500,7 +500,8 @@ instead of from this computer.
   lost access, drops the queued message and its uploads. A message the
   runtime refuses (a PRO-88 refusal, a held lease, an invalid payload) gives
   up its sender's uploads at once. An upload nobody sent within a day is
-  removed, at start and about hourly; at most 64 wait at once. The desktop
+  removed, at start and about hourly; at most 64 wait at once, holding
+  at most 256 MiB together (one full message of 25 MB files fits). The desktop
   uploads one attachment under one id for as long as the composer holds it,
   so a send tried again replaces nothing and leaves nothing behind.
 
@@ -537,6 +538,10 @@ instead of from this computer.
      queued message keeps their stored paths, so a restart does not lose
      them. A message naming a file that is not there in full is refused with
      `attachment-missing` before anything about the tab changes.
+
+  The composer of a machine tab takes any file as a local tab's does
+  (`SessionBackendCaps.files`); a folder dropped on it is left out and the
+  composer says so, since its path here names nothing on the machine.
 
   A machine from before `composer/4` takes images only: the composer says to
   update it, and nothing is uploaded. In the transcript the files show as

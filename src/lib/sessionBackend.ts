@@ -46,6 +46,13 @@ export interface SessionBackendCaps {
   steer: boolean;
   /** Images go with a prompt. */
   images: boolean;
+  /**
+   * Files other than images go with a prompt: a local tab (PRO-290), and a
+   * machine that serves `composer/4` (PRO-407). Never a cloud workspace's tab.
+   * While a machine is away it is true: the send is held until it is back,
+   * and a machine from before `composer/4` then says it needs an update.
+   */
+  files: boolean;
   /** The local recovery flows (retry safely, resume after a stop). */
   recovery: boolean;
   /**
@@ -212,7 +219,7 @@ export interface SessionBackend {
   };
 }
 
-const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, recovery: true, interrupt: true };
+const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, files: true, recovery: true, interrupt: true };
 const OFFERED: TerminalViewOffer = { available: true, reason: null };
 
 /** The terminal view switch for `tab` on `backend`: every local tab has one. */
@@ -445,7 +452,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     kind: "cloud",
     key: ctx.key,
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
-    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), recovery: false, interrupt: interrupts },
+    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) && (!client || client.hasCapability("composer/4")), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },

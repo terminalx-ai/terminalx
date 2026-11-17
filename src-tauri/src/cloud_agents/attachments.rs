@@ -45,6 +45,10 @@ pub const MAX_FILES: usize = MAX_FILES_PER_MESSAGE;
 const UNKNOWN_MEDIA_TYPE: &str = "application/octet-stream";
 /// Uploads kept at once, for everyone together.
 const MAX_STORED: usize = 64;
+/// Bytes kept at once, for everyone together: one full message of files
+/// (10 of 25 MB) fits, and a driver cannot fill the computer's disk with
+/// uploads nobody sends (PRO-407).
+const MAX_STORED_BYTES: u64 = 256 * 1024 * 1024;
 const KEEP_FOR_MS: u64 = 24 * 60 * 60 * 1000;
 const MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
@@ -100,6 +104,8 @@ pub struct Attachments {
     dir: PathBuf,
     /// One upload or read at a time: parts are small and rare.
     lock: Mutex<()>,
+    /// [`MAX_STORED_BYTES`]; smaller in tests.
+    max_bytes: u64,
 }
 
 /// 8-128 letters, digits, `-` or `_`: also safe as a file name.
@@ -111,7 +117,7 @@ impl Attachments {
     pub fn open(state_dir: &Path) -> Result<Self> {
         let dir = state_dir.join("attachments");
         crate::cloud_bootstrap::ensure_private_dir(&dir)?;
-        Ok(Self { dir, lock: Mutex::new(()) })
+        Ok(Self { dir, lock: Mutex::new(()), max_bytes: MAX_STORED_BYTES })
     }
 
     fn data(&self, id: &str) -> PathBuf {
@@ -151,15 +157,13 @@ impl Attachments {
         if !valid_id(id) {
             return Err(AttachError::Invalid("attachmentId is 8-128 letters, digits, '-' or '_'"));
         }
-        let (media_type, name, limit) = if file {
-            let media_type = file_media_type(media_type).ok_or(AttachError::Invalid("mediaType is not a media type"))?;
-            let name = crate::attachments::admissible_name(name.unwrap_or("")).map_err(|error| AttachError::Refused(format!("{error:#}")))?;
-            (media_type, Some(name), MAX_ATTACHMENT_BYTES)
+        let (media_type, limit) = if file {
+            (file_media_type(media_type).ok_or(AttachError::Invalid("mediaType is not a media type"))?, MAX_ATTACHMENT_BYTES)
         } else {
             if !MEDIA_TYPES.contains(&media_type) {
                 return Err(AttachError::Invalid("only PNG, JPEG, GIF and WebP images can be attached"));
             }
-            (media_type, name.map(|name| name.chars().take(200).collect()), MAX_IMAGE_BYTES)
+            (media_type, MAX_IMAGE_BYTES)
         };
         if bytes.len() > PART_BYTES {
             return Err(AttachError::Invalid("the part is too large"));
@@ -178,7 +182,15 @@ impl Attachments {
             Some(meta) => meta,
             None if offset != 0 => return Err(AttachError::Invalid("the upload starts at offset 0")),
             None if self.ids().len() >= MAX_STORED => return Err(AttachError::Full),
-            None => Meta { owner: owner.to_string(), media_type: media_type.to_string(), name, complete: false, at: now, file },
+            // The name is read from the first part only; later parts may leave it out.
+            None => {
+                let name = if file {
+                    Some(crate::attachments::admissible_name(name.unwrap_or("")).map_err(|error| AttachError::Refused(format!("{error:#}")))?)
+                } else {
+                    name.map(|name| name.chars().take(200).collect())
+                };
+                Meta { owner: owner.to_string(), media_type: media_type.to_string(), name, complete: false, at: now, file }
+            }
         };
         let path = self.data(id);
         let size = fs::metadata(&path).map(|file| file.len()).unwrap_or(0);
@@ -211,6 +223,11 @@ impl Attachments {
         if end > limit {
             self.remove_locked(id);
             return Err(AttachError::TooLarge);
+        }
+        if self.stored_bytes_locked().saturating_sub(size) + end > self.max_bytes {
+            // What waits already takes the room: this one gives its place up, not the others.
+            self.remove_locked(id);
+            return Err(AttachError::Full);
         }
         // The record first, so a part without one is never left behind.
         meta.complete = last;
@@ -304,6 +321,11 @@ impl Attachments {
         }
     }
 
+    /// The bytes every waiting upload holds.
+    fn stored_bytes_locked(&self) -> u64 {
+        self.ids().iter().filter_map(|id| fs::metadata(self.data(id)).ok()).map(|file| file.len()).sum()
+    }
+
     fn remove_locked(&self, id: &str) {
         let _ = fs::remove_file(self.data(id));
         let _ = fs::remove_file(self.meta_path(id));
@@ -374,6 +396,21 @@ pub fn named_all(plaintext: &serde_json::Value) -> Option<Vec<String>> {
     let mut ids = named(plaintext)?;
     ids.extend(files);
     Some(ids)
+}
+
+/// Every well-formed upload id a message names in `images` or `files`, even
+/// when the lists are not valid as a whole: what a refused message gives up.
+pub fn named_any(plaintext: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for field in ["images", "files"] {
+        let entries = plaintext.get(field).and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or_default();
+        for id in entries.iter().take(MAX_STORED).filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str)) {
+            if valid_id(id) && !ids.iter().any(|known| known == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
 }
 
 fn named_in(plaintext: &serde_json::Value, field: &str, max: usize) -> Option<Vec<String>> {
@@ -556,6 +593,30 @@ mod tests {
         assert_eq!(named_files(&serde_json::json!({ "images": [{ "id": ID }], "files": [{ "id": ID }] })), None, "one upload is an image or a file");
         assert_eq!(named_files(&serde_json::json!({ "files": [{ "id": "../x" }] })), None);
         assert_eq!(named_all(&serde_json::json!({ "images": [{ "id": ID }], "files": [{ "id": "attach-0002" }] })), Some(vec![ID.to_string(), "attach-0002".to_string()]));
+    }
+
+    #[test]
+    fn waiting_uploads_hold_at_most_their_byte_budget_together() {
+        // The budget holds one full message of files at the largest size.
+        assert!(MAX_STORED_BYTES >= MAX_FILES as u64 * MAX_ATTACHMENT_BYTES);
+        let (_dir, mut store) = store();
+        store.max_bytes = 10;
+        assert_eq!(store.write_part("alice", "attach-0001", 0, b"abcd", "text/plain", Some("a.txt"), true, true, 1), Ok(4));
+        assert_eq!(store.write_part("alice", "attach-0002", 0, b"abc", "text/plain", Some("b.txt"), true, false, 1), Ok(3));
+        // A part past the budget: this upload gives its place up, the others stay.
+        assert_eq!(store.write_part("alice", "attach-0002", 3, b"defg", "text/plain", None, true, true, 1), Err(AttachError::Full));
+        assert_eq!(store.ids(), vec!["attach-0001".to_string()]);
+        assert_eq!(store.write_part("alice", "attach-0003", 0, b"x".repeat(7).as_slice(), "text/plain", Some("c.txt"), true, true, 1), Err(AttachError::Full));
+        assert_eq!(store.write_part("alice", "attach-0003", 0, b"x".repeat(6).as_slice(), "text/plain", Some("c.txt"), true, true, 1), Ok(6));
+        assert_eq!(store.stored_bytes_locked(), 10);
+    }
+
+    #[test]
+    fn a_refused_message_names_its_well_formed_uploads_even_in_a_malformed_list() {
+        let body = serde_json::json!({ "images": [{ "id": ID }, { "id": "../x" }, "junk"], "files": [{ "id": "attach-0002" }, { "id": ID }] });
+        assert_eq!(named(&body), None);
+        assert_eq!(named_any(&body), vec![ID.to_string(), "attach-0002".to_string()]);
+        assert_eq!(named_any(&serde_json::json!({ "images": "all", "files": [{ "id": "attach-0002" }] })), vec!["attach-0002".to_string()]);
     }
 
     #[test]
