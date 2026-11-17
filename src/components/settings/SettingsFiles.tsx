@@ -27,10 +27,16 @@ export function useSettingsFiles(projectPath: string | null): { files: SettingsF
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const reload = () => configuration.files(projectPath).then(
-      (next) => { if (live) { setFiles(next); setError(null); } },
-      (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); },
-    );
+    let request = 0;
+    setFiles(null);
+    setError(null);
+    const reload = () => {
+      const current = ++request;
+      return configuration.files(projectPath).then(
+        (next) => { if (live && current === request) { setFiles(next); setError(null); } },
+        (cause: unknown) => { if (live && current === request) setError(cause instanceof Error ? cause.message : String(cause)); },
+      );
+    };
     const changed = () => { if (!live) return; clearTimeout(timer); timer = setTimeout(() => void reload(), 150); };
     let stopUser: (() => void) | undefined;
     let stopProject: (() => void) | undefined;
@@ -109,13 +115,14 @@ function SettingsFileView({ file }: { file: SettingsFileLayer }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
+    setError(null);
     fs.readText(file.path!).then(
       (read) => { if (live) setText(read.binary ? null : read.content); if (live && read.binary) setError("This file isn’t text."); },
       (cause: unknown) => { if (live) setError(cause instanceof Error ? cause.message : String(cause)); },
     );
     return () => { live = false; };
-    // Reread when the list reports the file changed (its key count or problem).
-  }, [file.path, file.keys, file.problem?.message]);
+    // Each list reload supplies a fresh snapshot, even for value-only edits.
+  }, [file]);
   const meta = [file.git && GIT_STATE[file.git], `${file.keys} ${file.keys === 1 ? "key" : "keys"}`].filter(Boolean).join(" · ");
   const rows = text?.replace(/\n$/, "").split("\n") ?? [];
   return <div aria-label={`Contents of ${file.displayPath}`} className="overflow-hidden rounded-lg bg-raised hairline">
