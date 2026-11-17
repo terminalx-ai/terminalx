@@ -1,3 +1,4 @@
+import { SettingsDescription } from "./SettingsDescription";
 import { SettingsLeaveBoundaryContext, SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
@@ -440,7 +441,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                 {/* One title a page, the page's name, with the project beneath it (design 11.02, 11.10). */}
                 <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="break-words text-[22px] font-semibold tracking-tight outline-none">{pageLabel}</h2>
                 <ProjectPageSubtitle project={project} page={page} />
-              </div> : <div className="min-w-0 flex-1 basis-48"><h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2><p id="settings-section-subtitle" className="mt-1 text-[13px] text-muted-foreground">{SETTINGS_SECTIONS[section].subtitle}</p></div>}
+              </div> : <div className="min-w-0 flex-1 basis-48"><h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2><SettingsDescription section={section} id="settings-section-subtitle" className="mt-1" /></div>}
               {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
               <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
             </div>

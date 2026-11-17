@@ -1,3 +1,5 @@
+import { AgentsTab } from "./SettingsSections";
+import { SETTINGS_SECTIONS } from "./settingsRegistry";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
@@ -559,4 +561,23 @@ it("does not move focus out of an open dialog when a row link arrives", () => {
   }
   render(<WithDialog />);
   expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
+});
+
+
+describe("consolidated page introductions (#1152)", () => {
+  it.each(["machines", "agents"] as const)("renders one %s description associated with its heading", async (section) => {
+    render(<SettingsPage initialTab={section} onBack={vi.fn()} />);
+    const heading = screen.getByRole("heading", { level: 2, name: SETTINGS_SECTIONS[section].title });
+    const description = document.getElementById(heading.getAttribute("aria-describedby")!);
+    expect(description?.textContent).toContain(SETTINGS_SECTIONS[section].subtitle);
+    expect(screen.getAllByText(SETTINGS_SECTIONS[section].subtitle, { exact: false })).toHaveLength(1);
+    if (section === "machines") expect(within(description!).getByRole("button", { name: "Machines guide" })).toBeTruthy();
+    await act(async () => {});
+  });
+
+  it("retains the complete introduction when Agents is rendered standalone", async () => {
+    render(<AgentsTab />);
+    expect(screen.getByText(SETTINGS_SECTIONS.agents.subtitle)).toBeTruthy();
+    await act(async () => {});
+  });
 });

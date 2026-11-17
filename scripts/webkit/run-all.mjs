@@ -21,7 +21,7 @@ import { parseArgs } from "node:util";
 
 /** The checks CI requires, in the order they were added. */
 const checks = [
-  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "orchestration", "run-limits", "run-sidebar",
+  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "settings-introductions", "orchestration", "run-limits", "run-sidebar",
   "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "working-marks",
   "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",

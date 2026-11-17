@@ -332,3 +332,12 @@ describe("running sessions on a machine's card", () => {
     expect(runningText(3)).toBe("3 sessions running");
   });
 });
+
+
+it("retains the complete introduction when Machines is rendered standalone", async () => {
+  render(<MachinesSettings />);
+  await card("Mac mini");
+  const { SETTINGS_SECTIONS } = await import("../settings/settingsRegistry");
+  expect(screen.getByText(SETTINGS_SECTIONS.machines.subtitle, { exact: false })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Your machines" })).toBeTruthy();
+});

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, ChevronRight, Copy, Ellipsis, ExternalLink, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
+import { Check, ChevronRight, Copy, Ellipsis, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -13,7 +12,8 @@ import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
-import { repoFile } from "@/lib/repo";
+import { MachinesGuideLink as GuideLink, SettingsDescription } from "@/components/settings/SettingsDescription";
+export { MACHINES_GUIDE_URL } from "@/components/settings/SettingsDescription";
 import { machineSectionKey } from "@/types/target";
 import type { MachineActivityEntry, MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import type { MachineName } from "@/types/pairing";
@@ -30,22 +30,6 @@ const heading = "text-[14px] font-semibold";
 const card = "flex min-h-14 items-center gap-3 rounded-lg border border-hairline px-3 py-2.5";
 const iconBox = "grid size-8 shrink-0 place-items-center rounded-md bg-muted";
 
-/** The Machines guide (PRO-360): add a Mac, add a server, start a session there, offline, update and remove. */
-export const MACHINES_GUIDE_URL = repoFile("docs/MACHINES-GUIDE.md");
-
-/** Opens the guide in the browser; the same link sits under the page's lead and in the first-run card. */
-function GuideLink() {
-  return (
-    <button
-      type="button"
-      onClick={() => void openUrl(MACHINES_GUIDE_URL)}
-      className="inline-flex items-center gap-1 whitespace-nowrap rounded-sm text-[12.5px] text-muted-foreground underline decoration-hairline-strong underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-    >
-      Machines guide <ExternalLink className="size-3" aria-hidden />
-    </button>
-  );
-}
-
 /**
  * Settings → Machines (PRO-349, screen 21.02): the switch that lets other
  * computers operate this Mac, this Mac's name and key label, the machines
@@ -53,8 +37,8 @@ function GuideLink() {
  * paired it opens with how to start, and the guide (PRO-360). Data privacy mode turns off
  * both operating and being operated (PRO-357), and the page says so.
  */
-export function MachinesSettings() {
-  return useDataPrivacy().enabled ? <MachinesPrivacyState /> : <MachinesSettingsContent />;
+export function MachinesSettings({ showIntroduction = true }: { showIntroduction?: boolean }) {
+  return useDataPrivacy().enabled ? <MachinesPrivacyState /> : <MachinesSettingsContent showIntroduction={showIntroduction} />;
 }
 
 /** What data privacy mode turns off here: the runtime opens no listener, and no machine connection is made. */
@@ -67,7 +51,7 @@ function MachinesPrivacyState() {
   );
 }
 
-function MachinesSettingsContent() {
+function MachinesSettingsContent({ showIntroduction }: { showIntroduction: boolean }) {
   // A machine's page (21.10) in place of the list; Machines in its breadcrumb comes back.
   const [page, setPage] = useState<string | null>(null);
   // Asked for from elsewhere (the new-session form's "Open its machine page").
@@ -78,10 +62,10 @@ function MachinesSettingsContent() {
     takeMachinePageRequest(requested);
   }, [requested]);
   if (page) return <MachinePage machineId={page} onBack={() => setPage(null)} />;
-  return <MachinesList onOpen={setPage} />;
+  return <MachinesList onOpen={setPage} showIntroduction={showIntroduction} />;
 }
 
-function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
+function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string) => void; showIntroduction: boolean }) {
   const host = useMachineHost();
   useEffect(() => {
     void bootMachineHost();
@@ -91,9 +75,7 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
 
   return (
     <div className="flex flex-col" data-testid="machines-settings">
-      <p className="-mt-4 mb-2 text-[13px] text-muted-foreground">
-        Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them. <GuideLink />
-      </p>
+      {showIntroduction && <SettingsDescription section="machines" className="mb-2" />}
       <div className="border-b border-hairline py-1.5">
         <RegisteredSetting
           setting="machines.allowOperating"
