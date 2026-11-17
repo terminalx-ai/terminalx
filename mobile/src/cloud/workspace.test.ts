@@ -869,11 +869,22 @@ describe("a cloud workspace on the phone", () => {
       const queued = await h.session.send("t1", "submitted");
       await h.session.outbox.enqueue("t1", "send", { text: "held" }, { post: false });
       h.list("attention-required");
+      h.runtimes[0].drop(1006);
       h.api.commandStatuses.mockResolvedValue([{ clientCommandId: queued.clientCommandId, tabId: "t1", kind: "send", state: "applied", keyId: "k1", createdAt: 1, updatedAt: 2 }]);
       await h.session["syncOutbox"]();
       expect(h.api.commandStatuses).toHaveBeenCalled();
       expect(h.session.outbox.entries().map((entry) => entry.state)).toEqual(["applied", "unsent"]);
       expect(h.posted).toHaveLength(1);
+      h.session.close();
+    });
+
+    it("sends without waking when the connected workspace needs attention", async () => {
+      const h = harness({ state: "attention-required" });
+      server(h, () => true);
+      await h.session.start();
+      await connected(h);
+      await h.session.send("t1", "continue");
+      expect(wakeOptions(h)).toEqual([{ wake: false }]);
       h.session.close();
     });
 

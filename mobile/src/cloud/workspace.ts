@@ -461,12 +461,13 @@ export class CloudWorkspaceSession {
    */
   private async mayPost(allowWake: boolean): Promise<"post" | "post-no-wake" | "hold" | "would-wake" | "unavailable"> {
     const stateNow = () => this.options.listed()?.state ?? null;
-    if (stateNow() === "attention-required") throw new CloudSendError("needs-attention");
+    const connected = () => this.client.connection.state === "connected";
+    if (stateNow() === "attention-required" && this.client.connection.state !== "connected") throw new CloudSendError("needs-attention");
     if (stateNow() === null || stateNow() === "archived") return "unavailable";
     if (allowWake) return "post";
     if (await this.options.api.doNotWake?.().catch(() => false)) {
       const listed = stateNow();
-      if (listed === "attention-required") throw new CloudSendError("needs-attention");
+      if (listed === "attention-required" && this.client.connection.state !== "connected") throw new CloudSendError("needs-attention");
       if (listed === null || listed === "archived") return "unavailable";
       // Listed as stopped and not connected: ask without a request that would be refused.
       if (this.client.connection.state !== "connected" && (listed === "suspended" || listed === "suspending")) return "would-wake";
@@ -475,7 +476,7 @@ export class CloudWorkspaceSession {
     if (this.client.connection.state === "connected") return "post";
     const fresh = this.options.refreshList ? await this.options.refreshList().catch(() => false) : true;
     const state = stateNow();
-    if (state === "attention-required") throw new CloudSendError("needs-attention");
+    if (state === "attention-required" && !connected()) throw new CloudSendError("needs-attention");
     if (state === null || state === "archived") return "unavailable";
     if (state === "suspended" || state === "suspending") return "would-wake";
     return fresh ? "post" : "hold";

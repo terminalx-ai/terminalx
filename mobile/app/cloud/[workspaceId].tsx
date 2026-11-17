@@ -133,14 +133,14 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
           : stopped || starting || listedState === "attention-required" ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail={listedState === "attention-required" ? "Nothing has been saved in this workspace yet." : "Nothing was said in this workspace before it stopped."} />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
-        {startBarShown(listedState, starting) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
+        {startBarShown(listedState, starting, live) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
       </View>}
   </>;
 }
 
 /** Whether the composer's place holds the Start bar: stopped, or starting and not running yet. */
-function startBarShown(listedState: string | null, starting: boolean): boolean {
-  return listedState === "suspended" || listedState === "resuming" || listedState === "provisioning" || listedState === "attention-required" || starting;
+function startBarShown(listedState: string | null, starting: boolean, live: boolean): boolean {
+  return listedState === "suspended" || listedState === "resuming" || listedState === "provisioning" || (listedState === "attention-required" && !live) || starting;
 }
 
 /**
@@ -160,7 +160,7 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   const mayStart = role === "manager";
   const needsAttention = listedState === "attention-required";
   const operation = catalog.getSnapshot().organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.latestOperation;
-  const retryResume = needsAttention && operation?.state === "failed" && operation.action === "resume" && operation.errorCode === "cloud_workspace_runtime_bootstrap_failed";
+  const retryResume = needsAttention && operation?.state === "failed" && operation.action === "resume" && ["cloud_workspace_runtime_bootstrap_failed", "cloud_provider_unavailable", "cloud_provider_rate_limited", "cloud_provider_state_conflict", "cloud_provider_permission_denied"].includes(operation.errorCode ?? "");
   const start = () => Alert.alert(retryResume ? "Retry resume?" : "Start this workspace?", "It is billed to the organization while it runs.", [
     { text: "Cancel", style: "cancel" },
     { text: retryResume ? "Retry resume" : "Start", onPress: () => {
@@ -176,7 +176,7 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : "This workspace is stopped"}</Text>
-      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : needsAttention ? (retryResume ? (mayStart ? "The workspace’s runtime could not be set up on its machine." : `The workspace’s runtime could not be set up on its machine. ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : `${attentionDetail(operation?.errorCode)} Open this workspace on the desktop to see how to recover.`) : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
+      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : needsAttention ? (retryResume ? (mayStart ? attentionDetail(operation?.errorCode) : `${attentionDetail(operation?.errorCode)} ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : `${attentionDetail(operation?.errorCode)} Open this workspace on the desktop to see how to recover.`) : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
       {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
     </View>
@@ -338,7 +338,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
         {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
-    {startBarShown(listedState, starting) && !sendStarts
+    {startBarShown(listedState, starting, live) && !sendStarts
       ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
       : mayWrite && listedState !== "archived" && listedState !== null
       ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>

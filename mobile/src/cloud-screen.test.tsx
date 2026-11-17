@@ -372,6 +372,23 @@ describe("a cloud workspace screen", () => {
     }
   });
 
+  it("allows a manager to retry a transient failed resume", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" };
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("provider did not answer");
+    await click("Retry resume");
+  });
+
+  it("keeps the composer for an online workspace needing attention", async () => {
+    const { session } = world({ state: "attention-required", role: "manager", connection: "connected" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    await type("continue");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledWith("t1", "continue");
+  });
+
   it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }, { state: "failed", action: "resume", errorCode: "cloud_provider_credential_invalid" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
     world({ state: "attention-required", role: "manager" });
     mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
