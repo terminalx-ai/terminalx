@@ -68,6 +68,7 @@ import { PortForwardChip } from "@/components/cloud/PortForwardChip";
 import { PortToasts } from "@/components/cloud/PortToast";
 import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
+import { MachineRunMenu } from "@/components/machines/MachineRunPanes";
 import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
@@ -622,8 +623,9 @@ export function SessionView({
 
   useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
-    else if (machine && cloud && cloudTerminals.length) {
-      selectCloudTerminal(cloud.workspaceKey, cloudTerminals[cloudTerminals.length - 1].id);
+    else if (machine && cloud && cloudTerminals.some((terminal) => !terminal.run)) {
+      // The latest shell, not a script's run (PRO-403): those are under Setup and Run.
+      selectCloudTerminal(cloud.workspaceKey, cloudTerminals.filter((terminal) => !terminal.run).at(-1)!.id);
       setPrefs({ panelOpen: true, panelTerminalOpen: true });
     } else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
@@ -846,6 +848,8 @@ export function SessionView({
             {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
+            {/* A machine session's are the machine's, run there (PRO-403). */}
+            {machine && cloud && !compact && <MachineRunMenu key={`run-menu:${session.id}`} cloud={cloud} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
@@ -934,7 +938,7 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
-        {local && !cloud && <RunRestartOffer session={session} />}
+        {((local && !cloud) || (machine && cloud)) && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
         {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
