@@ -1,6 +1,6 @@
 import { api, type CloudProviderSummary } from "@/lib/api";
 import { getAccount } from "@/lib/account";
-import { cloudProviderLabel, cloudProviderOffered, orderedCloudProviders } from "@/lib/cloudProviders";
+import { cloudProviderIsPlatform, cloudProviderLabel, cloudProviderOffered, orderedCloudProviders } from "@/lib/cloudProviders";
 import { CreateRefused, PROVIDER_CREATION_PAUSED, PROVIDER_NOT_OFFERED, listedNames, usableProviders } from "@/lib/cloudCreate";
 
 // A provider can be hidden: the server lists it only while an organization
@@ -32,13 +32,19 @@ export function listedProviders(providers: CloudProviderSummary[]): CloudProvide
  * empty (PRO-372). A provider that is connected but whose new machines are
  * paused (PRO-112), or whose connection needs attention, is not "no provider
  * connected": saying so asked people to connect again what they had connected
- * in the web console. The detail names the providers concerned.
+ * in the web console. The detail names the providers concerned. A platform
+ * provider that needs attention is named only when no connection of the
+ * organization's does: that one somebody here can repair.
  */
 export function noProviderRefusal(providers: CloudProviderSummary[]): CreateRefused {
   const paused = pausedProviders(providers);
   if (paused.length) return new ProvidersPaused(paused);
   const attention = providers.filter((provider) => provider.availability === "attention-required" && cloudProviderOffered(provider));
-  if (attention.length) return new CreateRefused("cloud_provider_connection_attention_required", listedNames(attention.map(cloudProviderLabel)));
+  const repairable = attention.filter((provider) => !cloudProviderIsPlatform(provider));
+  if (repairable.length) return new CreateRefused("cloud_provider_connection_attention_required", listedNames(repairable.map(cloudProviderLabel)));
+  // A provider TerminalX itself provides (PRO-452) has no connection for anyone
+  // to repair in Settings: it is not offered for now, and trying later is all there is.
+  if (attention.length) return new CreateRefused(PROVIDER_NOT_OFFERED, listedNames(attention.map(cloudProviderLabel)));
   return new CreateRefused("cloud_provider_connection_required");
 }
 

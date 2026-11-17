@@ -97,6 +97,15 @@ describe("platform providers", () => {
     const refusal = noProviderRefusal([paused, summary("beta", 2, { availability: "not-connected" })]);
     expect([refusal.code, refusal.detail]).toEqual(["cloud_provider_creation_paused", "PLAT"]);
   });
+
+  it("is not offered for now when it needs attention: there is no connection of the organization's to repair", () => {
+    const unavailable = platform("plat", 1, { availability: "attention-required" });
+    const refusal = noProviderRefusal([unavailable, summary("beta", 2, { availability: "not-connected" })]);
+    expect([refusal.code, refusal.detail]).toEqual(["cloud_provider_not_offered_for_create", "PLAT"]);
+    // A connection the organization can repair is what it is told about, and only that one is named.
+    const both = noProviderRefusal([unavailable, summary("alpha", 2, { availability: "attention-required", connection: { ...connected, state: "attention-required" } })]);
+    expect([both.code, both.detail]).toEqual(["cloud_provider_connection_attention_required", "ALPHA"]);
+  });
 });
 
 describe("hidden providers", () => {
