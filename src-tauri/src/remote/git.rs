@@ -732,8 +732,10 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 500) as u32;
         let from = params.get("from").and_then(Value::as_str);
-        if from.is_some_and(|from| !valid_object_id(from)) {
-            return Err(RpcError::invalid("from is a commit id"));
+        // ScopePicker excludes the selected base's history. Accept only this
+        // bounded range form in addition to the existing commit-id cursor.
+        if from.is_some_and(|from| !valid_object_id(from) && !from.strip_suffix("..HEAD").is_some_and(valid_ref_name)) {
+            return Err(RpcError::invalid("from is a commit id or a base branch followed by ..HEAD"));
         }
         if crate::git::head_commit(&repo.dir).is_none() && from.is_none() {
             return Ok(json!({ "repo": repo.name, "commits": [] }));

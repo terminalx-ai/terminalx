@@ -92,15 +92,24 @@ export function ScopePicker({ source, choice, onChoose, checkpoints, showTurn, l
   const [uncommitted, setUncommitted] = useState<Summary | null>(null);
   const [turns, setTurns] = useState<Record<string, number>>({});
   const [commits, setCommits] = useState<CommitInfo[] | null>(null);
+  const [commitsFailed, setCommitsFailed] = useState(false);
   const checkpoint = checkpoints.find((entry) => entry.id === choice.checkpoint);
   const latest = useRef({ checkpoints }); latest.current = { checkpoints };
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     const quietly = <T,>(work: Promise<T>, done: (value: T) => void) => void work.then((value) => { if (!cancelled) done(value); }, () => {});
-    quietly(source.reviewRange(choice.target, false).then((range) => source.changesBetween(range.base, range.head, hideWhitespace)), (list) => setAll(summary(list)));
+    const review = source.reviewRange(choice.target, false);
+    quietly(review.then((range) => source.changesBetween(range.base, range.head, hideWhitespace)), (list) => setAll(summary(list)));
     quietly(source.reviewRange(null, true).then((range) => source.changesBetween(range.base, range.head, hideWhitespace)), (list) => setUncommitted(summary(list)));
-    quietly(source.logCommits(null, 8), setCommits);
+    setCommits(null);
+    setCommitsFailed(false);
+    // reviewRange's base/head are trees, not commits. Exclude the resolved
+    // target's ancestry from HEAD so shared history cannot fill the list.
+    void review.then((range) => source.logCommits(`${range.target}..HEAD`, 8)).then(
+      (list) => { if (!cancelled) setCommits(list); },
+      () => { if (!cancelled) setCommitsFailed(true); },
+    );
     for (const entry of latest.current.checkpoints.slice(0, 8)) {
       quietly(source.changesBetween(entry.base, entry.head, hideWhitespace), (list) => setTurns((was) => ({ ...was, [entry.id]: list.length })));
     }
@@ -141,9 +150,11 @@ export function ScopePicker({ source, choice, onChoose, checkpoints, showTurn, l
         {choice.scope === "checkpoint" && !checkpoint && <Option icon={<MessageSquare />} name="Unavailable turn checkpoint" chosen disabled onSelect={() => {}} />}
         {checkpoints.map((entry) => <Option key={entry.id} icon={<MessageSquare />} name={entry.label} title={entry.prompt || undefined} detail={turnDetail(entry)}
           chosen={choice.scope === "checkpoint" && choice.checkpoint === entry.id} onSelect={() => pick({ ...choice, scope: "checkpoint", checkpoint: entry.id })} />)}
-        <Heading>Commits</Heading>
+        <Heading>{commits?.length === 8 ? "Latest 8 commits" : "Commits"}</Heading>
         {choice.scope === "commit" && choice.commit && !commits?.some((commit) => commit.sha.startsWith(choice.commit!)) && <CommitOption sha={choice.commit} subject="" chosen onSelect={() => setOpen(false)} />}
-        {commits === null ? <p className="px-2.5 py-1.5 text-[12px] text-faint">Loading commits…</p>
+        {commitsFailed ? <p className="px-2.5 py-1.5 text-[12px] text-faint">Could not load branch commits.</p>
+          : commits === null ? <p className="px-2.5 py-1.5 text-[12px] text-faint">Loading commits…</p>
+          : commits.length === 0 ? <p className="px-2.5 py-1.5 text-[12px] text-faint">No commits ahead of {against}.</p>
           : commits.map((commit) => <CommitOption key={commit.sha} sha={commit.shortSha || short(commit.sha)} subject={commit.subject}
             chosen={choice.scope === "commit" && !!choice.commit && commit.sha.startsWith(choice.commit)} onSelect={() => pick({ ...choice, scope: "commit", commit: commit.sha })} />)}
         <Option icon={<History />} name="All commits…" detail="Browse the history and review any commit" chosen={choice.scope === "history"} onSelect={() => pick({ ...choice, scope: "history" })} />

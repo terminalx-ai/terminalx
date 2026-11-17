@@ -708,3 +708,23 @@ fn cloud_approval_is_refused_before_running_gh_even_with_a_personal_viewer_claim
     }
     assert!(f.gh_calls().is_empty(), "approval must never use the App token");
 }
+
+#[test]
+fn log_limits_commits_to_the_selected_base_branch() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    for i in 0..3 {
+        git(&repo, &["commit", "--allow-empty", "-m", &format!("main {i}")]);
+    }
+    git(&repo, &["checkout", "-b", "feature"]);
+    let range = json!({ "repo": "app", "from": "main..HEAD", "limit": 8 });
+    assert_eq!(f.call("git.log", range.clone()).unwrap()["commits"], json!([]));
+    git(&repo, &["commit", "--allow-empty", "-m", "branch change"]);
+    let log = f.call("git.log", range).unwrap();
+    assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(log["commits"][0]["subject"], "branch change");
+    for from in ["--all..HEAD", "main...HEAD", "main~1..HEAD", "main..HEAD~1"] {
+        assert_eq!(f.code("git.log", json!({ "repo": "app", "from": from })), "invalid_params");
+    }
+}
