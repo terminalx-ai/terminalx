@@ -60,6 +60,16 @@ pub const DISCONNECT: &str = "runtime.machineHost.disconnect";
 /// Let a disconnected computer connect again ([`ForComputer`]). Like
 /// [`APPROVE`], only a person may (`serve_cli::consent`). `{ letBack: bool }`.
 pub const LET_BACK: &str = "runtime.machineHost.letBack";
+/// A relay control request the window makes through the runtime's
+/// registration while the runtime is registered ([`RelayControl`], PRO-368):
+/// a phone's invite, credential install or revocation. Answers the relay's
+/// reply to the request's `reqId` as it came (`control-error` included), or
+/// refuses with `relay_offline` when the runtime is not registered.
+pub const RELAY_CONTROL: &str = "runtime.machineHost.relayControl";
+/// Emitted on the runtime's event sink when the relay hints, on the
+/// runtime's registration, that this host's account pairing grants or
+/// revocations changed. No payload. The window polls the account service.
+pub const RELAY_HINT_EVENT: &str = "machine_host_relay_hint";
 
 /// A pairing code: `txm2.` and base64url, unpadded, of a [`MachineCode`].
 pub const CODE_PREFIX: &str = "txm2.";
@@ -96,6 +106,45 @@ pub enum HostKeyState {
     Needed,
     /// It could not be read or kept; `Status::error` says why.
     Error,
+}
+
+/// The runtime's own relay registration (PRO-368).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelayState {
+    /// Not registering: the switch is off, the host key is not ready, or
+    /// this build has no relay. Also what an older runtime says.
+    #[default]
+    Off,
+    /// The switch is on and nobody is signed in on this machine.
+    SignedOut,
+    /// Making its first registration. The window waits a while for it
+    /// rather than take the host id from it.
+    Connecting,
+    /// Its registration was lost or refused, and it is trying again. The
+    /// window registers itself meanwhile; the runtime's next registration
+    /// retires the window's.
+    Retrying,
+    /// Registered: [`Status::relay`] says where.
+    Registered,
+    /// A newer runtime process for this machine took the relay; this one
+    /// does not register again until it restarts.
+    Superseded,
+}
+
+/// Where the runtime is registered, for the window to use the registration
+/// for its phones (PRO-368) instead of registering itself: the relay would
+/// close one of the two.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayRegistration {
+    pub relay_host_id: String,
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    /// The relay's generation for the registration (`host-hello-ack`).
+    pub generation: u64,
+    pub runtime_generation: u64,
 }
 
 /// One paired computer, as Settings → Machines lists it. No credential.
@@ -184,6 +233,12 @@ pub struct Status {
     /// Pairing is paused after five wrong attempts in a minute, until then.
     #[serde(default)]
     pub paused_until: Option<i64>,
+    /// The runtime's own relay registration (PRO-368).
+    #[serde(default)]
+    pub relay_state: RelayState,
+    /// Set while [`RelayState::Registered`].
+    #[serde(default)]
+    pub relay: Option<RelayRegistration>,
 }
 
 /// A computer waiting for Allow, as the approval dialog shows it.
@@ -262,6 +317,16 @@ pub struct ForComputer {
     pub epoch: String,
     pub lease: String,
     pub id: String,
+}
+
+/// Params of [`RELAY_CONTROL`]. `frame` is the relay control request as the
+/// window would send it on its own registration, with its own `reqId`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelayControl {
+    pub epoch: String,
+    pub lease: String,
+    pub frame: serde_json::Value,
 }
 
 /// Params of [`REVOKE_GRANT`].
@@ -534,6 +599,8 @@ mod tests {
             pending: None,
             code: Some(CodeExpiry { expires_at: 9 }),
             paused_until: None,
+            relay_state: RelayState::Off,
+            relay: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["code"], serde_json::json!({ "expiresAt": 9 }));
