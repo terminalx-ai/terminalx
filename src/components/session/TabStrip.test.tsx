@@ -440,6 +440,19 @@ describe("the tab's agent account", () => {
     expect(document.querySelector('[data-tab="t-codex"]')!.textContent).toBe("");
   });
 
+  it("names a machine tab's account as the machine does, never from this computer's accounts (PRO-408)", async () => {
+    // This computer has two Claude accounts; the machine's tabs are not on either.
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
+    marks([tab("claude", { id: "t-mini", accountLabel: "studio@example.com" }), tab("claude", { id: "t-one", accountLabel: null })]);
+    await flush();
+    const mini = document.querySelector('[data-tab="t-mini"]')!;
+    expect(within(mini as HTMLElement).getByTestId("tab-account-mark").getAttribute("aria-label")).toBe("On studio@example.com");
+    expect(within(mini as HTMLElement).getByTestId("tab-account-mark").textContent).toBe("S");
+    expect(within(mini as HTMLElement).getByTestId("tab-account-label").textContent).toBe("studio@example.com");
+    // One account for that agent on the machine: nothing, even though this computer has several.
+    expect(document.querySelector('[data-tab="t-one"]')!.textContent).toBe("");
+  });
+
   it("marks the agent tabs in the workspace's row of tabs, and not a cloud session's", async () => {
     act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
     act(() => takeAgentAccounts({ agent: "codex", accounts: [account("codex", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));

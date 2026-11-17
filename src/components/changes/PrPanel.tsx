@@ -25,6 +25,7 @@ import { NextLine } from "./NextStep";
 import { PrConversation, SectionHead, useDocumentVisible } from "./PrConversation";
 import { MergeMenu, type MergeChoices } from "./MergeMenu";
 import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
+import { machinePanelHost, removeMachineWorkspace, useMachinePanel } from "./machinePanel";
 import { ReviewThreads } from "./ReviewThreads";
 import { noteSessionPrs } from "@/lib/reviewThreads";
 
@@ -165,6 +166,11 @@ export function PrPanel({
   const project = store.projects.find((entry) => entry.path === store.sessions.find((entry) => entry.id === sessionId)?.projectPath);
   const shortcutMethod = project ? pipelineSettings(project).mergeMethod : null;
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
+  // A session on a paired machine (PRO-404, PRO-406): its pull requests are read through the machine's Git, so the
+  // panel's source is a remote one; its worktree is removed on the machine, never through this computer's commands.
+  const machinePanel = useMachinePanel();
+  const onMachine = source.cloud ? machinePanel : null;
+  const machineWorkspace = onMachine?.workspace;
 
   useEffect(() => { setLoginSource(null); }, [source]);
   // A pull request linked or unlinked from the session's menu shows at once.
@@ -340,7 +346,9 @@ export function PrPanel({
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
   const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue", choices?: MergeChoices) =>
     void act("merge", async () => {
-      await (row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method));
+      // On a machine that pins merges (`machine/9`), GitHub refuses one once the head moved from the one shown.
+      const pinned = onMachine?.headPinned ? (row.pr as PullRequest & { headSha?: string }).headSha : undefined;
+      await (row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method, pinned));
       if (method === "queue") return;
       noteMerge(row.pr!.url, method);
       if (choices?.deleteBranch && source.deleteMergedBranch) {
@@ -417,6 +425,15 @@ export function PrPanel({
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {/* In the Branch tab, the merged card's WHAT NEXT says this (design 05.12). */}
+      {!inline && !workspace && !onSettle && machineWorkspace && merged && onMachine && (
+        <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs" data-testid="machine-merged-banner">
+          <GitMerge className="size-3.5 shrink-0 text-merged" />
+          <span className="flex-1 text-foreground">This branch has been merged.</span>
+          <Button size="xs" variant="outline" onClick={() => removeMachineWorkspace(machineWorkspace)}>
+            Remove worktree on {onMachine.name}…
+          </Button>
+        </div>
+      )}
       {!inline && (workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
@@ -452,7 +469,10 @@ export function PrPanel({
         // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
         const whatNext = isMerged && inline && row.current && cwd && !source.cloud
           ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
-          : undefined;
+          : isMerged && inline && row.current && onMachine && machineWorkspace
+            // The machine's worktree, under the machine's own host key: the removal dialog asks the machine what would be lost.
+            ? <MergedWorkspaceStep cwd={machineWorkspace.path} host={machinePanelHost(onMachine)} where={onMachine.name} embedded onArchive={merged ? () => removeMachineWorkspace(machineWorkspace) : undefined} />
+            : undefined;
         // This owns the description as well as its editor, including in a PR tab.
         const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh}
           merged={isMerged} whatNext={whatNext}

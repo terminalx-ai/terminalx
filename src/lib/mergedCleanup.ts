@@ -29,6 +29,21 @@ import { cloudWorkspaceKey, isCloudKey, isLocalKey, parseCloudWorkspaceKey } fro
 export const LOCAL_HOST = "local";
 
 /**
+ * A paired machine, as a host (PRO-406). Its worktrees are its own: a status
+ * read under this key is never one of this computer's, so nothing shown for
+ * it can remove a local worktree, and no pass of this computer or of a cloud
+ * workspace answers for it. A machine session removes its worktree through
+ * the machine (`workspace.remove`, `RemovableWorkspace`), not through a pass.
+ */
+export function machineHostId(machineId: string): string {
+  return `machine:${machineId}`;
+}
+
+export function isMachineHost(hostId: string): boolean {
+  return hostId.startsWith("machine:");
+}
+
+/**
  * How often a pass runs when nothing is due sooner. Passes go on while the
  * window is behind others: tidying up after a merge made in the browser is
  * the point. The hosts start a grace period again after 15 minutes without
@@ -202,6 +217,8 @@ function cloudHost(key: string, client: WorkspaceRpcClient, on = true): MergedHo
 
 function hostOf(hostId: string): MergedHost {
   if (hostId === LOCAL_HOST) return localHost;
+  // Clean-up passes are this computer's and its cloud workspaces'; a machine's worktree is removed from its session.
+  if (isMachineHost(hostId)) throw new Error("Clean-up after merge does not run on a paired machine from this Mac. Remove the worktree from its session.");
   const client = connectedCloudClient(hostId);
   const unavailable = cloudUnavailable(client);
   if (!client || unavailable) throw new Error(unavailable ?? "The workspace is not connected.");
@@ -341,6 +358,8 @@ function apply(swept: Map<string, MergedSwept | null>) {
 }
 
 function afterRemoval(status: HostedStatus) {
+  // Never this computer's: a machine's path names nothing here.
+  if (isMachineHost(status.hostId)) return;
   const cloud = parseCloudWorkspaceKey(status.hostId);
   if (!cloud) {
     // The backend has told the session store; only the size that was measured is this window's to forget.

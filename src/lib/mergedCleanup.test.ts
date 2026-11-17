@@ -397,6 +397,28 @@ describe("a cloud workspace", () => {
   });
 });
 
+describe("a paired machine (PRO-406)", () => {
+  it("has a host key of its own, never this computer's, and no pass, keep or undo reaches this computer or a cloud workspace for it", async () => {
+    const host = lib.machineHostId("m1");
+    expect(host).not.toBe(lib.LOCAL_HOST);
+    expect(lib.isMachineHost(host)).toBe(true);
+    expect(lib.isMachineHost(lib.LOCAL_HOST)).toBe(false);
+    // A cloud runtime registered under the same key is not asked either.
+    const runtime = { holdMergedWorkspace: vi.fn(), restoreRemovedWorkspace: vi.fn() };
+    mocks.clients.set(host, runtime);
+    settings = { ...settings, enabled: true };
+    await lib.bootMergedCleanup();
+    await flush();
+    await expect(lib.holdMergedWorkspace(host, worktree, true)).rejects.toThrow(/does not run on a paired machine/);
+    await expect(lib.restoreMergedRemoval(host, "removal-1")).rejects.toThrow(/does not run on a paired machine/);
+    expect(calls("merged_cleanup_hold")).toEqual([]);
+    expect(calls("merged_cleanup_restore")).toEqual([]);
+    expect(runtime.holdMergedWorkspace).not.toHaveBeenCalled();
+    expect(runtime.restoreRemovedWorkspace).not.toHaveBeenCalled();
+    expect(mocks.forgetWorkspaceSize).not.toHaveBeenCalled();
+  });
+});
+
 describe("what is said", () => {
   it("of a workspace: why it stays or when it goes", () => {
     const now = Date.parse("2026-10-12T10:00:00Z");

@@ -18,14 +18,27 @@ import { holdMergedWorkspace, LOCAL_HOST, mergedDue, useMergedStatus } from "@/l
  * offers the same archive by hand.
  *
  * `embedded`: under the merged pull request's WHAT NEXT, which already says it merged.
+ *
+ * `host` is where the worktree lives (PRO-406): this computer unless named. For a paired machine
+ * (`machineHostId`) the path is the machine's: nothing here measures or removes it on this computer,
+ * and every removal goes through `onArchive`, which asks the machine.
  */
-export function MergedWorkspaceStep({ cwd, embedded = false, onArchive }: { cwd: string; embedded?: boolean; onArchive?: () => void }) {
-  const status = useMergedStatus(LOCAL_HOST, cwd);
+export function MergedWorkspaceStep({ cwd, embedded = false, onArchive, host = LOCAL_HOST, where }: {
+  cwd: string;
+  embedded?: boolean;
+  onArchive?: () => void;
+  host?: string;
+  /** The machine's name, for a worktree that is not on this computer. */
+  where?: string;
+}) {
+  const local = host === LOCAL_HOST;
+  const status = useMergedStatus(host, cwd);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // What archiving frees, for good: its whole folder, build output included. Measured once it has merged.
   const [size, setSize] = useState<number | null>(null);
-  const measured = status && status.phase !== "removed" ? `${status.projectPath}\n${status.path}` : null;
+  // Only this computer's folders are measured here.
+  const measured = local && status && status.phase !== "removed" ? `${status.projectPath}\n${status.path}` : null;
   useEffect(() => {
     setSize(null);
     if (!measured || !status) return;
@@ -35,7 +48,7 @@ export function MergedWorkspaceStep({ cwd, embedded = false, onArchive }: { cwd:
   }, [measured]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!status || status.phase === "removed") {
     if (!onArchive) return null;
-    return <ArchiveCard onArchive={onArchive} />;
+    return <ArchiveCard onArchive={onArchive} where={local ? undefined : where} />;
   }
   const frees = size && size >= 1024 * 1024 ? bytesText(size) : null;
   const hold = (held: boolean) => {
@@ -50,13 +63,14 @@ export function MergedWorkspaceStep({ cwd, embedded = false, onArchive }: { cwd:
       Keep
     </Button>
   );
-  const archive = (label: string) => (
+  // Another host's worktree is removed only through it (`onArchive`); without that there is no button.
+  const archive = (label: string) => !local && !onArchive ? null : (
     <Button
       size="sm"
       className="bg-merged font-medium text-merged-foreground hover:bg-merged/90"
       disabled={busy}
       // A workspace whose conversations could not be filed away first: the remove dialog that settles that.
-      onClick={() => status.archiveBlocked && status.hostId === LOCAL_HOST
+      onClick={() => !local ? onArchive?.() : status.archiveBlocked && status.hostId === LOCAL_HOST
         ? openWorkspaceRemove({ projectPath: status.projectPath, path: status.path, name: status.name, mode: "settle", archiveNotice: status.detail ?? undefined })
         : openWorkspaceDelete(status.projectPath, status.path, status.name)}
     >
@@ -106,15 +120,19 @@ export function MergedWorkspaceStep({ cwd, embedded = false, onArchive }: { cwd:
 }
 
 /** Where clean-up does not archive merged sessions: the archive offered by hand. */
-function ArchiveCard({ onArchive }: { onArchive: () => void }) {
+function ArchiveCard({ onArchive, where }: { onArchive: () => void; where?: string }) {
   return (
-    <section aria-label="Archive the session" data-testid="merged-archive" className="flex min-w-0 items-start gap-2.5 rounded-lg border border-hairline bg-raised p-3">
+    <section aria-label={where ? `Remove the worktree on ${where}` : "Archive the session"} data-testid="merged-archive" data-host={where ? "machine" : "local"} className="flex min-w-0 items-start gap-2.5 rounded-lg border border-hairline bg-raised p-3">
       <Archive aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-foreground">Archive the session</div>
-        <div className="text-[11.5px] text-faint">Runs the archive script and removes the worktree. Chats stay searchable.</div>
+        <div className="text-[12.5px] font-medium text-foreground">{where ? `Remove the worktree on ${where}` : "Archive the session"}</div>
+        <div className="text-[11.5px] text-faint">
+          {where
+            ? `${where} checks it first, as its own window does: uncommitted work and unpushed commits are kept unless you confirm. Nothing on this Mac changes.`
+            : "Runs the archive script and removes the worktree. Chats stay searchable."}
+        </div>
       </div>
-      <Button size="sm" className="shrink-0 bg-merged font-medium text-merged-foreground hover:bg-merged/90" onClick={onArchive}>Archive</Button>
+      <Button size="sm" className="shrink-0 bg-merged font-medium text-merged-foreground hover:bg-merged/90" onClick={onArchive}>{where ? "Remove…" : "Archive"}</Button>
     </section>
   );
 }

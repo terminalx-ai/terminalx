@@ -46,23 +46,49 @@ function accountInitial(account: AgentAccount): string {
   return (account.email ?? account.label).trim().charAt(0).toUpperCase() || "?";
 }
 
-/** A small mark on a tab in the strip: which of its agent's accounts it runs on. Nothing with one account. */
-export function TabAccountMark({ tab }: { tab: TabEntry }) {
-  const account = useTabAccount(tab);
-  if (!account) return null;
+/**
+ * Whether the tab's account is named by the machine it runs on (`machine/10`,
+ * PRO-408): `accountLabel` is set, a name or `null`, only on a machine
+ * session's tab. This computer's own account list says nothing of it.
+ */
+export function namedByMachine(tab: Pick<TabEntry, "accountLabel">): boolean {
+  return tab.accountLabel !== undefined;
+}
+
+function AccountMark({ label, initial }: { label: string; initial: string }) {
   return (
-    <span data-testid="tab-account-mark" role="img" aria-label={`On ${account.label}`} title={account.label}
+    <span data-testid="tab-account-mark" role="img" aria-label={`On ${label}`} title={label}
       className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-veil-raised text-[12px] leading-none text-muted-foreground">
-      {accountInitial(account)}
+      {initial}
     </span>
   );
 }
 
+function AccountLabel({ label, className }: { label: string; className?: string }) {
+  return <span data-testid="tab-account-label" title={`This tab runs on ${label}`} className={className ?? "min-w-0 truncate text-[12px] text-muted-foreground"}>{label}</span>;
+}
+
+function LocalAccountMark({ tab }: { tab: TabEntry }) {
+  const account = useTabAccount(tab);
+  return account ? <AccountMark label={account.label} initial={accountInitial(account)} /> : null;
+}
+
+function LocalAccountLabel({ tab, className }: { tab: TabEntry; className?: string }) {
+  const account = useTabAccount(tab);
+  return account ? <AccountLabel label={account.label} className={className} /> : null;
+}
+
+/** A small mark on a tab in the strip: which of its agent's accounts it runs on. Nothing with one account. */
+export function TabAccountMark({ tab }: { tab: TabEntry }) {
+  // A machine's tab: the machine's name for it, only when its agent has several accounts there.
+  if (namedByMachine(tab)) return tab.accountLabel ? <AccountMark label={tab.accountLabel} initial={tab.accountLabel.trim().charAt(0).toUpperCase() || "?"} /> : null;
+  return <LocalAccountMark tab={tab} />;
+}
+
 /** The tab's account by name, for its header. Nothing with one account. */
 export function TabAccountLabel({ tab, className }: { tab: TabEntry; className?: string }) {
-  const account = useTabAccount(tab);
-  if (!account) return null;
-  return <span data-testid="tab-account-label" title={`This tab runs on ${account.label}`} className={className ?? "min-w-0 truncate text-[12px] text-muted-foreground"}>{account.label}</span>;
+  if (namedByMachine(tab)) return tab.accountLabel ? <AccountLabel label={tab.accountLabel} className={className} /> : null;
+  return <LocalAccountLabel tab={tab} className={className} />;
 }
 
 /**

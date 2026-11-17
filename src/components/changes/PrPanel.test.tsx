@@ -11,6 +11,11 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+// The real dialog store, with its delete request observed (PRO-406: a machine's worktree names its host).
+vi.mock("@/lib/dialogs", async (original) => {
+  const real = await original<typeof import("@/lib/dialogs")>();
+  return { ...real, openWorkspaceDelete: vi.fn(real.openWorkspaceDelete) };
+});
 
 const { PrPanel } = await import("./PrPanel");
 const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
@@ -757,5 +762,66 @@ describe("PrPanel load failure states", () => {
     render(<PrPanel cwd={cwd} branch="feature" busy={false} active />);
     expect(await screen.findByText("You're offline")).toBeTruthy();
     expect(screen.queryByText("Could not complete Git operation")).toBeNull();
+  });
+});
+
+describe("a session on a paired machine (PRO-404, PRO-406)", () => {
+  const worktree = "/srv/repos/app/.raccoon/worktrees/bright-otter";
+  const host = { key: "machine:m1|s1", disposition: vi.fn(), remove: vi.fn(), turnRunning: () => false };
+  const panel = (headPinned: boolean) => ({ machineId: "m1", name: "Mac mini", headPinned, workspace: { host, projectPath: "machine:m1:p1", path: worktree, name: "bright-otter" } });
+  const machineSource = (call: (method: string) => Promise<unknown>, mutate = vi.fn(async () => ({}))) =>
+    cloudGitSource({ workspaceKey: "machine:m1:p1", remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  // Only the session's recorded pull requests are this computer's to read; nothing of its Git, gh or worktrees is asked.
+  const onlyAssociations = () =>
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command !== "pr_associations") throw Error(`A machine session must not use this computer's commands: ${command}`);
+      return [];
+    });
+
+  it("offers to remove the worktree on the machine once its pull request merged, through the machine's host", async () => {
+    onlyAssociations();
+    const { MachinePanelContext } = await import("./machinePanel");
+    const { openWorkspaceDelete, closeWorkspaceRemove } = await import("@/lib/dialogs");
+    const call = vi.fn(async (method: string) => {
+      if (method === "git.status") return workStatus(mergedPr.head, 0);
+      if (method === "git.prs") return { prs: [mergedPr] };
+      if (method === "git.prAssociations") return { associations: [] };
+      throw new WorkspaceRpcError("method_not_found", "not here", method);
+    });
+    render(
+      <MachinePanelContext.Provider value={panel(true)}>
+        <PrPanel source={machineSource(call)} branch={mergedPr.head} active busy={false} inline />
+      </MachinePanelContext.Provider>,
+    );
+    const card = await screen.findByTestId("merged-archive");
+    expect(card.getAttribute("data-host")).toBe("machine");
+    expect(card.textContent).toContain("Remove the worktree on Mac mini");
+    fireEvent.click(screen.getByRole("button", { name: "Remove…" }));
+    expect(openWorkspaceDelete).toHaveBeenCalledWith("machine:m1:p1", worktree, "bright-otter", host);
+    closeWorkspaceRemove();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("merges on the machine, pinned to the head shown where the machine pins merges (machine/9: %s)", async (headPinned) => {
+    onlyAssociations();
+    const { MachinePanelContext } = await import("./machinePanel");
+    const ready = { ...openPr, headSha: "abc1234def" };
+    const call = vi.fn(async (method: string) => {
+      if (method === "git.status") return workStatus(followup.head, 1);
+      if (method === "git.prs") return { prs: [ready] };
+      if (method === "git.prAssociations") return { associations: [] };
+      throw new WorkspaceRpcError("method_not_found", "not here", method);
+    });
+    const mutate = vi.fn(async () => ({}));
+    render(
+      <MachinePanelContext.Provider value={panel(headPinned)}>
+        <PrPanel source={machineSource(call, mutate)} branch={followup.head} active busy={false} />
+      </MachinePanelContext.Provider>,
+    );
+    const merge = await screen.findByRole("button", { name: "Merge" });
+    fireEvent.pointerDown(merge, { button: 0, pointerType: "mouse" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Squash/ }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo: "app", number: followup.number, method: "squash", ...(headPinned ? { head: "abc1234def" } : {}) }));
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pr_merge", expect.anything());
   });
 });

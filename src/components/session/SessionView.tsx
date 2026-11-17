@@ -7,7 +7,7 @@ import { openWorkspaceRestore } from "@/lib/dialogs";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { PanelPresence } from "@/components/layout/PanelPresence";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, FolderSync, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, PanelLeft, PanelRight, Server, SessionContinue, Smartphone, SquareTerminal } from "@/icons";
 import { openPairPhone } from "@/lib/pairing";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
@@ -82,6 +82,9 @@ import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
+import { MachineContinuationDialog } from "./ContinuationDialogMachine";
+import { MachineBranchButton, MachineBranchStats, MachineCheckFixNotice, MachineSessionCost, MachineWorkspaceMenu, useMachineCheckFix, type MachineCheckFix } from "./SessionViewMachine";
+import { MachinePanelContext, type MachinePanel } from "@/components/changes/machinePanel";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -148,7 +151,7 @@ function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: Tab
  * the workspace is connected there is nothing to read, and nothing here
  * connects or wakes it.
  */
-function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry }) {
+function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry; checkFix?: MachineCheckFix }) {
   const log = useTabLog(cloud.backend.logSessionId, tab?.id ?? "");
   const live = tab?.status === "in_progress" || tab?.status === "waiting";
   // PRO-28: only for someone who may use previews; it never connects or wakes the workspace.
@@ -162,6 +165,11 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
   const portsCount = cloud.ports.offered ? openForwardCount(forwards) : 0;
   // A machine session's terminals are the machine's, under the panel (21.08).
   const dock = cloud.machine ? <MachineTerminalDock cloud={cloud} /> : undefined;
+  // PRO-404, PRO-406: what the PR panel of a machine session knows of the machine: its worktree there and the merge pin.
+  const machinePanel = useMemo<MachinePanel | null>(
+    () => (cloud.machine ? { machineId: cloud.machine.machineId, name: cloud.machine.name, workspace: cloud.removableWorkspace, headPinned: !!cloud.branch?.headPinned } : null),
+    [cloud.machine, cloud.removableWorkspace, cloud.branch?.headPinned],
+  );
   if (!cloud.fileSource) {
     return (
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
@@ -197,6 +205,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
     );
   }
   return (
+    <MachinePanelContext.Provider value={machinePanel}>
     <RightPanel
       key={cloud.repository ?? "none"}
       cwd={cloud.root}
@@ -217,7 +226,11 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       ports={ports ? () => ports(true) : undefined}
       portsCount={portsCount}
       dock={dock}
+      // PRO-408: a machine's failed checks are saved on the machine and sent to the open tab there.
+      onFixErrors={checkFix?.offered && tab && !checkFix.blocked ? (pr) => checkFix.fix(pr.url) : undefined}
+      fixBusy={checkFix?.busy}
     />
+    </MachinePanelContext.Provider>
   );
 }
 
@@ -559,7 +572,9 @@ export function SessionView({
   // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
   useEffect(() => { setContinuationSource(null); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
-  const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
+  // A machine session's continues in a new tab of the session there (PRO-408), never on this computer.
+  const continueTab = activeTab && (local || (machine && cloud?.continueInNewTab)) ? () => setContinuationSource(activeTab) : null;
+  const machineCheckFix = useMachineCheckFix(machine ? cloud : undefined, activeTab && !isTerminalTab(activeTab) ? activeTab.id : undefined);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
   // The worktree's agent moved it off the branch it was made on: say where it is now.
@@ -625,7 +640,8 @@ export function SessionView({
   });
   // What the session's agents have used, at API list prices (PRO-273), beside
   // where it is; Settings → Experimental → Session cost.
-  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
+  // A machine session's is counted on the machine (PRO-408).
+  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : machine && cloud ? <MachineSessionCost cloud={cloud} session={session} className={cn("ml-1", HEADER_TIGHT)} /> : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="relative flex h-full min-h-0 min-w-0 flex-1">
@@ -727,7 +743,8 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The account the open tab's agent runs on, only when that agent has several (#980). */}
-            {local && !cloud && activeTab && <TabAccountLabel tab={activeTab} className={cn("ml-1 max-w-40 shrink-0 truncate text-[12px] text-muted-foreground", HEADER_TIGHT)} />}
+            {/* A machine tab's is the machine's name for it (PRO-408). */}
+            {((local && !cloud) || machine) && activeTab && <TabAccountLabel tab={activeTab} className={cn("ml-1 max-w-40 shrink-0 truncate text-[12px] text-muted-foreground", HEADER_TIGHT)} />}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
             {/* Autopilot is set up in the Branch tab; the header shows it only while it runs (docs/AUTOPILOT-PLACEMENT.md). */}
@@ -799,6 +816,9 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
+            {/* A machine session's branch: its diff size and pull requests, then the worktree's menu (21.08, PRO-404, PRO-406). */}
+            {machine && cloud && <MachineBranchStats cloud={cloud} className={HEADER_TIGHT} />}
+            {machine && cloud && <MachineWorkspaceMenu cloud={cloud} session={session} onContinue={continueTab} />}
             {/* The base commit is a detail (the branch's tooltip and the ··· menu have it); only a doubt about it stays on the bar. A cloud session has no menu, so it keeps the note. */}
             {session.worktreeBase && (session.worktreeBase.warning || !local) && (
               <span
@@ -843,11 +863,20 @@ export function SessionView({
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
+            {/* A machine session's next Git step runs on the machine (PRO-404). */}
+            {machine && cloud && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} cloud={cloud} tabId={activeTab && !isTerminalTab(activeTab) ? activeTab.id : undefined} checkFix={machineCheckFix} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
-            {continueTab && (
+            {continueTab && local && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={continueTab}>
+                  <SessionContinue />
+                </Button>
+              </WithTooltip>
+            )}
+            {continueTab && machine && (
+              <WithTooltip label={cloud?.continueBlocked ?? "Continue in a New Tab…"}>
+                <Button variant="ghost" size="icon-sm" aria-label="Continue in a New Tab…" aria-disabled={!!cloud?.continueBlocked} className={cn(cloud?.continueBlocked && "opacity-40")} onClick={() => { if (!cloud?.continueBlocked) continueTab(); }}>
                   <SessionContinue />
                 </Button>
               </WithTooltip>
@@ -931,7 +960,9 @@ export function SessionView({
         {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {local && !cloud && <RunRestartOffer session={session} />}
-        {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+        {continuationSource && !machine && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+        {continuationSource && machine && cloud && <MachineContinuationDialog cloud={cloud} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+        {machine && <MachineCheckFixNotice fix={machineCheckFix} />}
         {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
           <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
           {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
@@ -1069,7 +1100,7 @@ export function SessionView({
       {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
-      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
+      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={machine ? machineCheckFix : undefined} />}
       {!compact && prefs.panelOpen && !cloud &&
         (panelTab ? (
           <PanelHost session={session} tab={panelTab} checkFix={checkFix} />

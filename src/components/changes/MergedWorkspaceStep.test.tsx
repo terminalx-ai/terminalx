@@ -8,10 +8,14 @@ const mocks = vi.hoisted(() => ({
   remove: vi.fn(),
   settle: vi.fn(),
   size: vi.fn(async () => 7.2 * 1024 ** 3),
+  asked: [] as [string, string | null | undefined][],
 }));
 vi.mock("@/lib/mergedCleanup", () => ({
   LOCAL_HOST: "local",
-  useMergedStatus: () => mocks.status,
+  useMergedStatus: (host: string, path: string | null | undefined) => {
+    mocks.asked.push([host, path]);
+    return mocks.status;
+  },
   holdMergedWorkspace: mocks.hold,
   mergedDue: () => "in 8 min",
 }));
@@ -29,6 +33,7 @@ const status = (patch: Partial<HostedStatus>): HostedStatus => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.asked = [];
 });
 
 describe("the merged workspace card", () => {
@@ -81,5 +86,31 @@ describe("the merged workspace card", () => {
     mocks.status = undefined;
     const { container } = render(<MergedWorkspaceStep cwd="/p" />);
     expect(container.textContent).toBe("");
+  });
+
+  it("for a worktree on a paired machine, reads its own host, offers its removal there and never measures or removes anything here (PRO-406)", () => {
+    mocks.status = undefined;
+    const remove = vi.fn();
+    render(<MergedWorkspaceStep cwd="/srv/app/.raccoon/worktrees/w" host="machine:m1" where="Mac mini" embedded onArchive={remove} />);
+    expect(mocks.asked).toContainEqual(["machine:m1", "/srv/app/.raccoon/worktrees/w"]);
+    expect(mocks.asked.some(([host]) => host === "local")).toBe(false);
+    expect(screen.getByText("Remove the worktree on Mac mini")).toBeTruthy();
+    expect(screen.getByText(/Nothing on this Mac changes\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove…" }));
+    expect(remove).toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled();
+    expect(mocks.size).not.toHaveBeenCalled();
+  });
+
+  it("a machine's own status still removes only through the machine", () => {
+    mocks.status = status({ hostId: "machine:m1", archiveBlocked: true });
+    const remove = vi.fn();
+    render(<MergedWorkspaceStep cwd="/p/.raccoon/worktrees/w" host="machine:m1" where="Mac mini" onArchive={remove} />);
+    fireEvent.click(screen.getByRole("button", { name: "Archive anyway" }));
+    expect(remove).toHaveBeenCalled();
+    expect(mocks.remove).not.toHaveBeenCalled();
+    expect(mocks.settle).not.toHaveBeenCalled();
+    expect(mocks.size).not.toHaveBeenCalled();
   });
 });
