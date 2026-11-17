@@ -188,8 +188,8 @@ it("Settings files lists each layer with its chips and an error naming file, lin
   expect(within(items[3]).getByText("14 keys")).toBeTruthy();
   expect(within(items[4]).getByText("built into TerminalX")).toBeTruthy();
   const error = within(items[1]).getByRole("alert");
-  expect(error.textContent).toBe("~/repo/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting. That key is ignored; the rest of the file applies.Open");
-  fireEvent.click(within(error).getByRole("button", { name: "Open" }));
+  expect(error.textContent).toBe("~/repo/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting. That key is ignored; the rest of the file applies.Open file");
+  fireEvent.click(within(error).getByRole("button", { name: "Open file" }));
   await waitFor(() => expect(openPath).toHaveBeenCalledWith("/repo/.terminalx/settings.local.json", null));
 });
 

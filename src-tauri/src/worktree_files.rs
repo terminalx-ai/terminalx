@@ -32,6 +32,8 @@ pub struct Preview {
     pub patterns: Vec<PatternPreview>,
     pub error: Option<String>,
     pub warning: Option<String>,
+    /// How many ignored files the patterns were checked against (0 with no patterns or no scan).
+    pub ignored_checked: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,7 +172,7 @@ pub fn preview(project: &Path, draft: Option<&[String]>, snapshot: Option<&str>)
         root_path: project.to_string_lossy().into_owned(),
         workspaces_path: git::worktree_root(&project).to_string_lossy().into_owned(),
         from_include_file: root.entry_exists(".worktreeinclude")?,
-        patterns: Vec::new(), error: None, warning: None,
+        patterns: Vec::new(), error: None, warning: None, ignored_checked: 0,
     };
     // Path rows and the repository-file lock remain available even when the
     // file is unreadable or its list exceeds the limit.
@@ -181,6 +183,7 @@ pub fn preview(project: &Path, draft: Option<&[String]>, snapshot: Option<&str>)
         // An empty pattern list needs only the paths, with no filesystem scan.
         let ignored = if patterns.is_empty() { Arc::new(IgnoredFiles::default()) } else { ignored_snapshot(&project, &root, snapshot)? };
         if ignored.limited { preview.warning = Some(SCAN_WARNING.into()); }
+        preview.ignored_checked = ignored.files.len();
         let mut other: Option<(Vec<String>, Vec<String>)> = None;
         preview.patterns = patterns.into_iter().map(|pattern| {
             match matcher(&pattern) {
