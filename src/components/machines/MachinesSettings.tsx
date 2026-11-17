@@ -30,8 +30,8 @@ const iconBox = "grid size-8 shrink-0 place-items-center rounded-md bg-muted";
 /**
  * Settings → Machines (PRO-349, screen 21.02): the switch that lets other
  * computers operate this Mac, this Mac's name and key label, the machines
- * this Mac operates, and the computers that operate it. Shown only with
- * Experimental → Machines on, until PRO-360. Data privacy mode turns off
+ * this Mac operates, and the computers that operate it. With no machine
+ * paired it opens with how to start, and the guide (PRO-360). Data privacy mode turns off
  * both operating and being operated (PRO-357), and the page says so.
  */
 export function MachinesSettings() {

@@ -45,7 +45,6 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "experimental.sessionCost",
   "experimental.orchestratorRuns",
   "experimental.localVmTasks",
-  "experimental.machines",
   "orchestrator.requireApproval",
   "orchestrator.workersPerRun",
   "orchestrator.workersAtOnce",

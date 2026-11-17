@@ -6,7 +6,7 @@ import { pairedMachine } from "@/components/machines/machineFixtures.test-utils"
 
 /**
  * Sessions on paired machines (PRO-346) want the reader back as local ones do:
- * in the dock badge and as notices, and only while Experimental → Machines is on.
+ * in the dock badge and as notices.
  */
 const mocks = vi.hoisted(() => ({
   sendNotification: vi.fn(),
@@ -133,7 +133,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("machine sessions in the dock badge", () => {
-  it("count a saved wait and an unread finish only while Machines is on", async () => {
+  it("count a saved wait and an unread finish while the machine is paired, and nothing once it is removed", async () => {
     localStorage.setItem("terminalx.machineCatalog.v1", JSON.stringify({
       [MINI.machineId]: {
         projects: [{ projectId: "P1", name: "terminalx", path: "/x", kind: "git", defaultBranch: "main", archived: false }],
@@ -142,17 +142,20 @@ describe("machine sessions in the dock badge", () => {
         syncedAt: 1,
       },
     }));
-    pair(null);
-    const { machineDashboard } = await boot(true);
+    await boot(true);
     await settle();
+    // The paired machines are not read yet: nothing counts.
     expect(lastBadge()).toBeUndefined();
 
-    machineDashboard.setMachineDashboardEnabled(true);
+    pair(null);
     await settle();
     // s1 waits, s2 finished unread; s3 was read.
     expect(lastBadge()).toBe(2);
 
-    machineDashboard.setMachineDashboardEnabled(false);
+    // Removed: the machine and its sessions leave the count.
+    mocks.connections = { ready: true, error: null, machines: [], states: {}, attachErrors: {}, connections: {} };
+    for (const listener of [...mocks.listeners]) listener();
+    await settle();
     await settle();
     expect(lastBadge()).toBeUndefined();
   });
@@ -168,8 +171,7 @@ describe("machine session notices", () => {
   it("raise a new wait on a connected machine, and the notice opens the machine session", async () => {
     const mini = new FakeMachine();
     mini.sessions = [session("in_progress")];
-    const { machineDashboard, sessions, notify } = await boot(true);
-    machineDashboard.setMachineDashboardEnabled(true);
+    const { sessions, notify } = await boot(true);
     pair(mini);
     mini.connect();
     await settle();
@@ -191,23 +193,15 @@ describe("machine session notices", () => {
     expect(sessions.getSessions().selectedSessionId).toBe(KEY);
   });
 
-  it("send a banner when nobody is looking, and nothing while Machines is off", async () => {
+  it("send a banner when nobody is looking", async () => {
     const mini = new FakeMachine();
     mini.sessions = [session("in_progress")];
-    const { machineDashboard } = await boot(false);
+    await boot(false);
     pair(mini);
     mini.connect();
     await settle();
-    // Off: the machine's wait raises nothing.
-    mini.setTab("waiting");
-    await settle();
-    mini.setTab("in_progress");
     await settle();
     expect(mocks.sendNotification).not.toHaveBeenCalled();
-
-    machineDashboard.setMachineDashboardEnabled(true);
-    await settle();
-    await settle();
     mini.setTab("waiting");
     await settle();
     await settle();

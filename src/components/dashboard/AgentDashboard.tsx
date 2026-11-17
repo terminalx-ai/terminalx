@@ -34,7 +34,7 @@ import { SessionTable, type SessionPlace, type SessionTableRow, type SessionTabl
 import { ActiveNow, DisplayMenu, FilterChip, InclusionChip, NewSessionButton, PeopleChip, SearchField, SortChip, type OverviewPerson } from "./OverviewToolbar";
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
-import { isMachineDashboardSession, machineAttentionTab, openMachineSession, useMachineDashboard, useMachineDashboardEnabled, type MachineDashboardSession } from "@/lib/machineDashboard";
+import { isMachineDashboardSession, machineAttentionTab, openMachineSession, useMachineDashboard, type MachineDashboardSession } from "@/lib/machineDashboard";
 import { useMachineConnections } from "@/lib/machineConnections";
 import { machineSectionKey } from "@/types/target";
 import type { SessionEntry } from "@/types/session";
@@ -94,12 +94,11 @@ export function AgentDashboard() {
   const cloud = useCloudDashboard(true);
   const { visibleIds } = useOrganizationVisibility();
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
-  // Sessions on paired machines (PRO-346): none while Experimental → Machines is off.
-  const machinesOn = useMachineDashboardEnabled();
+  // Sessions on paired machines (PRO-346): none while no machine is paired.
   const machineSessions = useMachineDashboard(true);
   const { machines: pairedMachines, states: machineStates } = useMachineConnections();
-  // The Where column and the All machines menu, only with Machines on and a machine paired: otherwise the overview is as it was.
-  const showWhere = machinesOn && pairedMachines.length > 0;
+  // The Where column and the All machines menu, only with a machine paired: otherwise the overview is as it was.
+  const showWhere = pairedMachines.length > 0;
   const [placeChoice, setPlace] = useState<Place>("all");
   const place: Place = showWhere && (placeChoice === "all" || placeChoice === "local" || placeChoice === "cloud" || pairedMachines.some((m) => machineSectionKey(m.machineId) === placeChoice)) ? placeChoice : "all";
   const everywhere = useMemo<CardSession[]>(() => [
@@ -285,7 +284,7 @@ export function AgentDashboard() {
         <InclusionChip kind="archived" value={filters.archived ?? "hide"} onChange={(archived) => setFilters((f) => ({ ...f, archived }))} />
         <SortChip sort={sort} columns={columns} onChange={(sort) => setPreferences({ ...preferences, sort })} />
         <DisplayMenu preferences={preferences} columns={columns} onChange={setPreferences} />
-        {/* Where sessions run (PRO-346): only with Machines on and a machine paired. */}
+        {/* Where sessions run (PRO-346): only once a machine is paired. */}
         {showWhere && <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant={place === "all" ? "ghost" : "secondary"} size="sm" className="gap-1.5">

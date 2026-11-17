@@ -100,15 +100,15 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeycaps: () => () => [],
 }));
 // PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
-const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, machines: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
-vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, machines: runShortcut.machines }) }));
-// PRO-345: paired machines stay attached while Experimental → Machines is on.
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+// PRO-345, PRO-360: every paired machine stays attached while the window is open.
 const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
-// PRO-346: machine sessions in the overview, badge and notices follow the switch; Archive goes to the machine.
-const machineSessions = vi.hoisted(() => ({ enabled: vi.fn(), update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
-// The shell reads the switch back (PRO-348): on once it was last set on.
-vi.mock("@/lib/machineDashboard", () => ({ setMachineDashboardEnabled: machineSessions.enabled, useMachineDashboardEnabled: () => machineSessions.enabled.mock.lastCall?.[0] === true }));
+// PRO-346: Archive on a machine session goes to the machine.
+const machineSessions = vi.hoisted(() => ({ update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
+// The machine sessions' store is the views' business, not the shell's: kept out of these tests.
+vi.mock("@/lib/machineDashboard", () => ({}));
 vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
 vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
@@ -234,7 +234,6 @@ beforeEach(() => {
   sessionStore.selectedAutomationId = null;
   sessionStore.selectedCloudWorkspace = null;
   sessionStore.view = "new";
-  runShortcut.machines = false;
   machineConnections.start.mockClear();
   machineConnections.stop.mockClear();
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
@@ -250,8 +249,7 @@ afterEach(async () => {
 });
 
 describe("a paired machine in the main slot (PRO-345)", () => {
-  it("keeps machines attached while Machines is on and shows the selected machine's view", async () => {
-    runShortcut.machines = true;
+  it("keeps machines attached while the window is open and shows the selected machine's view", async () => {
     sessionStore.selectedCloudWorkspace = "machine:m1";
     sessionStore.view = "welcome";
     const { unmount } = render(<AppShell />);
@@ -260,16 +258,6 @@ describe("a paired machine in the main slot (PRO-345)", () => {
     expect(machineConnections.start).toHaveBeenCalledTimes(1);
     unmount();
     expect(machineConnections.stop).toHaveBeenCalledTimes(1);
-  });
-
-  it("with Machines off attaches nothing and never routes a machine key to a cloud workspace", async () => {
-    sessionStore.selectedCloudWorkspace = "machine:m1";
-    sessionStore.view = "welcome";
-    render(<AppShell />);
-    await waitFor(() => expect(screen.queryByText("Loading view…")).toBeNull());
-    expect(screen.queryByTestId("machine-main")).toBeNull();
-    expect(screen.queryByTestId("cloud-workspace-main")).toBeNull();
-    expect(machineConnections.start).not.toHaveBeenCalled();
   });
 
   it("still shows a cloud workspace in the same slot", async () => {
@@ -283,31 +271,15 @@ describe("a paired machine in the main slot (PRO-345)", () => {
 describe("machine sessions (PRO-346)", () => {
   afterEach(() => {
     sessionStore.selectedSessionId = null;
-    machineSessions.enabled.mockClear();
     machineSessions.update.mockClear();
     machineSessions.archiveLocal.mockClear();
   });
 
-  it("join the overview, badge and notices only while Machines is on", async () => {
-    render(<AppShell />);
-    expect(machineSessions.enabled).toHaveBeenLastCalledWith(false);
-    cleanup();
-    runShortcut.machines = true;
-    render(<AppShell />);
-    expect(machineSessions.enabled).toHaveBeenLastCalledWith(true);
-  });
-
   it("opens a machine session as a session, not the machine's workspace view (PRO-347)", async () => {
-    runShortcut.machines = true;
     sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
     render(<AppShell />);
     expect((await screen.findByTestId("machine-session")).getAttribute("data-key")).toBe("machine:m1:P1:s1");
     expect(screen.queryByTestId("machine-main")).toBeNull();
-    cleanup();
-    // Machines off: nothing of the machine is shown.
-    runShortcut.machines = false;
-    render(<AppShell />);
-    expect(screen.queryByTestId("machine-session")).toBeNull();
   });
 
   it.each([

@@ -149,13 +149,11 @@ describe("settings row search", () => {
     expect(named()).not.toContain("localVms.tasks");
   });
 
-  it("finds Settings → Machines rows only while Experimental → Machines is on", () => {
+  it("finds Settings → Machines rows whatever the Experimental switches say (PRO-360)", () => {
     const named = () => searchSettings("pairing code").map((match) => match.id);
-    expect(named()).not.toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: true });
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
     expect(named()).toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: false });
-    expect(named()).not.toContain("machines.pairingCode");
+    expect(searchSettings("machines").map((match) => match.id)).not.toContain("experimental.machines");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {
