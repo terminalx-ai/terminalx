@@ -12,6 +12,7 @@ import type { CloudRole } from "@mobile/cloud/api";
 import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { useKeyboardShown } from "@mobile/ui/keyboard";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
@@ -183,6 +184,10 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
 
 function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null }) {
   const { palette } = useTheme();
+  // Docked at the bottom: clear of the home indicator and the screen's rounded corners, as the session screen's composer is.
+  const insets = useSafeAreaInsets();
+  const keyboardShown = useKeyboardShown();
+  const dockBottom = { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 12 };
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const tab = snapshot.tabs.find((entry) => entry.tabId === tabId);
   const [draft, setDraft] = useConversationState(`cloud:${scope}:${tabId}:draft`, "");
@@ -338,7 +343,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
     {startBarShown(listedState, starting) && !sendStarts
       ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
       : mayWrite && listedState !== "archived" && listedState !== null
-      ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
+      ? <View style={[styles.composer, dockBottom, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
         {!snapshot.hasKey ? <Text style={[styles.notice, { color: palette.muted }]}>{codeText("no-key")}</Text> : null}
         {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(lease?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
         <View style={styles.composeLine}>
@@ -347,7 +352,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
           <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther} onPress={() => void send()} style={[styles.round, { backgroundColor: palette.accent }, (!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther) && styles.disabled]}><Send size={17} color={palette.accentInk} /></Pressable>
         </View>
       </View>
-      : <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
+      : <View style={[styles.composer, dockBottom, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
   </KeyboardAvoidingView>;
 }
 
