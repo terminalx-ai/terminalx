@@ -212,8 +212,21 @@ describe("the tab strip", () => {
   it("opens the tab's menu on a right-click", async () => {
     render(<TabsHarness />);
     fireEvent.contextMenu(tab("Review").parentElement!);
-    expect(await screen.findByRole("menuitem", { name: "Rename…" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "Close other tabs…" })).toBeTruthy();
+    expect(await screen.findByRole("menuitem", { name: /^Rename (chat|tab)…$/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Close other tabs" })).toBeTruthy();
+  });
+
+  it("marks a tab whose close failed with a red ×, until the toast that says so goes (PRO-381)", async () => {
+    const { showError, dismissErrorKey } = await import("@/lib/errorToasts");
+    render(<TabsHarness />);
+    const close = () => within(strip()).getByRole("button", { name: /^Close Fix flaky test/ });
+    expect(close().getAttribute("data-close-failed")).toBeNull();
+    act(() => void showError("“Fix flaky test” is still open", undefined, { title: "Couldn't close the chat. Try again.", key: "close:agent:a2" }));
+    expect(close().getAttribute("data-close-failed")).toBe("true");
+    expect(close().className).toContain("text-destructive");
+    expect(close().getAttribute("aria-label")).toBe("Close Fix flaky test (closing failed)");
+    act(() => dismissErrorKey("close:agent:a2"));
+    expect(close().getAttribute("data-close-failed")).toBeNull();
   });
 
   it.each(["strip", "sidebar"])("opens the %s tab's menu with Shift+F10 and returns focus on Escape", async (surface) => {
@@ -222,7 +235,7 @@ describe("the tab strip", () => {
     act(() => target.focus());
     fireEvent.keyDown(target, { key: "F10", shiftKey: true });
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Rename…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /^Rename (chat|tab)…$/ })).toBeTruthy();
     fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
     await waitFor(() => expect(document.activeElement?.getAttribute("role")).toBe("menuitem"));
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });

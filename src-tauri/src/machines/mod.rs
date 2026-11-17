@@ -13,7 +13,8 @@
 
 pub mod account;
 pub mod connect;
-pub mod pair;
+/// Compiled at the crate root as `machine_pair`, so headless builds have it too.
+pub use crate::machine_pair as pair;
 pub mod secrets;
 pub mod store;
 

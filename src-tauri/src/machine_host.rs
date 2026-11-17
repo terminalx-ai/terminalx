@@ -86,7 +86,15 @@ pub struct Parts {
     pub sink: Arc<dyn EventSink>,
     pub terminals: Arc<crate::pty::Terminals>,
     pub sessions: crate::session::SessionManager,
+    /// Opens the agent tabs this machine serves its computers when it builds
+    /// its own RPC: with no relay link, nothing else gives it send, steer,
+    /// stop, interrupt and decisions as live calls (decision 3). Called once,
+    /// when the switch is first on, so a runtime that hosts no one opens none.
+    pub agents: Option<OpenAgents>,
 }
+
+/// See [`Parts::agents`].
+pub type OpenAgents = Arc<dyn Fn() -> Result<Arc<crate::cloud_agents::CloudAgents>> + Send + Sync>;
 
 enum Rpc {
     /// Built here once the key is known.
@@ -616,6 +624,11 @@ impl MachineHost {
         };
         match WorkspaceRpc::machine(identity, 0, parts.sink.clone(), parts.terminals.clone(), Some(parts.sessions.clone())) {
             Ok(built) => {
+                match parts.agents.as_ref().map(|open| open()) {
+                    Some(Ok(agents)) => built.set_agents(agents),
+                    Some(Err(error)) => log::error!("machine host: agent tabs: {error:#}; agent-commands/1 is not offered"),
+                    None => {}
+                }
                 *rpc = Rpc::Ready(built.clone());
                 Ok(Some(built))
             }

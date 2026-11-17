@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
@@ -69,7 +69,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const initial = resolveSetting(initialTab);
   const [section, setSection] = useState<SettingsSection>(initial.section);
   const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
-  const [target, setTarget] = useState<string | null>(() => initialTab === initial.id ? initial.id : null);
+  const [target, setTarget] = useState<string | null>(() => isRowLink(initialTab) ? initial.id : null);
   // A project page chosen in the sidebar; without one, the page holding the row asked for (PRO-387).
   const [projectPage, setProjectPage] = useState<ProjectPage | null>(null);
   const content = useRef<HTMLElement>(null);
@@ -131,7 +131,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   useEffect(() => {
     setSection(initial.section);
     setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
-    setTarget(initialTab === initial.id ? initial.id : null);
+    setTarget(isRowLink(initialTab) ? initial.id : null);
     setProjectPage(null);
     setQuery("");
     setSelected(0);
@@ -301,7 +301,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
         </nav>
       </aside>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Open settings.json, top right of every page (PRO-140). */}
+        {/* Open settings.json, top right of every page (PRO-140); a project page opens the project's own file (PRO-388). */}
         <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-2 px-3 empty:hidden">
           {/* A project page says where it is: ⚙ › Projects › project › page (design 11.02). */}
           {section === "repositories" && project && !searching && <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 pl-2 text-[12px] text-faint">

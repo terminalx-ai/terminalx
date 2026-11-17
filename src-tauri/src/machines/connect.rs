@@ -137,8 +137,22 @@ impl MachineConnections {
         }
     }
 
+    /// The paired machines (`machines_list`), for the CLI (`machine_control`).
+    pub(crate) fn paired(&self) -> Result<Vec<super::store::PairedMachine>> {
+        self.machines.list()
+    }
+
+    pub(crate) fn machines(&self) -> &Arc<Machines> {
+        &self.machines
+    }
+
+    /// `terminalx machines remove`: as Settings → Machines → Remove.
+    pub(crate) fn forget(&self, machine_id: &str) -> Result<bool> {
+        self.remove(machine_id)
+    }
+
     /// One view per paired machine, `idle` when not attached.
-    fn views(&self) -> Result<Vec<MachineConnectionView>> {
+    pub(crate) fn views(&self) -> Result<Vec<MachineConnectionView>> {
         Ok(self
             .machines
             .list()?

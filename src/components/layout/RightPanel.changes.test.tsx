@@ -61,40 +61,45 @@ it("shows workspace work after a status-only turn, and commits from its Uncommit
   render(<RightPanel cwd={cwd} branch="fix/test" events={events} />);
   openChanges();
 
-  expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
-  expect(screen.getByText(/Against main/)).toBeTruthy();
+  expect(await screen.findByText("0 of 2 viewed")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Comparison target" }).textContent).toBe("vs main");
   expect(invoke).not.toHaveBeenCalledWith("working_changes", expect.anything());
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Uncommitted changes/ }));
 
   await waitFor(() => expect(screen.getAllByTitle("Modified · src/modified.ts")).toHaveLength(1));
   expect(invoke).toHaveBeenCalledWith("working_change_sets", { cwd, hideWhitespace: false });
 
   // History and back keep a commit draft.
   fireEvent.change(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)"), { target: { value: "Keep my draft" } });
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "history" } });
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: /^All commits/ }));
   expect(await screen.findByText("No commits yet.")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Uncommitted changes/ }));
   expect(screen.getByPlaceholderText("Commit message (⌘⏎ to commit)")).toHaveProperty("value", "Keep my draft");
 });
 
 it("offers workspace changes before there is a turn snapshot", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
   openChanges();
-  expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
+  expect(await screen.findByText("0 of 2 viewed")).toBeTruthy();
   expect(await screen.findByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });
 
 it("uses live-turn wording while an agent is running", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" events={events.slice(0, 1)} live />);
   openChanges();
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
-  expect(await screen.findByText("This turn · 2 files")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: /^(Latest turn|This turn)/ }));
+  expect(await screen.findByText("0 of 2 viewed")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Changes scope" }).textContent).toBe("This turn");
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("changes_between", { cwd, base: "snapshot", head: "live-snapshot", hideWhitespace: false }));
 });
 
 it("keeps the working-tree view scoped to the workspace", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" workingTree />);
   openChanges();
-  expect(await screen.findByText("All changes · 2 files")).toBeTruthy();
+  expect(await screen.findByText("0 of 2 viewed")).toBeTruthy();
   expect(screen.getByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });

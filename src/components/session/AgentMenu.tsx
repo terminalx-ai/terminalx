@@ -30,7 +30,13 @@ import { AccountRadioItems } from "./SessionAgentControls";
  * With `split`, as the new-session box shows them: two chips, the model and
  * effort on one and the permission mode on its own, each with its own menu.
  */
-export function AgentMenu({ selection, disabled = false, split = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean; split?: boolean }) {
+export function AgentMenu({ selection, disabled = false, split = false, onSetup }: {
+  selection: ReturnType<typeof useSessionAgent>;
+  disabled?: boolean;
+  split?: boolean;
+  /** New Session (#1064): an agent this Mac knows is missing or signed out can be picked to set it up, here rather than in a card per agent. */
+  onSetup?: (id: string) => void;
+}) {
   const { harnesses, harness, readiness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort, accounts, account, selectAccount } = selection;
   const menu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modeMenu = useRowMenu();
@@ -85,7 +91,9 @@ export function AgentMenu({ selection, disabled = false, split = false }: { sele
           const state = readiness?.[h.id]?.state;
           const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
           const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
-          return <DropdownMenuItem key={h.id} disabled={unavailable} onSelect={() => selectHarness(h.id)}>
+          // Only a definite answer offers setup: "checking…" stays off until the check says.
+          const setup = unavailable && !!onSetup && (state === "missing" || state === "signed_out");
+          return <DropdownMenuItem key={h.id} disabled={unavailable && !setup} onSelect={() => setup ? onSetup(h.id) : selectHarness(h.id)}>
             <AgentMark id={h.id} decorative brand />
             <span>{h.name}</span>
             {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}

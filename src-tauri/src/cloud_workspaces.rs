@@ -17,10 +17,16 @@ const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
-/// The providers this client can show and drive; the server leaves every
-/// other one out of its answers. The local Docker provider (terminalx-saas
-/// `cloud:e2e:local --serve`) is offered only by debug builds.
-const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,hetzner,local-docker" } else { "machine0,box,hetzner" };
+/// Which providers this client can show and drive: every one the server
+/// describes (PRO-415). A provider comes with a descriptor that says what it
+/// is called, how it is drawn and ordered, and what its credential is, so the
+/// client needs no list of its own. The ids after `described` are only for a
+/// server older than described providers (or one rolled back): it skips the
+/// word it does not know and answers for the providers it always offered,
+/// without descriptors, where the client falls back to their display names.
+/// A server that knows `described` answers with its whole registry and
+/// ignores the rest.
+const SUPPORTED_PROVIDERS: &str = "described,machine0,box,hetzner";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -31,35 +37,91 @@ const MAX_ARCHIVE_RETENTION_DAYS: u32 = 365;
 /// Diagnostics carry up to a few hundred operations with their history.
 const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CloudWorkspaceProviderId {
-    Machine0,
-    Box,
-    Hetzner,
-    #[serde(rename = "local-docker")]
-    LocalDocker,
-}
+/// A cloud provider's id, as the server's registry names it (PRO-415): a
+/// validated string, not a list this client knows. The shape is the
+/// server's own (`^[a-z0-9][a-z0-9-]{0,62}$`), so an id can go into a URL
+/// path segment and a header as it is.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct CloudWorkspaceProviderId(String);
 
 impl CloudWorkspaceProviderId {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Machine0 => "machine0",
-            Self::Box => "box",
-            Self::Hetzner => "hetzner",
-            Self::LocalDocker => "local-docker",
-        }
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 
-    /// What the provider is called when the service does not say.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Machine0 => "Machine0",
-            Self::Box => "Boat",
-            Self::Hetzner => "Hetzner",
-            Self::LocalDocker => "Local Docker",
+    fn valid(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        (1..=63).contains(&bytes.len())
+            && matches!(bytes[0], b'a'..=b'z' | b'0'..=b'9')
+            && bytes.iter().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+    }
+}
+
+impl TryFrom<String> for CloudWorkspaceProviderId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if Self::valid(&value) {
+            Ok(Self(value))
+        } else {
+            Err("a provider id is 1 to 63 lowercase letters, digits or hyphens, starting with a letter or digit".into())
         }
     }
+}
+
+impl From<CloudWorkspaceProviderId> for String {
+    fn from(value: CloudWorkspaceProviderId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for CloudWorkspaceProviderId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One input of a provider's credential, asked for in a native dialog.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderCredentialField {
+    pub name: String,
+    /// `secret` is typed into a secure field; `text` into a plain one. An
+    /// unknown kind is treated as secret.
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub help_url: Option<String>,
+}
+
+impl CloudProviderCredentialField {
+    pub(crate) fn secret(&self) -> bool {
+        self.kind != "text"
+    }
+}
+
+/// How a provider is presented, as the server's registry describes it
+/// (PRO-415). The fields this client acts on are typed; the rest
+/// (capabilities, offering, allowed values, copy) pass to the webview as the
+/// server sent them, so a field the server adds needs no client release.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderDescriptor {
+    pub id: CloudWorkspaceProviderId,
+    pub label: String,
+    pub icon: String,
+    pub order: i64,
+    /// False: hidden, listed only while the organization is still connected to it.
+    #[serde(default = "listed_by_default")]
+    pub listed: bool,
+    pub credential_fields: Vec<CloudProviderCredentialField>,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+fn listed_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -253,6 +315,7 @@ pub(crate) struct ProviderConnectAuthorization {
 
 impl ProviderConnectAuthorization {
     pub(crate) fn organization_id(&self) -> &str { &self.context.organization_id }
+    pub(crate) fn provider(&self) -> &CloudWorkspaceProviderId { &self.provider }
 }
 
 pub(crate) fn validate_disclosure(input: &CloudProviderConnectInput) -> Result<(), CloudWorkspaceClientError> {
@@ -296,6 +359,31 @@ pub struct CloudProviderSummary {
     pub can_manage: bool,
     pub connection: Option<CloudProviderConnection>,
     pub capabilities: CloudProviderCapabilities,
+    /// Absent from a server older than described providers.
+    #[serde(default)]
+    pub descriptor: Option<CloudProviderDescriptor>,
+}
+
+impl CloudProviderSummary {
+    /// What the provider is called: its descriptor's label, else the list's
+    /// display name, else its id.
+    pub(crate) fn label(&self) -> String {
+        [self.descriptor.as_ref().map(|descriptor| descriptor.label.as_str()), Some(self.display_name.as_str())]
+            .into_iter()
+            .flatten()
+            .find(|name| !name.trim().is_empty())
+            .unwrap_or(self.id.as_str())
+            .to_owned()
+    }
+
+    /// What the connect dialog asks for: the descriptor's credential fields,
+    /// else (a server older than described providers) one secret key.
+    pub(crate) fn credential_fields(&self) -> Vec<CloudProviderCredentialField> {
+        match &self.descriptor {
+            Some(descriptor) if !descriptor.credential_fields.is_empty() => descriptor.credential_fields.clone(),
+            _ => vec![CloudProviderCredentialField { name: "credential".into(), kind: "secret".into(), label: "provider key".into(), help_url: None }],
+        }
+    }
 }
 
 /// An agent whose login an organization can store for its cloud workspaces.
@@ -589,6 +677,22 @@ pub struct CloudWorkspaceSetup {
     pub defaults: ProviderSelection,
     pub allowed_idle_suspend_minutes: Vec<i64>,
     pub allowed_retention_days: Vec<i64>,
+    /// The organization's idle cap (PRO-410): the server has already left
+    /// never and every longer window out of `allowed_idle_suspend_minutes`.
+    /// None from a server that does not say, or with no cap.
+    #[serde(default, deserialize_with = "lenient")]
+    pub max_idle_suspend_minutes: Option<i64>,
+}
+
+/// A workspace's idle window and what it may be changed to (PRO-410).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIdleSuspend {
+    pub workspace_id: String,
+    /// Minutes without activity before it is stopped, 0 for never.
+    pub idle_suspend_minutes: Option<i64>,
+    pub allowed_idle_suspend_minutes: Vec<i64>,
+    pub max_idle_suspend_minutes: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -705,6 +809,10 @@ pub struct CloudWorkspace {
     pub created_by: Option<String>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
+    /// Minutes without activity before TerminalX stops it, 0 for never
+    /// (PRO-410); absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub idle_suspend_minutes: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -1944,7 +2052,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Read,
             )?;
-            ensure_connection(result, provider)
+            ensure_connection(result, &provider)
         })
     }
 
@@ -1961,7 +2069,7 @@ impl CloudWorkspaceService {
             None,
             RequestRisk::Read,
         )?;
-        let connection = ensure_connection(connection, provider)?;
+        let connection = ensure_connection(connection, &provider)?;
         if !self.account.is_current(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
@@ -1971,14 +2079,15 @@ impl CloudWorkspaceService {
         Ok(ProviderConnectAuthorization { context, provider })
     }
 
-    /// The provider's name in the organization's provider list, as Settings
-    /// shows it; `None` when the list cannot be read or does not name it.
-    pub(crate) fn provider_display_name(&self, authorization: &ProviderConnectAuthorization) -> Option<String> {
+    /// The provider as the organization's provider list describes it: its
+    /// name as Settings shows it and the credential its connect dialog asks
+    /// for (PRO-415). `None` when the list cannot be read or does not name it.
+    pub(crate) fn provider_summary(&self, authorization: &ProviderConnectAuthorization) -> Option<CloudProviderSummary> {
         let list = self
             .client
             .request::<CloudProviderSummaryResponse>(&authorization.context, &["cloud-providers"], None, None, None, RequestRisk::Read)
             .ok()?;
-        list.providers.into_iter().find(|summary| summary.id == authorization.provider).map(|summary| summary.display_name)
+        list.providers.into_iter().find(|summary| summary.id == authorization.provider)
     }
 
     pub(crate) fn connect_authorized(
@@ -2012,7 +2121,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, authorization.provider)
+        ensure_connection(result, &authorization.provider)
     }
 
     pub fn disconnect_provider(
@@ -2021,7 +2130,7 @@ impl CloudWorkspaceService {
         context_revision: String,
         disposition: DisconnectDisposition,
     ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2034,7 +2143,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, provider)
+        ensure_connection(result, &provider)
     }
 
     /// The organization's cloud teardown, if one was ever asked for (§10.7).
@@ -2121,7 +2230,7 @@ impl CloudWorkspaceService {
         context_revision: String,
         enabled: bool,
     ) -> Result<CloudProviderSummary, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2152,7 +2261,7 @@ impl CloudWorkspaceService {
         provider: CloudWorkspaceProviderId,
         context_revision: String,
     ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2165,7 +2274,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, provider)
+        ensure_connection(result, &provider)
     }
 
     /// An organization's agent logins for cloud workspaces (PRO-79): which
@@ -2392,7 +2501,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Read,
             )?;
-            ensure_provider(result, provider, RequestRisk::Read)
+            ensure_provider(result, &provider, RequestRisk::Read)
         })
     }
 
@@ -2402,7 +2511,7 @@ impl CloudWorkspaceService {
         input: CloudWorkspaceQuoteInput,
     ) -> Result<CloudWorkspaceQuote, CloudWorkspaceClientError> {
         self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let provider = input.provider;
+            let provider = input.provider.clone();
             let result = client.request(
                 context,
                 &["cloud-workspaces", "quote"],
@@ -2411,7 +2520,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Mutation,
             )?;
-            ensure_provider(result, provider, RequestRisk::Mutation)
+            ensure_provider(result, &provider, RequestRisk::Mutation)
         })
     }
 
@@ -2780,6 +2889,53 @@ impl CloudWorkspaceService {
             // An answer about another workspace or organization says nothing
             // about whether this one changed.
             if result.id != workspace_id || result.org_id != context.organization_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result)
+        })
+    }
+
+    /// The workspace's idle window and what it may be changed to (PRO-410),
+    /// for whoever may manage it.
+    pub fn idle_suspend(&self, org: Option<&str>, workspace_id: &str) -> Result<WorkspaceIdleSuspend, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: WorkspaceIdleSuspend = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                None,
+                None,
+                RequestRisk::Read,
+            )?;
+            if result.workspace_id != workspace_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    /// How long the workspace may sit idle before it is stopped, 0 for never
+    /// (PRO-410). The server holds it to the provider's windows and the
+    /// organization's cap.
+    pub fn set_idle_suspend(&self, org: Option<&str>, workspace_id: &str, idle_suspend_minutes: i64) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) || idle_suspend_minutes < 0 {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudWorkspace = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                Some(json!({ "idleSuspendMinutes": idle_suspend_minutes })),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            // An answer about another workspace, or one that does not name
+            // the window it now has, says nothing about whether this changed.
+            if result.id != workspace_id || result.org_id != context.organization_id || result.idle_suspend_minutes != Some(idle_suspend_minutes) {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
             Ok(result)
@@ -3391,7 +3547,7 @@ fn known_operation_error_code(code: &str) -> bool {
 
 fn ensure_provider<T>(
     value: T,
-    expected: CloudWorkspaceProviderId,
+    expected: &CloudWorkspaceProviderId,
     risk: RequestRisk,
 ) -> Result<T, CloudWorkspaceClientError>
 where
@@ -3405,31 +3561,31 @@ where
 
 fn ensure_connection(
     value: CloudProviderConnectionResponse,
-    expected: CloudWorkspaceProviderId,
+    expected: &CloudWorkspaceProviderId,
 ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-    if value.provider != expected {
+    if &value.provider != expected {
         return Err(invalid_response());
     }
     Ok(value)
 }
 
 trait ProviderBound {
-    fn provider_id(&self) -> CloudWorkspaceProviderId;
+    fn provider_id(&self) -> &CloudWorkspaceProviderId;
 }
 
 impl ProviderBound for CloudProviderSummary {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.id
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.id
     }
 }
 impl ProviderBound for CloudWorkspaceSetup {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.provider
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.provider
     }
 }
 impl ProviderBound for CloudWorkspaceQuote {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.provider
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.provider
     }
 }
 
@@ -3906,18 +4062,63 @@ mod tests {
         assert_eq!(old.operation.detail_code, None);
     }
 
+    fn provider_id(id: &str) -> CloudWorkspaceProviderId {
+        CloudWorkspaceProviderId::try_from(id.to_owned()).unwrap()
+    }
+
+    // PRO-415: which providers exist is the server's to say. The client reads
+    // any id of the registry's shape, one it has never heard of included, and
+    // refuses anything that could not go into a path segment as it is.
     #[test]
-    fn hetzner_is_a_provider_this_client_names_and_reads() {
-        assert!(SUPPORTED_PROVIDERS.split(',').any(|provider| provider == "hetzner"));
-        let provider: CloudWorkspaceProviderId = serde_json::from_str(r#""hetzner""#).unwrap();
-        assert_eq!(provider, CloudWorkspaceProviderId::Hetzner);
-        assert_eq!(provider.as_str(), "hetzner");
-        assert_eq!(serde_json::to_string(&provider).unwrap(), r#""hetzner""#);
-        // Every provider the client declares is one it can also read back.
-        for name in SUPPORTED_PROVIDERS.split(',') {
+    fn a_provider_id_is_any_registry_shaped_string() {
+        // Described providers first; the fixed ids only for a server without them.
+        assert_eq!(SUPPORTED_PROVIDERS.split(',').next(), Some("described"));
+        for name in SUPPORTED_PROVIDERS.split(',').skip(1) {
+            assert!(serde_json::from_value::<CloudWorkspaceProviderId>(json!(name)).is_ok(), "{name}");
+        }
+        for name in ["hetzner", "acme-cloud", "0x", &"a".repeat(63)] {
             let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(parsed.as_str(), name);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(name));
         }
+        for name in ["", "Box", "-leading", "a/b", "a b", "a_b", "é", &"a".repeat(64)] {
+            assert!(serde_json::from_value::<CloudWorkspaceProviderId>(json!(name)).is_err(), "{name:?}");
+        }
+    }
+
+    // PRO-415: a described provider's descriptor reaches the webview whole,
+    // fields this client does not type included; an older server's summary,
+    // without one, still reads.
+    #[test]
+    fn provider_summaries_carry_their_descriptor() {
+        let described: CloudProviderSummary = serde_json::from_value(json!({
+            "id": "acme-cloud", "displayName": "Acme", "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" },
+            "descriptor": {
+                "id": "acme-cloud", "label": "Acme Cloud", "icon": "server", "order": 40, "listed": true,
+                "credentialFields": [{ "name": "token", "kind": "secret", "label": "Acme token", "helpUrl": "https://acme.example/tokens" }],
+                "capabilities": { "pauseResumeWithMemory": false, "stopStart": true, "snapshots": false, "exec": false, "computeRunsUntilStopped": false },
+                "allowedRetentionDays": [7, 30], "somethingNew": { "kept": true }
+            }
+        }))
+        .unwrap();
+        assert_eq!(described.label(), "Acme Cloud");
+        assert_eq!(described.credential_fields(), vec![CloudProviderCredentialField { name: "token".into(), kind: "secret".into(), label: "Acme token".into(), help_url: Some("https://acme.example/tokens".into()) }]);
+        let projected = serde_json::to_value(&described).unwrap();
+        assert_eq!(projected["descriptor"]["somethingNew"], json!({ "kept": true }));
+        assert_eq!(projected["descriptor"]["allowedRetentionDays"], json!([7, 30]));
+        assert_eq!(projected["descriptor"]["credentialFields"][0]["helpUrl"], json!("https://acme.example/tokens"));
+
+        let older: CloudProviderSummary = serde_json::from_value(json!({
+            "id": "box", "displayName": "Boat", "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }
+        }))
+        .unwrap();
+        assert!(older.descriptor.is_none());
+        assert_eq!(older.label(), "Boat");
+        assert_eq!(older.credential_fields().len(), 1);
+        assert!(older.credential_fields()[0].secret());
+        assert_eq!(serde_json::to_value(&older).unwrap()["descriptor"], Value::Null);
     }
 
     #[test]
@@ -3942,7 +4143,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box,hetzner"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: described,machine0,box,hetzner\r\n"));
     }
 
     #[test]
@@ -3951,9 +4152,9 @@ mod tests {
             r#"{"provider":"box","state":"not-connected","canManage":false,"ignored":"drop"}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let detail = service.provider(CloudWorkspaceProviderId::Box).unwrap();
+        let detail = service.provider(provider_id("box")).unwrap();
         let captured = request.join().unwrap();
-        assert_eq!(detail.provider, CloudWorkspaceProviderId::Box);
+        assert_eq!(detail.provider, provider_id("box"));
         assert!(matches!(
             detail.state,
             CloudProviderConnectionState::NotConnected
@@ -3964,28 +4165,37 @@ mod tests {
             .starts_with("GET /v1/desktop/orgs/org-1/cloud-providers/box HTTP/1.1"));
     }
 
-    // PRO-111: the key dialog names the provider as the organization's list does.
+    // PRO-111, PRO-415: the key dialog names the provider and asks for its
+    // credential as the organization's list describes it.
     #[test]
-    fn provider_display_name_comes_from_the_organization_list() {
-        let summary = |id: &str, name: &str| json!({ "id": id, "displayName": name, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" } });
-        let body = json!({ "providers": [summary("box", "Boat"), summary("local-docker", "Local Docker (development)")] }).to_string();
+    fn provider_summary_for_the_dialog_comes_from_the_organization_list() {
+        let summary = |id: &str, name: &str, descriptor: Value| json!({ "id": id, "displayName": name, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": descriptor });
+        let fields = json!([{ "name": "account", "kind": "text", "label": "Account id" }, { "name": "secret", "kind": "secret", "label": "Secret key" }]);
+        let body = json!({ "providers": [
+            summary("box", "Boat", Value::Null),
+            summary("acme-cloud", "Acme", json!({ "id": "acme-cloud", "label": "Acme Cloud (test)", "icon": "cloud", "order": 90, "credentialFields": fields })),
+        ] })
+        .to_string();
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let authorization = ProviderConnectAuthorization { context: context(), provider: CloudWorkspaceProviderId::LocalDocker };
-        assert_eq!(service.provider_display_name(&authorization).as_deref(), Some("Local Docker (development)"));
+        let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id("acme-cloud") };
+        let found = service.provider_summary(&authorization).unwrap();
+        assert_eq!(found.label(), "Acme Cloud (test)");
+        let asked: Vec<(String, bool)> = found.credential_fields().into_iter().map(|field| (field.name.clone(), field.secret())).collect();
+        assert_eq!(asked, vec![("account".into(), false), ("secret".into(), true)]);
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-providers HTTP/1.1"));
         assert!(!captured.extra_request);
 
-        // Not listed, or no list: no name, and the dialog falls back to the provider's own label.
+        // Not listed, or no list: nothing, and the dialog falls back to the provider's id and one key.
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let authorization = ProviderConnectAuthorization { context: context(), provider: CloudWorkspaceProviderId::Hetzner };
-        assert_eq!(service.provider_display_name(&authorization), None);
+        let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id("hetzner") };
+        assert!(service.provider_summary(&authorization).is_none());
         request.join().unwrap();
         let (base, _, request) = serve_once(response("503 Service Unavailable", "{}", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.provider_display_name(&authorization), None);
+        assert!(service.provider_summary(&authorization).is_none());
         request.join().unwrap();
     }
 
@@ -4038,8 +4248,8 @@ mod tests {
     fn provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation() {
         type Call = fn(&CloudWorkspaceService, String) -> Option<CloudWorkspaceClientError>;
         let calls: [Call; 2] = [
-            |service, revision| service.set_provider_creation_enabled(CloudWorkspaceProviderId::Box, revision, false).err(),
-            |service, revision| service.revalidate_provider(CloudWorkspaceProviderId::Box, revision).err(),
+            |service, revision| service.set_provider_creation_enabled(provider_id("box"), revision, false).err(),
+            |service, revision| service.revalidate_provider(provider_id("box"), revision).err(),
         ];
         for call in calls {
             // A member: the read says so, and nothing is posted.
@@ -4586,7 +4796,7 @@ mod tests {
     fn provider_disconnect_denies_members_before_any_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, AccountManager::context_revision(&context()), DisconnectDisposition::Retain).unwrap_err();
+        let error = service.disconnect_provider(provider_id("box"), AccountManager::context_revision(&context()), DisconnectDisposition::Retain).unwrap_err();
         assert_eq!(error.code, "organization_admin_required");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET "));
@@ -4597,7 +4807,7 @@ mod tests {
     fn provider_disconnect_fences_stale_organization_before_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, "old-context".into(), DisconnectDisposition::Destroy).unwrap_err();
+        let error = service.disconnect_provider(provider_id("box"), "old-context".into(), DisconnectDisposition::Destroy).unwrap_err();
         assert_eq!(error.code, "account_context_changed");
         assert!(!request.join().unwrap().extra_request);
     }
@@ -4615,7 +4825,7 @@ mod tests {
         }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let setup = service.setup(None, CloudWorkspaceProviderId::Box).unwrap();
+        let setup = service.setup(None, provider_id("box")).unwrap();
         let captured = request.join().unwrap();
         assert!(matches!(
             setup.locations[0].placement,
@@ -4688,7 +4898,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let quote = service
             .quote(None, CloudWorkspaceQuoteInput {
-                provider: CloudWorkspaceProviderId::Machine0,
+                provider: provider_id("machine0"),
                 source_id: "ubuntu".into(),
                 location_id: "us".into(),
                 machine_class_id: "small".into(),
@@ -4996,7 +5206,7 @@ mod tests {
                     id: "workspace-1".into(),
                     org_id: "another-org".into(),
                     name: "one".into(),
-                    provider: CloudWorkspaceProviderId::Box,
+                    provider: provider_id("box"),
                     state: WorkspaceState::Ready,
                     access_mode: WorkspaceAccessMode::Private,
                     created_at: 1,
@@ -5009,6 +5219,7 @@ mod tests {
                     repositories: None,
                     created_by: None,
                     last_activity_at: None,
+                    idle_suspend_minutes: None,
                     revision: None,
                     runtime_activity: None,
                     authority: None,
@@ -5951,6 +6162,63 @@ mod tests {
     }
 
     #[test]
+    fn set_idle_suspend_posts_the_window_and_checks_the_answer_names_it() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["idleSuspendMinutes"] = json!(0);
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.set_idle_suspend(None, "workspace-1", 0).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert!(captured.text.to_ascii_lowercase().contains("x-terminalx-cloud-workspace-idle-options: never-v1"));
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "idleSuspendMinutes": 0 }));
+        assert_eq!(changed.idle_suspend_minutes, Some(0));
+
+        // An answer that does not name the window asked for (an older
+        // server, another workspace's) is an unknown outcome, not a success.
+        for (key, value) in [("idleSuspendMinutes", json!(15)), ("id", json!("workspace-9"))] {
+            let mut other = workspace.clone();
+            other[key] = value;
+            let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.set_idle_suspend(None, "workspace-1", 0).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, "cloud_workspace_request_outcome_unknown", "{key}");
+        }
+
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.set_idle_suspend(None, "../x", 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.set_idle_suspend(None, "workspace-1", -1).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn idle_suspend_reads_the_window_and_its_choices_for_that_workspace() {
+        let body = json!({
+            "workspaceId": "workspace-1", "idleSuspendMinutes": 15,
+            "allowedIdleSuspendMinutes": [5, 10, 15, 30], "maxIdleSuspendMinutes": 30
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let read = service.idle_suspend(None, "workspace-1").unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert_eq!(read, WorkspaceIdleSuspend {
+            workspace_id: "workspace-1".into(),
+            idle_suspend_minutes: Some(15),
+            allowed_idle_suspend_minutes: vec![5, 10, 15, 30],
+            max_idle_suspend_minutes: Some(30),
+        });
+
+        let mut other = body.clone();
+        other["workspaceId"] = json!("workspace-9");
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.idle_suspend(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+    }
+
+    #[test]
     fn share_identifiers_are_checked_before_sending() {
         let (_, service) = test_service("http://127.0.0.1:9");
         assert_eq!(service.share_put(None, "workspace-1", "../x", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
@@ -5963,7 +6231,7 @@ mod tests {
         let body = r#"{"error":"cloud_provider_disabled"}"#;
         let (base, _, request) = serve_once(response("403 Forbidden", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.setup(None, CloudWorkspaceProviderId::Machine0).unwrap_err();
+        let error = service.setup(None, provider_id("machine0")).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("cloud_provider_disabled", Some(403)));
         assert!(!error.retryable);

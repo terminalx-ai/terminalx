@@ -1,4 +1,5 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import { rememberCloudProviders } from "@/lib/cloudProviders";
 import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
@@ -425,7 +426,11 @@ export const api = {
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
-  cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
+  cloudProviders: async () => {
+    const response = await invoke<CloudProviderSummaryResponse>("cloud_providers");
+    rememberCloudProviders(response.providers);
+    return response;
+  },
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
@@ -551,6 +556,12 @@ export const api = {
    */
   cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
     invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
+  /** The workspace's idle window and its choices (PRO-410), for whoever may manage it. */
+  cloudWorkspaceIdleSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceIdleSuspend>("cloud_workspace_idle_suspend", { workspaceId, orgId: orgId ?? null }),
+  /** Change how long the workspace may sit idle before it is stopped; 0 is never (PRO-410). */
+  cloudWorkspaceSetIdleSuspend: (workspaceId: string, idleSuspendMinutes: number, orgId?: string | null) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_idle_suspend", { workspaceId, idleSuspendMinutes, orgId: orgId ?? null }),
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
@@ -888,7 +899,6 @@ export interface CloudCatalogFeed {
   deletedWorkspaceIds: string[];
 }
 
-/** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
 export interface CloudMirrorRepository {
   repo: string;
   branch: string | null;
@@ -946,7 +956,11 @@ export interface CloudMirrorPublished {
   takenBack: number;
 }
 
-export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
+/**
+ * A cloud provider's id. Which ones exist is the server's to say (PRO-415):
+ * the app lists, names, draws and asks for them from their descriptors.
+ */
+export type CloudWorkspaceProviderId = string;
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -957,6 +971,46 @@ export interface CloudProviderCapabilities {
   locationSelection: "required" | "automatic";
   sourceSelection: "required" | "optional" | "none";
   pricing: "provider-rate" | "estimate" | "unavailable";
+}
+
+/** One input of a provider's credential, asked for in the app's secure dialog. */
+export interface CloudProviderCredentialField {
+  name: string;
+  /** `secret` is never shown; `text` may be. */
+  kind: "secret" | "text" | string;
+  label: string;
+  helpUrl: string | null;
+}
+
+/** Everything the app shows about a provider, as the server describes it (PRO-415). */
+export interface CloudProviderDescriptor {
+  id: CloudWorkspaceProviderId;
+  label: string;
+  /** A generic glyph word (`ship`, `server`, `cloud`, `container`); see `cloudProviderIcon`. */
+  icon: string;
+  order: number;
+  description: string;
+  billing: string;
+  billedByProvider: boolean;
+  /** False: hidden, listed only while the organization is still connected to it. */
+  listed: boolean;
+  credentialFields: CloudProviderCredentialField[];
+  capabilities: {
+    pauseResumeWithMemory: boolean;
+    stopStart: boolean;
+    snapshots: boolean;
+    exec: boolean;
+    computeRunsUntilStopped: boolean;
+  };
+  offering: {
+    locations: string;
+    sources: string;
+    machineClasses: string;
+    pricingSource: string;
+    suspendedBilling: string;
+  };
+  allowedIdleSuspendMinutes: number[];
+  allowedRetentionDays: number[];
 }
 
 export interface CloudProviderSummary {
@@ -971,6 +1025,8 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+  /** Null from a server older than described providers. */
+  descriptor: CloudProviderDescriptor | null;
 }
 
 export type AgentLoginProvider = "codex" | "claude" | "cursor";
@@ -1217,8 +1273,20 @@ export interface CloudWorkspaceSetup {
     activeHourlyMicros: number | null;
   }[];
   defaults: CloudWorkspaceProviderSelection;
+  /** Already limited to the organization's idle cap; 0 is never. */
   allowedIdleSuspendMinutes: number[];
   allowedRetentionDays: number[];
+  /** The organization's idle cap (PRO-410); null or absent with none, or from an older server. */
+  maxIdleSuspendMinutes?: number | null;
+}
+
+/** A workspace's idle window and what it may be changed to (PRO-410). */
+export interface CloudWorkspaceIdleSuspend {
+  workspaceId: string;
+  /** Minutes without activity before it is stopped, 0 for never. */
+  idleSuspendMinutes: number | null;
+  allowedIdleSuspendMinutes: number[];
+  maxIdleSuspendMinutes: number | null;
 }
 
 export interface CloudWorkspaceQuoteInput extends CloudWorkspaceProviderSelection {
@@ -1271,6 +1339,8 @@ export interface CloudWorkspace {
   repositories?: CloudWorkspaceRepository[] | null;
   createdBy?: string | null;
   lastActivityAt?: number | null;
+  /** Minutes without activity before TerminalX stops it, 0 for never (PRO-410); absent from older servers. */
+  idleSuspendMinutes?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
   runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
   /** Monotonic per workspace (S1). */

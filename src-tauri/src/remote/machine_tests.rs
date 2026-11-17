@@ -466,6 +466,8 @@ async fn update_status_has_the_contract_s_shape() {
     assert_eq!(status["progress"], json!({ "phase": "idle" }));
 
     // Not installed by the installer: unmanaged, and no update from here.
+    // The first machine holds the test home's lock: end it before the next.
+    drop((served, peer, m));
     let m2 = machine_rpc();
     serving(&m2, environment(&m2, Some(m2.path("no-install")), false, no_blockers), Host { others: Vec::new(), window: false });
     let (peer2, _events2, _) = computer(&m2.rpc).await;
@@ -579,6 +581,8 @@ async fn a_desktop_machine_asks_its_window_to_update_the_app() {
     // No window attached: the app cannot update itself now.
     assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "0.9.0" })).await), "update_unavailable");
 
+    // The first machine holds the test home's lock: end it before the next.
+    drop((events, peer, m));
     let m2 = machine_rpc();
     let mut published2 = m2.sink.subscribe();
     serving(&m2, environment(&m2, None, true, no_blockers), Host { others: Vec::new(), window: true });
@@ -670,17 +674,24 @@ async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
     m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::SignedOut, Some("2.4.1".to_string())))]));
     let kept = call(&m.rpc, &peer, "runtime.agents", json!({})).await.unwrap();
     assert_eq!(kept["agents"][0]["signIn"], "signedIn");
-    // A participant's refresh starts no probe: it is answered from the kept check.
-    let (viewer, _viewer_events) = Peer::new("viewer-350".into(), Authority::Participate);
+    // A participant's refresh starts no probe: it is answered from the kept
+    // check. A participant is served only once the members are listed
+    // (#475), and then a manage connection names its person too.
+    m.rpc.set_collaboration(Some(
+        serde_json::from_value(json!({ "v": 1, "members": [{ "userId": "admin", "role": "manager" }, { "userId": "viewer", "role": "viewer" }] })).unwrap(),
+    ));
+    let (manager, _manager_events) = Peer::for_user("manager-350".into(), Authority::Manage, Some("admin".into()));
+    call(&m.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": protocol::served(true) })).await.unwrap();
+    let (viewer, _viewer_events) = Peer::for_user("viewer-350".into(), Authority::Participate, Some("viewer".into()));
     call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["agents/1"] })).await.unwrap();
     let viewed = call(&m.rpc, &viewer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
     assert_eq!(viewed["agents"][0]["signIn"], "signedIn");
-    let asked = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    let asked = call(&m.rpc, &manager, "runtime.agents", json!({ "refresh": true })).await.unwrap();
     assert_eq!(asked["agents"][0]["signIn"], "signedOut");
 
     // A probe that cannot tell is unknown, never signed out.
     m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::Unknown, None))]));
-    let unknown = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    let unknown = call(&m.rpc, &manager, "runtime.agents", json!({ "refresh": true })).await.unwrap();
     assert_eq!(unknown["agents"][0]["signIn"], "unknown");
     assert_eq!(unknown["agents"][0]["version"], Value::Null);
 }
@@ -764,4 +775,72 @@ fn a_sign_in_started_from_another_computer_uses_the_device_code_where_there_is_o
     let elsewhere = crate::harness::setup::command_elsewhere("codex", step).unwrap();
     assert!(!here.contains("--device-auth"));
     assert!(elsewhere.ends_with("'login' '--device-auth'"), "{elsewhere}");
+}
+
+// ------------------------------------------------- machine/6 (PRO-351)
+
+/// PRO-351: a paired computer browses the machine's home, adds a folder as
+/// a project and removes it again; each change reaches `machine.changed`,
+/// and the folder stays. A session-scoped participant can do none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_computer_adds_and_removes_a_machines_projects() {
+    let m = machine_rpc();
+    let home = m.path("home");
+    let api = home.join("code/api");
+    std::fs::create_dir_all(&api).unwrap();
+    std::fs::write(api.join("README.md"), "api\n").unwrap();
+    m.rpc.set_home_for_tests(&home);
+    let (peer, mut events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/6")), "{hello}");
+    // Let the watcher read what is there before anything changes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let listing = call(&m.rpc, &peer, "machine.browse", json!({})).await.unwrap();
+    assert_eq!(listing["home"], home.to_string_lossy().as_ref());
+    assert_eq!(listing["entries"][0]["name"], "code");
+    let code_dir = call(&m.rpc, &peer, "machine.browse", json!({ "path": home.join("code") })).await.unwrap();
+    assert_eq!(code_dir["entries"][0]["path"], api.to_string_lossy().as_ref());
+    assert_eq!(code(call(&m.rpc, &peer, "machine.browse", json!({ "path": m.path("") })).await), "path_forbidden");
+
+    let added = call(&m.rpc, &peer, "machine.addProject", json!({ "path": api })).await.unwrap();
+    let id = added["project"]["projectId"].as_str().unwrap().to_string();
+    let changed = next_event(&mut events, "machine.changed").await;
+    assert!(changed["projects"].as_array().unwrap().iter().any(|project| project["projectId"] == id.as_str()), "{changed}");
+    let again = call(&m.rpc, &peer, "machine.browse", json!({ "path": home.join("code") })).await.unwrap();
+    assert_eq!(again["entries"][0]["projectId"], id.as_str());
+
+    assert_eq!(call(&m.rpc, &peer, "machine.removeProject", json!({ "projectId": id })).await.unwrap(), json!({ "removed": true }));
+    let changed = next_event(&mut events, "machine.changed").await;
+    assert!(!changed["projects"].as_array().unwrap().iter().any(|project| project["projectId"] == id.as_str()), "{changed}");
+    assert!(api.join("README.md").exists(), "the folder stays");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.removeProject", json!({ "projectId": id })).await), "not_found");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.cloneStatus", json!({ "cloneId": "clone-unknown" })).await), "not_found");
+
+    let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/6"] })).await.unwrap();
+    for (method, params) in [
+        ("machine.browse", json!({})),
+        ("machine.addProject", json!({ "path": api })),
+        ("machine.removeProject", json!({ "projectId": id })),
+        ("machine.cloneProject", json!({ "repository": "acme/api", "parent": home })),
+        ("machine.cloneStatus", json!({ "cloneId": "clone-unknown" })),
+        ("machine.cloneCancel", json!({ "cloneId": "clone-unknown" })),
+    ] {
+        assert!(call(&m.rpc, &viewer, method, params).await.is_err(), "{method} is the manager's");
+    }
+    assert!(crate::store::projects::list().unwrap().0.is_empty(), "the viewer added nothing");
+}
+
+/// A one-root runtime has no machine/6: it never lists folders outside its root.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_root_runtime_has_no_machine_6() {
+    let _home = crate::store::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    let hello = call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/6", "fs/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["fs/1"]));
+    assert_eq!(code(call(&rpc, &peer, "machine.browse", json!({})).await), "capability_not_granted");
+    terminals.kill_all();
 }
