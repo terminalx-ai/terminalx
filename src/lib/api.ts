@@ -2691,6 +2691,8 @@ export interface PullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has. Empty or absent on older workspace runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
   /** The head commit GitHub has; absent on older workspace runtimes. */
