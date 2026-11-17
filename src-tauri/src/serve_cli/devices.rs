@@ -342,7 +342,8 @@ mod tests {
         let listed = phones(data.path()).unwrap();
         assert_eq!(listed.iter().map(|phone| phone.id.as_str()).collect::<Vec<_>>(), ["paired"], "only phones that paired, not unused codes or session invitations");
         let printed = phone_table(&listed);
-        assert!(printed.contains("PHONE") && printed.contains("paired  Sam's iPhone  ios  last seen"), "{printed}");
+        let row = printed.lines().nth(1).unwrap_or_default();
+        assert!(printed.starts_with("ID") && printed.contains("PHONE") && row.starts_with("paired  Sam's iPhone  ios ") && row.contains("last seen 2026-11-17 "), "{printed}");
         assert_eq!(revoke(data.path(), "paired").unwrap(), 0);
         assert!(phones(data.path()).unwrap().is_empty());
         assert_eq!(phone_table(&[]), "", "no phones, no table");
