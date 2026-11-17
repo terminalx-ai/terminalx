@@ -115,7 +115,7 @@ it("keeps search and filters across views, hides automations and archives until 
   await waitFor(() => expect(rowNames()).toEqual(["Fix nightly"]));
 });
 
-// Where is offered only with Machines on and a machine paired: MachineDashboard.test sorts and hides it.
+// Where is offered only with a machine paired: MachineDashboard.test sorts and hides it.
 it.each(tableColumns(false))("sorts and toggles the $label column", async ({ id, label, menu }) => {
   state.sessions = [session("Task 10"), session("Task 2")];
   setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, hiddenColumns: [] } });
