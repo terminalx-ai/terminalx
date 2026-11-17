@@ -144,11 +144,11 @@ describe("repository action editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Edit Dev" })).toBeNull());
     save.mockRejectedValueOnce(new Error("Repository file is unreadable."));
-    fireEvent.click(screen.getByRole("button", { name: "Edit Test" }));
-    fireEvent.click(screen.getByRole("button", { name: "Reset to terminalx.json" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reset all actions to terminalx.json" }));
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Repository file is unreadable.");
-    expect(screen.getByRole("dialog")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Reset to terminalx.json" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit Test" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Reset all actions to terminalx.json" }));
     await screen.findByRole("button", { name: "Edit Dev" });
     expect(screen.queryByRole("button", { name: "Edit Test" })).toBeNull();
   });
@@ -157,7 +157,7 @@ describe("repository action editor", () => {
     render(<Editor />);
     fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
     expect(screen.getByRole("button", { name: "Hide action" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset all actions to terminalx.json", hidden: true })).toBeNull();
   });
 
   it("refuses to save an action that was deleted while the dialog was open", async () => {
