@@ -2071,7 +2071,7 @@ fn presence_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     // JSON 1.0 is also a JS safe integer; strings and fractional values are not.
     let number = serde_json::Number::deserialize(deserializer)?;
     let value = number.as_f64().ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid sequence"))?;
-    if value < 1.0 || value > 9_007_199_254_740_991.0 || value.fract() != 0.0 {
+    if !(1.0..=9_007_199_254_740_991.0).contains(&value) || value.fract() != 0.0 {
         return Err(serde::de::Error::custom("invalid sequence"));
     }
     Ok(value as u64)
