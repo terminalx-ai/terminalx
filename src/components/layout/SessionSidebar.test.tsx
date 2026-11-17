@@ -587,7 +587,7 @@ describe("renaming from the sidebar", () => {
     mount();
     try {
       fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
-      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
       // No dialog for a branch that is not there: the toast says why, and what to do.
       expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
       const toast = await screen.findByRole("alert");
@@ -622,7 +622,7 @@ describe("renaming from the sidebar", () => {
     mount();
     try {
       fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
-      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
       await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
       const alerts = await screen.findAllByRole("alert");
       expect(alerts.map((alert) => alert.textContent)).toEqual([
@@ -645,7 +645,7 @@ describe("renaming from the sidebar", () => {
   };
   const createBranchFrom = async (row: HTMLElement) => {
     fireEvent.contextMenu(row);
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
   };
 
@@ -701,7 +701,7 @@ describe("renaming from the sidebar", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
     // The designed order (02.13, PRO-386): keys shown only where one is bound.
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Copy link", "Share session…", "Issue and pull request", "Remove workspace…The conversations are kept", "Archive", "Delete session…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Rename branch…", "Copy link", "Share session…", "Issue and pull request", "Remove workspace…The conversations are kept", "Archive", "Delete session…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -709,7 +709,7 @@ describe("renaming from the sidebar", () => {
     await bootTwo();
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
     expect(name.value).toBe("dc/crane");
     fireEvent.change(name, { target: { value: "Pricing research" } });
@@ -725,13 +725,55 @@ describe("renaming from the sidebar", () => {
     await bootTwo();
     mount();
     const row = screen.getByRole("button", { name: "Payments, Talk crane" });
-    fireEvent.doubleClick(row);
+    fireEvent.contextMenu(row);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
     expect(name.value).toBe("Payments");
     fireEvent.change(name, { target: { value: "Billing" } });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
     expect(mocks.invoke.mock.calls.some(([command]) => command === "rename_branch")).toBe(false);
     expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "dc/crane", label: "Billing" } } });
+  });
+
+  it.each(["double-click", "context menu", "dropdown"])("renames the displayed session on a named branch via %s without changing Git", async (entry) => {
+    withTrees({ "dc/crane": "Payments" });
+    await bootTwo();
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "rename_session" || command === "rename_tab") {
+        const { sessionId, tabId, title } = args as { sessionId: string; tabId?: string; title: string };
+        sessions = sessions.map((s) => s.id !== sessionId ? s : command === "rename_session"
+          ? { ...s, title }
+          : { ...s, tabs: s.tabs.map((tab) => tab.id === tabId ? { ...tab, title } : tab) });
+        return;
+      }
+      return base(command, args);
+    });
+    const { SessionDialogs } = await import("@/components/session/SessionDialogs");
+    const { closeRenameSession } = await import("@/lib/dialogs");
+    act(() => closeRenameSession());
+    render(<SessionDialogs />);
+    mount();
+    const row = screen.getByRole("button", { name: "Payments, Talk crane" });
+    expect(row.querySelector("[data-row-title]")?.textContent).toBe("Talk crane");
+    if (entry === "double-click") fireEvent.doubleClick(row);
+    else {
+      if (entry === "context menu") fireEvent.contextMenu(row);
+      else fireEvent.keyDown(screen.getByRole("button", { name: "Menu for Talk crane" }), { key: "ArrowDown" });
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename…" }));
+    }
+    const input = await screen.findByRole("textbox", { name: "Session title" });
+    expect((input as HTMLInputElement).value).toBe("Talk crane");
+    expect(screen.queryByRole("checkbox", { name: "Also rename branch" })).toBeNull();
+    fireEvent.change(input, { target: { value: "Investigate billing" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke).toHaveBeenCalledWith("rename_session", { sessionId: "crane", title: "Investigate billing" });
+    // Reload persisted titles, as native session-change events do in the app.
+    await act(async () => store.refreshEverything());
+    expect(screen.getByRole("button", { name: "Payments, Investigate billing" }).querySelector("[data-row-title]")?.textContent).toBe("Investigate billing");
+    expect(store.getSessionStore().sessions.find((s) => s.id === "crane")?.branch).toBe("dc/crane");
+    expect(store.getSessionStore().workspaces["/repos/web"].find((w) => w.name === "crane")?.branch).toBe("dc/crane");
+    expect(mocks.invoke.mock.calls.some(([command]) => ["rename_branch", "update_project", "git_branch_here"].includes(command))).toBe(false);
   });
 
   it("renames a conversation by its title where the row shows its title", async () => {

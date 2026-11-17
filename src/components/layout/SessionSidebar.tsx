@@ -616,7 +616,7 @@ function ProjectGroup({
   );
   // The branch whose Rename dialog is open. The project's own checkout keeps its branch; its label can still change.
   const [renaming, setRenaming] = useState<string | null>(null);
-  // On a detached HEAD there is no branch to rename: Rename… says so, and offers to make one at the commit (PRO-295).
+  // On a detached HEAD there is no branch to rename: Rename branch… says so, and offers to make one at the commit (PRO-295).
   // The row's branch reads "detached at 1a2b3c4" then (or nothing): it is the checkout that says there is no branch.
   const detachedCheckout = (session: SessionEntry, branch: string) => {
     if (session.worktreeRemoved) return null;
@@ -1057,7 +1057,7 @@ function BranchRow({
       <ContextMenuContent className="w-56">
         {onRename && (
           <ContextMenuItem onSelect={onRename}>
-            <Pencil /> Rename…
+            <Pencil /> Rename branch…
           </ContextMenuItem>
         )}
         {branch && (
@@ -1206,13 +1206,14 @@ type ConversationMenuProps = {
   session: SessionEntry;
   branch: string | null;
   rename: (() => void) | null;
+  renameBranch?: (() => void) | null;
   /** The sessions the row stands for, which Select picks for the bulk bar. */
   ids?: string[];
   linkTo?: ConversationLinkActions | null;
 };
 
 /** One action list for a conversation's ⋯, right-click and keyboard menus, in both sidebar layouts. */
-export function ConversationMenuItems({ session, branch, rename, ids = [session.id], linkTo, contextMenu = false }: ConversationMenuProps & { contextMenu?: boolean }) {
+export function ConversationMenuItems({ session, branch, rename, renameBranch, ids = [session.id], linkTo, contextMenu = false }: ConversationMenuProps & { contextMenu?: boolean }) {
   const Item = contextMenu ? ContextMenuItem : DropdownMenuItem;
   const Separator = contextMenu ? ContextMenuSeparator : DropdownMenuSeparator;
   const Sub = contextMenu ? ContextMenuSub : DropdownMenuSub;
@@ -1309,6 +1310,11 @@ export function ConversationMenuItems({ session, branch, rename, ids = [session.
           <Pencil /> Rename…
         </Item>
       )}
+      {renameBranch && (
+        <Item onSelect={renameBranch}>
+          <GitBranch /> Rename branch…
+        </Item>
+      )}
       <Item onSelect={() => void copyShareLink(session.id).catch(reportError(`Couldn't copy a link to “${title}”`))}>
         <Link /> Copy link
       </Item>
@@ -1388,7 +1394,7 @@ export function ConversationRow({
   /** A branch row's sessions (as tabs, the row stands for all of them): the row shows the most pressing state among them. */
   peers?: SessionEntry[];
   selected: boolean;
-  /** What the row stands for: its conversation, or (alone on its branch in a project) the branch, which Rename then renames. */
+  /** Whether to include branch context in the row’s accessible name. */
   named?: "title" | "branch";
   /** Where a row in a section or the Pinned group lives (its project and branch), for its tooltip. */
   locationLabel?: string;
@@ -1398,9 +1404,9 @@ export function ConversationRow({
   merged?: boolean;
   /** Start another session on the row's branch, where it is checked out (or a workspace from it). */
   onNewSession?: NewSessionAction | null;
-  /** What the reader named the branch, shown instead of it on a row named by its branch. */
+  /** The branch label used in the row’s tooltip and accessible name. */
   label?: string;
-  /** Open the branch's Rename dialog; a row named by its branch renames that, any other its conversation. */
+  /** Open the separate Rename branch action; title renaming always targets the session. */
   onRenameBranch?: (() => void) | null;
   /** The branch it works on, named at the row's end; without one the row shows when it was last active. */
   branch: string | null;
@@ -1447,8 +1453,8 @@ export function ConversationRow({
   const rowStatus = useSessionRowStatus(peers);
   // A row is its name and its age: which agent runs it is in the chat, and where it works is in its tooltip.
   const branchName = locationLabel ?? label ?? branch;
-  // Rename is of what the row shows: its branch's label, or its conversation's title.
-  const rename = named === "branch" ? onRenameBranch : () => openRenameSession(session.id);
+  // The visible title belongs to the session, even when this row represents a branch.
+  const rename = () => openRenameSession(session.id);
   return (
     <li ref={sort.ref} style={sort.style} className={family ? "[--own-indent:var(--indent,0px)]" : undefined} data-lead={family ? session.id : undefined} data-worker={worker ? session.id : undefined}
       data-try={worker && found ? found.number : undefined} data-earlier-try={earlierTry ? "" : undefined}>
@@ -1494,7 +1500,7 @@ export function ConversationRow({
               // A lead with a run opens on its run (18.07).
               if (runLead) showRunView(session.id, true);
             }}
-            onDoubleClick={picking ? undefined : (rename ?? undefined)}
+            onDoubleClick={picking ? undefined : rename}
             aria-current={selected ? "true" : undefined}
             aria-pressed={picking ? picked : undefined}
             aria-describedby={statusDescriptionId}
@@ -1532,10 +1538,10 @@ export function ConversationRow({
           </RowActions>
         </div>
         </ContextMenuTrigger>
-        <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
+        <RowContextMenu session={session} branch={branch ?? session.branch ?? null} rename={rename} renameBranch={onRenameBranch} ids={ids} linkTo={linkTo} />
         </AsyncContextMenu>
         <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
-          <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} ids={ids} linkTo={linkTo} />
+          <ConversationMenuItems session={session} branch={branch ?? session.branch ?? null} rename={rename} renameBranch={onRenameBranch} ids={ids} linkTo={linkTo} />
         </DropdownMenuContent>
       </AsyncDropdownMenu>
       {family && leadExpanded && family.rows.length > 0 && (
