@@ -75,6 +75,16 @@ describe("the shortcut registry", () => {
     expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
   });
 
+  it("gives Home a default on both platforms while respecting custom or disabled bindings", () => {
+    for (const mac of [true, false]) {
+      expect(resolveKeymap({}, mac)["app.home"]).toEqual(["mod+alt+0"]);
+      expect(bindingProblem("app.home", "mod+alt+0", mac)).toBeNull();
+      expect(isTerminalReserved("mod+alt+0", mac)).toBe(false);
+      expect(resolveKeymap({ "app.home": [] }, mac)["app.home"]).toEqual([]);
+      expect(resolveKeymap({ "app.home": ["mod+alt+g"] }, mac)["app.home"]).toEqual(["mod+alt+g"]);
+    }
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");

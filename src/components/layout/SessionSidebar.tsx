@@ -246,7 +246,7 @@ const ShowAgents = createContext(false);
  * that belong to none. Workspaces and tabs are not levels here; a row names
  * its branch, and the full tree is one click away as the detailed sidebar.
  */
-export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const order = useSidebarOrder();
   const filter = useSidebarFilter();
@@ -325,7 +325,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <SidebarTitlebar onHide={onHide} />
 
       <div className="shrink-0 px-2">
-        <AppDestinations onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
+        <AppDestinations onOpenHome={onOpenHome} onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}

@@ -165,8 +165,9 @@ vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/layout/Sidebar", () => ({
-  Sidebar: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
+  Sidebar: ({ onOpenSettings, onOpenHome }: { onOpenSettings: () => void; onOpenHome: () => void }) => (
     <div data-testid="sidebar">
+      <button type="button" onClick={onOpenHome}>Home</button>
       <button type="button" onClick={onOpenSettings}>Open settings</button>
     </div>
   ),
@@ -665,6 +666,18 @@ describe("cloud followers at launch", () => {
 
 
 describe("welcome routing", () => {
+  it.each(["mouse", "keyboard"])("opens Home from a selected session by %s", (input) => {
+    sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
+    const { rerender } = render(<AppShell />);
+    expect(screen.getByTestId("machine-session")).toBeTruthy();
+    if (input === "mouse") fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    else act(() => shortcuts.get("app.home")!());
+    rerender(<AppShell />);
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+    expect(screen.queryByTestId("machine-session")).toBeNull();
+  });
+
+
   it("shows all start actions on Home after a project exists, without checkout panels", () => {
     sessionStore.view = "home";
     render(<AppShell />);
