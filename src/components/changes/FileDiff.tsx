@@ -46,12 +46,12 @@ export function DiffStats({ additions, deletions }: { additions: number; deletio
 export function TooLargeState({ path, size, onOpenFile }: { path: string; size?: number | null; onOpenFile?: () => void }) {
   return <EmptyState icon={<FileX2 />} title="No diff to show"
     actions={onOpenFile && <Button size="sm" onClick={onOpenFile}><FileText /> Open file</Button>}>
-    <span className="font-mono">{path}</span> is {size != null ? `${formatSize(size)}, over the text preview limit` : "over the text preview limit"}, so the diff isn't drawn.{!onOpenFile && " Open it in the workspace to read or copy its full contents."}
+    <span className="font-mono">{path}</span> is {size != null ? `${formatSize(size)}, over the text preview limit` : "over the text preview limit (size unknown)"}, so the diff isn't drawn.{!onOpenFile && " Open it in the workspace to read or copy its full contents."}
   </EmptyState>;
 }
 
 type Content = { data: string; mime: string };
-type Pair = { kind: "text"; before: string; after: string } | { kind: "media"; before: Content | null; after: Content | null } | { kind: "large" };
+type Pair = { kind: "text"; before: string; after: string } | { kind: "media"; before: Content | null; after: Content | null } | { kind: "large"; size?: number | null };
 export function diffMediaKind(path: string): "image" | "pdf" | "svg" | null {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "svg" || ext === "pdf") return ext;
@@ -103,9 +103,10 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard, s
         const [before, after] = await Promise.all([source.mediaContentAt(oldPath ?? path, base), source.mediaContentAt(path, head)]);
         return { kind: "media", before, after };
       }
-      const next = text ?? await source.fileContentsAt(path, base, head);
-      const before = !text && oldPath ? (await source.fileContentsAt(oldPath, base, head)).before : next.before;
-      if (before === TOO_LARGE || next.after === TOO_LARGE) return { kind: "large" };
+      const next: Awaited<ReturnType<GitSource["fileContentsAt"]>> = text ?? await source.fileContentsAt(path, base, head);
+      const previous = !text && oldPath ? await source.fileContentsAt(oldPath, base, head) : next;
+      const before = previous.before;
+      if (before === TOO_LARGE || next.after === TOO_LARGE) return { kind: "large", size: next.after === TOO_LARGE ? next.afterSize : previous.beforeSize };
       return { kind: "text", before: before ?? "", after: next.after ?? "" };
     };
     void read().then((next) => { if (!cancelled) setPair(next); }).catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
@@ -121,7 +122,7 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard, s
   } : undefined;
   return <div className="flex h-full min-h-0 min-w-0 flex-col">
     {chrome && <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 text-xs scrollbar-none">
-      <PathChip path={path} size={pair?.kind === "large" ? size : undefined} />
+      <PathChip path={path} size={pair?.kind === "large" ? pair.size ?? size : undefined} />
       {stats && <DiffStats {...stats} />}
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {staging && source.applyHunk && Array.from({ length: hunks }, (_, index) => <Button key={index} size="xs" variant="ghost" disabled={staging.disabled} onClick={() => staging.onHunk(index)}>{staging.staged ? "Unstage" : "Stage"} hunk {index + 1}</Button>)}
@@ -135,7 +136,7 @@ function FileDiffContent({ source, path, oldPath, base, head, text, onDiscard, s
     {copyStatus && <p role="status" className={cn("px-3 py-1 text-xs", copyStatus === "Copied file" ? "sr-only" : "text-muted-foreground")}>{copyStatus}</p>}
     {error ? <div role="alert" className="p-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
       : !pair ? <div role="status" className="p-3 text-xs">Loading file diff…</div>
-      : pair.kind === "large" ? <TooLargeState path={path} size={size} onOpenFile={onOpenFile} />
+      : pair.kind === "large" ? <TooLargeState path={path} size={pair.size ?? size} onOpenFile={onOpenFile} />
       : pair.kind === "text" && (pair.before.includes("\0") || pair.after.includes("\0")) ? <p className="p-3 text-xs text-muted-foreground">Binary file changed.</p>
       : pair.kind === "text" && textView ? <div className="min-h-0 flex-1"><DiffPane workspace={source.key} path={path} before={pair.before} after={pair.after} base={base} originalPath={oldPath} mode={options.mode} wrap={options.wrap} hideWhitespace={options.hideWhitespace} /></div>
       : <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-hairline">
