@@ -323,7 +323,13 @@ pub fn seal_key_holder() {
         eprintln!("terminalx-serve: cannot protect the host key from same-account processes");
         std::process::exit(70);
     }
-    if let Err(error) = super::guest_account::check_linux_owner() {
+    if let Err(error) = super::guest_account::check_linux_owner().and_then(|_| {
+        // An explicit activation must not fall back to a generic runtime if
+        // installation lookup says absent/inaccessible (e.g. ProtectHome).
+        // Reject before any generic session/provider initialization; the RPC
+        // helper still validates its private identity before forwarding input.
+        if rpc { Ok(()) } else { require_linux_worker_runtime() }
+    }) {
         eprintln!("terminalx-serve: {error:#}");
         std::process::exit(70);
     }
