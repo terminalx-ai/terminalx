@@ -95,6 +95,25 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
 }
 
 #[test]
+fn workspace_creation_uses_committed_policy_while_a_broader_draft_is_previewed() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    projects::update(&project.path, projects::ProjectPatch {
+        repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env.local"]) }),
+        ..Default::default()
+    }).unwrap();
+    write(repo.path(), ".env.local", "local");
+    write(repo.path(), ".env.production", "production");
+    let draft = preview(repo.path(), Some(&patterns(&["*"])), None).unwrap();
+    assert_eq!(draft.patterns[0].matches, patterns(&[".env.local", ".env.production"]));
+    let created = git::create_worktree(repo.path(), "during-edit", Some("main")).unwrap();
+    assert!(Path::new(&created.path).join(".env.local").is_file());
+    assert!(!Path::new(&created.path).join(".env.production").exists());
+    assert_eq!(projects::repository_settings(repo.path()).unwrap().files_to_copy, patterns(&[".env.local"]));
+}
+
+#[test]
 fn repository_copy_settings_and_scripts_survive_independent_updates() {
     let _home = crate::store::temp_home();
     let repo = repo();

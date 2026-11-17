@@ -108,7 +108,7 @@ describe("Project settings", () => {
     expect(screen.getByRole("button", { name: "Refresh preview" })).toBeTruthy();
   });
 
-  it("saves an edit by itself once its preview is in and valid, and only the chosen repository's patterns", async () => {
+  it("commits a validated edit on blur, and only the chosen repository's patterns", async () => {
     render(<RepositorySettingsPage project={project} />);
     await screen.findByText(".env.local");
     const snapshot = mock.preview.mock.calls[0][2];
@@ -116,9 +116,42 @@ describe("Project settings", () => {
     await screen.findByText("config/local/app.json");
     expect(mock.preview).toHaveBeenLastCalledWith("/repo", [".env*", "config/local/**"], expect.any(String));
     expect(mock.preview.mock.calls.at(-1)?.[2]).toBe(snapshot);
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.blur(screen.getByRole("textbox"));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }));
     // The line being started stays under the cursor.
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(".env*\nconfig/local/**\n");
+  });
+
+  it("previews a paused intermediate glob without persisting it", async () => {
+    render(<RepositorySettingsPage project={project} />);
+    await screen.findByText(".env.local");
+    const textarea = screen.getByRole("textbox");
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "*" } });
+    await screen.findByText("config/local/app.json");
+    expect(mock.preview).toHaveBeenLastCalledWith("/repo", ["*"], expect.any(String));
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.change(textarea, { target: { value: "*.local" } });
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(1));
+    expect(mock.update).toHaveBeenLastCalledWith("/repo", { repositorySettings: { filesToCopy: ["*.local"] } });
+  });
+
+  it("cancels a pending blur commit when editing resumes before validation", async () => {
+    let answer!: (value: RepositoryFilesPreview) => void;
+    render(<RepositorySettingsPage project={project} />);
+    await screen.findByText(".env.local");
+    mock.preview.mockImplementationOnce(() => new Promise<RepositoryFilesPreview>((resolve) => { answer = resolve; }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "*" } });
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(answer).toBeDefined());
+    fireEvent.focus(textarea);
+    await act(async () => answer(result(["*"])));
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(1));
   });
 
   it("shows the repository include patterns read-only and never saves them", async () => {
@@ -128,6 +161,9 @@ describe("Project settings", () => {
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
     expect(textarea.readOnly).toBe(true);
     expect(textarea.value).toBe("config/local/**");
+    fireEvent.blur(textarea);
+    expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull();
+    expect(mock.update).not.toHaveBeenCalled();
     mock.preview.mockResolvedValue(result([".env*"]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
     await screen.findByText(".env.local");
@@ -153,6 +189,7 @@ describe("Project settings", () => {
     await waitFor(() => expect(answer).toBeDefined());
     mock.preview.mockResolvedValue({ ...result(), patterns: [{ pattern: "[", matches: [], error: "Unclosed character class" }] });
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "[" } });
+    fireEvent.blur(screen.getByRole("textbox"));
     await screen.findByRole("alert");
     await act(async () => answer(result(["slow"])));
     expect(screen.getByRole("alert").textContent).toBe("[: Unclosed character class");
@@ -160,16 +197,23 @@ describe("Project settings", () => {
     expect(screen.queryByText("config/local/app.json")).toBeNull();
   });
 
-  it("keeps the draft when saving fails and saves the next edit", async () => {
+  it("keeps the draft and explicitly retries unchanged text after a failed save", async () => {
     mock.update.mockRejectedValueOnce(new Error("Cannot save"));
     render(<RepositorySettingsPage project={project} />);
     await screen.findByText(".env.local");
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**" } });
+    fireEvent.blur(screen.getByRole("textbox"));
     expect((await screen.findByRole("alert")).textContent).toContain("Cannot save");
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("config/local/**");
     expect(mock.update).toHaveBeenCalledTimes(1);
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**\n.env*" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+    await screen.findByText("1 ignored file matches");
+    expect(screen.getByRole("alert").textContent).toContain("Cannot save");
+    expect(mock.update).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(2));
+    expect(mock.update.mock.calls[1]).toEqual(mock.update.mock.calls[0]);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull());
   });
 
   it("reports unreadable previews and can refresh after recovery", async () => {
