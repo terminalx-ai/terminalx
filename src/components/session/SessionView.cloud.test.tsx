@@ -637,6 +637,9 @@ describe("cloud session actions", () => {
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "permission-decision")?.payload).toEqual({ requestId: "req-9", optionId: "allow" }));
 
     // Steer while the turn runs, then stop it.
+    // A /goal is never steered past the composer's check (PRO-380).
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal keep the tests green" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "steer")?.payload).toEqual({ text: "use the staging config" }));

@@ -111,6 +111,9 @@ export function Chat({
   onReset,
   onRetryInNewChat,
   onRetry,
+  agent,
+  onGoalCommand,
+  onEditGoal,
 }: {
   sessionId: string;
   checkpointTabId?: string;
@@ -152,6 +155,12 @@ export function Chat({
    * standing leaves the tab idle, and sending wakes the agent as the composer would.
    */
   onRetry?: (seq: number) => void;
+  /** The agent's name, for what a message it took mid-turn says. */
+  agent?: { id: string; name: string };
+  /** Sends Codex's `/goal pause` or `/goal resume` from the goal card. */
+  onGoalCommand?: (command: string) => void;
+  /** Puts the goal in the composer to change. */
+  onEditGoal?: (objective: string) => void;
 }) {
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
@@ -440,7 +449,7 @@ export function Chat({
         }
       }}>
       {find.bar}
-      {transcript.goal && <GoalBanner goal={transcript.goal} />}
+      {transcript.goal && <GoalBanner goal={transcript.goal} onCommand={onGoalCommand} onEdit={onEditGoal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
@@ -481,6 +490,7 @@ export function Chat({
                 // A failed last turn can go again: its prompt, sent as a new message.
                 onRetry={isLast && !t.live && !sending ? onRetry : undefined}
                 onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
+                agent={agent}
               />
             );
           })}
