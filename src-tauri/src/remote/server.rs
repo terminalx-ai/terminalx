@@ -433,6 +433,11 @@ pub struct WorkspaceRpc {
     /// The status as the served updates stood when they started being
     /// served (which updates, and what): the watcher's first compare.
     update_baseline: Mutex<Option<(usize, String)>>,
+    /// Clones started from another computer (`machine/6`, PRO-351).
+    machine_clones: Arc<super::machine_projects::Clones>,
+    /// Stands in for the runtime user's home directory in tests (`machine/6`).
+    #[cfg(test)]
+    home_for_tests: Mutex<Option<std::path::PathBuf>>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
@@ -537,6 +542,9 @@ impl WorkspaceRpc {
             machine_access: OnceLock::new(),
             machine_updates: Mutex::new(None),
             update_baseline: Mutex::new(None),
+            machine_clones: Arc::new(super::machine_projects::Clones::default()),
+            #[cfg(test)]
+            home_for_tests: Mutex::new(None),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -1511,6 +1519,10 @@ impl WorkspaceRpc {
             },
             "machine.agentSetupRunning" => match &self.scope {
                 Scope::Machine { .. } => self.machine_agent_setup_running(&params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.browse" | "machine.addProject" | "machine.removeProject" | "machine.cloneProject" | "machine.cloneStatus" | "machine.cloneCancel" => match &self.scope {
+                Scope::Machine { .. } => self.machine_projects_call(method, &params),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "cleanup.scan" => self.cleanup_scan(),
@@ -3461,6 +3473,44 @@ impl WorkspaceRpc {
 
     /// `machine.agentSetupRunning`: the step of `harness` running in a
     /// terminal a peer can attach to.
+    /// `machine/6` (PRO-351): a machine's projects from another computer.
+    /// Adding or removing one emits `projects_changed`, as `projects.add`
+    /// on the control socket does, so `machine.changed` goes out.
+    fn machine_projects_call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use super::machine_projects as projects;
+        match method {
+            "machine.browse" => projects::browse(&self.machine_home()?, params),
+            "machine.addProject" => {
+                let added = projects::add(&self.machine_home()?, params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(added)
+            }
+            "machine.removeProject" => {
+                let removed = projects::remove(params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(removed)
+            }
+            "machine.cloneProject" => self.machine_clones.start(&self.machine_home()?, params, self.sink.clone()),
+            "machine.cloneStatus" => self.machine_clones.status(params),
+            "machine.cloneCancel" => self.machine_clones.cancel(params),
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/6 method"))),
+        }
+    }
+
+    /// The home directory `machine/6` stays under: the runtime user's.
+    fn machine_home(&self) -> Result<std::path::PathBuf, RpcError> {
+        #[cfg(test)]
+        if let Some(home) = self.home_for_tests.lock().unwrap().clone() {
+            return Ok(home);
+        }
+        super::machine_projects::home()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_home_for_tests(&self, home: &Path) {
+        *self.home_for_tests.lock().unwrap() = Some(std::fs::canonicalize(home).unwrap());
+    }
+
     fn machine_agent_setup_running(&self, params: &Value) -> Result<Value, RpcError> {
         let harness = required_str(params, "harness")?;
         Ok(json!({ "run": self.setup_run(harness) }))
