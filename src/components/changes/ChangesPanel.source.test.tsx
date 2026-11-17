@@ -549,7 +549,7 @@ it("selects and restores a commit's exact range and returns to the saved workspa
 it("discards an in-flight commit response when the scope changes", async () => {
   const source = fakeSource("commit-race");
   let resolve!: (value: typeof selectedCommit[]) => void;
-  vi.mocked(source.logCommits).mockImplementation((from) => from ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
+  vi.mocked(source.logCommits).mockImplementation((from) => from === selectedCommit.sha ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   await pickCommit(/^aaaaaaa\s*A selected commit/);
   await waitFor(() => expect(resolve).toBeDefined());

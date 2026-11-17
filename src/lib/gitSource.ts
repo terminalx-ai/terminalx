@@ -41,6 +41,7 @@ export interface GitSource {
   workStatus(): Promise<SourceStatus>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
   /** Resolves to a notice worth showing (e.g. what a reconciled push found), or null. */
