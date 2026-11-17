@@ -43,6 +43,7 @@ import type { SessionEntry } from "@/types/session";
 import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
+import { useSessionRowFacts } from "@/lib/sessionRowStatus";
 
 /** A card: a local session, a cloud one (PRO-23 CS-19) or one on a paired machine (PRO-346), in the same columns. */
 type CardSession = (SessionEntry | CloudDashboardSession | MachineDashboardSession) & { ownerId?: string | null };
@@ -104,11 +105,12 @@ export function AgentDashboard() {
   const showWhere = pairedMachines.length > 0;
   const [placeChoice, setPlace] = useState<Place>("all");
   const place: Place = showWhere && (placeChoice === "all" || placeChoice === "local" || placeChoice === "cloud" || pairedMachines.some((m) => machineSectionKey(m.machineId) === placeChoice)) ? placeChoice : "all";
+  const localFacts = useSessionRowFacts(store.sessions);
   const everywhere = useMemo<CardSession[]>(() => [
-    ...store.sessions.map((session) => ({ ...session, ownerId: localOwner })),
+    ...store.sessions.map((session) => ({ ...session, ownerId: localOwner, rowStatus: localFacts[session.id] ?? session.rowStatus })),
     ...visibleCloud,
     ...(showWhere ? machineSessions : []),
-  ], [store.sessions, visibleCloud, showWhere, machineSessions, localOwner]);
+  ], [store.sessions, visibleCloud, showWhere, machineSessions, localOwner, localFacts]);
   const sessions = useMemo(() => (place === "all" ? everywhere : everywhere.filter((session) => placeOf(session) === place)), [everywhere, place]);
   // The menu's counts: sessions with an agent that are not archived, wherever the other filters stand.
   const placeCounts = useMemo(() => {
@@ -160,7 +162,8 @@ export function AgentDashboard() {
     [sessions, query, pathFilters, projectName],
   );
   const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
-  const scoped = !!query.trim() || hasFilters(filters) || preferences.owners.length > 0 || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only";
+  const hiddenWorkingAutomations = (filters.automations ?? "hide") === "hide" && bucketSessions(everywhere).working.some((session) => !!session.automation);
+  const scoped = !!query.trim() || hasFilters(filters) || preferences.owners.length > 0 || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only" || hiddenWorkingAutomations;
   const clearScope = () => {
     setQuery("");
     setFilters({ ...NO_FILTERS, automations: "show", archived: "show" });

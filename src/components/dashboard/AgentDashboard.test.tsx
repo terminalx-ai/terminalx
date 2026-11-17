@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SessionEntry } from "@/types/session";
 import { DEFAULT_DASHBOARD_PREFERENCES, tableColumns } from "@terminalx/portable/dashboard";
 import { setPrefs, getPrefs } from "@/lib/prefs";
 import { AgentDashboard } from "./AgentDashboard";
+import { api } from "@/lib/api";
 
 const state = vi.hoisted(() => ({ sessions: [] as SessionEntry[], select: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ sessions: state.sessions, loaded: true, projects: [], harnesses: [] }), selectSession: state.select, openNewSession: vi.fn() }));
@@ -22,7 +23,7 @@ beforeEach(() => {
   state.select.mockClear();
   Element.prototype.scrollIntoView = vi.fn();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 it("renders empty chats under Not started and moves a chat after its first message", () => {
   const at = "2026-11-05T12:00:00Z";
@@ -87,18 +88,38 @@ it("updates live cards and counts across team views, with waiting taking priorit
   expect(column("Working").getByText("2")).toBeTruthy();
 });
 
-it("moves completed background work out of Working when the activity clears", () => {
+it("updates local background work from the runtime status poll", async () => {
+  vi.useFakeTimers();
   const active = session("Active");
-  const background = session("Background", { tabs: [{ ...active.tabs[0], id: "background", status: "completed" }], rowStatus: { tabs: [{ status: "completed", activity: "background" }] } });
+  const background = session("Background", { tabs: [{ ...active.tabs[0], id: "background", status: "completed" }] });
+  let backgroundActive = true;
+  const fetch = vi.spyOn(api, "sessionRowStatuses").mockImplementation(async () => ({ Background: { tabs: [{ status: "completed", activity: backgroundActive ? "background" : null }] } }));
   state.sessions = [active, background];
-  const view = render(<AgentDashboard />);
+  render(<AgentDashboard />);
   const working = () => within(screen.getByRole("region", { name: "Working" }));
+  expect(working().getByText("1")).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(fetch).toHaveBeenCalledWith(expect.arrayContaining(["Active", "Background"]));
   expect(working().getByText("2")).toBeTruthy();
   expect(working().getByText("Background")).toBeTruthy();
-  state.sessions = [active, { ...background, rowStatus: { tabs: [{ status: "completed" }] } }];
-  view.rerender(<AgentDashboard />);
+  backgroundActive = false;
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
   expect(working().getByText("1")).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "Done" })).getByText("Background")).toBeTruthy();
+});
+
+it("explains when hidden automations are the only running sessions", async () => {
+  state.sessions = [session("Automated", { automation: { id: "auto", name: "Daily", runId: "run", runNumber: 1 } })];
+  render(<AgentDashboard />);
+  const working = within(screen.getByRole("region", { name: "Working" }));
+  expect(working.getByText(/current view/)).toBeTruthy();
+  fireEvent.click(working.getByRole("button", { name: "Show all sessions" }));
+  expect(working.getByText("Automated")).toBeTruthy();
+  openMenu("With automations");
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "Hide automations" }));
+  await waitFor(() => expect(working.getByText(/current view/)).toBeTruthy());
+  fireEvent.click(working.getByRole("button", { name: "Show all sessions" }));
+  expect(working.getByText("Automated")).toBeTruthy();
 });
 /** The view lives in the Display menu (02.15). */
 async function showView(name: "Table" | "Board") {
