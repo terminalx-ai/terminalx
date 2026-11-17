@@ -258,6 +258,7 @@ fn relay_session(grant: &RelaySessionGrant) -> RelaySession {
         attachments: Vec::new(),
         revocations: Vec::new(),
         collaboration: None,
+        collaboration_v2: false,
     }
 }
 
