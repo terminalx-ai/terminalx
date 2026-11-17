@@ -1,4 +1,4 @@
-import { agentName } from "@terminalx/portable/agentMarks";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import type { CloudSessionRow, CloudSessionTab } from "@/lib/cloudSessions";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { TabStatus } from "@/types/session";
@@ -18,7 +18,7 @@ import type { TabStatus } from "@/types/session";
 export interface CloudTabRow {
   tabId: string;
   harness: string;
-  /** The name the session's tab strip gives it: the tab's own title, else its agent's name. */
+  /** The tab strip's label: the tab's own title, else the agent's cloud product name. */
   label: string;
   /**
    * The tab's own state: waiting on the person (a question or a pending
@@ -79,7 +79,7 @@ export function cloudTabRows(row: CloudSessionRow, input: CloudTabRowsInput = {}
   return row.tabs.map((tab) => ({
     tabId: tab.tabId,
     harness: tab.harness,
-    label: tab.title?.trim() || agentName(tab.harness),
+    label: tab.title?.trim() || cloudAgentLabel(tab.harness),
     status: projected.get(tab.tabId) ?? cloudTabStatus(tab),
     front: tab.tabId === frontId,
   }));

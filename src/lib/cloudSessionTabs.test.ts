@@ -1,4 +1,3 @@
-import { agentName } from "@terminalx/portable/agentMarks";
 import { describe, expect, it } from "vitest";
 import { threeAgentSession, threeAgentTab, threeAgentWorkspace } from "@/components/layout/cloud/cloudSessionFixtures.test-utils";
 import { buildCloudSessions, cloudSessionStatus } from "@/lib/cloudSessions";
@@ -16,8 +15,19 @@ describe("cloudTabRows", () => {
     const rows = cloudTabRows(live());
     expect(rows.map((row) => row.tabId)).toEqual(["tab-codex", "tab-claude", "tab-codex-2"]);
     expect(rows.map((row) => row.harness)).toEqual(["codex", "claude", "codex"]);
-    expect(rows.map((row) => row.label)).toEqual(["Fix the flaky build", "Review the fix", agentName("codex")]);
+    expect(rows.map((row) => row.label)).toEqual(["Fix the flaky build", "Review the fix", "Codex"]);
     expect(rows.map((row) => row.status)).toEqual(["in_progress", "completed", "idle"]);
+  });
+
+  it.each([
+    { title: null, label: "Claude Code" },
+    { title: "  ", label: "Claude Code" },
+    { title: "Review the sidebar", label: "Review the sidebar" },
+  ])("labels a Claude tab with title $title as $label", ({ title, label }) => {
+    const session = threeAgentSession();
+    session.tabs = session.tabs.map((tab) => (tab.id === "tab-claude" ? { ...tab, title } : tab));
+    const [row] = buildCloudSessions({ item: threeAgentWorkspace(), live: [session] });
+    expect(cloudTabRows(row).find((tab) => tab.tabId === "tab-claude")?.label).toBe(label);
   });
 
   it("shows no tab of a stopped workspace's cached list as working", () => {
