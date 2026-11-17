@@ -1,8 +1,8 @@
 //! Phones the runtime serves itself (PRO-359; docs/MACHINES.md, decision 4
 //! and "As built (PRO-359)").
 //!
-//! While a window takes phones (`runtime.machineHost.phoneRoute`) the direct
-//! listener passes each phone to it, as since PRO-341. While none does (a
+//! While a window takes phones (`runtime.machineHost.phoneRoute`), direct
+//! and relay connections go to it. While none does (a
 //! Mac whose window is closed, or a headless server) the runtime serves the
 //! phone here: the same E2EE v2 handshake with the machine's one host key,
 //! the same `devices.json` records, the same RPC (`crate::phone`). The
@@ -50,13 +50,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const REFUSED_NOT_APPROVED: &str = "not-approved";
 const REFUSED_ANOTHER_PHONE: &str = "another-phone";
 const REFUSED_CODE_INACTIVE: &str = "code-inactive";
-
-/// The binding generation of the account this Mac is signed in to, as the
-/// window last wrote it (`account.json`); 0 signed out. An error when the
-/// file cannot be read: nothing is decided on a guess.
-fn read_account_generation() -> Result<u64> {
-    Ok(load_account_mirror()?.map(|mirror| mirror.binding_generation).unwrap_or(0))
-}
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
@@ -169,11 +162,14 @@ pub(crate) struct Phones {
     registry: DeviceRegistry,
     state: Mutex<State>,
     next: AtomicU64,
-    /// [`read_account_generation`] as last read, each tick: the phone RPC
+    /// The account generation as last read, each tick: the phone RPC
     /// asks for it on every request and event, which must not read a file.
     generation: Arc<AtomicU64>,
     /// Whether the last read succeeded; phones are not judged on a failed one.
-    generation_known: AtomicBool,
+    account_known: AtomicBool,
+    /// The complete last known binding. Generations are scoped to a user;
+    /// switching users can leave the generation unchanged.
+    account: Mutex<Option<AccountMirror>>,
     /// Tells the machine host its status changed.
     changed: Box<dyn Fn() + Send + Sync>,
     relay: Mutex<Option<Weak<crate::remote::host::RelayHost>>>,
@@ -183,10 +179,11 @@ pub(crate) struct Phones {
 impl Phones {
     pub(crate) fn new(sessions: SessionManager, sink: Arc<dyn EventSink>, lifetime: Arc<Lifetime>, changed: impl Fn() + Send + Sync + 'static) -> Result<Arc<Self>> {
         // The account binding is the window's, in the shared `account.json`:
-        // a sign-out or another account there ends every phone served here at
-        // its next request or event, as it does the window's.
-        let first = read_account_generation();
-        let generation = Arc::new(AtomicU64::new(*first.as_ref().unwrap_or(&0)));
+        // a sign-out or another account there fences every phone served here
+        // when the lifecycle tick observes the changed user or generation.
+        let first = load_account_mirror();
+        let account = first.as_ref().ok().cloned().flatten();
+        let generation = Arc::new(AtomicU64::new(account.as_ref().map_or(0, |mirror| mirror.binding_generation)));
         let current = generation.clone();
         let host = Arc::new(PhoneHost::new(move || current.load(Ordering::SeqCst)));
         // Its notices stay in this process: the window has its own (`phone::sink`).
@@ -199,7 +196,8 @@ impl Phones {
             state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
             generation,
-            generation_known: AtomicBool::new(first.is_ok()),
+            account_known: AtomicBool::new(first.is_ok()),
+            account: Mutex::new(account),
             changed: Box::new(changed),
             relay: Mutex::new(None),
             stopped: watch::channel(0).0,
@@ -297,9 +295,8 @@ impl Phones {
     /// window or `devices revoke` with no runtime to ask, or removed at
     /// sign-out. Their requests are refused already; this ends the idle ones
     /// and their grants too. Blocking: it reads `devices.json`.
-    fn close_unpaired(&self) {
-        let connected: Vec<String> = self.state.lock().unwrap().connections.keys().cloned().collect();
-        if connected.is_empty() || !self.generation_known.load(Ordering::SeqCst) {
+    fn close_unpaired(&self, connected: Vec<String>) {
+        if connected.is_empty() || !self.account_known.load(Ordering::SeqCst) {
             return;
         }
         let paired = match self.registry.list() {
@@ -309,10 +306,10 @@ impl Phones {
                 return;
             }
         };
-        let generation = self.generation.load(Ordering::SeqCst);
+        let account = self.account.lock().unwrap().clone();
         for device_id in connected {
             let current = paired.iter().find(|device| device.id == device_id);
-            let stale = current.is_none_or(|device| device.provenance == DeviceProvenance::Automatic && device.binding_generation != generation);
+            let stale = current.is_none_or(|device| !account_allows(device, account.as_ref()));
             if stale {
                 log::info!("machine host: phone {device_id} is no longer paired; closing it");
                 self.end_grants(&device_id);
@@ -328,17 +325,21 @@ impl Phones {
         }
     }
 
-    /// Read the account generation again. A failed read keeps the last one
-    /// and judges no phone by it.
-    fn read_generation(&self) -> bool {
-        match read_account_generation() {
-            Ok(generation) => {
-                let changed = self.generation.swap(generation, Ordering::SeqCst) != generation;
-                self.generation_known.store(true, Ordering::SeqCst);
+    /// Read the full account binding again. Profile edits do not retire it.
+    /// A failed read keeps the last known binding and judges no phone by it.
+    fn read_account(&self) -> bool {
+        match load_account_mirror() {
+            Ok(account) => {
+                let mut previous = self.account.lock().unwrap();
+                let binding = |mirror: &AccountMirror| (mirror.user_id.clone(), mirror.binding_generation);
+                let changed = previous.as_ref().map(binding) != account.as_ref().map(binding);
+                self.generation.store(account.as_ref().map_or(0, |mirror| mirror.binding_generation), Ordering::SeqCst);
+                *previous = account;
+                self.account_known.store(true, Ordering::SeqCst);
                 changed
             }
             Err(error) => {
-                if self.generation_known.swap(false, Ordering::SeqCst) {
+                if self.account_known.swap(false, Ordering::SeqCst) {
                     log::warn!("machine host: read the account for phones: {error:#}");
                 }
                 false
@@ -349,13 +350,16 @@ impl Phones {
     /// A code or a request that ran out ends, and phones no longer paired
     /// are let go. Blocking: it may write `devices.json`.
     pub(crate) fn tick(&self, now: i64) {
-        let account_changed = self.read_generation();
-        self.close_unpaired();
+        // Capture ids before publishing the new generation: a concurrent RPC
+        // can observe it and drop its tracking guard before cleanup runs.
+        let connected = self.state.lock().unwrap().connections.keys().cloned().collect();
+        let account_changed = self.read_account();
+        self.close_unpaired(connected);
         if account_changed {
             // Retire stale automatic relay credentials before cancelling all
             // streams, so their tracking guards cannot hide them from the tick.
-            // Fence handshakes too, and give reconnects a fresh lease: generation
-            // 0 at sign-out cannot reuse earlier signed-in mobile authority.
+            // Fence handshakes too, and give reconnects a fresh lease. A different
+            // user with the same generation must not reuse mobile authority.
             let mut state = self.state.lock().unwrap();
             self.stopped.send_modify(|epoch| *epoch += 1);
             if let Some(owner) = state.owner.take() {

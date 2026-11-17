@@ -311,6 +311,15 @@ async fn relay_registration_alone_never_admits_a_phone_or_another_identity() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_generation_changes_fence_automatic_relay_phones() {
+    account_change_fences_automatic_relay_phones("owner", 6).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_generation_account_switch_fences_automatic_relay_phones() {
+    account_change_fences_automatic_relay_phones("another", 5).await;
+}
+
+async fn account_change_fences_automatic_relay_phones(next_user: &str, next_generation: u64) {
     let mut rig = Rig::new().await;
     let mut mirror = AccountMirror {
         user_id: "owner".into(),
@@ -327,8 +336,16 @@ async fn account_generation_changes_fence_automatic_relay_phones() {
     let mut phone = rig.connect("phone", "token", "resume", [7; 32]).await;
     phone.authenticated().await;
     assert_eq!(phone.call("host.describe", json!({})).await["ok"], true);
-    mirror.binding_generation = 6;
-    mirror.user_id = "another".into();
+    // A profile update is not a new account binding.
+    let stopped = rig.phones.stopped();
+    let epoch = *stopped.borrow();
+    mirror.display_name = "Updated name".into();
+    save_account_mirror(&mirror).unwrap();
+    rig.phones.tick(now_ms());
+    assert_eq!(*stopped.borrow(), epoch);
+    assert_eq!(phone.call("host.describe", json!({})).await["ok"], true);
+    mirror.binding_generation = next_generation;
+    mirror.user_id = next_user.into();
     save_account_mirror(&mirror).unwrap();
     rig.phones.tick(now_ms());
     assert!(phone.read().await.is_none());
