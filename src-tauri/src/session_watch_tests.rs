@@ -27,6 +27,13 @@ const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
 #[test]
+fn automation_completion_waits_for_a_followup_turn_already_open() {
+    let rig = Rig::new();
+    rig.start_turn();
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+}
+
+#[test]
 fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
     let rig = Rig::new();
     for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {

@@ -71,6 +71,18 @@ impl SessionObserver for RuntimeObserver {
         self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, &detail));
     }
 
+    fn automation_execution_lost(&self, session_id: &str, tab_id: &str, message: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::fail_from_hook(host, session_id, tab_id, message);
+        }
+    }
+
+    fn automation_cancelled(&self, session_id: &str, tab_id: &str, message: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::cancel_from_hook(host, session_id, tab_id, message);
+        }
+    }
+
     /// Off the sender's thread, which may hold the checkout's admission or a
     /// pipeline's own step: the answer is taken once that step is done.
     fn answered(&self, session_id: &str, tab_id: &str) {

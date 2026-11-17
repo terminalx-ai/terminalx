@@ -844,6 +844,8 @@ impl SessionManager {
         drop(rt);
         if turn_was_open {
             self.observer.automation_failed(&entry.id, &tab.id, "The agent left the terminal before the automation turn completed.");
+        } else {
+            self.observer.automation_execution_lost(&entry.id, &tab.id, "The agent left before the automation run completed.");
         }
     }
 
@@ -930,6 +932,8 @@ impl SessionManager {
         if turn_was_open {
             let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
             self.observer.automation_failed(&session, &tab, &format!("The agent process exited{detail} before the automation turn completed."));
+        } else {
+            self.observer.automation_execution_lost(&session, &tab, "The agent process exited before the automation run completed.");
         }
         // The app's own CLI was the pane's process, so the pane went with it:
         // the tab needs a shell to be the terminal it now is. A CLI started

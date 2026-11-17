@@ -4342,7 +4342,9 @@ impl SessionManager {
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        self.stop_with(session_id, tab_id, false)
+        self.stop_with(session_id, tab_id, false)?;
+        self.observer.automation_cancelled(session_id, tab_id, "The automation agent was stopped.");
+        Ok(())
     }
 
     /// Stop a tab's agent, and whatever it left running, if nothing is using
@@ -4374,6 +4376,7 @@ impl SessionManager {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
+        self.observer.automation_execution_lost(session_id, tab_id, "The agent stopped before the automation run completed.");
         // Kept with the tab, so a runtime started since knows it too.
         if let Err(error) = index::set_parked(session_id, tab_id, true) {
             log::warn!("mark {session_id}:{tab_id} as stopped for sitting idle: {error:#}");
@@ -4414,6 +4417,14 @@ impl SessionManager {
             return Some(what);
         }
         crate::idle_agents::left_running(leader?)
+    }
+
+    /// A new turn may already have started by the time the previous turn's
+    /// completion is delivered. Background work can also wake a later turn.
+    pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
+        if runtime.lock().unwrap().turn_open { return true; }
+        self.background_work(session_id, tab_id).is_some()
     }
 
     /// Every running agent that has nothing to do, with how long it has had
@@ -7780,6 +7791,8 @@ impl SessionManager {
                         &frame.tab,
                         "The agent session ended before the automation turn completed.",
                     );
+                } else {
+                    self.observer.automation_execution_lost(&frame.session, &frame.tab, "The agent session ended before the automation run completed.");
                 }
             }
             _ => {}

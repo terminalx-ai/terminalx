@@ -81,6 +81,8 @@ pub trait SessionObserver: Send + Sync {
     fn automation_running(&self, _session_id: &str, _tab_id: &str) {}
     fn automation_completed(&self, _session_id: &str, _tab_id: &str, _final_message: Option<String>) {}
     fn automation_failed(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
+    fn automation_execution_lost(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
+    fn automation_cancelled(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
     /// A message reached a tab's agent, or its question or permission request
     /// was answered: by the composer, a phone, a share, the CLI, or typed into
     /// the agent's own terminal. Not a turn the agent started by itself.
@@ -199,6 +201,14 @@ mod desktop {
         fn automation_failed(&self, session_id: &str, tab_id: &str, message: &str) {
             crate::issue_pipeline::desktop::turn_failed(self, session_id, tab_id, message);
             crate::automations::fail_from_hook(self, session_id, tab_id, message);
+        }
+
+        fn automation_execution_lost(&self, session_id: &str, tab_id: &str, message: &str) {
+            crate::automations::fail_from_hook(self, session_id, tab_id, message);
+        }
+
+        fn automation_cancelled(&self, session_id: &str, tab_id: &str, message: &str) {
+            crate::automations::cancel_from_hook(self, session_id, tab_id, message);
         }
 
         fn answered(&self, session_id: &str, tab_id: &str) {

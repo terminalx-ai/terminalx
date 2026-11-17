@@ -19,6 +19,9 @@ use crate::sink::EventSink;
 pub trait AutomationHost: Clone + Send + Sync + 'static {
     fn sink(&self) -> Arc<dyn EventSink>;
     fn sessions(&self) -> Result<crate::session::SessionManager>;
+    fn execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        self.sessions().map_or(true, |sessions| sessions.automation_execution_continues(session_id, tab_id))
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -1313,6 +1316,11 @@ pub fn complete_from_hook(
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
+    // Stop marks a foreground turn, not necessarily the automation's work.
+    // A background task can wake the agent for another turn after this one.
+    if app.execution_continues(session_id, tab_id) {
+        return;
+    }
     let changed_files = changed_file_count(&entry);
     let mut transitioned = false;
     let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
@@ -1383,6 +1391,14 @@ fn archive_finished_run(app: &impl AutomationHost, finished: &AutomationRun) {
 }
 
 pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Failed);
+}
+
+pub fn cancel_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Cancelled);
+}
+
+fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str, status: AutomationRunStatus) {
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
@@ -1394,7 +1410,7 @@ pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str,
             AutomationRunStatus::Pending | AutomationRunStatus::Running
         ) {
             transitioned = true;
-            run.status = AutomationRunStatus::Failed;
+            run.status = status;
             run.ended_at = Some(index::now());
             run.error = Some(message);
         }
@@ -1676,7 +1692,10 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
         };
         let ended = |run: &AutomationRun| !run.status.is_terminal() && !run.session_id.as_ref().is_some_and(|session| going_on.contains(session));
         for open in runs.into_iter().filter(ended) {
+            let mut transitioned = false;
             let Ok(run) = automation_store::replace_run(&automation.id, &open.run_id, |run| {
+                if run.status.is_terminal() { return Ok(()); }
+                transitioned = true;
                 run.status = AutomationRunStatus::Failed;
                 run.ended_at = Some(index::now());
                 run.error = Some("The app closed before this automation run finished.".into());
@@ -1684,6 +1703,7 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
             }) else {
                 continue;
             };
+            if !transitioned { continue; }
             emit_run(app, &run);
             let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
             update_summary(app, &automation.id, run.status, &ended_at);
@@ -2094,7 +2114,7 @@ mod tests {
     /// A host with an event sink and no session manager: ending a run needs
     /// only the first.
     #[derive(Clone)]
-    struct EndHost(Arc<crate::sink::BroadcastSink>);
+    struct EndHost(Arc<crate::sink::BroadcastSink>, Arc<AtomicBool>);
 
     impl AutomationHost for EndHost {
         fn sink(&self) -> Arc<dyn EventSink> {
@@ -2103,10 +2123,63 @@ mod tests {
         fn sessions(&self) -> Result<crate::session::SessionManager> {
             bail!("ending a run asks for no session manager")
         }
+        fn execution_continues(&self, _: &str, _: &str) -> bool {
+            self.1.load(Ordering::SeqCst)
+        }
     }
 
     fn end_host() -> EndHost {
-        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)))
+        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(AtomicBool::new(false)))
+    }
+
+    #[test]
+    fn background_work_defers_completion_until_the_followup_turn_finishes() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (run, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Pipeline running".into()));
+        let stored = || automation_store::list_runs(&automation.id).unwrap().into_iter().find(|r| r.run_id == run.run_id).unwrap();
+        assert_eq!(stored().status, AutomationRunStatus::Running);
+        assert!(stored().ended_at.is_none());
+        assert!(!archived(&session));
+        // A resumed turn is still active even when the task notification has arrived.
+        complete_from_hook(&host, &session, &tab, Some("Investigating failure".into()));
+        assert_eq!(stored().status, AutomationRunStatus::Running);
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Fixed and verified".into()));
+        assert_eq!(stored().status, AutomationRunStatus::Completed);
+        assert_eq!(stored().final_message.as_deref(), Some("Fixed and verified"));
+        assert!(stored().ended_at.is_some());
+        mark_running_from_hook(&host, &session, &tab);
+        complete_from_hook(&host, &session, &tab, Some("Later manual conversation".into()));
+        assert_eq!(stored().final_message.as_deref(), Some("Fixed and verified"));
+    }
+
+    #[test]
+    fn open_background_run_fails_on_interruption_and_recovers_after_restart() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Still running".into()));
+        fail_from_hook(&host, &session, &tab, "Interrupted");
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Late reply".into()));
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Failed);
+        let (_, next, _) = running_run(&automation);
+        recover_open_runs_except(&host, &std::collections::HashSet::from([next.clone()]));
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
+        recover_open_runs_except(&host, &std::collections::HashSet::new());
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Failed);
+        let (_, cancelled, cancelled_tab) = running_run(&automation);
+        cancel_from_hook(&host, &cancelled, &cancelled_tab, "Stopped by user");
+        complete_from_hook(&host, &cancelled, &cancelled_tab, Some("Late reply".into()));
+        let last = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(last.status, AutomationRunStatus::Cancelled);
+        assert!(last.ended_at.is_some());
     }
 
     /// An automation that archives its runs, saved in the store.
