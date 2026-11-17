@@ -43,7 +43,7 @@ const formatTime = (timestamp: number | null) => (timestamp ? ago(timestamp, Dat
 /** The age or progress a version row shows beside its name. */
 function versionAge(version: EnvironmentVersion, now: number): string {
   if (version.state === "queued") return "waiting to build";
-  if (version.state === "running") return `building · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
+  if (version.state === "running") return `building: ${stageLabel(version.stage).toLowerCase()} · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
   const age = ago(version.finishedAt ?? version.createdAt, now);
   if (version.state === "canceled") return `canceled · ${age}`;
   if (version.publication === "expired") return `${age} · expired`;

@@ -270,6 +270,29 @@ it("lists versions as rows with a status icon, relative age and ACTIVE badge, an
   await waitFor(() => expect(environment.rollback).toHaveBeenCalledWith("version-1", "rev-1"));
 });
 
+it("shows the current stage and elapsed duration as a running build progresses", async () => {
+  const now = Date.UTC(2026, 9, 2);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  try {
+    const building = version({ id: "version-3", number: 3, state: "running", stage: "install", publication: null, startedAt: now - 125_000, finishedAt: null });
+    environment.status.mockResolvedValue(status({ versions: [building, version()] }));
+    mount();
+    await settled();
+    expect(within(screen.getByLabelText("Version 3")).getByText("building: running the machine install script · 2m 5s")).toBeTruthy();
+
+    clock.mockReturnValue(now + 60_000);
+    environment.status.mockResolvedValue(status({ versions: [{ ...building, stage: "snapshot" }, version()] }));
+    fireEvent.click(screen.getByLabelText("Refresh cloud environment"));
+    await waitFor(() => {
+      const row = within(screen.getByLabelText("Version 3"));
+      expect(row.getByText("building: saving the image · 3m 5s")).toBeTruthy();
+      expect(row.queryByText(/running the machine install script/)).toBeNull();
+    });
+  } finally {
+    clock.mockRestore();
+  }
+});
+
 it("shows a failed build as failed, with where it failed, and asks before building again", async () => {
   const failed = version({ id: "version-3", number: 3, state: "failed", stage: "install", failurePhase: "install", errorCode: "cloud_environment_install_failed", publication: null });
   environment.status.mockResolvedValue(status({ versions: [failed, version()] }));
