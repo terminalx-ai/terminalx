@@ -42,7 +42,8 @@ export function DataPrivacySettings() {
           aria-label="Data privacy mode"
           checked={privacy.ready && privacy.enabled}
           disabled={!privacy.ready || privacy.managed || busy}
-          className={cn(locked && "disabled:opacity-100 data-[state=checked]:bg-accent/70")}
+          // The warning token stays amber across palettes (design 14.20).
+          className={cn(locked && "disabled:opacity-100 data-[state=checked]:bg-warning/70")}
           onCheckedChange={(enabled) => {
             setBusy(true);
             setError(null);

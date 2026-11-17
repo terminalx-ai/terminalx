@@ -81,15 +81,15 @@ it("Reset to default removes the row's key with reset_user_setting, and is disab
   await waitFor(() => expect(screen.queryByText("Your value")).toBeNull());
 });
 
-it("Open settings.json opens the user file, names its broken line, and opens it in a chosen editor", async () => {
+it("Open personal settings.json opens the user file, names its broken line, and opens it in a chosen editor", async () => {
   await boot();
   const { OpenSettingsFileButton } = await import("./SettingSources");
   render(<OpenSettingsFileButton />);
-  const button = screen.getByRole("button", { name: "Open settings.json" });
+  const button = screen.getByRole("button", { name: "Open personal settings.json" });
   fireEvent.click(button);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
 
-  openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
+  openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   const menu = await screen.findByRole("menu");
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
@@ -97,8 +97,8 @@ it("Open settings.json opens the user file, names its broken line, and opens it 
 
   file = { ...file, error: "preferences.linkActions, line 7: Unexpected “,” before “}”", problem };
   await act(async () => mocks.listeners.get("settings_file_changed")!());
-  await waitFor(() => expect(screen.getByRole("button", { name: "Open settings.json · line 7" })).toBeTruthy());
-  expect((screen.getByRole("button", { name: "Open settings.json · line 7" }).parentElement as HTMLElement).className).toContain("text-destructive");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open personal settings.json · line 7" })).toBeTruthy());
+  expect((screen.getByRole("button", { name: "Open personal settings.json · line 7" }).parentElement as HTMLElement).className).toContain("text-destructive");
 });
 
 it("on a project page the one Open button names and opens the project's own file (PRO-388)", async () => {
@@ -132,7 +132,7 @@ it("a failed Open in reports the failure in an error toast", async () => {
   const answer = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => command === "open_settings_file" ? Promise.reject("Zed is not installed") : answer(command, args));
   render(<OpenSettingsFileButton />);
-  openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
+  openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Zed" }));
   await waitFor(() => expect(toasts.getErrorToasts().map(toasts.errorToastText)).toEqual(["Couldn’t open ~/.raccoon/settings.json in Zed: Zed is not installed"]));
 });

@@ -151,7 +151,7 @@ try {
     checks["chips"] = await filesView.getByText("none on this Mac", { exact: true }).isVisible() && await filesView.getByText("ignored by Git", { exact: true }).isVisible() && await filesView.getByText("committed", { exact: true }).isVisible();
     checks["the error names file, line and key"] = (await filesView.getByRole("alert").textContent()).startsWith("/repos/p0/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting.");
     checks["subtitle"] = await filesView.getByText(/Edits made in an editor show up here within a second\./).isVisible();
-    await settings.getByRole("button", { name: "More ways to open settings.json" }).click();
+    await settings.getByRole("button", { name: "More ways to open personal settings.json" }).click();
     const openMenu = page.getByRole("menu");
     checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
     await shoot(browser, page, "11.10-settings-files", mode);
@@ -172,9 +172,9 @@ try {
     // 09.43: a save refused by an invalid file.
     await nav.getByRole("button", { name: "General", exact: true }).click();
     await page.evaluate(() => window.__PW_BREAK__());
-    const openButton = settings.getByRole("button", { name: "Open settings.json · line 7" });
+    const openButton = settings.getByRole("button", { name: "Open personal settings.json · line 7" });
     await openButton.waitFor();
-    checks["Open settings.json names the line in the destructive colour"] = await openButton.evaluate((node) => node.parentElement.className.includes("text-destructive"));
+    checks["Open personal settings.json names the line in the destructive colour"] = await openButton.evaluate((node) => node.parentElement.className.includes("text-destructive"));
     // PRO-374 (09.43): no banner above the title; the red header link and the toast only.
     checks["no banner above the title"] = await settings.getByRole("alert").count() === 0;
     await row.locator('[role="switch"]').click();

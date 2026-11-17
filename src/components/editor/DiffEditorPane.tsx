@@ -44,7 +44,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   const kind = fileKind(entry.rel);
   const media = kind !== "text" || diffMediaKind(entry.rel) === "pdf";
   const options = useDiffOptions(diffFileKey(source.key, entry.rel));
-  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean; originalPath?: string } | null>(null);
+  const [pair, setPair] = useState<{ before: string; after: string; deleted: boolean; originalPath?: string; size?: number | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [changed, setChanged] = useState(false);
@@ -79,10 +79,11 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
       const previousPath = oldPath ?? (next.before === null && next.after !== null
         ? (await source.changesBetween(range.base, range.head)).find((file) => file.path === entry.rel)?.oldPath
         : undefined);
-      const before = previousPath ? (await source.fileContentsAt(previousPath, range.base, range.head)).before : next.before;
+      const previous = previousPath ? await source.fileContentsAt(previousPath, range.base, range.head) : next;
+      const before = previous.before;
       if (before === null && next.after === null) throw new Error("This file is not present in either snapshot.");
       // Comments made on the before side are keyed by the path they were read from.
-      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath: previousPath });
+      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "", deleted: next.after === null, originalPath: previousPath, size: next.after === TOO_LARGE ? next.afterSize : previous.beforeSize });
     })().catch((e) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
   }, [source, entry.rel, range?.base, range?.head, oldPath, media]);
@@ -146,7 +147,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
   return <div className="flex h-full min-h-0 flex-col" data-testid="diff-editor">
     {/* One row (design 05.04): the file, its +/−, the view, then copy, layout, options and Viewed. */}
     <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-hairline px-3 text-xs scrollbar-none">
-      <PathChip path={entry.rel} />
+      <PathChip path={entry.rel} size={tooLarge ? pair?.size : undefined} />
       {changedFile && <DiffStats additions={changedFile.additions} deletions={changedFile.deletions} />}
       <Segmented aria-label="Diff view" value={mode} onChange={(next) => void setDiffMode(entry.id, next)} options={modes} className="ml-1" />
       {scope === "all" && <Button variant="ghost" size="icon-xs" aria-label="Refresh diff" title="Refresh diff" disabled={refreshing} onClick={() => void refresh()}><RefreshCw className={cn(refreshing && "animate-spin")} /></Button>}
@@ -166,7 +167,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
     <div className="relative min-h-0 flex-1">
       {(["diff", ...(entire ? ["entire" as const] : [])] as const).map((surface) => <div key={surface} className={cn("absolute inset-0", mode !== surface && "hidden")}>
         {!range ? <p className="p-4 text-sm text-muted-foreground">No snapshots are available for this turn. Open All changes in the Changes panel to review the workspace.</p>
-          : tooLarge ? <TooLargeState path={entry.rel} onOpenFile={openWhole} />
+          : tooLarge ? <TooLargeState path={entry.rel} size={pair?.size} onOpenFile={openWhole} />
           : surface === "diff" && !binary && (pair || (media && diffMediaKind(entry.rel))) ? <FileDiff chrome={false} source={source} path={entry.rel} oldPath={oldPath ?? pair?.originalPath} base={range.base} head={range.head} text={pair ?? undefined} />
           : media || binary ? <p className="p-4 text-sm text-muted-foreground">Binary file changed.{kind !== "text" && " Choose Preview to view the current file."}</p>
           : pair ? <DiffPane workspace={source.key} path={entry.rel} before={pair.before} after={pair.after} base={range.base} originalPath={oldPath ?? pair.originalPath} mode="entire" wrap={options.wrap} hideWhitespace={options.hideWhitespace} />

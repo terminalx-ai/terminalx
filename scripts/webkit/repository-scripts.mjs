@@ -167,7 +167,7 @@ try {
     await page.getByText("Archive script saved.").waitFor();
     failed += report(`${mode} saved`, {
       "saves on this computer with its timeout": await page.evaluate(() => JSON.stringify(window.__SAVES__.at(-1)) === JSON.stringify({ scripts: { setup: "pnpm install", archive: "docker compose down --volumes", archiveTimeoutMinutes: 10 } })),
-      "Open names your file when the project has none": (await page.locator("[data-open-settings-file] > button").first().innerText()) === "Open settings.json",
+      "Open names your file when the project has none": (await page.locator("[data-open-settings-file] > button").first().innerText()) === "Open personal settings.json",
       "footnote says it stays on this computer": (await page.getByText(/Saved on this computer for this project/).count()) === 1,
       "project variables on the page": (await page.getByRole("heading", { name: "Environment variables" }).count()) === 1,
       "no lock label": (await page.getByText(/· locked/).count()) === 0,
