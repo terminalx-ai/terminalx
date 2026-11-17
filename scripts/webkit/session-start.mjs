@@ -41,8 +41,11 @@ function fixture() {
       window.__firstSend = args;
       const event = { id: "prompt", seq: 1, sessionId: "first", tabId: "tab", ts: at, harness: "claude",
         payload: { type: "user_message", text: args.text, queued: false, files: args.files } };
+      const otherMessage = (id, seq, text) => ({ ...event, id, seq, payload: { type: "user_message", text, queued: false } });
       window.__finishSetup = () => stub.emit("workspace_setup_changed", { ...setup, status: "succeeded", exitCode: 0 });
       window.__publishFirstPrompt = () => stub.emit("agent_event", event);
+      window.__publishOtherPrompt = () => stub.emit("agent_event", otherMessage("live", 2, "Another live prompt"));
+      window.__otherHistory = [otherMessage("history", 3, "Another prompt from history")];
       window.__completeFirstSend = () => resolve({ queued: false, events: [event] });
       window.__failFirstSend = () => reject(new Error("Agent could not start"));
     }),
@@ -99,14 +102,25 @@ try {
     await first.getByText("Ran the setup script · pnpm install").waitFor();
 
     if (outcome === "failure") {
+      await page.evaluate(() => window.__publishOtherPrompt());
+      await chat.getByTestId("reader-message").getByText("Another live prompt").waitFor();
+      await first.getByText("Check the attached notes.").waitFor();
       await page.evaluate(() => window.__failFirstSend());
       await first.getByRole("alert").filter({ hasText: "Agent could not start" }).waitFor();
+      await page.evaluate(async () => {
+        const { mergeTabEvents } = await import("/src/lib/agentEvents.ts");
+        mergeTabEvents("first", "tab", window.__otherHistory);
+      });
+      await chat.getByTestId("reader-message").getByText("Another prompt from history").waitFor();
+      await first.getByRole("alert").filter({ hasText: "Agent could not start" }).waitFor();
+      await first.getByText("Check the attached notes.").waitFor();
       await first.getByText("notes.md", { exact: true }).waitFor();
+      await first.getByRole("button", { name: "View pixel.png" }).waitFor();
       assert.equal(await first.getByText("Sending…").count(), 0);
     } else {
       if (outcome === "broadcast") {
         await page.evaluate(() => window.__publishFirstPrompt());
-        await first.waitFor({ state: "detached" });
+        await chat.locator("[data-chat-search]").filter({ hasText: "Check the attached notes." }).waitFor();
       }
       await page.evaluate(() => window.__completeFirstSend());
       await first.waitFor({ state: "detached" });

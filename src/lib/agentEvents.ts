@@ -103,7 +103,8 @@ export function showFirstMessage(sessionId: string, tabId: string, message: Firs
   const k = key(sessionId, tabId);
   getLog(k).firstMessage = message;
   touch(k, true);
-  // A broadcast, history load, or tab removal may have overtaken the send.
+  // Only the Create send can acknowledge this preview. Transcript events
+  // have no request ID and may belong to another send, even with identical text.
   return (error?: string) => {
     const log = logs.get(k);
     if (log?.firstMessage !== message) return;
@@ -201,7 +202,6 @@ export function applyEvent(ev: AgentEvent) {
     log.stream = [];
   }
   log.events.push(ev);
-  if (p.type === "user_message") log.firstMessage = undefined;
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
   // A reader's message is drawn in the frame it arrives in: the composer's own
   // stops being drawn as sending as soon as the runtime answers (#727).
@@ -315,7 +315,6 @@ export function mergeTabEvents(sessionId: string, tabId: string, events: AgentEv
   const log = getLog(k);
   const committed = events.filter((ev) => ev.payload.type !== "delta");
   if (committed.length) {
-    if (log.firstMessage && committed.some((ev) => ev.payload.type === "user_message")) log.firstMessage = undefined;
     const byId = new Map(log.events.map((ev) => [ev.id, ev]));
     for (const ev of committed) byId.set(ev.id, ev);
     const savedSeqs = new Set([...byId.values()].filter((ev) => !transient(ev)).map((ev) => ev.seq));
