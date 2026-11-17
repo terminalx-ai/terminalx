@@ -79,7 +79,7 @@ pub trait SessionObserver: Send + Sync {
     fn tab_status(&self, _key: String, _status: TabStatus) {}
     fn interrupted(&self, _key: &str) {}
     fn automation_running(&self, _session_id: &str, _tab_id: &str) {}
-    fn automation_completed(&self, _session_id: &str, _tab_id: &str, _final_message: Option<String>) {}
+    fn automation_completed(&self, _session_id: &str, _tab_id: &str, _final_message: Option<String>, _generation: u64) {}
     fn automation_failed(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
     fn automation_execution_lost(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
     fn automation_cancelled(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
@@ -191,11 +191,11 @@ mod desktop {
             crate::automations::mark_running_from_hook(self, session_id, tab_id);
         }
 
-        fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>) {
+        fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>, generation: u64) {
             // A turn ending is also what moves an issue pipeline: the author
             // reporting its work, the reviewer its verdict.
             crate::issue_pipeline::desktop::turn_completed(self, session_id, tab_id, final_message.clone());
-            crate::automations::complete_from_hook(self, session_id, tab_id, final_message);
+            crate::automations::complete_from_turn(self, session_id, tab_id, final_message, generation);
         }
 
         fn automation_failed(&self, session_id: &str, tab_id: &str, message: &str) {

@@ -47,9 +47,9 @@ impl SessionObserver for RuntimeObserver {
         }
     }
 
-    fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>) {
+    fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>, generation: u64) {
         if let Some(host) = self.local_automations.get() {
-            crate::automations::complete_from_hook(host, session_id, tab_id, final_message.clone());
+            crate::automations::complete_from_turn(host, session_id, tab_id, final_message.clone(), generation);
         }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         if !store::takes_part(session_id, tab_id) {
@@ -199,7 +199,7 @@ mod tests {
         let blocked = "Stuck.\n\n```terminalx-status\n{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"Which database?\"}\n```";
         let observer = RuntimeObserver::default();
         // Before the agent tabs are served there is no host: a turn ending moves nothing.
-        observer.automation_completed("author", "t1", Some(blocked.into()));
+        observer.automation_completed("author", "t1", Some(blocked.into()), 1);
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(store::get("p1").unwrap().state, State::Working);
 
@@ -208,9 +208,9 @@ mod tests {
         sink.listen(crate::issue_pipeline::host::CHANGED, Box::new(move |_| *counted.lock().unwrap() += 1));
         observer.attach(std::sync::Arc::new(LocalHost::cloud_workspace(sink.clone() as std::sync::Arc<dyn EventSink>, manager, std::sync::Arc::new(|_: &str| {}))));
         // A tab that takes no part is not looked at.
-        observer.automation_completed("someone", "else", Some(blocked.into()));
+        observer.automation_completed("someone", "else", Some(blocked.into()), 1);
         // The author's is: off the hook's thread, and announced to whoever shows it.
-        observer.automation_completed("author", "t1", Some(blocked.into()));
+        observer.automation_completed("author", "t1", Some(blocked.into()), 1);
         let deadline = Instant::now() + Duration::from_secs(10);
         // Written, then announced: both are waited for.
         while (store::get("p1").unwrap().state != State::NeedsYou || *announced.lock().unwrap() == 0) && Instant::now() < deadline {

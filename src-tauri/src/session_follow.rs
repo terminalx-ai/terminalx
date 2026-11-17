@@ -786,8 +786,9 @@ impl SessionManager {
                     Engine::Cli(p) => p.turn_tail.last_assistant_message().map(str::to_owned),
                     _ => None,
                 };
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             _ => {}
         }

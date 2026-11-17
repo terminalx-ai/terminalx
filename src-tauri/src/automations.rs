@@ -22,6 +22,12 @@ pub trait AutomationHost: Clone + Send + Sync + 'static {
     fn execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
         self.sessions().map_or(true, |sessions| sessions.automation_execution_continues(session_id, tab_id))
     }
+    fn with_quiescent_execution<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        self.sessions().ok()?.with_automation_quiescent(session_id, tab_id, generation, action)
+    }
+    fn with_current_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        self.sessions().ok()?.with_automation_turn(session_id, tab_id, generation, action)
+    }
     fn deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
         if let Ok(sessions) = self.sessions() {
             sessions.automation_deferred_status(session_id, tab_id, active);
@@ -498,6 +504,8 @@ pub struct AutomationRun {
 #[serde(rename_all = "camelCase")]
 pub struct DeferredCompletion {
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_since: Option<String>,
 }
@@ -1324,13 +1332,18 @@ fn spawn_issue_report(
         }));
 }
 
-pub fn complete_from_hook(
+#[cfg(test)]
+fn complete_from_hook(
     app: &impl AutomationHost,
     session_id: &str,
     tab_id: &str,
     final_message: Option<String>,
 ) {
-    finish_from_hook(app, session_id, tab_id, final_message, None);
+    finish_from_hook(app, session_id, tab_id, final_message, None, None);
+}
+
+pub fn complete_from_turn(app: &impl AutomationHost, session_id: &str, tab_id: &str, final_message: Option<String>, generation: u64) {
+    finish_from_hook(app, session_id, tab_id, final_message, None, Some(generation));
 }
 
 fn finish_from_hook(
@@ -1339,29 +1352,16 @@ fn finish_from_hook(
     tab_id: &str,
     final_message: Option<String>,
     expected: Option<&DeferredCompletion>,
+    generation: Option<u64>,
 ) {
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
-    // Stop marks a foreground turn, not necessarily the automation's work.
-    // A background task can wake the agent for another turn after this one.
-    if app.execution_continues(session_id, tab_id) {
-        if expected.is_some() { return; }
-        let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
-            if !run.status.is_terminal() {
-                run.deferred_completion = Some(DeferredCompletion { message: final_message, quiet_since: None });
-            }
-            Ok(())
-        }) else { return };
-        if !run.status.is_terminal() {
-            app.deferred_status(session_id, tab_id, true);
-            emit_run(app, &run);
-        }
-        return;
-    }
     let changed_files = changed_file_count(&entry);
     let mut transitioned = false;
-    let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+    // The tab lock holds turn admission through the durable transition. A
+    // check made before taking it is not enough: another turn can open then.
+    let result = app.with_quiescent_execution(session_id, tab_id, generation, || automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
         if expected.is_none_or(|candidate| run.deferred_completion.as_ref() == Some(candidate)) && matches!(
             run.status,
             AutomationRunStatus::Pending | AutomationRunStatus::Running
@@ -1369,12 +1369,27 @@ fn finish_from_hook(
             transitioned = true;
             run.status = AutomationRunStatus::Completed;
             run.ended_at = Some(expected.and_then(|candidate| candidate.quiet_since.clone()).unwrap_or_else(index::now));
-            run.final_message = final_message;
+            run.final_message = final_message.clone();
             run.deferred_completion = None;
             run.changed_files = changed_files;
         }
         Ok(())
-    }) else {
+    }));
+    let Some(result) = result else {
+        if expected.is_some() { return; }
+        let Some(Ok(run)) = app.with_current_turn(session_id, tab_id, generation, || automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+            if !run.status.is_terminal() {
+                run.deferred_completion = Some(DeferredCompletion { message: final_message, turn_generation: generation, quiet_since: None });
+            }
+            Ok(())
+        })) else { return };
+        if !run.status.is_terminal() {
+            app.deferred_status(session_id, tab_id, true);
+            emit_run(app, &run);
+        }
+        return;
+    };
+    let Ok(run) = result else {
         return;
     };
     emit_run(app, &run);
@@ -1389,8 +1404,8 @@ fn finish_from_hook(
     }
 }
 
-/// A notification can arrive just before the CLI starts its next turn. Give
-/// that turn time to open, and restart the interval whenever work is observed.
+/// For untracked process work, wait for a stable observation that it ended.
+/// Tracked notifications remain outstanding until the agent has handled them.
 const DEFERRED_SETTLE: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
 
 fn reconcile_deferred(app: &impl AutomationHost, now: DateTime<Utc>) -> Result<()> {
@@ -1402,7 +1417,7 @@ fn reconcile_deferred(app: &impl AutomationHost, now: DateTime<Utc>) -> Result<(
             let busy = app.execution_continues(session, tab);
             let quiet = candidate.quiet_since.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
             if !busy && quiet.is_some_and(|at| now.signed_duration_since(at) >= DEFERRED_SETTLE) {
-                finish_from_hook(app, session, tab, candidate.message.clone(), Some(candidate));
+                finish_from_hook(app, session, tab, candidate.message.clone(), Some(candidate), candidate.turn_generation);
             } else if (busy && candidate.quiet_since.is_some()) || (!busy && quiet.is_none()) {
                 let _ = automation_store::replace_run(&automation.id, &run.run_id, |current| {
                     if !current.status.is_terminal() && current.deferred_completion.as_ref() == Some(candidate) {
@@ -2192,7 +2207,7 @@ mod tests {
     /// A host with an event sink and no session manager: ending a run needs
     /// only the first.
     #[derive(Clone)]
-    struct EndHost(Arc<crate::sink::BroadcastSink>, Arc<AtomicBool>, Arc<Mutex<Vec<bool>>>);
+    struct EndHost(Arc<crate::sink::BroadcastSink>, Arc<AtomicBool>, Arc<Mutex<Vec<bool>>>, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>);
 
     impl AutomationHost for EndHost {
         fn sink(&self) -> Arc<dyn EventSink> {
@@ -2204,13 +2219,54 @@ mod tests {
         fn execution_continues(&self, _: &str, _: &str) -> bool {
             self.1.load(Ordering::SeqCst)
         }
+        fn with_quiescent_execution<T>(&self, _: &str, _: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+            (!self.1.load(Ordering::SeqCst) && !self.3.swap(false, Ordering::SeqCst) && generation.is_none_or(|value| value == self.4.load(Ordering::SeqCst))).then(action)
+        }
+        fn with_current_turn<T>(&self, _: &str, _: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+            generation.is_none_or(|value| value == self.4.load(Ordering::SeqCst)).then(action)
+        }
         fn deferred_status(&self, _: &str, _: &str, active: bool) {
             self.2.lock().unwrap().push(active);
         }
     }
 
     fn end_host() -> EndHost {
-        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(AtomicBool::new(false)), Arc::default())
+        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(AtomicBool::new(false)), Arc::default(), Arc::new(AtomicBool::new(false)), Arc::default())
+    }
+
+    #[test]
+    fn a_late_callback_cannot_finish_or_replace_a_newer_turn() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.4.store(2, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("Old reply".into()), 1);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("New interim".into()), 2);
+        complete_from_turn(&host, &session, &tab, Some("Late old reply".into()), 1);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].deferred_completion.as_ref().unwrap().message.as_deref(), Some("New interim"));
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("Final".into()), 2);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].final_message.as_deref(), Some("Final"));
+    }
+
+    #[test]
+    fn a_turn_opening_at_finalization_defers_the_reply() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.3.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Interim".into()));
+        let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(run.status, AutomationRunStatus::Running);
+        assert_eq!(run.deferred_completion.unwrap().message.as_deref(), Some("Interim"));
+        complete_from_hook(&host, &session, &tab, Some("Final".into()));
+        let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(run.status, AutomationRunStatus::Completed);
+        assert_eq!(run.final_message.as_deref(), Some("Final"));
     }
 
     #[test]
@@ -2255,7 +2311,7 @@ mod tests {
         let old = automation_store::list_runs(&automation.id).unwrap()[0].deferred_completion.clone().unwrap();
         complete_from_hook(&host, &session, &tab, Some("Later reply".into()));
         host.1.store(false, Ordering::SeqCst);
-        finish_from_hook(&host, &session, &tab, old.message.clone(), Some(&old));
+        finish_from_hook(&host, &session, &tab, old.message.clone(), Some(&old), old.turn_generation);
         assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
         cancel_from_hook(&host, &session, &tab, "Stopped");
         reconcile_deferred(&host, Utc::now() + chrono::TimeDelta::minutes(1)).unwrap();

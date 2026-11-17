@@ -34,6 +34,31 @@ fn automation_completion_waits_for_a_followup_turn_already_open() {
 }
 
 #[test]
+fn automation_completion_holds_the_tab_lock_through_the_transition() {
+    let rig = Rig::new();
+    let manager = rig.manager.clone();
+    let runtime = rig.rt.clone();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let task = scope.spawn(move || manager.with_automation_quiescent(SESSION, TAB, None, || {
+            entered.send(()).unwrap();
+            proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(runtime.try_lock().is_err(), "a new turn must wait until the transition finishes");
+        release.send(()).unwrap();
+        assert_eq!(task.join().unwrap(), Some(()));
+        runtime.lock().unwrap().open_turn();
+    });
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+    // Even if the new turn closes before an older callback acquires the lock,
+    // its generation cannot be mistaken for the previous turn's.
+    runtime.lock().unwrap().turn_open = false;
+    assert_eq!(rig.manager.with_automation_quiescent(SESSION, TAB, Some(0), || "stale"), None);
+}
+
+#[test]
 fn deferred_automation_keeps_tab_working_until_reconciled() {
     let rig = Rig::new();
     let entry: index::SessionEntry = serde_json::from_value(json!({
@@ -106,7 +131,7 @@ impl SessionObserver for Observer {
     fn answered(&self, session: &str, tab: &str) {
         self.answered.lock().unwrap().push((session.into(), tab.into()));
     }
-    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
+    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>, _generation: u64) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
         // Another thread may hold the lock for a moment, as the input thread a
         // typed `/effort` starts does. Only the caller holding it never lets go.
@@ -356,6 +381,7 @@ impl Rig {
             queued: Vec::new(),
             held_queue: Default::default(),
             turn_open: false,
+            turn_generation: 0,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,

@@ -1090,6 +1090,7 @@ pub struct TabRuntime {
     pub queued: Vec<PendingMessage>,
     pub held_queue: held::Queue,
     pub turn_open: bool,
+    turn_generation: u64,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
     /// A compact boundary observed during this command, not proof a model turn ended.
@@ -1177,6 +1178,7 @@ impl TabRuntime {
     /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
         if !self.turn_open {
+            self.turn_generation = self.turn_generation.saturating_add(1);
             self.turn_by_command = false;
             self.signed_out_in_turn = false;
             self.turn_opener = Some(("session", "prompt"));
@@ -1199,8 +1201,10 @@ impl TabRuntime {
         let ended = matches!(&self.engine, Engine::Cli(p) if p.transcript_turn.is_some_and(tui::TurnMark::ends));
         let fresh = !self.turn_open || (self.turn_by_command && !command)
             || (compact && (self.turn_by_command || ended));
+        let was_open = self.turn_open;
         self.open_turn();
         if fresh {
+            if was_open { self.turn_generation = self.turn_generation.saturating_add(1); }
             self.turn_started_at = Some(Instant::now());
             self.turn_by_command = command;
             self.compact_completed = false;
@@ -1906,8 +1910,9 @@ impl SessionManager {
                 // never reset it. Left to the latch, such a turn would not
                 // close here, and skipping the rest of the pass for it would
                 // leave the tab "Working" for good with no warning either.
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(&rt_arc, rt, final_message);
+                self.after_turn_completed(&rt_arc, rt, final_message, completed);
                 continue;
             }
             self.nudge_if_due(&mut rt, now);
@@ -2280,6 +2285,7 @@ impl SessionManager {
                 queued: Vec::new(),
                 held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
+                turn_generation: 0,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
@@ -4423,14 +4429,42 @@ impl SessionManager {
     /// completion is delivered. Background work can also wake a later turn.
     pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
         let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
-        {
+        let watch = {
             let rt = runtime.lock().unwrap();
-            if rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
-                || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
-                || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
-            { return true; }
-        }
+            if Self::automation_runtime_busy(&rt) { return true; }
+            rt.background.clone()
+        };
+        if watch.is_some_and(|watch| watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_some()) { return true; }
         self.background_work(session_id, tab_id).is_some()
+    }
+
+    fn automation_runtime_busy(rt: &TabRuntime) -> bool {
+        rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
+            || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
+    }
+
+    /// Serialize the durable completion transition with turn admission. The
+    /// potentially slow process/transcript scan is outside the tab lock, then
+    /// the live state is checked again while that lock is held.
+    pub(crate) fn with_automation_quiescent<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let observed = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return None; }
+            rt.seq
+        };
+        if self.automation_execution_continues(session_id, tab_id) { return None; }
+        let rt = runtime.lock().unwrap();
+        if Self::automation_runtime_busy(&rt) || rt.seq != observed || generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    pub(crate) fn with_automation_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = runtime.lock().unwrap();
+        if generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
     }
 
     /// A deferred automation still owns work while its CLI waits at a prompt.
@@ -6630,9 +6664,10 @@ impl SessionManager {
                 drop(application);
                 self.observer.automation_failed(&session, &tab, "The automation turn was interrupted.");
             } else {
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
                 drop(application);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             self.judge_reported_mode(rt_arc, tail);
             return;
@@ -7772,8 +7807,9 @@ impl SessionManager {
                 if !mine(&rt) { return HookReply::default(); }
                 rt.last_activity = Instant::now();
                 if rt.turn_open {
+                    let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                     self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
-                    self.after_turn_completed(&rt_arc, rt, final_text);
+                    self.after_turn_completed(&rt_arc, rt, final_text, completed);
                     return HookReply::default();
                 }
             }
@@ -7825,11 +7861,15 @@ impl SessionManager {
     /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
     /// before notifying automation or scheduling a settings restart that may
     /// re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        let (generation, started_at, finished) = completed;
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
+        let started = started_at.and_then(|at| chrono::TimeDelta::from_std(at.elapsed()).ok()).map(|elapsed| chrono::Utc::now() - elapsed);
+        let watch = rt.background.clone();
         drop(rt);
-        self.observer.automation_completed(&session, &tab, final_message);
+        if let Some(watch) = watch { watch.lock().unwrap().automation_turn_completed(started, finished, final_message.as_deref()); }
+        self.observer.automation_completed(&session, &tab, final_message, generation);
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 

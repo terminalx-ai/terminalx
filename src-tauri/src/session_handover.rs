@@ -67,6 +67,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
+    pub turn_generation: u64,
+    #[serde(default)]
     pub turn_opener: Option<(String, String)>,
     #[serde(default)]
     pub turn_by_command: bool,
@@ -480,6 +482,7 @@ impl SessionManager {
             queued: rt.queued.clone(),
             held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
+            turn_generation: rt.turn_generation,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
             signed_out_in_turn: rt.signed_out_in_turn,
@@ -575,6 +578,7 @@ impl SessionManager {
         rt.queued = record.queued;
         rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
+        rt.turn_generation = record.turn_generation;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;
         rt.signed_out_in_turn = record.signed_out_in_turn;

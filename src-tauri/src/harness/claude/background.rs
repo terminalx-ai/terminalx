@@ -76,6 +76,33 @@ enum Stopping {
     Cron(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notification {
+    at: DateTime<Utc>,
+    task_id: Option<String>,
+    tool_use_id: Option<String>,
+    previous_message: Option<String>,
+    delivered_at: Option<DateTime<Utc>>,
+    response: Option<(DateTime<Utc>, String)>,
+}
+
+impl Notification {
+    fn matches(&self, text: &str) -> bool {
+        text.split("<task-notification>").skip(1).any(|block| {
+            let block = block.split("</task-notification>").next().unwrap_or(block);
+            self.task_id.as_deref().is_some_and(|id| tagged(block, "task-id") == Some(id))
+                || self.tool_use_id.as_deref().is_some_and(|id| tagged(block, "tool-use-id") == Some(id))
+        })
+    }
+}
+
+fn same_notification(prompt: &str, rendered: &str) -> bool {
+    rendered.contains("<task-notification>") && (
+        tagged(prompt, "task-id").is_some_and(|id| tagged(rendered, "task-id") == Some(id))
+        || tagged(prompt, "tool-use-id").is_some_and(|id| tagged(rendered, "tool-use-id") == Some(id))
+    )
+}
+
 /// What one CLI started and has not heard back from, by the tool use that
 /// started each.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,6 +112,9 @@ pub struct Ledger {
     stopping: BTreeMap<String, Stopping>,
     /// When the wakeup it scheduled last is due.
     wakeup: Option<DateTime<Utc>>,
+    /// A task ended, but the agent has yet to finish a turn that took its notification.
+    automation_notifications: Vec<Notification>,
+    last_assistant_id: Option<String>,
 }
 
 impl Ledger {
@@ -104,6 +134,14 @@ impl Ledger {
         let parts = record["message"]["content"].as_array().map(Vec::as_slice).unwrap_or_default();
         match record["type"].as_str() {
             Some("assistant") => {
+                let id = record["message"]["id"].as_str();
+                for notice in &mut self.automation_notifications {
+                    let text = text_of(&record["message"]["content"]);
+                    if id.is_some() && notice.previous_message.as_deref().is_some_and(|old| Some(old) != id) && !text.is_empty() {
+                        notice.response = Some((at, text));
+                    }
+                }
+                if let Some(id) = id { self.last_assistant_id = Some(id.to_string()); }
                 for part in parts.iter().filter(|part| part["type"] == "tool_use") {
                     self.tool_use(part, at);
                 }
@@ -116,16 +154,30 @@ impl Ledger {
                     self.tool_result(part, structured);
                 }
                 if results.is_empty() {
-                    self.notifications(&text_of(&record["message"]["content"]));
+                    let content = text_of(&record["message"]["content"]);
+                    self.notifications(&content, at, |_| true);
+                    for notice in &mut self.automation_notifications {
+                        if !notice.matches(&content) { continue; }
+                        notice.delivered_at = Some(at);
+                    }
                     let origin = record["turnOrigin"].as_str().or_else(|| record["origin"]["kind"].as_str());
                     if origin == Some("scheduled") {
                         self.scheduled_turn(at);
                     }
                 }
             }
-            Some("attachment") if record["attachment"]["type"] == "queued_command" => self.notifications(&text_of(&record["attachment"]["prompt"])),
+            Some("attachment") if record["attachment"]["type"] == "queued_command" => {
+                let prompt = text_of(&record["attachment"]["prompt"]);
+                self.notifications(&prompt, at, |block| record["rendered"].as_array().is_some_and(|parts| parts.iter().any(|part| {
+                    part["content"].as_str().is_some_and(|text| same_notification(block, text))
+                })));
+            }
             _ => {}
         }
+    }
+
+    fn note_notification(&mut self, at: DateTime<Utc>, content: &str, delivered_in_turn: bool) {
+        self.automation_notifications.push(Notification { at, task_id: tagged(content, "task-id").map(str::to_owned), tool_use_id: tagged(content, "tool-use-id").map(str::to_owned), previous_message: self.last_assistant_id.clone(), delivered_at: delivered_in_turn.then_some(at), response: None });
     }
 
     fn tool_use(&mut self, part: &Value, at: DateTime<Utc>) {
@@ -199,7 +251,8 @@ impl Ledger {
     }
 
     /// Each `<task-notification>` in `text` with a final status ends its task.
-    fn notifications(&mut self, text: &str) {
+    fn notifications(&mut self, text: &str, at: DateTime<Utc>, delivered: impl Fn(&str) -> bool) -> bool {
+        let mut matched = false;
         for block in text.split("<task-notification>").skip(1) {
             let block = block.split("</task-notification>").next().unwrap_or(block);
             let status = tagged(block, "status").map(str::to_ascii_lowercase);
@@ -207,8 +260,15 @@ impl Ledger {
                 continue;
             }
             let (tool_use, task) = (tagged(block, "tool-use-id"), tagged(block, "task-id"));
+            let before = self.tasks.len();
             self.tasks.retain(|key, known| Some(key.as_str()) != tool_use && (task.is_none() || known.id.as_deref() != task));
+            if self.tasks.len() != before {
+                let complete = format!("<task-notification>{block}</task-notification>");
+                self.note_notification(at, &complete, delivered(&complete));
+                matched = true;
+            }
         }
+        matched
     }
 
     /// The scheduler started a turn: the oldest one-shot job made before it
@@ -238,6 +298,10 @@ impl Ledger {
             1 => Some("a scheduled job".into()),
             n => Some(format!("{n} scheduled jobs")),
         }
+    }
+
+    fn automation_outstanding(&self, now: DateTime<Utc>) -> Option<String> {
+        self.outstanding(now).or_else(|| (!self.automation_notifications.is_empty()).then(|| "a background notification awaiting the agent".into()))
     }
 }
 
@@ -289,6 +353,25 @@ impl Watch {
             log::debug!("read {} for background work: {error}", self.aimed.0.display());
         }
         self.ledger.outstanding(now)
+    }
+
+    pub fn automation_outstanding(&mut self, now: DateTime<Utc>) -> Option<String> {
+        if let Err(error) = self.catch_up() {
+            log::debug!("read {} for automation work: {error}", self.aimed.0.display());
+            return Some("background state could not be read".into());
+        }
+        self.ledger.automation_outstanding(now)
+    }
+
+    /// A later turn, or a new model response in the current turn after the
+    /// notification, proves that the queued report was taken. The reply must
+    /// belong to this completed turn, not a transcript written later.
+    pub fn automation_turn_completed(&mut self, started: Option<DateTime<Utc>>, finished: DateTime<Utc>, final_message: Option<&str>) {
+        if self.catch_up().is_err() { return; }
+        self.ledger.automation_notifications.retain(|notice| {
+            !(notice.delivered_at.is_some_and(|delivered| delivered + chrono::TimeDelta::milliseconds(1) < finished) && (started.is_some_and(|start| notice.at < start)
+                || notice.response.as_ref().is_some_and(|(at, text)| *at >= notice.at && *at + chrono::TimeDelta::milliseconds(1) < finished && Some(text.as_str()) == final_message)))
+        });
     }
 
     fn catch_up(&mut self) -> std::io::Result<()> {
@@ -393,6 +476,87 @@ mod tests {
         let mut lines = started.to_vec();
         lines.push(queued("<task-notification><task-id>b3a8zex3u</task-id><status>killed</status></task-notification>"));
         assert_eq!(ledger(&lines).outstanding(at(30)), None);
+    }
+
+    #[test]
+    fn automation_waits_for_a_turn_to_handle_the_queued_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let mut watch = Watch::new(tail(&path, HashSet::new()));
+        append(&path, &[
+            tool_use("toolu_ci", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("toolu_ci", "running", serde_json::json!({ "backgroundTaskId": "bci" }), false),
+            queued(&notification("bci", "toolu_ci", "failed")),
+        ]);
+        assert!(watch.outstanding(at(30)).is_none());
+        assert!(watch.automation_outstanding(at(30)).is_some());
+        // Even a very long delay and the end of the preceding turn do not
+        // prove the queued notification was taken.
+        watch.automation_turn_completed(Some(at(-1)), at(0), Some("Interim"));
+        assert!(watch.automation_outstanding(at(600)).is_some());
+        let mut delivery: Value = serde_json::from_str(&reported(&notification("bci", "toolu_ci", "failed"))).unwrap();
+        delivery["timestamp"] = at(2).to_rfc3339().into();
+        append(&path, &[delivery.to_string()]);
+        watch.automation_turn_completed(Some(at(1)), at(1) + chrono::TimeDelta::seconds(30), Some("Earlier turn"));
+        assert!(watch.automation_outstanding(at(600)).is_some(), "a later delivery cannot settle an earlier turn");
+        watch.automation_turn_completed(Some(at(3)), at(4), Some("Final"));
+        assert!(watch.automation_outstanding(at(600)).is_none());
+    }
+
+    #[test]
+    fn notification_handled_within_a_turn_requires_a_new_completed_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let mut watch = Watch::new(tail(&path, HashSet::new()));
+        let report = notification("bci", "ci", "failed");
+        let mut delivered: Value = serde_json::from_str(&queued(&report)).unwrap();
+        delivered["rendered"] = serde_json::json!([{ "content": report }]);
+        append(&path, &[
+            serde_json::json!({ "type": "assistant", "timestamp": AT, "message": { "id": "before", "content": [{ "type": "tool_use", "id": "ci", "name": "Bash", "input": { "run_in_background": true } }] } }).to_string(),
+            tool_result("ci", "running", serde_json::json!({ "backgroundTaskId": "bci" }), false),
+            delivered.to_string(),
+        ]);
+        watch.automation_turn_completed(Some(at(-1)), at(1), Some("Interim"));
+        assert!(watch.automation_outstanding(at(100)).is_some());
+        append(&path, &[serde_json::json!({ "type": "assistant", "timestamp": "2026-11-01T14:02:00Z", "message": { "id": "after", "content": [{ "type": "text", "text": "Handled failure" }] } }).to_string()]);
+        // A callback belonging to an older turn cannot consume a later reply.
+        watch.automation_turn_completed(Some(at(-1)), at(1), Some("Handled failure"));
+        assert!(watch.automation_outstanding(at(100)).is_some());
+        watch.automation_turn_completed(Some(at(-1)), at(3), Some("Handled failure"));
+        assert!(watch.automation_outstanding(at(100)).is_none());
+
+        let other = dir.path().join("queued.jsonl");
+        let mut queued_watch = Watch::new(tail(&other, HashSet::new()));
+        append(&other, &[
+            serde_json::json!({ "type": "assistant", "timestamp": AT, "message": { "id": "before", "content": [{ "type": "tool_use", "id": "ci", "name": "Bash", "input": { "run_in_background": true } }] } }).to_string(),
+            tool_result("ci", "running", serde_json::json!({ "backgroundTaskId": "bci" }), false),
+            queued(&notification("bci", "ci", "failed")),
+            serde_json::json!({ "type": "assistant", "timestamp": "2026-11-01T14:02:00Z", "message": { "id": "after", "content": [{ "type": "text", "text": "Interim" }] } }).to_string(),
+        ]);
+        queued_watch.automation_turn_completed(Some(at(-1)), at(3), Some("Interim"));
+        assert!(queued_watch.automation_outstanding(at(100)).is_some(), "a queued report without delivery evidence remains pending");
+    }
+
+    #[test]
+    fn each_queued_notification_must_be_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let mut watch = Watch::new(tail(&path, HashSet::new()));
+        let first = notification("b1", "t1", "completed");
+        let second = notification("b2", "t2", "failed");
+        append(&path, &[
+            tool_use("t1", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("t1", "running", serde_json::json!({ "backgroundTaskId": "b1" }), false),
+            tool_use("t2", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("t2", "running", serde_json::json!({ "backgroundTaskId": "b2" }), false),
+            queued(&format!("{first}{second}")),
+            reported(&first),
+        ]);
+        watch.automation_turn_completed(Some(at(1)), at(2), Some("First handled"));
+        assert!(watch.automation_outstanding(at(100)).is_some());
+        append(&path, &[reported(&second)]);
+        watch.automation_turn_completed(Some(at(3)), at(4), Some("Both handled"));
+        assert!(watch.automation_outstanding(at(100)).is_none());
     }
 
     /// A Monitor's events report in without ending it; its end does.
