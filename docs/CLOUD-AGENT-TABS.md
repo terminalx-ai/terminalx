@@ -514,6 +514,34 @@ instead of from this computer.
   from before `composer/3` says it needs an update; the message is never
   sent without its images.
 
+- **Files other than images, on a machine** (`composer/4`, PRO-407). A
+  machine's agent takes any file a local tab takes (PRO-290: at most 10
+  per message with its images, 25 MB each, no name TerminalX uses for its
+  own files). A cloud workspace's agent still takes images only.
+  1. The desktop uploads each file as it uploads an image, with
+     `session.attach { …, kind: "file", name, mediaType }`. `name` is the
+     file's last name segment and `mediaType` may be empty; a file picked or
+     dropped from this computer is read here part by part
+     (`read_attachment_part`), so its bytes leave this computer and its path
+     never does. An empty file is one empty last part. The machine refuses a
+     reserved name (`file-refused`) or a file over 25 MB (`file-too-large`)
+     in a sentence the composer shows with the file's name.
+  2. The message names them: `files: [{ id, name, mediaType? }]` in the live
+     `session.send` (or a `send` under `agent-commands/1`). Text is optional
+     when there are files. A `steer` never carries files.
+  3. When the message is typed (or queued behind a running turn), the
+     machine moves the uploads into one new folder of the session's
+     attachments folder there (`$TERMINALX_HOME/attachments/<session>/…`,
+     `attachments::store`) and hands the agent those paths after the text,
+     exactly as a local tab's files are (`SessionManager::send_pressed`). A
+     queued message keeps their stored paths, so a restart does not lose
+     them. A message naming a file that is not there in full is refused with
+     `attachment-missing` before anything about the tab changes.
+
+  A machine from before `composer/4` takes images only: the composer says to
+  update it, and nothing is uploaded. In the transcript the files show as
+  chips by name; they are on the machine, so they do not open here.
+
   In the transcript, an image sent to a cloud tab shows by name: its file
   is on the workspace, not on this computer, so there is no thumbnail.
   "Send again" on a message whose outcome is unknown uploads its images

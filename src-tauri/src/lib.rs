@@ -898,6 +898,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::store_attachments,
+            commands::read_attachment_part,
             commands::inspect_attachments,
             commands::save_attachment_copy,
             commands::report_send_shown,

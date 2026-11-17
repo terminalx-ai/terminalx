@@ -149,6 +149,16 @@ pub trait AgentOps: Send + Sync {
         }
         anyhow::bail!("this runtime cannot send images to an agent")
     }
+    /// A message with images and files already stored in the session's
+    /// attachments folder (PRO-407), handed to the agent as a local tab's
+    /// are (`SessionManager::send_pressed`). An agent host that cannot take
+    /// files says so.
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        if files.is_empty() {
+            return self.send_with_images(session_id, tab_id, text, images);
+        }
+        anyhow::bail!("this runtime cannot send files to an agent")
+    }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     /// Escape for the tab's running turn (#427): the turn is interrupted, the
     /// agent's process stays, and nothing queued is dropped. False when the
@@ -345,6 +355,10 @@ impl AgentOps for ManagerOps {
 
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
         self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
+    }
+
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        self.manager.send_pressed(session_id, tab_id, text.to_string(), images, None, files).map(|_| ())
     }
 
     fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
@@ -767,15 +781,15 @@ impl CloudAgents {
         Ok(key_id)
     }
 
-    /// One part of an image `owner` attaches to a message they are about to
-    /// send (`session.attach`). Uploads nobody sent within a day are dropped
+    /// One part of an image or, with `file`, another file (PRO-407) `owner`
+    /// attaches to a message they are about to send (`session.attach`). Uploads nobody sent within a day are dropped
     /// first, except those a queued message still waits for.
     #[allow(clippy::too_many_arguments)]
-    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
+    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, file: bool, last: bool) -> Result<u64, attachments::AttachError> {
         if offset == 0 {
             self.prune_attachments();
         }
-        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now_ms())
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, file, last, now_ms())
     }
 
     /// Drop uploads nobody sent within a day, except those a queued message
@@ -829,7 +843,7 @@ impl CloudAgents {
                     let permit = self.collab.get().map(|collab| collab::v2::Permit::new(collab.clone(), &follow_up.actor_id, follow_up.policy_stamp.clone(), collab::v2::Action::Drive));
                     match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
                         Ok(images) => {
-                            let send = || self.ops.send_with_images(&follow_up.session_id, &tab_id, &follow_up.text, images);
+                            let send = || self.ops.send_attached(&follow_up.session_id, &tab_id, &follow_up.text, images, follow_up.files.clone());
                             let result = match permit { Some(permit) => permit.with(send), None => send() };
                             if let Err(error) = result {
                                 log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);

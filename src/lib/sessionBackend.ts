@@ -10,6 +10,7 @@ import {
   decideCloudAgent,
   discardPendingConfig,
   isDeciding,
+  isDevScope,
   markCloudAgentRead,
   refreshFromCheckpoint,
   sendAgain,
@@ -20,7 +21,7 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_FILES_REFUSED, MACHINE_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
 import type { TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
@@ -471,7 +472,10 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     send: async (tabId, text, images, options) => {
       guard();
       // Files other than images are stored on this computer (PRO-290); a cloud agent takes images only.
-      if (options?.files?.length) throw new CloudImageError(CLOUD_FILES_REFUSED);
+      // A machine takes them (PRO-407): they are uploaded to it and stored in the session's attachments folder there.
+      const files = options?.files ?? [];
+      if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
+      if (files.length && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
       // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
       const blocked = images.length ? cloudImagesBlocked(client, cloudAsleep(ctx.state, ctx.workspaceState)) : null;
@@ -482,8 +486,8 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
       if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
       // Told not to start anything: the server refuses a stopped workspace, and no wake follows from here either.
-      if (options?.wake === false) await sendToCloudAgent(scope, tabId, text, client, images, { wake: false });
-      else await interactive(() => sendToCloudAgent(scope, tabId, text, client, images));
+      if (options?.wake === false) await sendToCloudAgent(scope, tabId, text, client, images, { wake: false, files });
+      else await interactive(() => sendToCloudAgent(scope, tabId, text, client, images, { files }));
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),
