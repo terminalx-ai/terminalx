@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as settingsFile from "@/lib/settingsFile";
+import { configuration } from "@/lib/configuration";
 import type { Project } from "@/types/session";
 import type { SettingId } from "./settingsRegistry";
 
@@ -289,4 +291,35 @@ describe("row search over repository rows (PRO-127)", () => {
     expect(row?.getAttribute("data-setting-instance")).toBe("/repos/two");
     expect(document.activeElement).toBe(row);
   });
+});
+
+
+it("labels the title-bar fallback as personal when the selected project has neither settings file (#1090)", async () => {
+  const personalPath = "/Users/me/.raccoon/settings.json";
+  const status = vi.spyOn(settingsFile, "useSettingsFile").mockReturnValue({
+    file: { path: personalPath, displayPath: "~/.raccoon/settings.json", exists: true, error: null, problem: null, setKeys: [], preferences: {} },
+    error: null, revision: 0, saveFailure: null,
+  });
+  const files = vi.spyOn(configuration, "files").mockResolvedValue([
+    { layer: "repositoryShared", path: "/repos/two/.terminalx/settings.json", displayPath: "/repos/two/.terminalx/settings.json", exists: false, keys: 0, git: null, problem: null },
+    { layer: "repositoryLocal", path: "/repos/two/.terminalx/settings.local.json", displayPath: "/repos/two/.terminalx/settings.local.json", exists: false, keys: 0, git: null, problem: null },
+  ]);
+  const open = vi.spyOn(configuration, "openFile").mockResolvedValue(undefined);
+  try {
+    render(<SettingsPage initialTab="repositories" initialProjectPath="/repos/two" onBack={vi.fn()} />);
+    await waitFor(() => expect(files).toHaveBeenCalledWith("/repos/two"));
+    fireEvent.click(screen.getByRole("button", { name: "Open personal settings.json" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith(personalPath, null));
+    expect(screen.queryByRole("button", { name: "Open settings.json" })).toBeNull();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "More ways to open personal settings.json" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: /Project · shared.*none yet/ }).getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: /Project · local.*none yet/ }).getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: /Your settings/ }).hasAttribute("data-current")).toBe(true);
+  } finally {
+    cleanup();
+    status.mockRestore();
+    files.mockRestore();
+    open.mockRestore();
+  }
 });
