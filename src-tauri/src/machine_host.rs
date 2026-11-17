@@ -21,6 +21,8 @@ mod pairing_tests;
 mod security_tests;
 #[cfg(test)]
 mod relay_tests;
+#[cfg(all(test, unix))]
+mod phone_relay_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -394,15 +396,14 @@ impl MachineHost {
     /// relay credential ends with it.
     pub fn use_relay(&self, relay: &Arc<crate::remote::host::RelayHost>) {
         *self.relay.lock().unwrap() = Some(Arc::downgrade(relay));
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get() {
+            phones.use_relay(relay);
+        }
     }
 
     fn relay(&self) -> Option<Arc<crate::remote::host::RelayHost>> {
         self.relay.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
-    }
-
-    /// The direct listener's port, while it listens.
-    pub(crate) fn listening_port(&self) -> Option<u16> {
-        self.state.lock().unwrap().listening.as_ref().map(|listening| listening.address.port())
     }
 
     /// The direct listener's addresses (`machine/2` `directEndpoints`).
@@ -592,10 +593,15 @@ impl MachineHost {
         wire::PhoneStatus::default()
     }
 
-    /// The phones served here, while no window takes them.
+    /// Capture the admission fence with route selection, before any handshake.
     #[cfg(unix)]
-    pub(crate) fn phones(&self) -> Option<&Arc<phones::Phones>> {
-        self.phones.get()
+    pub(crate) fn phone_admission(&self) -> Option<(Arc<phones::Phones>, HostKeypair, u16, tokio::sync::watch::Receiver<u64>, u64)> {
+        let state = self.state.lock().unwrap();
+        if !state.enabled || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) { return None; }
+        let phones = self.phones.get()?.clone();
+        let stopped = phones.stopped();
+        let epoch = *stopped.borrow();
+        Some((phones, state.keypair.clone()?, state.listening.as_ref()?.address.port(), stopped, epoch))
     }
 
     /// Tell the window and stdout when the status changed.
@@ -893,6 +899,8 @@ impl MachineHost {
         for (_, cancel) in state.phones.drain() {
             let _ = cancel.send(());
         }
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get() { phones.invalidate(); }
         drop(state);
         #[cfg(unix)]
         if let Some(phones) = self.phones.get().cloned() {
@@ -1109,6 +1117,20 @@ impl MachineHost {
 
     pub(crate) fn untrack_phone(&self, id: u64) {
         self.state.lock().unwrap().phones.remove(&id);
+    }
+
+    fn register_phone_route(&self, route: PhoneRoute) -> Result<(), ControlError> {
+        let mut state = self.state.lock().unwrap();
+        if state.phone_route.as_ref().is_some_and(|current| current.attachment.valid() && current.lease != route.lease) {
+            return Err(ControlError::new("busy", "Another window takes this machine's phones.", None::<String>));
+        }
+        state.phone_route = Some(route);
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get() { phones.invalidate(); }
+        drop(state);
+        #[cfg(unix)]
+        if let Some(phones) = self.phones.get() { phones.stop(); }
+        Ok(())
     }
 
     /// Where a phone goes: the window's route while its attachment is current.
@@ -1510,18 +1532,7 @@ impl MachineHost {
                 if let Err(error) = private_socket(&self.data_dir, &route.socket) {
                     return Err(ControlError::new("invalid_route", format!("{error:#}"), None::<String>));
                 }
-                let mut state = self.state.lock().unwrap();
-                if state.phone_route.as_ref().is_some_and(|current| current.attachment.valid() && current.lease != route.lease) {
-                    return Err(ControlError::new("busy", "Another window takes this machine's phones.", None::<String>));
-                }
-                state.phone_route = Some(PhoneRoute { attachment, lease: route.lease, socket: route.socket });
-                drop(state);
-                // A window takes phones now: the ones served here reconnect
-                // and reach it, and a phone code made here ends (PRO-359).
-                #[cfg(unix)]
-                if let Some(phones) = self.phones.get().cloned() {
-                    Self::off_task(move || phones.stop());
-                }
+                self.register_phone_route(PhoneRoute { attachment, lease: route.lease, socket: route.socket })?;
                 Ok(json!({ "registered": true }))
             }
             wire::REVOKE => {
@@ -1667,8 +1678,39 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         self.untrack(computer_id, tracked);
     }
 
-    fn forward_phone(&self, forwarded: wire::Forwarded) -> bool {
-        let Some(route) = self.phone_route() else { return false };
+    fn forward_phone(&self, forwarded: wire::Forwarded, mut relay_cancel: mpsc::UnboundedReceiver<()>) -> bool {
+        // Route selection and the stop subscription share the takeover lock.
+        // A window registered after this point invalidates the entire runtime
+        // connection, including a phone still in its handshake or approval.
+        let state = self.state.lock().unwrap();
+        let route = state.phone_route.as_ref().filter(|route| route.attachment.valid()).map(|route| route.socket.clone());
+        if route.is_none() {
+            #[cfg(unix)]
+            {
+                if !state.enabled { return false; }
+                let Some(phones) = self.phones.get().cloned() else { return false };
+                let Some(keypair) = state.keypair.clone() else { return false };
+                let port = state.listening.as_ref().map(|listener| listener.address.port()).unwrap_or(self.port);
+                let mut stopped = phones.stopped();
+                let epoch = *stopped.borrow();
+                drop(state);
+                tokio::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        _ = stopped.changed() => {},
+                        _ = relay_cancel.recv() => {},
+                        result = phones.serve_relay(keypair, forwarded, port, epoch) => {
+                            if let Err(error) = result { log::debug!("machine host: relay phone closed: {error:#}"); }
+                        }
+                    }
+                });
+                return true;
+            }
+            #[cfg(not(unix))]
+            return false;
+        }
+        drop(state);
+        let route = route.unwrap();
         #[cfg(unix)]
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
