@@ -410,6 +410,14 @@ pub(super) fn inherited() -> Result<Channel> {
     })
 }
 
+impl super::DeadlineIo for Channel {
+    fn set_deadline(&mut self, deadline: Instant) -> io::Result<()> {
+        super::time_left(deadline)?;
+        self.frame_deadline = Some(deadline);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,10 +463,3 @@ mod tests {
     }
 }
 
-impl super::DeadlineIo for Channel {
-    fn set_deadline(&mut self, deadline: Instant) -> io::Result<()> {
-        super::time_left(deadline)?;
-        self.frame_deadline = Some(deadline);
-        Ok(())
-    }
-}
