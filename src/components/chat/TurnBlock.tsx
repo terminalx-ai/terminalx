@@ -1,10 +1,12 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
-import { TurnDetailsPopover, turnStats } from "./UsagePopovers";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { TurnDetailsPopover, turnStats, type TurnFallback } from "./UsagePopovers";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { ArrowLeftRight, Brain, Check, ChevronRight, CircleAlert, CircleX, Clock, Copy, Image as ImageIcon, Keyboard, Loader2, Navigation, Pencil, RefreshCw, RotateCcw, Send, Shrink, Users, X } from "@/icons";
+import { ArrowLeftRight, Bookmark, Brain, Check, ChevronRight, CircleAlert, CircleX, Clock, Copy, Ellipsis, FileText, FolderGit2, GitFork, Image as ImageIcon, Keyboard, Loader2, Navigation, Pencil, RefreshCw, RotateCcw, Send, Shrink, Square, Unmute, Users, X } from "@/icons";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { canReadAloud, readAloud, stopReading, useReadingAloud } from "@/lib/readAloud";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
@@ -60,6 +62,14 @@ interface TurnProps {
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
+  /** Who a second opinion asks: "Codex" in "Second opinion from Codex". */
+  secondOpinionAgent?: string;
+  /** Fork the conversation as it stood at this turn's end (PRO-379); absent where that cannot be done. */
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  /** Keep this turn's prompt as a snippet; absent where there is nowhere to keep it. */
+  onSaveSnippet?: (text: string) => void;
+  /** What the turn details say for settings a turn's own record lacks. */
+  turnFallback?: TurnFallback;
   onReset?: (endSeq: number) => void;
   /** The agent's name, for what a message taken mid-turn says ("Codex reads it at its next tool call"). */
   agent?: { id: string; name: string };
@@ -83,6 +93,10 @@ function TurnBody({
   onSendQueuedNow,
   onSendAgain,
   onSecondOpinion,
+  secondOpinionAgent,
+  onFork,
+  onSaveSnippet,
+  turnFallback,
   onReset,
   workingSince,
   onRetry,
@@ -169,7 +183,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={outcome} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} onReset={onReset} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet} />}
     </div>
   );
 }
@@ -295,30 +309,50 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
 
 /**
  * A settled turn's one footer row: how long it took and when it ended (which opens the turn's details), its cache hit
- * and output speed, a copy of the answer, a second opinion, and Reset to here.
+ * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
+ * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, outcome, onSecondOpinion, onReset }: { turn: Turn; outcome: Outcome | null; onSecondOpinion?: (turn: Turn) => void; onReset?: (endSeq: number) => void }) {
+function TurnFooter({ turn, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet }: {
+  turn: Turn;
+  outcome: Outcome | null;
+  fallback?: TurnFallback;
+  onSecondOpinion?: (turn: Turn) => void;
+  secondOpinionAgent?: string;
+  onReset?: (endSeq: number) => void;
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  onSaveSnippet?: (text: string) => void;
+}) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
   const [copied, setCopied] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const reading = useReadingAloud(turn.key);
   useEffect(() => {
     if (!copied) return;
     const id = window.setTimeout(() => setCopied(false), 1500);
     return () => window.clearTimeout(id);
   }, [copied]);
+  const settled = !!turn.completed && !turn.live;
+  const endSeq = turn.completed?.status === "ok" ? turn.completed.seq : undefined;
+  const prompt = turn.prompt?.text.trim();
+  const fork = endSeq != null ? onFork : undefined;
+  const reset = endSeq != null ? onReset : undefined;
+  const snippet = prompt ? onSaveSnippet : undefined;
+  const hasMenu = !!(fork || reset || text || snippet || onSecondOpinion);
   const ended = messageTime(turn.completed?.ts ?? ts);
   const stats = turnStats(turn);
   if (!messageTime(ts) && !outcome && !text && !turn.completed && !onSecondOpinion && !onReset) return null;
   const quiet = outcome?.tone === "ok";
+  const label = [outcome ? (quiet ? outcome.duration?.replace(/^for /, "") ?? outcome.word : outcome.label) : null, ended ? ended.short : null].filter(Boolean).join(" · ");
+  const icon = "-my-1 flex size-6 items-center justify-center rounded-md text-faint hover:bg-veil-raised hover:text-foreground focus-visible:outline";
+  const hover = "opacity-0 transition-opacity focus-visible:opacity-100 group-hover/turn:opacity-100";
   return (
     <div className="flex min-h-7 flex-wrap items-center gap-x-2 text-xs text-faint" data-testid="turn-footer">
-      {turn.completed && !turn.live ? (
-        <TurnDetailsPopover turn={turn}>
+      {settled ? (
+        <TurnDetailsPopover turn={turn} fallback={fallback} label={label}>
           {outcome && !quiet && <OutcomeIcon tone={outcome.tone} />}
-          <span className={cn("tabular-nums", outcome?.tone === "failed" && "text-destructive")}>
-            {[outcome ? (quiet ? outcome.duration?.replace(/^for /, "") ?? outcome.word : outcome.label) : null, ended ? ended.short : null].filter(Boolean).join(" · ")}
-          </span>
+          <span className={cn("tabular-nums", outcome?.tone === "failed" && "text-destructive")}>{label}</span>
         </TurnDetailsPopover>
       ) : (
         <MessageTime ts={ts} inline />
@@ -326,26 +360,60 @@ function TurnFooter({ turn, outcome, onSecondOpinion, onReset }: { turn: Turn; o
       {stats.cacheHit != null && <span className="tabular-nums" title="Share of this turn's input read from the prompt cache">cache hit {stats.cacheHit}%</span>}
       {stats.tokensPerSecond != null && <span className="tabular-nums" title="Average output rate over the whole turn, tool calls included">{stats.tokensPerSecond} tok/s</span>}
       {text && (
-          <button
-            type="button"
-            aria-label="Copy answer"
-            title={copied ? "Copied" : "Copy answer"}
-            onClick={() => void copyText(text).then(() => setCopied(true))}
-            className="-my-1 flex size-6 items-center justify-center rounded-md text-faint hover:bg-veil-raised hover:text-foreground focus-visible:outline"
-          >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          </button>
+        <button type="button" aria-label="Copy answer" title={copied ? "Copied" : "Copy answer"} onClick={() => void copyText(text).then(() => setCopied(true))} className={icon}>
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        </button>
+      )}
+      {text && canReadAloud() && (
+        <button type="button" aria-label={reading ? "Stop reading aloud" : "Read aloud"} title={reading ? "Stop reading aloud" : "Read aloud"} aria-pressed={reading}
+          onClick={() => (reading ? stopReading() : readAloud(turn.key, text))} className={cn(icon, !reading && hover, reading && "text-foreground")}>
+          {reading ? <Square className="size-3" /> : <Unmute className="size-3.5" />}
+        </button>
+      )}
+      {settled && hasMenu && (
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button type="button" aria-label="Turn actions" title="Turn actions" className={cn(icon, !menuOpen && hover, "data-[state=open]:bg-veil-strong data-[state=open]:text-foreground")}>
+              <Ellipsis className="size-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-80">
+            {fork && <>
+              <TurnMenuItem icon={<GitFork />} label="Fork to new tab" hint="Same worktree · knows the chat up to here" onSelect={() => fork(endSeq!, "tab")} />
+              <TurnMenuItem icon={<FolderGit2 />} label="Fork to new session" hint="New worktree with this turn's files" onSelect={() => fork(endSeq!, "session")} />
+            </>}
+            {reset && <>
+              {fork && <DropdownMenuSeparator />}
+              <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint="Removes later turns; can reset files too" onSelect={() => reset(endSeq!)} />
+            </>}
+            {(fork || reset) && (text || snippet || onSecondOpinion) && <DropdownMenuSeparator />}
+            {text && <TurnMenuItem icon={<FileText />} label="Copy answer as Markdown" onSelect={() => void copyText(text).then(() => setCopied(true))} />}
+            {snippet && <TurnMenuItem icon={<Bookmark />} label="Save the prompt as a snippet…" onSelect={() => snippet(prompt!)} />}
+            {onSecondOpinion && <TurnMenuItem icon={<ArrowLeftRight />} label={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : "Second opinion"}
+              hint={`Opens ${secondOpinionAgent ? `a ${secondOpinionAgent}` : "another agent's"} tab with this turn's diff`} onSelect={() => onSecondOpinion(turn)} />}
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
       {onSecondOpinion && (
-        <button type="button" onClick={() => onSecondOpinion(turn)} className="-mx-0.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+        <button type="button" onClick={() => onSecondOpinion(turn)} title={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : undefined}
+          className="-mx-0.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
           <ArrowLeftRight className="size-3.5" />
           Second opinion
         </button>
       )}
-      {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
-        <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
-      )}
     </div>
+  );
+}
+
+function TurnMenuItem({ icon, label, hint, onSelect }: { icon: ReactNode; label: string; hint?: string; onSelect: () => void }) {
+  return (
+    <DropdownMenuItem onSelect={onSelect} className={cn(hint && "items-start whitespace-normal")}>
+      <span className={cn(hint && "mt-0.5")}>{icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block">{label}</span>
+        {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
+      </span>
+    </DropdownMenuItem>
   );
 }
 

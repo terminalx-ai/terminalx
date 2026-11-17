@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -108,6 +108,10 @@ export function Chat({
   sending = null,
   onSendAgain,
   onSecondOpinion,
+  secondOpinionAgent,
+  onFork,
+  onSaveSnippet,
+  turnSettings,
   onReset,
   onRetryInNewChat,
   onRetry,
@@ -146,6 +150,14 @@ export function Chat({
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
+  /** Who a second opinion asks, by name ("Codex"). */
+  secondOpinionAgent?: string;
+  /** Fork at a finished turn (PRO-379), where the backend can. */
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  /** Keep a turn's prompt as a snippet. */
+  onSaveSnippet?: (text: string) => void;
+  /** The tab's settings now, for turns whose own record does not say. */
+  turnSettings?: { effort?: string | null; permissionMode?: string | null };
   /** Reset to the end of a turn: which turn it is, which go, and how many files changed since, for the dialog to say. */
   onReset?: (endSeq: number, target: ResetTarget) => void;
   /** Take a failed turn's prompt to a new chat. */
@@ -162,6 +174,11 @@ export function Chat({
   /** Puts the goal in the composer to change. */
   onEditGoal?: (objective: string) => void;
 }) {
+  // Rebuilt only when a value changes: every turn is memoised on it.
+  const [effort, permissionMode] = [turnSettings?.effort, turnSettings?.permissionMode];
+  const [effortChanged, modeChanged] = [transcript.changedSettings?.effort, transcript.changedSettings?.permissionMode];
+  const turnFallback = useMemo(() => turnSettings ? { effort, permissionMode, changed: { effort: effortChanged, permissionMode: modeChanged } } : undefined,
+    [!!turnSettings, effort, permissionMode, effortChanged, modeChanged]);
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
   useNoticeDeferral(active && transcript.pendingAsks.length > 0);
@@ -485,6 +502,10 @@ export function Chat({
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
                 onSecondOpinion={onSecondOpinion}
+                secondOpinionAgent={secondOpinionAgent}
+                onFork={onFork}
+                onSaveSnippet={onSaveSnippet}
+                turnFallback={turnFallback}
                 onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
                 workingSince={isLast ? transcript.workingSince : undefined}
                 // A failed last turn can go again: its prompt, sent as a new message.

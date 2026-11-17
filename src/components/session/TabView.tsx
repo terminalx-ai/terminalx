@@ -45,6 +45,8 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import { SaveSnippetDialog } from "@/components/chat/SaveSnippetDialog";
+import { forkTurn } from "@/lib/sessions";
 import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
@@ -173,6 +175,7 @@ export function TabView({
   const sendBusy = sendNotice !== null;
   const [busyRefused, setBusyRefused] = useState<string | null>(null);
   const [resetTarget, setResetTarget] = useState<{ endSeq: number | null; target?: ResetTarget } | null>(null);
+  const [snippetPrompt, setSnippetPrompt] = useState<string | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -325,6 +328,9 @@ export function TabView({
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  // Fork from a turn (PRO-379): what a reset can cut, a fork can copy.
+  const canFork = canReset;
+  const turnSettings = useMemo(() => ({ effort: tab.effort, permissionMode: tab.permissionMode }), [tab.effort, tab.permissionMode]);
   // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
   const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
@@ -903,6 +909,12 @@ export function TabView({
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
+      secondOpinionAgent={counterpart?.name}
+      onFork={canFork ? (endSeq, into) => void forkTurn(session.id, tab.id, endSeq, into).then(
+        (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
+        (e) => showError("Couldn't fork the conversation", e)) : undefined}
+      onSaveSnippet={setSnippetPrompt}
+      turnSettings={turnSettings}
       agent={chatAgent}
       onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}
       onEditGoal={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? editGoal : undefined}
@@ -1171,6 +1183,7 @@ export function TabView({
       <span>{resetNotice(tab)}</span>
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
+    {snippetPrompt !== null && <SaveSnippetDialog prompt={snippetPrompt} onClose={() => setSnippetPrompt(null)} />}
     {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}

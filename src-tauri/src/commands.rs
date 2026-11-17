@@ -2667,26 +2667,132 @@ pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<S
 /// provider conversation forked on the first send.
 #[tauri::command]
 pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<SessionEntry> {
-    github_work(move || {
+    github_work(move || fork_into_session(&app, &session_id, &tab_id, None).map(|(entry, _)| entry))
+    .await
+    .map_err(err)?
+}
+
+/// Where a fork from a turn goes (PRO-379).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ForkInto {
+    /// A new tab beside the source, in the same checkout.
+    Tab,
+    /// A new session, on a worktree of its own with the turn's files where it can.
+    Session,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkedTurn {
+    pub session: SessionEntry,
+    pub tab_id: String,
+    /// Said beside the fork when it went differently from what was asked: files left as they were.
+    pub note: Option<String>,
+}
+
+/// Fork a tab's conversation as it stood at the end of the turn `end_seq`
+/// (PRO-379): later turns stay with the source only.
+#[tauri::command]
+pub async fn fork_turn(app: AppHandle, session_id: String, tab_id: String, end_seq: u64, into: ForkInto) -> CmdResult<ForkedTurn> {
+    github_work(move || match into {
+        ForkInto::Session => fork_into_session(&app, &session_id, &tab_id, Some(end_seq))
+            .map(|(session, note)| ForkedTurn { tab_id: session.active_tab.clone().unwrap_or_default(), session, note }),
+        ForkInto::Tab => fork_into_tab(&app, &session_id, &tab_id, end_seq),
+    })
+    .await
+    .map_err(err)?
+}
+
+/// A tab's new copy for a fork: idle, not yet run, on the account the source ran on.
+fn forked_tab(tab: &TabEntry, now: &str) -> TabEntry {
+    let mut new_tab = tab.clone();
+    new_tab.id = uuid::Uuid::now_v7().to_string();
+    new_tab.status = TabStatus::Idle;
+    new_tab.created = now.to_owned();
+    new_tab.modified = now.to_owned();
+    // Claude can fork a conversation; Codex starts a new thread over the copied log.
+    new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
+    new_tab.provider_session_id = None;
+    for key in ["resetLogId", "resetBackupId", "resetSeq", "resetTurn", "resetFilesRestored"] { new_tab.unknown.remove(key); }
+    // On the agent account the source tab ran on (#980), asked for, so
+    // the fork goes on as the conversation did; it has not run yet.
+    let account = crate::session_ops::tab_running_account(tab).map(str::to_owned);
+    crate::session_ops::set_tab_account(&mut new_tab, account.as_deref());
+    new_tab.unknown.remove(crate::session_ops::TAB_LAUNCHED_ACCOUNT);
+    new_tab
+}
+
+/// Write a forked tab's log: these events, re-stamped so the new tab owns them.
+fn write_forked_log(session_id: &str, tab_id: &str, lines: impl Iterator<Item = serde_json::Value>) -> Result<(), String> {
+    let mut out = String::new();
+    for mut v in lines {
+        v["sessionId"] = serde_json::Value::String(session_id.to_owned());
+        v["tabId"] = serde_json::Value::String(tab_id.to_owned());
+        out.push_str(&v.to_string());
+        out.push('\n');
+    }
+    let path = store::log_path(session_id, tab_id).map_err(err)?;
+    store::write_atomic(&path, out.as_bytes()).map_err(err)
+}
+
+/// The conversation up to `end_seq` under a new provider id (see
+/// [`crate::session::fork_conversation`]), with the new tab pointed at it.
+/// Read-only until [`ForkedConversation::write`].
+struct ForkedConversation { harness: String, provider: String, native: String, events: Vec<crate::events::AgentEvent> }
+
+impl ForkedConversation {
+    fn prepare(src: &SessionEntry, tab: &TabEntry, new_tab: &mut TabEntry, end_seq: u64) -> Result<Self, String> {
+        let provider = uuid::Uuid::new_v4().to_string();
+        let (native, events) = crate::session::fork_conversation(src, tab, end_seq, &provider).map_err(err)?;
+        new_tab.provider_session_id = Some(provider.clone());
+        new_tab.fork_from = None;
+        new_tab.continuation = None;
+        new_tab.context_used = None;
+        new_tab.context_max = None;
+        Ok(Self { harness: tab.harness.clone(), provider, native, events })
+    }
+
+    /// The agent's transcript where it looks from `cwd`, and the app log for the new tab.
+    fn write(&self, cwd: &str, session_id: &str, tab_id: &str) -> Result<(), String> {
+        crate::session::write_forked_conversation(&self.harness, cwd, &self.provider, &self.native).map_err(err)?;
+        let lines = self.events.iter().map(|event| serde_json::to_value(event).map_err(err)).collect::<Result<Vec<_>, String>>()?;
+        write_forked_log(session_id, tab_id, lines.into_iter())
+    }
+}
+
+fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) -> Result<ForkedTurn, String> {
+    let src = index::get(session_id).map_err(err)?;
+    if src.worktree_removed { return Err("This workspace was removed.".into()); }
+    let tab = src.tab(tab_id).cloned().ok_or("no such tab")?;
+    let mut new_tab = forked_tab(&tab, &index::now());
+    ForkedConversation::prepare(&src, &tab, &mut new_tab, end_seq)?.write(&src.cwd, session_id, &new_tab.id)?;
+    let session = index::update_session(session_id, |session| {
+        let at = session.tabs.iter().position(|t| t.id == tab_id).map_or(session.tabs.len(), |i| i + 1);
+        session.tabs.insert(at, new_tab.clone());
+        session.active_tab = Some(new_tab.id.clone());
+        Ok(session.clone())
+    }).map_err(err)?;
+    announce_session(app, session_id);
+    announce_tabs(app);
+    Ok(ForkedTurn { session, tab_id: new_tab.id, note: None })
+}
+
+/// Fork a tab into a new session; `at` cuts its conversation at a turn and
+/// puts the new worktree's files at that turn's end where they were kept.
+fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option<u64>) -> Result<(SessionEntry, Option<String>), String> {
+    {
+        let session_id = session_id.to_owned();
+        let tab_id = tab_id.to_owned();
+        let app = app.clone();
         let src = index::get(&session_id).map_err(err)?;
         let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
         let project_path = Path::new(&src.project_path);
         let id = uuid::Uuid::now_v7().to_string();
         let now = index::now();
-        let mut new_tab = tab.clone();
-        new_tab.id = uuid::Uuid::now_v7().to_string();
-        new_tab.status = TabStatus::Idle;
-        new_tab.created = now.clone();
-        new_tab.modified = now.clone();
-        // Claude can fork a conversation; Codex starts a new thread over the copied log.
-        new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
-        new_tab.provider_session_id = None;
-        for key in ["resetLogId", "resetBackupId", "resetSeq"] { new_tab.unknown.remove(key); }
-        // On the agent account the source tab ran on (#980), asked for, so
-        // the fork goes on as the conversation did; it has not run yet.
-        let account = crate::session_ops::tab_running_account(&tab).map(str::to_owned);
-        crate::session_ops::set_tab_account(&mut new_tab, account.as_deref());
-        new_tab.unknown.remove(crate::session_ops::TAB_LAUNCHED_ACCOUNT);
+        let mut new_tab = forked_tab(&tab, &now);
+        // Read and checked before anything is made for the fork.
+        let conversation = at.map(|end_seq| ForkedConversation::prepare(&src, &tab, &mut new_tab, end_seq)).transpose()?;
         // A quick chat's fork is a quick chat with a scratch directory of its
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
@@ -2739,8 +2845,21 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             entry.base_ref = Some(wt.base_tree);
             entry.worktree_base = wt.worktree_base;
         }
+        let mut note = None;
+        if let (Some(end_seq), Some(conversation)) = (at, &conversation) {
+            if entry.worktree_name.is_some() {
+                let files = crate::checkpoints::turn_end(&src.id, &tab.id, end_seq)
+                    .and_then(|(tree, index)| crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index));
+                if let Err(error) = files {
+                    note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
+                }
+            } else {
+                note = Some("The fork shares this checkout, so its files are as they are now.".into());
+            }
+            conversation.write(&entry.cwd, &id, &new_tab.id)?;
+        }
         // Copy the log, re-stamping envelopes so the new tab owns them.
-        if let Ok(dir) = store::sessions_dir() {
+        if let (None, Ok(dir)) = (&conversation, store::sessions_dir()) {
             let from = store::log_path(&src.id, &tab.id).map_err(err)?;
             if let Ok(text) = std::fs::read_to_string(&from) {
                 let to_dir = dir.join(&id);
@@ -2772,10 +2891,8 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         let _ = app.emit("session_created", &entry);
         // A fork with a worktree always creates it above; other forks share a checkout.
         if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
-        Ok(entry)
-    })
-    .await
-    .map_err(err)?
+        Ok((entry, note))
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {

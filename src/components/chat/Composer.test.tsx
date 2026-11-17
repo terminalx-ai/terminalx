@@ -973,6 +973,24 @@ describe("composer history (PRO-85)", () => {
     expect(selected()).toContain("b.ts");
   });
 
+  it("offers saved snippets under / by name, and choosing one puts its text in (PRO-379)", async () => {
+    act(() => setPrefs({ promptSnippets: [{ id: "a", name: "review-pr", text: "Review the open PR.\nList risks." }] }));
+    try {
+      const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: null };
+      function CloudComposer() {
+        const [draft, setDraft] = useState("");
+        return <Composer tab={tab} commands={{ key: "cloud|snippets", known: () => null, load: async () => list }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+      }
+      render(<CloudComposer />);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+      await waitFor(() => expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["/review-prReview the open PR.Snippet", "/compactShorten"]));
+      fireEvent.change(box, { target: { value: "/rev", selectionStart: 4 } });
+      fireEvent.mouseDown(await screen.findByRole("option", { name: /review-pr/ }));
+      await waitFor(() => expect(box.value).toBe("Review the open PR.\nList risks."));
+    } finally { act(() => setPrefs({ promptSnippets: [] })); }
+  });
+
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
     const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
     const load = vi.fn(async () => list);

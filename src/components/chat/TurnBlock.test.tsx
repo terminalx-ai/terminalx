@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`, invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
+const { copyText } = vi.hoisted(() => ({ copyText: vi.fn(async () => {}) }));
+vi.mock("@/lib/clipboard", () => ({ copyText }));
 
 import { TurnBlock, hasMarkdownTable, splitMarkdownTables } from "./TurnBlock";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -325,6 +327,8 @@ describe("a settled turn's header and footer", () => {
     expect(header.getAttribute("aria-expanded")).toBe("false");
     const footer = screen.getByTestId("turn-footer");
     expect(footer.textContent).toMatch(/^14s · \d{1,2}:\d{2}/);
+    // The chip is what opens the turn's details (PRO-379), named after what it says.
+    expect(within(footer).getByRole("button", { name: /^Turn details: 14s · \d{1,2}:\d{2}/ })).toBeDefined();
     expect(footer.textContent).toContain("cache hit 72%");
     expect(footer.textContent).toContain("41 tok/s");
     expect(screen.getByRole("button", { name: "Copy answer" }).className).not.toContain("opacity-0");
@@ -417,15 +421,54 @@ describe("a turn's order and its failure", () => {
   });
 });
 
-it("resets only a completed successful turn using its completion sequence", () => {
+const openMenu = (element: HTMLElement) => fireEvent.pointerDown(element, { button: 0, ctrlKey: false, pointerType: "mouse" });
+
+it("resets only a completed successful turn using its completion sequence, from the turn's menu", () => {
   const onReset = vi.fn();
   const value = turn([]);
   value.completed = { seq: 19, status: "ok", ts: "2026-11-07T00:00:00Z" };
   const view = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onReset={onReset} />);
-  fireEvent.click(screen.getByRole("button", { name: "Reset to here" }));
+  expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+  openMenu(screen.getByRole("button", { name: "Turn actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /Reset chat to here…/ }));
   expect(onReset).toHaveBeenCalledWith(19);
   view.rerender(<TurnBlock turn={{ ...value, completed: { ...value.completed, status: "aborted" } }} sessionId="s" stream={[]} working={false} onReset={onReset} />);
-  expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Turn actions" })).toBeNull();
+});
+
+describe("the turn's menu (PRO-379)", () => {
+  const answered = (): Turn => ({
+    ...turn([]),
+    completed: { seq: 9, status: "ok", ts: "2026-11-07T00:00:00Z" },
+    work: [{ kind: "text", key: "a5", seq: 5, text: "**Done.**", messageTs: "2026-11-07T00:00:00Z" }],
+  }) as unknown as Turn;
+
+  it("forks to a tab or a session, copies the answer, keeps the prompt and asks the other agent", () => {
+    const onFork = vi.fn();
+    const onSaveSnippet = vi.fn();
+    const onSecondOpinion = vi.fn();
+    render(<TurnBlock turn={answered()} sessionId="s" stream={[]} working={false} onFork={onFork} onSaveSnippet={onSaveSnippet} onSecondOpinion={onSecondOpinion} secondOpinionAgent="Codex" />);
+    const pick = (name: RegExp) => { openMenu(screen.getByRole("button", { name: "Turn actions" })); fireEvent.click(screen.getByRole("menuitem", { name })); };
+    pick(/^Fork to new tab/);
+    expect(onFork).toHaveBeenLastCalledWith(9, "tab");
+    pick(/^Fork to new session/);
+    expect(onFork).toHaveBeenLastCalledWith(9, "session");
+    pick(/^Save the prompt as a snippet/);
+    expect(onSaveSnippet).toHaveBeenCalledWith("what is this?");
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    expect(screen.getByRole("menuitem", { name: /^Second opinion from Codex/ }).textContent).toContain("Opens a Codex tab with this turn's diff");
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Copy answer as Markdown/ }));
+    expect(copyText).toHaveBeenCalledWith("**Done.**");
+    pick(/^Second opinion from Codex/);
+    expect(onSecondOpinion).toHaveBeenCalledOnce();
+  });
+
+  it("offers nothing for a turn that did not finish well but its second opinion", () => {
+    render(<TurnBlock turn={{ ...answered(), completed: { status: "aborted", ts: "2026-11-07T00:00:00Z" } } as Turn} sessionId="s" stream={[]} working={false} onFork={vi.fn()} onReset={vi.fn()} />);
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    expect(screen.queryByRole("menuitem", { name: /Fork|Reset/ })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: /Copy answer as Markdown/ })).toBeDefined();
+  });
 });
 
 describe("a pasted Markdown table in a message", () => {
