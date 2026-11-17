@@ -86,6 +86,6 @@ export function SessionPipelineControls({ session, project, tabId, pipeline, pla
         {!tabId ? <span className="text-xs text-muted-foreground">Open a conversation first.</span> : !chosen ? <span className="text-xs text-muted-foreground">Turn on a switch above first.</span> : null}
       </div>
     </>}
-    {!pipeline && <Button size="xs" disabled={busy || !tabId || !launch.settings.enabled} onClick={() => void adopt()}>Adopt existing PR</Button>}
+    {!pipeline && <Button size="xs" className="text-xs" disabled={busy || !tabId || !launch.settings.enabled} onClick={() => void adopt()}>Adopt existing PR</Button>}
   </div>;
 }

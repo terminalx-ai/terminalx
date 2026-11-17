@@ -72,10 +72,10 @@ export function NextLine({ tone, text, why, children, actions, testId = "next-st
             tone === "muted" && "bg-muted-foreground/60",
           )}
         />
-        <span className={cn("min-w-0 flex-1 truncate text-xs", tone === "muted" ? "text-muted-foreground" : "text-foreground")}>{text}</span>
+        <span className={cn("min-w-0 flex-1 truncate text-[13px]", tone === "muted" ? "text-muted-foreground" : "text-foreground")}>{text}</span>
         {actions && <div className="-my-0.5 flex shrink-0 items-center gap-1.5">{actions}</div>}
       </div>
-      {why && <p className="pl-3.5 text-[11px] leading-relaxed text-faint" data-testid="next-step-why">{why}</p>}
+      {why && <p className="pl-3.5 text-xs leading-relaxed text-muted-foreground" data-testid="next-step-why">{why}</p>}
       {children}
     </div>
   );

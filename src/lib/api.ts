@@ -2693,6 +2693,8 @@ export interface PullRequest {
   head: string;
   additions: number;
   deletions: number;
+  /** The head commit GitHub has; absent on older workspace runtimes. */
+  headSha?: string;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   /** Absent on older workspace runtimes. */
   mergeState?: string;
