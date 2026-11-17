@@ -342,7 +342,12 @@ mod tests {
         let listed = phones(data.path()).unwrap();
         assert_eq!(listed.iter().map(|phone| phone.id.as_str()).collect::<Vec<_>>(), ["paired"], "only phones that paired, not unused codes or session invitations");
         let printed = phone_table(&listed);
-        assert!(printed.contains("PHONE") && printed.contains("paired  Sam's iPhone  ios  last seen"), "{printed}");
+        // Columns are padded to their widest cell or header, so compare cells, not spacing.
+        let mut lines = printed.lines().filter(|line| !line.trim().is_empty());
+        assert_eq!(lines.next().unwrap().split_whitespace().collect::<Vec<_>>(), ["ID", "PHONE", "PLATFORM", "STATE"], "{printed}");
+        let row = lines.next().unwrap();
+        assert!(row.starts_with("paired  Sam's iPhone  ios ") && row.contains(" last seen "), "{printed}");
+        assert!(lines.next().is_none(), "{printed}");
         assert_eq!(revoke(data.path(), "paired").unwrap(), 0);
         assert!(phones(data.path()).unwrap().is_empty());
         assert_eq!(phone_table(&[]), "", "no phones, no table");

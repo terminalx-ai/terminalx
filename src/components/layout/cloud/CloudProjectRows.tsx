@@ -331,7 +331,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
           <ul className="flex flex-col [--indent:10px]">
             {project.workspaces.length === 0 && <li className="py-1 pl-[26px] pr-2 text-[12px] text-faint">{project.blank ? "No sessions yet. + starts one." : "No workspace yet."}</li>}
             {project.workspaces.map((node) => (
-              <WorkspaceRows key={node.key} node={node} named={grouped} open={open} onLifecycle={onLifecycle} />
+              <WorkspaceRows key={node.key} node={node} named={grouped} open={open} onLifecycle={onLifecycle} flat />
             ))}
           </ul>
         </div>
@@ -403,8 +403,12 @@ function OpenWorkspaceItem({ node }: { node: CloudWorkspaceNode }) {
   );
 }
 
-/** A workspace's sessions; with several workspaces in the project, under a row that names the workspace. */
-export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle; extraActions?: ReactNode }) {
+/**
+ * A workspace's sessions. Under a project (`flat`) loaded sessions are direct project children and
+ * empty workspaces retain their actions; in a personal section the workspace keeps its named row,
+ * because a section holds and moves workspaces.
+ */
+export function WorkspaceRows({ node, named, open, onLifecycle, extraActions, flat = false }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle; extraActions?: ReactNode; flat?: boolean }) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
   const menu = useRowMenu();
@@ -455,6 +459,13 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
     </>
   );
   const attentionInput = { tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state };
+  if (flat && sessions.length) return <>
+    {rows}
+    {named && (resolveCloudAttention(node.item, attentionInput) || deletionLine(node.item)) && <li data-testid="cloud-workspace-notice" data-workspace={workspace.id}>
+      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
+      {deletionLine(node.item) && <p className="ml-6 text-[10px] text-faint">{deletionLine(node.item)}</p>}
+    </li>}
+  </>;
   if (!named) return rows;
   const selected = store.selectedCloudWorkspace === node.key;
   const extra = extraRepositories(node.item);

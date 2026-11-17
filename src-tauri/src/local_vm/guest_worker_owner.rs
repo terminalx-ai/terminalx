@@ -114,7 +114,7 @@ impl<S: Read + Write> RetainedOwner<S> {
         target: Option<TaskTarget>,
         operation: Operation,
     ) -> Result<Observation> {
-        self.request_with(target, operation, |path, value| write_new(path, value))
+        self.request_with(target, operation, write_new)
     }
 
     fn request_with(

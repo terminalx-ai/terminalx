@@ -258,6 +258,8 @@ fn relay_session(grant: &RelaySessionGrant) -> RelaySession {
         attachments: Vec::new(),
         revocations: Vec::new(),
         collaboration: None,
+        // An account link never requests `collaboration-v2`; only the cloud bootstrap does.
+        collaboration_v2: false,
     }
 }
 
