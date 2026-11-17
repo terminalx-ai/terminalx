@@ -15,7 +15,7 @@ beforeEach(() => setPrefs({ shortcuts: {} }));
 afterEach(cleanup);
 
 it("keeps Overview keycaps and ARIA in sync with defaults, custom keys, collisions and unbinding", () => {
-  render(<AppDestinations onNewSession={vi.fn()} onSearch={vi.fn()} onOpenIssues={vi.fn()} onOpenAgents={vi.fn()} onOpenAutomations={vi.fn()} />);
+  render(<AppDestinations onOpenHome={vi.fn()} onNewSession={vi.fn()} onSearch={vi.fn()} onOpenIssues={vi.fn()} onOpenAgents={vi.fn()} onOpenAutomations={vi.fn()} />);
   const overview = screen.getByRole("button", { name: /^Overview/ });
   expect(overview.getAttribute("aria-keyshortcuts")).toBe("Control+1");
   expect(overview.textContent).toContain("Ctrl1");
