@@ -2050,7 +2050,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Header branch button: diff size, Create PR | Follow-up | PRO-404 |
 | Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
 | Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
-| Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
+| Remove the session's worktree once its PR merged | Works: the chat's Delete workspace and the removal dialog, read and removed on the machine (`workspace/1`) | PRO-406 |
 | Rename, archive, pin | Works | PRO-346 |
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
@@ -2087,6 +2087,26 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
+
+### As built (PRO-406): removing a machine session's worktree
+
+- **The host.** `machineWorkspaceHost` (`src/lib/machineWorkspaceHost.ts`) is
+  the session's `RemovableWorkspace` host while this Mac manages the machine,
+  the machine grants `workspace/1` and the session has a worktree. It calls
+  `workspace.disposition` and `workspace.remove` named by the session, so the
+  machine runs the checks a local removal runs (uncommitted work, unpushed
+  commits, the pull request, the second confirmation's digest). Nothing on
+  this computer is read or removed; the machine's path is only shown.
+- **Where it is offered.** As for a cloud session: once the PR merged, the
+  chat's Delete workspace opens the standard removal dialog with this host.
+  The sessions that went with the worktree leave the sidebar at once
+  (`forgetMachineSessions`); a lost answer counts as removed only when the
+  machine no longer lists the session.
+- **Left out.** Keeping the conversations (`keepSessions`) is refused, as on a
+  cloud workspace: `workspace.remove` deletes the worktree's sessions. This
+  desktop does not run merged clean-up passes on a machine (`workspace/2`):
+  removing by itself after a merge follows the machine's own settings, not
+  this Mac's.
 
 ### As built (PRO-348): a new session on a machine
 
