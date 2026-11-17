@@ -35,7 +35,7 @@ const checks = [
   "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
   "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
   "sidebar-design", "chat-transcript", "changes-design", "sidebar-menus", "machines-screens", "review-tab", "turn-details", "settings-design",
-  "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run",
+  "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run", "confirm-dialogs",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

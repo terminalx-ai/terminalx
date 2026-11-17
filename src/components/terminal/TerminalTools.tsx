@@ -27,7 +27,7 @@ const lightDecorations = {
  */
 export const TERMINAL_KEYS = {
   clear: { chord: "mod+k", label: isMac ? "⌘K" : "Ctrl+K", aria: isMac ? "Meta+K" : "Control+K" },
-  addToChat: { chord: "mod+shift+l", label: isMac ? "⌘⇧L" : "Ctrl+Shift+L", aria: isMac ? "Meta+Shift+L" : "Control+Shift+L" },
+  addToChat: { chord: "mod+shift+l", label: isMac ? "⇧⌘L" : "Ctrl+Shift+L", aria: isMac ? "Meta+Shift+L" : "Control+Shift+L" },
   matchCase: { chord: "mod+alt+c", label: isMac ? "⌥⌘C" : "Ctrl+Alt+C", aria: isMac ? "Alt+Meta+C" : "Control+Alt+C" },
 } as const;
 

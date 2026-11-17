@@ -12,7 +12,8 @@ vi.mock("@tauri-apps/api/event", async () => {
   const { backend } = await import("@/test/tabsBackend");
   return { listen: backend.listen };
 });
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => true), message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn(async () => undefined), openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -103,7 +104,7 @@ async function click(row: HTMLElement) {
   await flush();
 }
 
-/** ⌘⌥T, remapped to keys jsdom can press the same way on every platform. */
+/** ⌥⌘T, remapped to keys jsdom can press the same way on every platform. */
 function pressReopen() {
   fireEvent.keyDown(document.body, { key: "y", code: "KeyY", shiftKey: true, metaKey: isMac, ctrlKey: !isMac });
 }
@@ -253,7 +254,7 @@ describe("the page of a session with no tabs", () => {
     expect(store().selectedSessionId).toBe("empty");
   });
 
-  it("reopens this session's last closed tab on ⌘⌥T while the page is shown", async () => {
+  it("reopens this session's last closed tab on ⌥⌘T while the page is shown", async () => {
     render(<Main />);
     await click(sessionRow("Github preparation"));
     act(pressReopen);

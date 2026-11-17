@@ -217,7 +217,7 @@ const APP_ACTIONS_FIRST = [
 ];
 const APP_ACTIONS_LAST = ["command:shortcut:app.checkUpdates", "command:shortcut:app.docs", "command:shortcut:app.reportIssue", "command:shortcut:app.about"];
 
-/** A binding as one keycap (design 07.04): ⌘⇧X on the Mac, Ctrl+Shift+X elsewhere. */
+/** A binding as one keycap (design 07.04): ⇧⌘X on the Mac, Ctrl+Shift+X elsewhere. */
 const chordCap = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
 
 interface CommandEntry extends PaletteEntityBase {

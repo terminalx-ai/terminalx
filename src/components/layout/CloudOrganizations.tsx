@@ -5,7 +5,7 @@ import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeftRight, Check, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Plus, RefreshCw, Trash2, X } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -200,12 +200,11 @@ function OrganizationSection({
   const switchOrg = async () => {
     setSwitchError(null);
     const current = status.identity?.organization ?? "the current organization";
-    const yes = await ask(`Cloud sessions open in ${current} will close. Switch the default organization to ${org.name}?`, {
-      title: "Switch organization",
-      kind: "info",
-      okLabel: "Switch",
-      cancelLabel: "Cancel",
-    }).catch(() => false);
+    const yes = await confirmInApp({
+      title: `Switch the default organization to ${org.name}?`,
+      body: `Cloud sessions open in ${current} will close.`,
+      action: "Switch",
+    });
     if (!yes) return;
     try {
       cloudPresence.leave();

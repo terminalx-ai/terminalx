@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, fs, git } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp as ask } from "@/lib/confirm";
 import { liveEditorsFor } from "@/lib/editorViews";
 import { selectSessionTab } from "@/lib/terminal";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -22,7 +22,7 @@ vi.mock("@/lib/api", () => ({
   git: { discard: vi.fn().mockResolvedValue(undefined) },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
 vi.mock("./PdfSurface", () => ({ default: ({ data }: { data: string }) => <div data-testid="pdf">{data}</div> }));

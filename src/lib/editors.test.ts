@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp as ask } from "@/lib/confirm";
 import { getTerminalState, selectSessionTab } from "@/lib/terminal";
 import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, openReviewStack, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode, isFileTab, isTabEditor } from "./editors";
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
+// Unsaved changes are asked about in the app's own dialog (PRO-400), not a system alert.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn() }));
 
 afterEach(async () => {
   vi.mocked(ask).mockResolvedValue(true);

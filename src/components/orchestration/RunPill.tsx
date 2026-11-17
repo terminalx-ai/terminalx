@@ -46,7 +46,7 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
 }
 
 /**
- * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⌘⇧O run view". The reader's
+ * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⇧⌘O run view". The reader's
  * own keys when they changed them (Settings → Keyboard shortcuts); nothing when the action has none.
  */
 export function RunViewHint({ className }: { className?: string }) {

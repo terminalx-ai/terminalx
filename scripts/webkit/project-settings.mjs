@@ -107,7 +107,7 @@ try {
     await menu.waitFor();
     checks["the Open menu lists the project's files"] = JSON.stringify((await menu.getByRole("menuitem").allTextContents()).slice(0, 3)) === JSON.stringify([
       "Your settings~/.raccoon/settings.json", "Project · shared.terminalx/settings.json · committed", "Project · local.terminalx/settings.local.json · ignored by git"]);
-    checks["Open in rows carry 1–4 and Copy path ⌘⇧C"] = JSON.stringify((await menu.getByRole("menuitem").allTextContents()).slice(3)) === JSON.stringify(["Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
+    checks["Open in rows carry 1–4 and Copy path ⇧⌘C"] = JSON.stringify((await menu.getByRole("menuitem").allTextContents()).slice(3)) === JSON.stringify(["Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⇧⌘C"]);
     const menuBox = await menu.boundingBox();
     checks["the menu stays inside the window"] = menuBox.x >= 0 && menuBox.x + menuBox.width <= 1440;
     await page.waitForTimeout(400);

@@ -35,7 +35,7 @@ import {
   UserRound,
   X,
 } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
@@ -369,7 +369,12 @@ export function TabMenuItems({
   );
   const restart = async () => {
     // Restarting ends the turn in flight; that is asked about, not assumed.
-    if (peerIsLive(tab) && !(await ask(`${label} is ${peerStatus(tab) === "waiting" ? "waiting for an answer" : "working"}. Restarting the agent stops this turn; the conversation is kept and resumes.`, { title: "Restart agent", kind: "warning", okLabel: "Restart", cancelLabel: "Cancel" }).catch(() => false))) return;
+    if (peerIsLive(tab) && !(await confirmInApp({
+      title: "Restart the agent?",
+      body: `${label} is ${peerStatus(tab) === "waiting" ? "waiting for an answer" : "working"}. Restarting stops this turn; the conversation is kept and resumes.`,
+      action: "Restart",
+      destructive: true,
+    }))) return;
     await restartTab(row, tab);
   };
   const unread = !!agentTab && (!!agentTab.markedUnread || agentTab.status === "completed");

@@ -495,7 +495,7 @@ export function startSessionIn(projectPath: string, cwd: string | null, fromBran
   focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
-/** New session in a project, opened on Start from a branch, issue or PR (the project menu's ⌘⇧N item). */
+/** New session in a project, opened on Start from a branch, issue or PR (the project menu's ⇧⌘N item). */
 export function startFromIn(projectPath: string) {
   startSessionIn(projectPath, null);
   set({ startFromRequest: state.startFromRequest + 1 });

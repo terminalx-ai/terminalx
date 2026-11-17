@@ -7,14 +7,16 @@ export type ResolvedMode = "light" | "dark";
 export interface ThemeInfo {
   id: ThemeId;
   name: string;
+  /** A few words under the name on its card in Settings (design 17.07). */
+  caption: string;
   darkOnly?: boolean;
 }
 
 export const THEMES: ThemeInfo[] = [
-  { id: "den", name: "Den" },
-  { id: "slate", name: "Slate" },
-  { id: "moss", name: "Moss" },
-  { id: "ember", name: "Ember", darkOnly: true },
+  { id: "den", name: "Den", caption: "default" },
+  { id: "slate", name: "Slate", caption: "cool neutral grey" },
+  { id: "moss", name: "Moss", caption: "green-tinted" },
+  { id: "ember", name: "Ember", caption: "dark only", darkOnly: true },
 ];
 
 export const DEFAULT_THEME: ThemeId = "den";

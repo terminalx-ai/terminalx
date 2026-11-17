@@ -12,6 +12,7 @@ import {
   defaultBindings,
   isCustomized,
   isTerminalReserved,
+  bindingText,
   keycaps,
   matchesShortcut,
   readOverrides,
@@ -40,7 +41,7 @@ describe("the shortcut registry", () => {
     }
   });
 
-  // PRO-362: the drafts drew ⌘⇧R for the Run view, which Automations has. Its own keys are free on every platform,
+  // PRO-362: the drafts drew ⇧⌘R for the Run view, which Automations has. Its own keys are free on every platform,
   // and are none of the menu keys the system itself puts in the native menus (Edit, Hide, Minimize, Quit).
   it("gives the Run view keys no other action has, in the Go menu, and leaves Automations its own", () => {
     const action = SHORTCUT_ACTIONS.find((entry) => entry.id === "app.runView")!;
@@ -56,7 +57,7 @@ describe("the shortcut registry", () => {
       expect(bindingProblem("app.runView", "mod+shift+o", mac)).toBeNull();
       expect(isTerminalReserved("mod+shift+o", mac)).toBe(false);
     }
-    expect(keycaps("mod+shift+o", true)).toEqual(["⌘", "⇧", "O"]);
+    expect(keycaps("mod+shift+o", true)).toEqual(["⇧", "⌘", "O"]);
     expect(keycaps("mod+shift+o", false)).toEqual(["Ctrl", "Shift", "O"]);
   });
 
@@ -101,8 +102,8 @@ describe("the shortcut registry", () => {
       expect(SHORTCUT_ACTIONS.filter((action) => keymap[action.id].includes(chord)).map((action) => action.id)).toEqual([owner]);
       expect(bindingProblem(owner, chord, mac)).toBeNull();
     }
-    expect(keycaps(toggle, mac)).toEqual(mac ? ["⌘", "⌥", "⇧", "L"] : ["Ctrl", "Alt", "Shift", "L"]);
-    expect(keycaps(reopen, mac)).toEqual(mac ? ["⌘", "⌥", "T"] : ["Ctrl", "Alt", "Shift", "T"]);
+    expect(keycaps(toggle, mac)).toEqual(mac ? ["⌥", "⇧", "⌘", "L"] : ["Ctrl", "Alt", "Shift", "L"]);
+    expect(keycaps(reopen, mac)).toEqual(mac ? ["⌥", "⌘", "T"] : ["Ctrl", "Alt", "Shift", "T"]);
   });
 
   it("requires an explicit replacement to give the macOS reopen chord to light/dark", () => {
@@ -119,7 +120,7 @@ describe("the shortcut registry", () => {
     expect(bindingKind("hold:AltRight")).toBe("hold");
   });
 
-  it("dictates on a held Right Option by default on macOS, with ⌘⇧D kept as a second binding", () => {
+  it("dictates on a held Right Option by default on macOS, with ⇧⌘D kept as a second binding", () => {
     expect(defaultBindings("composer.dictate", true)).toEqual(["hold:AltRight", "mod+shift+d"]);
     expect(resolveKeymap({}, true)["composer.dictate"]).toEqual(["hold:AltRight", "mod+shift+d"]);
   });
@@ -149,7 +150,11 @@ describe("the shortcut registry", () => {
   });
 
   it("shows a binding as keycaps for the platform", () => {
-    expect(keycaps("mod+shift+d", true)).toEqual(["⌘", "⇧", "D"]);
+    // macOS writes modifiers ⌃⌥⇧⌘ (PRO-400), whatever order the binding is stored in; elsewhere it is Ctrl+Alt+Shift.
+    expect(keycaps("mod+shift+d", true)).toEqual(["⇧", "⌘", "D"]);
+    expect(keycaps("mod+ctrl+alt+shift+k", true)).toEqual(["⌃", "⌥", "⇧", "⌘", "K"]);
+    expect(bindingText("mod+shift+d", true)).toBe("⇧⌘D");
+    expect(bindingText("mod+shift+d", false)).toBe("Ctrl+Shift+D");
     expect(keycaps("mod+shift+d", false)).toEqual(["Ctrl", "Shift", "D"]);
     expect(keycaps("hold:AltRight", true)).toEqual(["Right ⌥"]);
     expect(keycaps("hold:AltRight", false)).toEqual(["Right Alt"]);

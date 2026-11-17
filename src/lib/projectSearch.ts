@@ -1,6 +1,6 @@
 /**
  * Search in files from outside its dialog (PRO-299): `openProjectSearch`
- * opens the dialog of the session in front, as ⌘⇧F would, and with a query
+ * opens the dialog of the session in front, as ⇧⌘F would, and with a query
  * fills it in and runs it. The newest mounted dialog takes the call, the
  * same rule the shortcut follows.
  */

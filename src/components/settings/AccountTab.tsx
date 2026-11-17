@@ -6,6 +6,7 @@ import { Loader2, LogOut } from "@/icons";
 import { MachineNameSettings } from "./MachineNameSettings";
 import { WorkStatusSettings } from "./WorkStatusSettings";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { signIn, signOut, useAccount } from "@/lib/account";
 import { PasteSignInLink } from "@/components/account/PasteSignInLink";
 import { usePairing } from "@/lib/pairing";
@@ -118,25 +119,26 @@ export function AccountTab() {
               <div className="min-w-0">
                 <div className="text-[13px] font-medium">Sign out</div>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {confirmingSignOut
-                    ? "Automatic account pairings will be removed and disconnected. QR and code pairings keep working, and running agents are untouched."
-                    : "Signs out of TerminalX on this Mac. Local sessions keep working; cloud workspaces and pairing need an account. Your session is kept in macOS Keychain until then."}
+                  Signs out of TerminalX on this Mac. Local sessions keep working; cloud workspaces and pairing need an account. Your session is kept in macOS Keychain until then.
                 </p>
               </div>
-              {confirmingSignOut ? (
-                <div className="flex shrink-0 gap-2">
-                  <Button variant="ghost" size="sm" disabled={account.busy} onClick={() => setConfirmingSignOut(false)}>Cancel</Button>
-                  <Button variant="destructive" size="sm" disabled={account.busy} onClick={() => void signOut()}>
-                    {account.busy ? <Loader2 className="animate-spin" /> : null} Confirm sign out
-                  </Button>
-                </div>
-              ) : (
-                <Button variant="outline" size="sm" className="shrink-0" disabled={account.busy} onClick={() => setConfirmingSignOut(true)}>
-                  <LogOut /> Sign out
-                </Button>
-              )}
+              <Button variant="outline" size="sm" className="shrink-0" disabled={account.busy} onClick={() => setConfirmingSignOut(true)}>
+                <LogOut /> Sign out
+              </Button>
             </div>
             {status.lastError && <p className="mt-2 text-xs text-warning">{status.lastError}</p>}
+            {/* Design 17.01: what signing out does, then Cancel and a red Sign out. A failure closes it and is said in the row. */}
+            <ConfirmDialog
+              open={confirmingSignOut}
+              title="Sign out of TerminalX?"
+              action={<>{account.busy ? <Loader2 className="animate-spin" /> : null} Sign out</>}
+              destructive
+              busy={account.busy}
+              onAction={() => void signOut().finally(() => setConfirmingSignOut(false))}
+              onCancel={() => setConfirmingSignOut(false)}
+            >
+              Phones paired through your account disconnect. QR and code pairings keep working, and running agents are untouched.
+            </ConfirmDialog>
           </div></RegisteredSetting>
         </div>
       </div>

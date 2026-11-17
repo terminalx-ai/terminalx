@@ -16,7 +16,8 @@ vi.mock("@/lib/api", () => ({
   api: { headTree: vi.fn().mockResolvedValue(null), fileContentsAt: vi.fn() },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div data-testid="preview">{text}</div> }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
 
