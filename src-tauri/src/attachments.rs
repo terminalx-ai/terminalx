@@ -118,6 +118,49 @@ fn session_folder(session_id: &str) -> Result<PathBuf> {
     dir.canonicalize().with_context(|| format!("open the attachments folder {}", dir.display()))
 }
 
+/// The name a file sent from another computer is stored under (PRO-407),
+/// checked as [`store`] checks it: its last segment, not a name TerminalX
+/// uses for its own files.
+pub fn admissible_name(name: &str) -> Result<String> {
+    let name = sanitized(name)?;
+    if is_reserved(&name) { return Err(reserved(&name)); }
+    Ok(name)
+}
+
+/// One part of a file, read for an upload to another computer (PRO-407).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePart {
+    /// Base64 of at most [`READ_PART_BYTES`] bytes from the offset asked for.
+    pub data: String,
+    /// How many bytes `data` holds.
+    pub bytes: u64,
+    /// The whole file's size, as it is now.
+    pub size: u64,
+}
+
+/// What one part read for an upload holds: 384 KiB, as one `session.attach` part takes.
+pub const READ_PART_BYTES: u64 = 384 * 1024;
+
+/// The bytes of `path` from `offset`, at most [`READ_PART_BYTES`] of them,
+/// for a file attached to a message for a machine (PRO-407). Refused as
+/// [`store`] refuses it: not a regular file, or over [`MAX_ATTACHMENT_BYTES`].
+pub fn read_part(path: &str, offset: u64) -> Result<FilePart> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = sanitized(path)?;
+    let mut file = std::fs::File::open(path).with_context(|| format!("{name} can’t be read."))?;
+    let meta = file.metadata().with_context(|| format!("{name} can’t be read."))?;
+    ensure!(meta.is_file(), "{name} is not a file that can be attached.");
+    if meta.len() > MAX_ATTACHMENT_BYTES { return Err(too_large(&name)); }
+    let mut bytes = Vec::new();
+    if offset < meta.len() {
+        file.seek(SeekFrom::Start(offset)).with_context(|| format!("{name} can’t be read."))?;
+        file.take(READ_PART_BYTES).read_to_end(&mut bytes).with_context(|| format!("{name} can’t be read."))?;
+    }
+    use base64::Engine as _;
+    Ok(FilePart { data: base64::engine::general_purpose::STANDARD.encode(&bytes), bytes: bytes.len() as u64, size: meta.len() })
+}
+
 /// Six lowercase base36 characters.
 fn folder_name() -> String {
     const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";

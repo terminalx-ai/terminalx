@@ -45,7 +45,7 @@ let page;
 try {
   page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 860 }, { extra });
   await openConversation(page, "Local long session");
-  const branch = page.getByRole("button", { name: "Branch", exact: true });
+  const branch = page.getByRole("button", { name: "Checks", exact: true });
   await branch.click();
   const conversation = page.getByLabel("Conversation for PR #214", { exact: true });
   await conversation.getByRole("heading", { name: "Activity", exact: true }).waitFor();

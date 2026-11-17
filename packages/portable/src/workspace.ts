@@ -72,7 +72,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -83,8 +83,11 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * for the paired computer.
  * `machine/6` (PRO-351): browse the machine's folders, add, clone and remove
  * its projects (docs/MACHINES.md "As built (PRO-351)").
+ * `machine/7` (PRO-403): a session's Setup and Run on the machine: its
+ * project's saved actions, preview URLs and setup script as the machine has
+ * them, and runs started there (docs/MACHINES.md "As built (PRO-403)").
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -104,6 +107,10 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.cloneProject": "machine/6",
   "machine.cloneStatus": "machine/6",
   "machine.cloneCancel": "machine/6",
+  "machine.sessionActions": "machine/7",
+  "machine.runAction": "machine/7",
+  "machine.setupRerun": "machine/7",
+  "machine.setupStop": "machine/7",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -810,6 +817,55 @@ export interface PtyInfo {
   running?: boolean;
   /** An agent's install or sign-in (`machine/4`); such a terminal is never in `pty.list`. */
   setup?: { harness: string; step: MachineAgentSetupStep };
+  /** One of its session's script runs on a machine (`machine/7`): a saved action, or the workspace's setup. */
+  run?: PtyRun;
+}
+
+/** What a session's script-run terminal is (`machine/7`). */
+export type PtyRun = { kind: "action"; actionId: string; name: string } | { kind: "setup" };
+
+/** A saved action as a machine's project has it (`machine/7`). */
+export interface MachineAction {
+  id: string;
+  name: string;
+  icon: string;
+  command: string;
+  runAfterSetup: boolean;
+  concurrent: boolean;
+  hidden: boolean;
+}
+
+/** A workspace setup attempt on a machine (`machine/7`); its pane is the terminal `pty.list` lists with `run.kind` "setup" while it is kept. */
+export interface MachineSetupRun {
+  paneId: string;
+  command: string;
+  status: "pending" | "running" | "stopping" | "stopped" | "succeeded" | "failed";
+  exitCode: number | null;
+  error: string | null;
+  hasPane: boolean;
+}
+
+/** `machine.sessionActions`: what a machine session's Run menu, Open button and Setup and Run tabs show, read on the machine. */
+export interface MachineSessionActions {
+  actions: MachineAction[];
+  previewUrls: { id: string; name: string; url: string }[];
+  /** The setup script the machine would run now; null when none is saved there. */
+  setupScript: string | null;
+  /** The session has a workspace checkout of its own, where setup runs. */
+  setupApplies: boolean;
+  /** False once its worktree is removed: nothing can run in it. */
+  available: boolean;
+  /** What $PORT and $PORT_1..$PORT_9 are on the machine; null when not known. */
+  ports: number[] | null;
+  setup: MachineSetupRun | null;
+}
+
+/** `machine.runAction`: the run started, or (`started` false) the running one of a non-concurrent action. */
+export interface MachineActionOutcome {
+  started: boolean;
+  run: { actionId: string; name: string; ptyId: string; state: "running" | "exited"; exitCode: number | null };
+  /** The run's terminal as `pty.list` lists it. */
+  terminal: PtyInfo | null;
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -1630,6 +1686,33 @@ export class WorkspaceRpcClient {
   async cancelClone(cloneId: string): Promise<MachineClone> {
     const result = await this.call<{ clone: MachineClone }>("machine.cloneCancel", { cloneId });
     return result.clone;
+  }
+
+  /** `machine/7`: a session's saved actions, preview URLs, setup script, ports and setup run, as the machine has them. */
+  async sessionActions(sessionId: string): Promise<MachineSessionActions> {
+    return this.call<MachineSessionActions>("machine.sessionActions", { sessionId });
+  }
+
+  /**
+   * `machine/7`: run a saved action in a terminal of the session on the
+   * machine. A non-concurrent action already running is not started again
+   * (`started` false) unless `restart`, which replaces that run. Not resent
+   * after a drop: a resend of a concurrent action would start it twice.
+   */
+  async runAction(sessionId: string, actionId: string, restart = false): Promise<MachineActionOutcome> {
+    return this.call<MachineActionOutcome>("machine.runAction", { sessionId, actionId, restart });
+  }
+
+  /** `machine/7`: run the session's setup script again on the machine. */
+  async rerunSetup(sessionId: string): Promise<MachineSetupRun | null> {
+    const result = await this.call<{ setup: MachineSetupRun | null }>("machine.setupRerun", { sessionId });
+    return result.setup;
+  }
+
+  /** `machine/7`: stop the session's setup attempt `paneId` on the machine. */
+  async stopSetup(sessionId: string, paneId: string): Promise<MachineSetupRun | null> {
+    const result = await this.call<{ setup: MachineSetupRun | null }>("machine.setupStop", { sessionId, paneId });
+    return result.setup;
   }
 
   /** `machine/4`: the setup step running there for `harness`, to follow it from another window or after a reload. */

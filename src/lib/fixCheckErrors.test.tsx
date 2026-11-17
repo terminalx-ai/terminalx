@@ -10,6 +10,7 @@ vi.mock("./agentEvents", () => ({ mergeTabEvents: mocks.merge }));
 vi.mock("./hotkeys", () => ({ useShortcut: mocks.shortcut }));
 vi.mock("./gitSource", () => ({ localGitSource: () => ({ workStatus: mocks.workStatus }) }));
 vi.mock("./sessionPrs", () => ({ sessionPrs: mocks.sessionPrs }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const pr = { url: "https://github.com/owner/repo/pull/1", state: "OPEN", checks: [{ name: "test", state: "failure", url: "https://github.com/owner/repo/actions/runs/12/job/34", actions: { runId: 12, jobId: 34 } }] } as PullRequest;
 const input = { sessionId: "s", tabId: "active-agent", cwd: "/repo", branch: "feature", enabled: true };
@@ -101,4 +102,18 @@ it("leaves out a pull request linked from another branch (PRO-294): this session
   mocks.sessionPrs.mockResolvedValue({ rows: [{ pr: linked, current: true, association: association(linked.url, true) }] });
   await act(async () => { await hook.result.current.fix(); });
   expect(gh.fixAttachment).toHaveBeenCalledExactlyOnceWith("s", "active-agent", linked.url, { owner: "test-policy", epoch: 0 });
+});
+
+it("links a failed Fix errors only to a web page: a provider's file:// check URL is passed over (PRO-394 review)", async () => {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  const { dismissError, getErrorToasts } = await import("./errorToasts");
+  const local = { ...pr, checks: [{ ...pr.checks[0], url: "file:///etc/passwd" }] } as PullRequest;
+  vi.mocked(gh.fixAttachment).mockRejectedValueOnce(new Error("Logs expired"));
+  const hook = renderHook(() => useFixCheckErrors(input));
+  await act(async () => { await expect(hook.result.current.fix(local)).rejects.toThrow("Logs expired"); });
+  const toast = getErrorToasts().find((entry) => entry.title === "Couldn't start Fix errors")!;
+  const open = toast.actions!.find((action) => action.label === "Open log on GitHub")!;
+  await open.run();
+  expect(openUrl).toHaveBeenCalledExactlyOnceWith(`${pr.url}/checks`);
+  for (const entry of getErrorToasts()) dismissError(entry.id);
 });
