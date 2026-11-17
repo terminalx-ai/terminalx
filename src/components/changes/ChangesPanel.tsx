@@ -1,7 +1,7 @@
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { openConflict, openDiff, openReviewStack, useEditors } from "@/lib/editors";
+import { openConflict, openDiff, openFile, openReviewStack, useEditors } from "@/lib/editors";
 import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
@@ -47,7 +47,7 @@ export function ChangesPanel(props: {
   return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
 }
 
-function ScopedChanges({ onOpenFile, source, events, version, active, live, workingTree, editor, sessionId }: {
+function ScopedChanges({ onOpenFile: hostOpenFile, source, events, version, active, live, workingTree, editor, sessionId }: {
   onOpenFile?: (path: string) => void;
   editor?: { root: string; sessionId: string };
   /** The session whose agent tab the merge card asks; none for a checkout without one. */
@@ -59,6 +59,7 @@ function ScopedChanges({ onOpenFile, source, events, version, active, live, work
   live: boolean;
   workingTree?: boolean;
 }) {
+  const onOpenFile = hostOpenFile ?? (editor ? (path: string) => openFile(editor.sessionId, editor.root, path) : undefined);
   const review = useReviewComments();
   // The session's PR and its threads are read here too: the PR panel need never have been opened (PRO-234).
   const threads = useSessionThreads(source, sessionId, active);
@@ -270,7 +271,7 @@ function ScopedChanges({ onOpenFile, source, events, version, active, live, work
       </div>}
       {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       {!mergeOnly && <div className="min-h-0 flex-1">
-        {repo ? <RepoPanel onOpenDiff={onOpenDiff} source={source} active={active} revision={tick} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} onReviewCommit={(commit) => choose({ ...choice, scope: "commit", commit })} embedded /> : <ChangesBody onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} key={`${choice.scope}:${choice.target}:${choice.commit}:${choice.checkpoint}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
+        {repo ? <RepoPanel onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} source={source} active={active} revision={tick} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} onReviewCommit={(commit) => choose({ ...choice, scope: "commit", commit })} embedded /> : <ChangesBody onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} key={`${choice.scope}:${choice.target}:${choice.commit}:${choice.checkpoint}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
           allowDiscard={choice.scope !== "commit" && choice.scope !== "checkpoint"}
           empty={emptyState} unavailable={unavailable} onChanged={() => setTick((t) => t + 1)} />}
       </div>}

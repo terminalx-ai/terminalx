@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@/types/events";
 import { setPrefs } from "@/lib/prefs";
@@ -104,30 +104,64 @@ it("keeps the working-tree view scoped to the workspace", async () => {
   expect(screen.getByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });
 
-it.each([
+it.each(([
   ["cloud:org:workspace", "cloud:org:workspace", "app", "app/large.ts"],
   ["machine:m:p", "machine:m:p/trees/topic", "trees/topic", "large.ts"],
   ["cloud:org:workspace", "cloud:other:workspace", "app", null],
-])("opens an oversized Changes file only through its matching file source (%s, %s)", async (workspaceKey, fileKey, repo, expectedPath) => {
+] as const).flatMap((row) => [false, true].flatMap((uncommitted) => [false, true].map((deleted) => [...row, uncommitted, deleted] as const))))("opens an oversized Changes file only through its matching file source (%s, %s, %s, %s, uncommitted=%s, deleted=%s)", async (workspaceKey, fileKey, repo, expectedPath, uncommitted, deleted) => {
   const { cloudGitSource } = await import("@/lib/gitSource");
   const { RemoteGit } = await import("@terminalx/portable/workspaceGit");
   const { getEditors, dropEditors } = await import("@/lib/editors");
   const call = vi.fn(async (method: string) => {
     if (method === "git.reviewRange") return { target: "main", base: "base", head: "head" };
-    if (method === "git.changesBetween") return { files: [{ path: "large.ts", status: "modified", additions: 0, deletions: 0 }] };
+    if (method === "git.changesBetween" || method === "git.workingChanges") return { head: "head", files: [{ path: "large.ts", status: deleted ? "deleted" : "modified", additions: 0, deletions: 0 }] };
     if (method === "git.branches") return { branches: [] };
-    if (method === "git.fileContents") return { before: "old", after: "<file too large to show>", afterSize: 5 * 1024 * 1024 };
+    if (method === "git.fileContents") return deleted ? { before: "<file too large to show>", beforeSize: 5 * 1024 * 1024, after: null } : { before: "old", after: "<file too large to show>", afterSize: 5 * 1024 * 1024 };
     throw new Error(method);
   });
   const gitSource = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as never, repo), canWrite: false, author: async () => null });
   render(<RightPanel cwd="/remote" sessionId="large-panel" gitSource={gitSource} fileSource={{ key: fileKey } as never} />);
   openChanges();
+  if (uncommitted) {
+    fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Uncommitted changes/ }));
+  }
   fireEvent.click(await screen.findByRole("button", { name: /large.ts/ }));
   expect(await screen.findByText("5.0 MB")).toBeTruthy();
-  if (expectedPath) {
+  if (expectedPath && !deleted) {
     fireEvent.click(screen.getByRole("button", { name: "Open file" }));
     expect(getEditors().editors.find((entry) => entry.sessionId === "large-panel")).toMatchObject({ rel: expectedPath, source: fileKey });
   } else expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
   expect(invoke).not.toHaveBeenCalledWith("file_contents_at", expect.anything());
   dropEditors((entry) => entry.sessionId === "large-panel");
+});
+
+it.each(["Staged", "Unstaged"] as const)("opens oversized local %s files from Uncommitted and suppresses deleted files", async (section) => {
+  const { getEditors, dropEditors } = await import("@/lib/editors");
+  const original = invoke.getMockImplementation()!;
+  const files = [
+    { path: "large.ts", status: "modified", additions: 0, deletions: 0 },
+    { path: "deleted.ts", status: "deleted", additions: 0, deletions: 0 },
+  ];
+  invoke.mockImplementation(async (command: string, args?: { path?: string }) => {
+    if (command === "working_change_sets") return ["head", "index", section === "Staged" ? files : [], section === "Unstaged" ? files : []];
+    if (command === "file_contents_at") return args?.path === "deleted.ts"
+      ? { before: "<file too large to show>", beforeSize: 6 * 1024 * 1024, after: null }
+      : { before: "old", after: "<file too large to show>", afterSize: 5 * 1024 * 1024 };
+    return original(command);
+  });
+  render(<RightPanel cwd={cwd} sessionId="local-uncommitted" branch="fix/test" />);
+  openChanges();
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Uncommitted changes/ }));
+  const list = within(await screen.findByRole("region", { name: section }));
+  fireEvent.click(await list.findByRole("button", { name: /Modified.*large.ts/ }));
+  expect(await screen.findByText("5.0 MB")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("file_contents_at", { cwd, path: "large.ts", base: section === "Staged" ? "head" : "index", head: section === "Staged" ? "index" : null });
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(getEditors().editors.find((entry) => entry.sessionId === "local-uncommitted")).toMatchObject({ kind: "text", root: cwd, rel: "large.ts" });
+  fireEvent.click(list.getByRole("button", { name: /Deleted.*deleted.ts/ }));
+  expect(await screen.findByText("6.0 MB")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  dropEditors((entry) => entry.sessionId === "local-uncommitted");
 });
