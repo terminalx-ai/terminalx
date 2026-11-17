@@ -8,11 +8,12 @@ vi.mock("@/lib/dataPrivacy", () => ({
   useDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
 }));
 import "@testing-library/dom";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import type { Project } from "@/types/session";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import { announceProjectAdded } from "@/lib/projectAdded";
+import { announceProjectAdded, requestProjectSettings } from "@/lib/projectAdded";
 
 // The native side of setting links (PRO-127): the link `settings_link_take` hands out once, and the ping
 // a link arriving while the app runs sends. Every other command fails as it does outside the app.
@@ -42,7 +43,7 @@ vi.mock("@/components/session/ShareSessionDialog", () => ({ ShareSessionDialogHo
 const { sessionStore } = vi.hoisted(() => ({
   sessionStore: {
     loaded: true,
-    projects: [{ path: "/repo", name: "Raccoon" }],
+    projects: [{ path: "/repo", name: "Raccoon" }] as Project[],
     lastProject: "/repo" as string | null,
     sessions: [],
     harnesses: [],
@@ -77,6 +78,7 @@ const { sessionStore } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/sessions", () => ({
+  updateProject: scriptSettings.update,
   bootSessions: vi.fn(),
   openHome: vi.fn(() => { sessionStore.view = "home"; sessionStore.selectedSessionId = null; }),
   openAgents: vi.fn(),
@@ -93,6 +95,7 @@ vi.mock("@/lib/sessions", () => ({
 // The latest handler registered for each shortcut, so a test can press one.
 const shortcuts = vi.hoisted(() => new Map<string, () => void>());
 vi.mock("@/lib/hotkeys", () => ({
+  hasEscapeOverlay: () => false,
   keycaps: () => [],
   useHotkey: vi.fn(),
   useShortcut: (id: string, handler: () => void) => void shortcuts.set(id, handler),
@@ -101,7 +104,7 @@ vi.mock("@/lib/hotkeys", () => ({
 }));
 // PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
 const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
-vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+vi.mock("@/lib/experimentalSettings", () => ({ getExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }), useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
 // PRO-345, PRO-360: every paired machine stays attached while the window is open.
 const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
@@ -132,6 +135,7 @@ const mirrorApi = vi.hoisted(() => ({
 // The machine approval host (PRO-342) reads the machine host on mount; with no
 // `invoke` here that read fails, and the store reports it with the real errorMessage.
 vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   agent: { send: vi.fn() },
   api: mirrorApi,
   errorMessage: (await importOriginal<typeof import("@/lib/api")>()).errorMessage,
@@ -163,7 +167,7 @@ vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
 vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({ KbdGroup: () => null, WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/layout/Sidebar", () => ({
   Sidebar: ({ onOpenSettings, onOpenHome }: { onOpenSettings: () => void; onOpenHome: () => void }) => (
     <div data-testid="sidebar">
@@ -195,13 +199,28 @@ vi.mock("@/components/editor/EditorSplit", () => ({ EditorSplit: ({ sessionId }:
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
-vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
+const scriptSettings = vi.hoisted(() => ({ real: false, update: vi.fn(), step: vi.fn(), setup: "npm ci", archive: "" }));
+vi.mock("@/lib/sessionNavigation", () => ({ stepVisibleSession: scriptSettings.step, stepAttentionSession: vi.fn() }));
+vi.mock("@/lib/configuration", () => ({ configuration: {
+  files: async () => [], watch: async () => () => {},
+  resolve: async () => ({ values: {
+    setupScript: { value: scriptSettings.setup, source: "user" },
+    archiveScript: { value: scriptSettings.archive, source: "user" },
+  }, warnings: [], registry: [], trust: null }),
+} }));
+vi.mock("@/components/settings/AccountTab", () => ({ AccountTab: () => <div>Account settings</div> }));
+vi.mock("@/components/settings/EnvironmentSettings", () => ({ EnvironmentTable: () => null }));
+vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }) }));
+vi.mock("@/components/settings/SettingsPage", async (original) => {
+  const { SettingsPage: RealSettingsPage } = await original<typeof import("@/components/settings/SettingsPage")>();
+  return { SettingsPage: (props: ComponentProps<typeof RealSettingsPage>) => scriptSettings.real
+    ? <RealSettingsPage {...props} /> : <StubSettingsPage {...props} /> };
+});
+const StubSettingsPage = ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
     <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-project-path={initialProjectPath ?? ""} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
-  ),
-}));
+  );
 vi.mock("@/components/command/CommandPalette", () => ({
   CommandPalette: ({ onOpenSettings }: { onOpenSettings: (tab?: string) => void }) => (
     <button type="button" onClick={() => onOpenSettings("appearance")}>Open Appearance settings</button>
@@ -226,6 +245,9 @@ const { openSettingRow } = await import("@/lib/settingsLinks");
 const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
+  scriptSettings.real = false;
+  scriptSettings.step.mockClear();
+  scriptSettings.update.mockReset();
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
@@ -725,4 +747,45 @@ describe("welcome routing", () => {
     expect(screen.getByTestId(view)).toBeTruthy();
     expect(screen.queryByTestId("welcome")).toBeNull();
   });
+});
+
+
+it.each(["app.nextSession", "app.previousSession", "app.settings"].flatMap((shortcut) =>
+  ["setup", "archive"].map((kind) => ({ shortcut, kind })),
+))("protects focused $kind drafts from the AppShell $shortcut shortcut", async ({ shortcut, kind }) => {
+  scriptSettings.real = true;
+  scriptSettings.setup = "npm ci";
+  scriptSettings.archive = "";
+  sessionStore.projects[0].scripts = { setup: "npm ci", archive: "" };
+  let finishSave: () => void = () => {};
+  scriptSettings.update.mockImplementation(async (_path, patch) => {
+    await new Promise<void>((resolve) => { finishSave = resolve; });
+    sessionStore.projects[0].scripts = patch.scripts;
+    scriptSettings.setup = patch.scripts.setup;
+    scriptSettings.archive = patch.scripts.archive;
+  });
+  render(<AppShell />);
+  act(() => requestProjectSettings("/repo"));
+  const label = kind === "setup" ? "Setup script" : "Archive script";
+  const editor = await screen.findByLabelText(label);
+  act(() => editor.focus());
+  fireEvent.change(editor, { target: { value: "echo preserved" } });
+  expect(document.activeElement).toBe(editor);
+  act(() => shortcuts.get(shortcut)!());
+  expect(screen.getByLabelText(label)).toBe(editor);
+  expect((editor as HTMLTextAreaElement).value).toBe("echo preserved");
+  expect(screen.getByText(/Save your script changes before leaving Settings/)).toBeTruthy();
+  expect(scriptSettings.step).not.toHaveBeenCalled();
+  expect(scriptSettings.update).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: `Save ${kind} script` }));
+  act(() => shortcuts.get(shortcut)!());
+  expect(screen.getByLabelText(label)).toBe(editor);
+  expect(scriptSettings.step).not.toHaveBeenCalled();
+  await act(async () => finishSave());
+  await screen.findByText(`${label} saved.`);
+  act(() => shortcuts.get(shortcut)!());
+  await waitFor(() => expect(screen.queryByLabelText(label)).toBeNull());
+  if (shortcut !== "app.settings") expect(scriptSettings.step).toHaveBeenCalledWith(shortcut === "app.nextSession" ? 1 : -1);
+  act(() => requestProjectSettings("/repo"));
+  await waitFor(() => expect((screen.getByLabelText(label) as HTMLTextAreaElement).value).toBe("echo preserved"));
 });

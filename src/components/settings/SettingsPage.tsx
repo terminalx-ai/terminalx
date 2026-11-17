@@ -1,11 +1,11 @@
-import { SettingsLeaveGuardContext } from "./settingsLeaveGuard";
+import { SettingsLeaveBoundaryContext, SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
 import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Bot, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Settings2, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
@@ -67,13 +67,8 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   onOpenSkills?: () => void;
   onOpenUsage?: () => void;
 }) {
-  const leaveGuards = useRef(new Set<() => boolean>());
-  const [leaveWarning, setLeaveWarning] = useState(false);
-  const canLeave = () => {
-    const blocked = [...leaveGuards.current].some((guard) => guard());
-    setLeaveWarning(blocked);
-    return !blocked;
-  };
+  const localBoundary = useSettingsLeaveBoundary();
+  const { guards: leaveGuards, warning: leaveWarning, canLeave } = useContext(SettingsLeaveBoundaryContext) ?? localBoundary;
   const close = () => { if (canLeave()) onBack(); };
   const initial = resolveSetting(initialTab);
   const [section, setSection] = useState<SettingsSection>(initial.section);
@@ -227,7 +222,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   return (
     // The settings menu stands where the project sidebar stands, at its width and in its row style, so opening Settings
     // reads as the sidebar changing what it lists rather than a different screen.
-    <SettingsLeaveGuardContext.Provider value={leaveGuards.current}>
+    <SettingsLeaveGuardContext.Provider value={leaveGuards}>
     <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
       <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
         <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pl-[78px] pr-2">
