@@ -1,7 +1,11 @@
 import { gh } from "@/lib/api";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ChevronDown, GitBranch, Loader2 } from "@/icons";
+import { ChevronDown, CircleX, GitBranch, Loader2 } from "@/icons";
+import { isFailingCheck } from "@/lib/checks";
+import { checksMarkOf, noteChecksMark } from "@/lib/panelMarks";
+import { cn } from "@/lib/cn";
+import { showPanelTab } from "@/lib/panelTab";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -137,6 +141,14 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
   useShortcut("git.fixChecks", shortcuts.fixChecks);
   useShortcut("git.merge", shortcuts.merge);
 
+  // The panel's Checks tab carries a red dot while a check fails, though the panel has not read the PR (PRO-394).
+  useEffect(() => {
+    if (!snapshot) return;
+    noteChecksMark(session.id, snapshot.pr?.state === "OPEN" ? checksMarkOf([...(snapshot.pr.checks ?? []), ...(snapshot.pr.validation ?? [])]) : null);
+  }, [session.id, snapshot]);
+  // Failing checks say how many, in red, as the next step (PRO-394, design 05.02: "Fix 2 failing checks").
+  const failing = !agentWorking && snapshot?.state === "checksFailing" ? new Set((snapshot.pr?.checks ?? []).filter(isFailingCheck).map((check) => check.name)).size : 0;
+  const label = running ?? (failing ? `Fix ${failing} failing ${failing === 1 ? "check" : "checks"}` : state?.label || "Git actions");
   const tooltip = snapshot
     ? `${state?.detail}. Base: ${snapshot.base}. Merge method: ${snapshot.mergeMethod}.${snapshot.state === "behind" ? (snapshot.pullNeedsAgent ? " The agent preserves uncommitted work while pulling." : snapshot.behindUpstream ? " Pull fast-forwards from the upstream branch." : " Pull merges the latest base into this branch.") : ""}`
     : "Reading branch status";
@@ -147,13 +159,13 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
     <div className="flex min-w-0 items-center gap-2" data-testid="branch-git-button">
       <div className="flex shrink-0 items-center">
         <WithTooltip label={tooltip} shortcut={state?.action ? BRANCH_ACTIONS[state.action].shortcut : undefined}>
-          <Button variant="outline" size="sm" className="max-w-44 rounded-r-none border-r-0" aria-label={running ?? (state?.label || "Git actions")} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
-            {running || refreshing || agentWorking ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />}
-            <span className="truncate @max-[520px]/session-header:hidden">{running ?? (state?.label || "Git actions")}</span>
+          <Button variant="outline" size="sm" className={cn("max-w-52 rounded-r-none border-r-0", failing && "border-destructive/30 bg-destructive/15 text-destructive hover:bg-destructive/25")} aria-label={label} data-tone={failing ? "bad" : undefined} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
+            {running || refreshing || agentWorking ? <Loader2 className="size-3.5 animate-spin" /> : failing ? <CircleX className="size-3.5" /> : <GitBranch className="size-3.5" />}
+            <span className="truncate @max-[520px]/session-header:hidden">{label}</span>
           </Button>
         </WithTooltip>
         <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="rounded-l-none px-1.5" aria-label="Git actions"><ChevronDown className="size-3" /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className={cn("rounded-l-none px-1.5", failing && "border-destructive/30 border-l-black/15 bg-destructive/15 text-destructive hover:bg-destructive/25")} aria-label="Git actions"><ChevronDown className="size-3" /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             {(Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
               <DropdownMenuItem key={action} disabled={!enabled(action) || !!pending} onSelect={() => void prepare(action)}>
@@ -161,6 +173,7 @@ export function BranchGitButton({ session, tabId }: { session: SessionEntry; tab
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
+            {snapshot?.pr && <DropdownMenuItem onSelect={() => showPanelTab("branch")}>Show checks</DropdownMenuItem>}
             {snapshot?.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(branchError(reason)))}>Open pull request</DropdownMenuItem>}
             <DropdownMenuItem disabled={refreshing} onSelect={() => refresh()}>Refresh Git status</DropdownMenuItem>
           </DropdownMenuContent>

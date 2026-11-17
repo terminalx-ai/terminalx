@@ -270,6 +270,37 @@ describe("composer attachments", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "inspect_attachments")).toHaveLength(1);
   });
 
+  it("PRO-407: a machine tab takes any file, sends it with the message, and leaves a dropped folder out with a word", async () => {
+    nativeFiles((path) => (path.endsWith(".png") ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : null));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    const onSend = vi.fn();
+    function Machine() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote attachFiles busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const { container } = render(<Machine />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop files to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt", "/Users/me/project"] } }));
+    expect(await screen.findByTitle("notes.txt")).toBeTruthy();
+    // A folder's path here names nothing on the machine: never mentioned, and said.
+    expect(box.value).toBe("");
+    expect(screen.getByTestId("attach-notice").textContent).toBe("project was not attached: only files can be sent to an agent on another computer, not folders.");
+    // The picker offers every file, not only images.
+    expect(container.querySelector<HTMLInputElement>('input[type="file"]')!.accept).toBe("");
+    fireEvent.change(box, { target: { value: "Read this" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+    expect(onSend).toHaveBeenCalledWith("Read this", [], false, [expect.objectContaining({ name: "notes.txt", path: "/Users/me/notes.txt" })]);
+  });
+
   it("hands over the very same image when a failed send is tried again", async () => {
     const sent: unknown[] = [];
     const onSend = vi.fn(async (_text: string, images: unknown[]) => {

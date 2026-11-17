@@ -41,20 +41,21 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); });
 
-/** The panel opens on Branch's Overview; these are about its Changes view. */
-const openChanges = () => fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
+/** The panel opens on Checks; these are about its Changes tab. */
+const openChanges = () => fireEvent.click(screen.getByRole("button", { name: /^Changes(\s*\d+)?$/ }));
 
-it("opens on the Branch tab's Overview, and reopens Branch on the view last shown", () => {
+it("opens on Checks, with Changes a tab of its own that counts the branch's files (PRO-394)", async () => {
   render(<RightPanel cwd={cwd} branch="fix/test" />);
   expect(screen.getByText("Branch overview")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("button", { name: "Checks" }).getAttribute("aria-pressed")).toBe("true");
+  // The tab row counts the files in the branch before Changes is opened.
+  expect((await screen.findByTestId("panel-changes-count")).textContent).toBe("2");
   openChanges();
   expect(screen.queryByText("Branch overview")).toBeNull();
-  // Away to Files and back to Branch: Changes again.
+  expect(screen.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "Files" }));
-  expect(screen.queryByRole("tab", { name: "Changes" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Branch" }));
-  expect(screen.getByRole("tab", { name: "Changes" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "Checks" }));
+  expect(screen.getByText("Branch overview")).toBeTruthy();
 });
 
 it("shows workspace work after a status-only turn, and commits from its Uncommitted scope", async () => {
