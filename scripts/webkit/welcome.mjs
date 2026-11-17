@@ -40,7 +40,9 @@ try {
     }
   }
   const first = await open(browser, server.url, { cloud: false, localProjects: 0 }, { width: 420, height: 650 }, {
-    extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));`,
+    extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));
+      // The fixture's agent is installed; its login is found, so step 1 reads as done.
+      window.__PW_STUB__.answers.check_agent_readiness = () => ({ state: 'ready', checkedAt: null, version: '2.1.318' });`,
   });
   const start = first.getByTestId("start-screen");
   await start.getByRole("heading", { name: "Welcome to TerminalX Legacy" }).waitFor();

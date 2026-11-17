@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, useSignInReadiness, type AgentReadiness } from "./agentReadiness";
+import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, useKnownReadiness, useSignInReadiness, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
 const exits = new Set<() => void>();
@@ -289,6 +289,36 @@ describe("new-chat readiness discovery", () => {
     invoke.mockClear();
     rerender({ agents: harnesses, enabled: false });
     await waitFor(() => expect(result.current.checking).toBe(false));
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("what is already known about the agents (PRO-399)", () => {
+  it("asks nothing itself, and takes the answers other checks get", async () => {
+    invoke.mockImplementation(async () => answer("ready"));
+    const { result } = renderHook(() => useKnownReadiness(["claude", "codex"]));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await act(async () => {});
+    expect(invoke).not.toHaveBeenCalled();
+    expect(result.current).toEqual({});
+
+    // A check made anywhere in this window, and an answer a setup run announces.
+    await act(async () => { await checkAgentReadiness("claude"); });
+    expect(result.current.claude?.state).toBe("ready");
+    act(() => announceReadiness("codex", answer("signed_out")));
+    expect(result.current.codex?.state).toBe("signed_out");
+    // Another agent's answer is not this view's.
+    act(() => announceReadiness("cursor", answer("ready")));
+    expect(Object.keys(result.current).sort()).toEqual(["claude", "codex"]);
+  });
+
+  it("starts from the answers of the last few minutes", async () => {
+    invoke.mockImplementation(async () => answer("ready"));
+    await checkAgentReadiness("claude");
+    invoke.mockClear();
+    const { result } = renderHook(() => useKnownReadiness(["claude", "codex"]));
+    expect(result.current.claude?.state).toBe("ready");
+    expect(result.current.codex).toBeUndefined();
     expect(invoke).not.toHaveBeenCalled();
   });
 });

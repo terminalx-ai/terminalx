@@ -28,6 +28,8 @@ vi.mock("@/lib/sessions", () => ({ ...sessions, useSessionStore: () => store }))
 
 const { StartScreen } = await import("./StartScreen");
 const { ProjectStartDialogHost } = await import("./ProjectStartDialogs");
+const { BypassDialog } = await import("@/components/session/BypassDialog");
+const { closeBypass } = await import("@/lib/dialogs");
 const { openProjectStart } = await import("@/lib/projectStart");
 const { forgetReadiness } = await import("@/lib/agentReadiness");
 
@@ -51,8 +53,9 @@ beforeEach(() => {
   account.status = { state: "signed-out", identity: null };
   Object.assign(prefs, { lastMode: "manual", bypassConfirmed: false });
   sessions.addProject.mockImplementation(async (path: string) => ({ path, name: path.split("/").pop() }) as Project);
-  invoke.mockImplementation(async (command: string) => {
-    if (command === "check_agent_readiness") return { state: "missing", checkedAt: null, version: null };
+  invoke.mockImplementation(async (command: string, args?: { harness?: string }) => {
+    // Each agent's login is found exactly when it is installed.
+    if (command === "check_agent_readiness") return { state: (store.harnesses as HarnessInfo[]).find((harness) => harness.id === args?.harness)?.available ? "ready" : "missing", checkedAt: null, version: null };
     if (command === "github_repositories") return { status: "ready", repositories: [], truncated: false };
     if (command === "project_start_defaults") return { projectsDir: "/home/me/Projects", suggestedName: "my-project" };
     throw new Error(`unexpected command ${command}`);
@@ -61,17 +64,19 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  act(() => openProjectStart(null));
+  act(() => { openProjectStart(null); closeBypass(); });
 });
 
+const probed = () => invoke.mock.calls.filter(([command]) => command === "check_agent_readiness").map(([, args]) => (args as { harness: string }).harness);
+
 describe("the start screen", () => {
-  it("welcomes by name with the three numbered steps, the project one open", () => {
+  it("welcomes by name with the three numbered steps, the project one open", async () => {
     render(<StartScreen onOpenSettings={vi.fn()} />);
 
     expect(screen.getByRole("heading", { level: 1, name: "Welcome to TerminalX" })).toBeTruthy();
     expect(screen.getByText("Run coding agents side by side, each in its own worktree.")).toBeTruthy();
     // An agent can run: step 1 is done, step 2 is the one in hand, step 3 waits with its choice.
-    expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(["Agents ready", "Open a project", "Choose how much the agent may do alone"]);
+    await waitFor(() => expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(["Agents ready", "Open a project", "Choose how much the agent may do alone"]));
     expect(screen.getByTestId("start-screen").getAttribute("data-stage")).toBe("project");
     expect(screen.getByRole("group", { name: "Get started" })).toBeTruthy();
     expect(cards().map((card) => card.getAttribute("data-start-card"))).toEqual(["local", "github", "quick"]);
@@ -295,10 +300,66 @@ describe("the start screen", () => {
     expect(screen.queryByRole("list", { name: "Agents" })).toBeNull();
   });
 
-  it("says an account is optional and who is signed in, beside the guide and the way to Settings › Agents", () => {
+  it("calls step 1 done only on an answer, and keeps Sign in on offer for a login that cannot be told", async () => {
+    store.harnesses = [{ ...claude, installable: true }];
+    let answer: ((value: unknown) => void) | undefined;
+    invoke.mockImplementation((command: string) => {
+      if (command === "check_agent_readiness") return new Promise((resolve) => { answer = resolve; });
+      throw new Error(`unexpected command ${command}`);
+    });
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+
+    // Installed, and nobody has answered about its login yet: the project step is open, and nothing says "ready".
+    const headings = () => screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent);
+    expect(screen.getByTestId("start-screen").getAttribute("data-stage")).toBe("project");
+    expect(headings()[0]).toBe("Set up an agent");
+    const line = screen.getByRole("region", { name: "Claude Code setup" });
+    expect(within(line).getByRole("status").textContent).toBe("Installed");
+    expect(within(line).queryByText("Ready")).toBeNull();
+    expect(within(line).queryByRole("button")).toBeNull();
+
+    await waitFor(() => expect(answer).toBeTruthy());
+    await act(async () => answer!({ state: "unknown", checkedAt: null, version: "2.1.318" }));
+    expect(headings()[0]).toBe("Set up an agent");
+    expect(within(line).getByRole("status").textContent).toBe("Login not checked");
+    expect(within(line).queryByText("Ready")).toBeNull();
+    expect(within(line).getByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
+  });
+
+  it("costs a set-up reader one check on Home, and none on coming back to the app", async () => {
+    store.harnesses = [claude, { ...codex, available: true }];
+    const { unmount } = render(<StartScreen onOpenSettings={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Agents ready" })).toBeTruthy());
+    expect(probed()).toEqual(["claude"]);
+    // The agent nobody asked about is on its line with no more claimed than that it is installed.
+    const codexLine = screen.getByRole("region", { name: "Codex setup" });
+    expect(within(codexLine).getByRole("status").textContent).toBe("Installed");
+    expect(within(codexLine).queryByText("Ready")).toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      window.dispatchEvent(new Event("focus"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(probed()).toEqual(["claude"]);
+    expect(sessions.refreshHarnesses).not.toHaveBeenCalled();
+
+    // Home again a moment later: the answer just given is enough.
+    unmount();
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Agents ready" })).toBeTruthy();
+    await act(async () => {});
+    expect(probed()).toEqual(["claude"]);
+  });
+
+  it("says an account is optional and who is signed in, beside the guide and the way to Settings › Agents", async () => {
     const onOpenSettings = vi.fn();
     const { unmount } = render(<StartScreen onOpenSettings={onOpenSettings} />);
 
+    await screen.findByRole("heading", { name: "Agents ready" });
     expect(screen.getByText("A TerminalX account is optional for local work.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Read the guide" }));
     expect(openUrl).toHaveBeenCalledWith(expect.stringContaining("github.com"));
@@ -335,5 +396,78 @@ describe("the start screen", () => {
     fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
     // Bypass waits for the app's warning dialog; nothing is saved by the pick alone.
     expect(setPrefs).not.toHaveBeenCalled();
+  });
+
+  it("warns about Bypass in the terms of the agent a new chat would start with, not the saved one", async () => {
+    // A Mac with only Codex, on a profile whose saved agent is still the default, Claude.
+    store.harnesses = [{ ...claude, available: false }, { ...codex, available: true }];
+    expect(prefs.lastAgent).toBe("claude");
+    render(
+      <>
+        <StartScreen onOpenSettings={vi.fn()} />
+        <BypassDialog />
+      </>,
+    );
+    await screen.findByRole("heading", { name: "Agents ready" });
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
+
+    const warning = await screen.findByRole("dialog", { name: "Let Codex run without asking?" });
+    expect(warning.textContent).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(warning.textContent).toContain("sandbox off");
+    expect(warning.textContent).not.toContain("--dangerously-skip-permissions");
+    expect(setPrefs).not.toHaveBeenCalled();
+    fireEvent.click(within(warning).getByRole("button", { name: "Bypass permissions" }));
+    expect(setPrefs).toHaveBeenCalledWith({ lastMode: "bypassPermissions" });
+  });
+
+  it("names the agent whose login was found when two are installed, whatever the saved one is", async () => {
+    store.harnesses = [claude, { ...codex, available: true }];
+    invoke.mockImplementation(async (command: string, args: { harness: string }) => {
+      if (command === "check_agent_readiness") return { state: args.harness === "codex" ? "ready" : "signed_out", checkedAt: null, version: null };
+      throw new Error(`unexpected command ${command}`);
+    });
+    render(
+      <>
+        <StartScreen onOpenSettings={vi.fn()} />
+        <BypassDialog />
+      </>,
+    );
+    await screen.findByRole("heading", { name: "Agents ready" });
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
+    expect(await screen.findByRole("dialog", { name: "Let Codex run without asking?" })).toBeTruthy();
+  });
+
+  it("holds Bypass back while no agent is installed: there is none to name in its warning", async () => {
+    store.harnesses = [{ ...claude, available: false, installable: true }, { ...codex, installable: true }];
+    render(
+      <>
+        <StartScreen onOpenSettings={vi.fn()} />
+        <BypassDialog />
+      </>,
+    );
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+    const bypass = await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ });
+    expect(bypass.getAttribute("aria-disabled")).toBe("true");
+    expect(bypass.textContent).toContain("Set up an agent first");
+    fireEvent.click(bypass);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(setPrefs).not.toHaveBeenCalled();
+    // The other modes need no agent to be named.
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /^Auto/ }));
+    expect(setPrefs).toHaveBeenCalledWith({ lastMode: "auto" });
+  });
+
+  it("reads a saved mode the way a new chat does: one the picker cannot read is Ask every time", () => {
+    for (const saved of [null, undefined, "dontAsk"]) {
+      Object.assign(prefs, { lastMode: saved });
+      const { unmount } = render(<StartScreen onOpenSettings={vi.fn()} />);
+      expect(screen.getByRole("button", { name: "Permissions: Ask every time" })).toBeTruthy();
+      unmount();
+    }
   });
 });

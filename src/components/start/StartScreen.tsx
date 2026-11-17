@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { getName } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { FIRST_RUN_PERMISSION_MODE, PERMISSION_MODES, pickerMode } from "@terminalx/portable/agentSettings";
+import { BYPASS_MODE, FIRST_RUN_PERMISSION_MODE, PERMISSION_MODES, pickerMode } from "@terminalx/portable/agentSettings";
 import appMark from "../../../src-tauri/icons/128x128.png";
 import { BookOpen, Check, ChevronsUpDown, FolderGit2, FolderOpen, Loader2, Zap, type LucideIcon } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useAccount } from "@/lib/account";
-import { READINESS_LABELS, useAgentReadiness, useAllSignedOut, type AgentReadiness } from "@/lib/agentReadiness";
+import { READINESS_LABELS, useAgentReadiness, useAllSignedOut, useKnownReadiness, type AgentReadiness } from "@/lib/agentReadiness";
 import { setupActive, startAgentSetup, useAgentSetupFlows } from "@/lib/agentSetupFlow";
 import { errorMessage } from "@/lib/api";
 import { onAppResume } from "@/lib/appResume";
@@ -44,6 +44,7 @@ const BRIEF_ACTIONS: { id: StartAction["id"]; label: string }[] = [
 export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents") => void }) {
   const store = useSessionStore();
   const account = useAccount();
+  const prefs = usePrefs();
   const root = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<StartAction["id"] | null>(null);
@@ -75,10 +76,6 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
     [],
   );
 
-  // An agent installed in a terminal of the reader's own shows when they come back: each card asks about
-  // its login again by itself, and this is what says the agent is there at all.
-  useEffect(() => onAppResume(() => { void refreshHarnesses().catch(() => {}); }), []);
-
   const run = async (action: StartAction) => {
     setError(null);
     setBusy(action.id);
@@ -105,14 +102,28 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
   // The probe answers a moment after launch: nothing is claimed before it has.
   const known = store.harnesses.length > 0;
   const noAgent = known && !store.harnesses.some((harness) => harness.available);
+  const installed = store.harnesses.filter((harness) => harness.available).map((harness) => harness.id);
+  // What the checks made in this window have found. Home asks nothing for its lines: the one check a
+  // set-up reader costs is `useAllSignedOut`'s below, and none when anything else checked lately.
+  const answers = useKnownReadiness(installed);
   // A run started here stays in view, terminal and all, until it ends or is put away.
   const flows = useAgentSetupFlows();
   const settingUp = store.harnesses.some((harness) => setupActive(flows[harness.id]));
   // Installed but never signed in (a sign-in left half way, the app quit
   // during it): the way on is the same as from nothing.
-  const signedOut = useAllSignedOut(store.harnesses.filter((harness) => harness.available).map((harness) => harness.id));
+  const signedOut = useAllSignedOut(installed);
   /** The step in hand: an agent until one can run, then a project. */
   const stage = noAgent || settingUp || signedOut ? "agent" : "project";
+  // Step 1 is done only on an answer: an agent that is installed and whose login was found.
+  const ready = installed.some((id) => answers[id]?.state === "ready");
+  const starts = newChatAgent(store.harnesses, answers, prefs.lastAgent);
+
+  // While an agent is being set up, one installed in a terminal of the reader's own shows when they come
+  // back: each card asks about its login again by itself, and this is what says the agent is there at all.
+  useEffect(() => {
+    if (stage !== "agent") return;
+    return onAppResume(() => { void refreshHarnesses().catch(() => {}); });
+  }, [stage]);
   const identity = account.ready && account.status.state === "signed-in" ? account.status.identity : null;
 
   return (
@@ -138,12 +149,12 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
             ) : known ? (
               <Step
                 number={1}
-                done
-                title="Agents ready"
+                done={ready}
+                title={ready ? "Agents ready" : "Set up an agent"}
                 aside={<button type="button" onClick={() => onOpenSettings("agents")} className={cn(LINK, "text-xs leading-5 text-muted-foreground")}>Manage in Settings › Agents</button>}
               >
                 <ul aria-label="Agents" className="mt-2.5 grid gap-1.5">
-                  {store.harnesses.map((harness) => <ReadyAgent key={harness.id} harness={harness} />)}
+                  {store.harnesses.map((harness) => <AgentLine key={harness.id} harness={harness} answer={answers[harness.id] ?? null} />)}
                 </ul>
               </Step>
             ) : (
@@ -203,7 +214,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
               </Step>
             )}
 
-            <PermissionStep />
+            <PermissionStep saved={prefs.lastMode} agent={starts} />
           </div>
 
           {error && (
@@ -288,28 +299,49 @@ function StartAgent({ harness }: { harness: HarnessInfo }) {
   );
 }
 
-/** What a ready agent's row says after its name: the login it found, and whose. */
-function readyLine(value: AgentReadiness | null, checking: boolean): string {
-  if (!value) return checking ? "Checking installation and login…" : READINESS_LABELS.unknown;
-  if (value.state !== "ready") return READINESS_LABELS[value.state];
-  return ["Local login found", value.account].filter(Boolean).join(" · ");
+/**
+ * The agent a new chat would start with now, as New Session picks it: one whose
+ * login was found, else one whose login could not be told, the saved agent
+ * first among them; with no answer yet, the saved agent if it is installed,
+ * else the first that is. `null` while none is installed.
+ */
+function newChatAgent(harnesses: readonly HarnessInfo[], answers: Readonly<Record<string, AgentReadiness>>, saved: string | undefined): HarnessInfo | null {
+  const installed = harnesses.filter((harness) => harness.available);
+  const inState = (state: AgentReadiness["state"]) => installed.filter((harness) => answers[harness.id]?.state === state);
+  const [ready, unknown] = [inState("ready"), inState("unknown")];
+  const candidates = ready.length ? ready : unknown.length ? unknown : installed;
+  return candidates.find((harness) => harness.id === saved) ?? candidates[0] ?? null;
 }
 
-/** One agent under "Agents ready": a line with its version and login. One that is not ready yet keeps its way on. */
-function ReadyAgent({ harness }: { harness: HarnessInfo }) {
-  const { value, checking } = useAgentReadiness(harness.id);
-  const state = value?.state;
+/** What an agent's line says after its name: the login found and whose, or how far it has got. */
+function agentLine(harness: HarnessInfo, answer: AgentReadiness | null): string {
+  if (!harness.available) return READINESS_LABELS.missing;
+  // Installed, and nothing in this window has asked about its login: no more is claimed.
+  if (!answer) return "Installed";
+  if (answer.state !== "ready") return READINESS_LABELS[answer.state];
+  return ["Local login found", answer.account].filter(Boolean).join(" · ");
+}
+
+/**
+ * One agent on a line, once the project step is the one in hand: its version
+ * and login as far as they are known, "Ready" only on an answer, and its way
+ * on (install, or sign in when the login is missing or could not be told).
+ * It reports what other checks found and makes none of its own.
+ */
+function AgentLine({ harness, answer }: { harness: HarnessInfo; answer: AgentReadiness | null }) {
+  const state = harness.available ? answer?.state : "missing";
   const install = state === "missing";
+  const value = harness.available ? answer : null;
   return (
     <li data-start-agent={harness.id}>
       <section aria-label={`${harness.name} setup`} className="flex min-h-11 min-w-0 items-center gap-3 rounded-md border border-hairline bg-raised px-3 py-1.5">
         <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-md bg-muted"><AgentMark id={harness.id} className="size-[15px]" decorative /></span>
         <span className="shrink-0 font-medium">{harness.name}</span>
         {value?.version && <span className="shrink-0 font-mono text-xs text-faint">{value.version}</span>}
-        <span role="status" className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{readyLine(value, checking)}</span>
+        <span role="status" className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{agentLine(harness, answer)}</span>
         {state === "ready" ? <ReadyBadge />
-          : harness.installable && (state === "missing" || state === "signed_out") ? (
-            <Button size="sm" variant="outline" disabled={checking} aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
+          : harness.installable && state ? (
+            <Button size="sm" variant="outline" aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
               onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
               {install ? "Install and sign in" : "Sign in"}
             </Button>
@@ -321,12 +353,20 @@ function ReadyAgent({ harness }: { harness: HarnessInfo }) {
 
 /**
  * Step 3: the permission mode new chats start in (`prefs.lastMode`), the same
- * choice as the picker in a new session. Bypass asks first, as it does there.
+ * choice as the picker in a new session, read the way a new chat reads it.
+ *
+ * Bypass asks first, in the terms of `agent`, the one a new chat would start
+ * with: its flag and what that flag turns off differ by agent (Codex loses its
+ * sandbox too). With no agent installed there is none to name, so Bypass waits
+ * until one is.
  */
-function PermissionStep() {
-  const prefs = usePrefs();
-  const mode = pickerMode(prefs.lastMode ?? "") ?? pickerMode(FIRST_RUN_PERMISSION_MODE)!;
+function PermissionStep({ saved, agent }: { saved: string; agent: HarnessInfo | null }) {
+  const mode = pickerMode(saved) ?? pickerMode(FIRST_RUN_PERMISSION_MODE)!;
   const safe = mode.id === FIRST_RUN_PERMISSION_MODE;
+  const choose = (id: string) => {
+    if (id === BYPASS_MODE && !agent) return;
+    chooseMode(agent?.id ?? "", id, (picked) => setPrefs({ lastMode: picked }));
+  };
   return (
     <Step
       number={3}
@@ -348,13 +388,16 @@ function PermissionStep() {
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[17rem]">
-            <DropdownMenuRadioGroup value={mode.id} onValueChange={(id) => chooseMode(prefs.lastAgent ?? "", id, (picked) => setPrefs({ lastMode: picked }))}>
-              {PERMISSION_MODES.map((candidate) => (
-                <DropdownMenuRadioItem key={candidate.id} value={candidate.id} className="flex-col items-start gap-0">
-                  <span>{candidate.label}</span>
-                  <span className="whitespace-normal text-xs text-faint">{candidate.hint}</span>
-                </DropdownMenuRadioItem>
-              ))}
+            <DropdownMenuRadioGroup value={mode.id} onValueChange={choose}>
+              {PERMISSION_MODES.map((candidate) => {
+                const waits = candidate.id === BYPASS_MODE && !agent;
+                return (
+                  <DropdownMenuRadioItem key={candidate.id} value={candidate.id} disabled={waits} className="flex-col items-start gap-0">
+                    <span>{candidate.label}</span>
+                    <span className="whitespace-normal text-xs text-faint">{waits ? "Set up an agent first: what this turns off depends on the agent." : candidate.hint}</span>
+                  </DropdownMenuRadioItem>
+                );
+              })}
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>

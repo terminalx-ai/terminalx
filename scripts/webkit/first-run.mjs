@@ -24,7 +24,8 @@ const bridge = (available, prefs) => `
   answers["plugin:app|name"] = "TerminalX";
   answers.list_harnesses = ${JSON.stringify(agents(available))};
   answers.agent_setup_running = null;
-  answers.check_agent_readiness = ({ harness }) => ${available}
+  window.__PROBES__ = [];
+  answers.check_agent_readiness = ({ harness }) => (window.__PROBES__.push(harness), ${available})
     ? { state: "ready", checkedAt: new Date().toISOString(), version: harness === "claude" ? "2.1.318" : "0.166.0", account: "demo@example.com" }
     : { state: "missing", checkedAt: new Date().toISOString(), version: null };
   Object.assign(answers, {
@@ -80,8 +81,22 @@ try {
       const install = await box(codex.getByRole("button", { name: "Install Codex and sign in" }));
       const name = await box(codex.getByText("Codex by OpenAI"));
       const tile = await box(codex.locator("span[aria-hidden]").first());
-      const number = start.locator('[data-step="1"] > span').first();
-      const colors = await number.evaluate((node) => ({ number: getComputedStyle(node).backgroundColor, accent: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim(), card: getComputedStyle(node.parentElement).backgroundColor }));
+      // The accent as WebKit resolves it, to compare with what each part is painted in.
+      const colors = await start.evaluate((root) => {
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "var(--accent)";
+        root.append(probe);
+        const accent = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        const paint = (selector) => [...root.querySelectorAll(selector)].map((node) => getComputedStyle(node).backgroundColor);
+        const edges = (selector) => [...root.querySelectorAll(selector)].map((node) => getComputedStyle(node).borderTopColor);
+        return {
+          accent,
+          numbers: paint("[data-step] > span:first-child"),
+          cards: [...paint("[data-step]"), ...paint('[data-testid="start-no-agent"] li section')],
+          edges: [...edges("[data-step]"), ...edges('[data-testid="start-no-agent"] li section')],
+        };
+      });
       failures += report(`${colorScheme} first run, no agent`, {
         "the agent step is in hand": (await start.getAttribute("data-stage")) === "agent",
         "three steps in order": (await start.getByRole("heading", { level: 2 }).allTextContents()).join("|") === "Set up an agent|Open a project|Choose how much the agent may do alone",
@@ -89,7 +104,15 @@ try {
         "each agent says who makes it": (await start.getByRole("region", { name: "Claude Code setup" }).textContent()).includes("Claude Code by Anthropic"),
         "the install action sits at the right of its card, beside the name": install.x > name.x + name.width && install.y < tile.y + tile.height && install.y + install.height > tile.y,
         "one action per agent": (await codex.getByRole("button").count()) === 1,
-        "only the step number is amber": colors.number !== colors.card && (await start.getByTestId("start-no-agent").getByRole("alert").count()) === 0,
+        "step 1's number is amber, and the other two are not": colors.numbers.length === 3 && colors.numbers[0] === colors.accent && colors.numbers.slice(1).every((color) => color !== colors.accent),
+        "nothing else is amber: the cards and their borders are neutral, and none is an alert": colors.cards.length === 5 && [...colors.cards, ...colors.edges].every((color) => color !== colors.accent) && (await start.getByTestId("start-no-agent").getByRole("alert").count()) === 0,
+        "Bypass waits for an agent to name": await (async () => {
+          await start.getByRole("button", { name: "Permissions: Ask every time" }).click();
+          const bypass = page.getByRole("menuitemradio", { name: /^Bypass permissions/ });
+          const held = (await bypass.getAttribute("aria-disabled")) === "true" && (await bypass.textContent()).includes("Set up an agent first");
+          await page.keyboard.press("Escape");
+          return held;
+        })(),
         "the project step offers its two buttons": (await start.locator("button[data-start-card]").allTextContents()).join("|") === "Open folder|Clone from GitHub",
         "the permission choice is offered": (await start.getByRole("button", { name: "Permissions: Ask every time" }).count()) === 1,
         "the footer says an account is optional, and links the guide": (await start.locator("footer").textContent()).includes("A TerminalX account is optional for local work.") && (await start.getByRole("button", { name: "Read the guide" }).count()) === 1,
@@ -113,6 +136,8 @@ try {
         "three steps in order": (await start.getByRole("heading", { level: 2 }).allTextContents()).join("|") === "Agents ready|Open a project|Choose how much the agent may do alone",
         "all three ways to a project": (await start.locator("button[data-start-card]").count()) === 3,
         "the three card titles sit on one line": titles.every((title) => Math.abs(title.y - titles[0].y) < 1),
+        "Home asked about one agent only": (await page.evaluate(() => window.__PROBES__.join())) === "codex",
+        "the agent nobody asked about claims no login": (await start.getByRole("region", { name: "Claude Code setup" }).getByRole("status").textContent()) === "Installed" && (await start.getByRole("region", { name: "Claude Code setup" }).getByText("Ready", { exact: true }).count()) === 0,
         "no text under 12px": (await small(start)).length === 0,
         "no sideways scroll": await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
       }, { titles, small: await small(start) });
@@ -130,6 +155,19 @@ try {
         "the pick is the mode new chats start in": await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")).lastMode === "auto"),
         "the step says what the pick means": (await start.locator('[data-step="3"]').textContent()).includes("Auto: Routine actions are approved; risky ones ask."),
       }, { smallInMenu });
+
+      // Bypass is warned about in the terms of the agent a new chat starts with (Codex here; the saved agent is Claude).
+      await start.getByRole("button", { name: "Permissions: Auto" }).click();
+      await page.getByRole("menuitemradio", { name: /^Bypass permissions/ }).click();
+      const warning = page.getByRole("dialog", { name: "Let Codex run without asking?" });
+      await warning.waitFor();
+      const warned = await warning.textContent();
+      await warning.getByRole("button", { name: "Cancel" }).click();
+      await warning.waitFor({ state: "detached" });
+      failures += report(`${colorScheme} Bypass warning`, {
+        "it names the agent that will run and its flag": warned.includes("--dangerously-bypass-approvals-and-sandbox") && !warned.includes("--dangerously-skip-permissions"),
+        "backing out keeps the mode": await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")).lastMode === "auto"),
+      }, warned);
 
       // 3. Create a project, from its card.
       await start.getByRole("button", { name: "Quick start", exact: true }).click();
