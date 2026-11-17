@@ -5,7 +5,7 @@ import { useSyncExternalStore } from "react";
  * a time: starting another stops the first, and its button shows Stop while
  * it speaks.
  */
-let speaking: string | null = null;
+let speaking: { key: string; utterance: SpeechSynthesisUtterance } | null = null;
 const listeners = new Set<() => void>();
 const notify = () => { for (const listener of [...listeners]) listener(); };
 
@@ -33,19 +33,22 @@ export function speakable(markdown: string): string {
 }
 
 export function stopReading() {
+  const wasSpeaking = speaking !== null;
+  speaking = null;
   synth()?.cancel();
-  if (speaking !== null) { speaking = null; notify(); }
+  if (wasSpeaking) notify();
 }
 
 export function readAloud(key: string, markdown: string) {
   const voice = synth();
   if (!voice) return;
+  speaking = null;
   voice.cancel();
   const utterance = new SpeechSynthesisUtterance(speakable(markdown));
-  const done = () => { if (speaking === key) { speaking = null; notify(); } };
+  const done = () => { if (speaking?.utterance === utterance) { speaking = null; notify(); } };
   utterance.onend = done;
   utterance.onerror = done;
-  speaking = key;
+  speaking = { key, utterance };
   notify();
   voice.speak(utterance);
 }
@@ -54,7 +57,7 @@ export function readAloud(key: string, markdown: string) {
 export function useReadingAloud(key: string): boolean {
   return useSyncExternalStore(
     (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
-    () => speaking === key,
+    () => speaking?.key === key,
     () => false,
   );
 }

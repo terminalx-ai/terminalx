@@ -327,6 +327,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
               ) : (
                 <Chat
                   sessionId={client?.sessionId ?? ""}
+                  tabId={tabId}
                   transcript={transcript}
                   stream={[]}
                   live={busy}
