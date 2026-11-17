@@ -351,6 +351,25 @@ describe("a cloud workspace screen", () => {
     expect(mocks.catalog.start).toHaveBeenCalledTimes(1);
   });
 
+  it("offers managers retry and tells others who can retry when setup failed", async () => {
+    for (const role of ["manager", "driver", "viewer"]) {
+      world({ state: "attention-required", role });
+      await show(<CloudWorkspaceScreen />);
+      expect(stateLine().textContent).toContain("Needs attention");
+      expect(container.querySelector("input")).toBeNull();
+      expect(startBar().textContent).toContain("runtime could not be set up");
+      if (role === "manager") {
+        await click("Retry resume");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalled();
+      } else {
+        expect(startBar().textContent).toContain("can retry resume");
+        expect(() => button("Retry resume")).toThrow();
+      }
+    }
+  });
+
   it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {
     world({ role: "manager" });
     await show(<CloudWorkspaceScreen />);

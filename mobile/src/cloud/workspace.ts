@@ -80,7 +80,7 @@ export interface CloudWorkspaceSnapshot {
 }
 
 export class CloudSendError extends Error {
-  constructor(readonly code: "read-only" | "would-wake" | "cannot-approve" | "unavailable") {
+  constructor(readonly code: "read-only" | "would-wake" | "cannot-approve" | "unavailable" | "needs-attention") {
     super(code);
     this.name = "CloudSendError";
   }
@@ -283,7 +283,7 @@ export class CloudWorkspaceSession {
     const verdict = await this.mayPost(!!options.allowWake);
     if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
     if (verdict === "post" || verdict === "post-no-wake") await this.outbox.sync({ deliver: true, wake: verdict === "post", rouse: !!options.allowWake });
-    if (verdict === "post-no-wake" && this.outbox.stopped) throw this.stoppedMeanwhile();
+    if (verdict === "post-no-wake" && this.outbox.stopped) throw await this.stoppedMeanwhile();
     if (this.followable()) this.startPolling();
   }
 
@@ -438,8 +438,8 @@ export class CloudWorkspaceSession {
     const verdict = await this.mayPost(!!options.allowWake);
     if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
     // "hold": whether the workspace runs is not known just now, so the command is kept and not posted.
-    const entry = await this.outbox.enqueue(tabId, kind, payload, { post: verdict !== "hold", wake: verdict !== "post-no-wake" }).catch((error: unknown) => {
-      throw error instanceof OutboxError && error.code === "stopped" ? this.stoppedMeanwhile() : error;
+    const entry = await this.outbox.enqueue(tabId, kind, payload, { post: verdict !== "hold", wake: verdict !== "post-no-wake" }).catch(async (error: unknown) => {
+      throw error instanceof OutboxError && error.code === "stopped" ? await this.stoppedMeanwhile() : error;
     });
     if (this.client.connection.state === "connected") void this.client.nudgeMailbox().catch(() => undefined);
     if (this.followable()) this.startPolling();
@@ -461,10 +461,12 @@ export class CloudWorkspaceSession {
    */
   private async mayPost(allowWake: boolean): Promise<"post" | "post-no-wake" | "hold" | "would-wake" | "unavailable"> {
     const stateNow = () => this.options.listed()?.state ?? null;
+    if (stateNow() === "attention-required") throw new CloudSendError("needs-attention");
     if (stateNow() === null || stateNow() === "archived") return "unavailable";
     if (allowWake) return "post";
     if (await this.options.api.doNotWake?.().catch(() => false)) {
       const listed = stateNow();
+      if (listed === "attention-required") throw new CloudSendError("needs-attention");
       if (listed === null || listed === "archived") return "unavailable";
       // Listed as stopped and not connected: ask without a request that would be refused.
       if (this.client.connection.state !== "connected" && (listed === "suspended" || listed === "suspending")) return "would-wake";
@@ -473,15 +475,16 @@ export class CloudWorkspaceSession {
     if (this.client.connection.state === "connected") return "post";
     const fresh = this.options.refreshList ? await this.options.refreshList().catch(() => false) : true;
     const state = stateNow();
+    if (state === "attention-required") throw new CloudSendError("needs-attention");
     if (state === null || state === "archived") return "unavailable";
     if (state === "suspended" || state === "suspending") return "would-wake";
     return fresh ? "post" : "hold";
   }
 
   /** The server refused a `wake: false` command: the workspace stopped since the list was read. */
-  private stoppedMeanwhile(): CloudSendError {
-    void this.options.refreshList?.().catch(() => false);
-    return new CloudSendError("would-wake");
+  private async stoppedMeanwhile(): Promise<CloudSendError> {
+    await this.options.refreshList?.().catch(() => false);
+    return new CloudSendError(this.options.listed()?.state === "attention-required" ? "needs-attention" : "would-wake");
   }
 
   /** Whether the outbox has anything to follow or deliver without asking the person. */

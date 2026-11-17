@@ -68,6 +68,7 @@ const CODES: Record<string, string> = {
   cloud_workspace_collaboration_forbidden: "Your role in this workspace does not allow that.",
   cloud_workspace_transcript_unreadable: "The saved conversation could not be read.",
   cloud_workspace_invalid_response: "Update the app to use this workspace.",
+  "needs-attention": "This workspace needs attention. Its runtime could not be set up.",
   cloud_workspace_stopped: "This workspace has stopped.",
   cloud_workspace_archived: "This workspace is archived.",
   cloud_workspace_rate_limited: "Too many requests just now. Try again in a moment.",
@@ -118,6 +119,7 @@ export function codeText(code: string | null | undefined): string | null {
  * the banner says so instead of "Live".
  */
 export function connectionLine(connection: WorkspaceConnectionState, listedState: string | null, problem: CloudLinkProblem, starting = false, access: { role: CloudRole | null; checking: boolean } = { role: null, checking: false }): { tone: "live" | "idle" | "warn"; text: string; short: string } {
+  if (listedState === "attention-required") return { tone: "warn", text: "The workspace’s runtime could not be set up on its machine.", short: "Needs attention" };
   if (connection.state === "connected") {
     if (access.checking) return { tone: "idle", text: "Checking your access…", short: "Checking access…" };
     if (access.role === "none") return { tone: "warn", text: "No access: this workspace is not shared with you.", short: "No access" };
