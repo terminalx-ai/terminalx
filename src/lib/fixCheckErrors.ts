@@ -7,6 +7,17 @@ import { useShortcut } from "./hotkeys";
 import { usePrefs } from "./prefs";
 import { sessionPrs, type SessionPr } from "./sessionPrs";
 import type { SendResult } from "./sessionBackend";
+import { dismissErrorKey } from "./errorToasts";
+import { showFixFailed } from "./checkToasts";
+import { isFailingCheck, webUrl } from "./checks";
+
+/** Fix errors asked for away from the session's own button: a check log's hand-off bar (PRO-394). */
+const fixRequests = new Set<(sessionId: string, prUrl: string) => void>();
+
+/** Ask the session's Fix errors to send the failures of the pull request at `prUrl`. */
+export function requestFixErrors(sessionId: string, prUrl: string) {
+  for (const listener of [...fixRequests]) listener(sessionId, prUrl);
+}
 
 export function fixErrorsPrompt(prUrl: string, path: string, instructions: string): string {
   const mention = /\s/.test(path) ? `@"${path.replace(/"/g, '\\"')}"` : `@${path}`;
@@ -35,14 +46,14 @@ export async function sendFailedChecks(sessionId: string, tabId: string, prUrl: 
 
 /**
  * The one PR of the session whose GitHub Actions checks failed, among the
- * rows `sessionPrs` found. A PR linked from another branch (PRO-294) is
- * shown, not worked on here: Push goes to this session's branch, so its agent
- * cannot fix it.
+ * rows `sessionPrs` found, or the one at `url` when it is given. A PR linked
+ * from another branch (PRO-294) is shown, not worked on here: Push goes to
+ * this session's branch, so its agent cannot fix it. Undefined when none.
  */
-export function failingPr(rows: readonly SessionPr[]): PullRequest {
-  const candidates = rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length ? [row.pr] : []);
+export function failingPr(rows: readonly SessionPr[], url?: string): PullRequest | undefined {
+  const candidates = rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length
+    && (url === undefined || row.pr.url === url) ? [row.pr] : []);
   if (candidates.length > 1) throw new Error("Several pull requests have failing checks. Use Fix errors on the pull request you want in the Branch tab.");
-  if (!candidates[0]) throw new Error("No failing GitHub Actions checks were found for this session.");
   return candidates[0];
 }
 
@@ -77,22 +88,30 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
   const [state, setState] = useState<{ key: string; busy: boolean; error?: string; notice?: string }>({ key, busy: false });
   const isCurrent = () => mounted.current && current.current.generation === generation;
 
-  const fix = async (given?: PullRequest) => {
+  /**
+   * `given` is the pull request to fix, or its URL (a log tab's hand-off bar).
+   * A failure is said as a toast with Try again (PRO-394), and thrown.
+   */
+  const fix = async (given?: PullRequest | string): Promise<void> => {
     if (!enabled || !tabId || locked.current === generation) return;
     locked.current = generation;
     setState({ key, busy: true });
+    let found: PullRequest | undefined = typeof given === "string" ? undefined : given;
+    dismissErrorKey(`fix-errors:${sessionId}`);
     try {
-      const found = async (source: GitSource) => {
+      const lookUp = async (source: GitSource) => {
         const status = await source.workStatus();
         const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
         if (result.error) throw new Error(result.error);
-        return failingPr(result.rows);
+        return failingPr(result.rows, typeof given === "string" ? given : undefined);
       };
       if (machine) {
         const { source, attach } = machine;
         if (!source || !attach) throw new Error(attach || source ? `Fix check errors works once ${machine.name} is connected.` : `Fix check errors works once ${machine.name} is connected and up to date.`);
-        const pr = given ?? await found(source);
+        const pr = typeof given === "string" || !given ? await lookUp(source) : given;
         if (!isCurrent()) return;
+        found = pr;
+        if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
         const attachment = await attach(tabId, pr.url);
         // Never send after the reader changes tabs, sessions, or closes this view, and never retry a send automatically.
         if (!isCurrent()) return;
@@ -102,12 +121,25 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
       }
       const authority = await gh.checkAuthority();
       if (!isCurrent()) return;
-      const pr = given ?? await found(localGitSource(cwd, authority));
+      const pr = typeof given === "string" || !given ? await lookUp(localGitSource(cwd, authority)) : given;
       if (!isCurrent()) return;
+      found = pr;
+      if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
       const notice = await sendFailedChecks(sessionId, tabId, pr.url, prefs.fixErrorsInstructions, isCurrent, authority);
       if (notice && isCurrent()) setState({ key, busy: false, notice });
     } catch (error) {
-      if (isCurrent()) setState({ key, busy: false, error: errorMessage(error) });
+      if (isCurrent()) {
+        setState({ key, busy: false, error: errorMessage(error) });
+        const retried = found ?? given;
+        showFixFailed({
+          key: sessionId,
+          error: errorMessage(error),
+          // A second failure updates this same toast, so it stays up.
+          retry: () => fix(retried).then(() => true, () => false),
+          // Check URLs are the provider's data: only a web page is opened (as everywhere else checks link out).
+          logUrl: webUrl(found?.checks.find((check) => isFailingCheck(check) && webUrl(check.url))?.url) ?? (found ? webUrl(`${found.url}/checks`) : null),
+        });
+      }
       throw error;
     } finally {
       if (locked.current === generation) locked.current = null;
@@ -115,6 +147,13 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
     }
   };
   useShortcut("session.fixErrors", () => { void fix().catch(() => {}); }, { enabled: enabled && !!tabId });
+  const latest = useRef(fix);
+  latest.current = fix;
+  useEffect(() => {
+    const listener = (asked: string, prUrl: string) => { if (asked === sessionId) void latest.current(prUrl).catch(() => {}); };
+    fixRequests.add(listener);
+    return () => { fixRequests.delete(listener); };
+  }, [sessionId]);
   return { fix, busy: state.key === key && state.busy,
     error: state.key === key ? state.error : undefined,
     notice: state.key === key ? state.notice : undefined,

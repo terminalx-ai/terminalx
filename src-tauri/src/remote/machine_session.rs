@@ -1,4 +1,4 @@
-//! `machine/7` (PRO-408): what a local session's header and side panel read
+//! `machine/8` (PRO-408): what a local session's header and side panel read
 //! from this computer's own session files and accounts, read on the machine
 //! for a machine session (docs/MACHINES.md "Session feature parity"):
 //!

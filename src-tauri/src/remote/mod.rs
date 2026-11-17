@@ -18,7 +18,7 @@
 //!   over the connection, and what listens on which port (PRO-28, PRO-355).
 //! - [`machine_projects`]: `machine/6`, a machine's projects from another
 //!   computer: browse its folders, add, remove and clone (PRO-351).
-//! - [`machine_session`]: `machine/7`, a machine session's cost, account
+//! - [`machine_session`]: `machine/8`, a machine session's cost, account
 //!   labels, Continue in a new tab and Fix check errors (PRO-408).
 //! - [`agent_commands`]: receipts of live agent commands on a runtime with
 //!   no cloud mailbox (`agent-commands/1`, PRO-343).

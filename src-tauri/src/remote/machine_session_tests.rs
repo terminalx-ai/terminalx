@@ -1,4 +1,4 @@
-//! `machine/7` (PRO-408): the account a machine session's tab runs on, and how
+//! `machine/8` (PRO-408): the account a machine session's tab runs on, and how
 //! each agent there is billed, as the machine lists its accounts.
 
 use serde_json::json;

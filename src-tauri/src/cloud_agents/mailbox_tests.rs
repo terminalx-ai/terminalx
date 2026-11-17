@@ -19,6 +19,8 @@ struct FakeOps {
     sent: Mutex<Vec<String>>,
     /// The images of each sent message: (media type, base64, name).
     images: Mutex<Vec<Vec<SentImage>>>,
+    /// The files of each sent message (PRO-407), as stored for its session.
+    files: Mutex<Vec<Vec<crate::events::FileRef>>>,
     stops: Mutex<u32>,
     pending: Mutex<Vec<String>>,
     decisions: Mutex<Vec<(String, String)>>,
@@ -77,6 +79,10 @@ impl AgentOps for FakeOps {
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> anyhow::Result<()> {
         self.images.lock().unwrap().push(images.into_iter().map(|image| (image.media_type, image.data, image.name)).collect());
         self.send(session_id, tab_id, text)
+    }
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> anyhow::Result<()> {
+        self.files.lock().unwrap().push(files);
+        self.send_with_images(session_id, tab_id, text, images)
     }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
@@ -1100,7 +1106,7 @@ fn a_command_is_never_steered_into_a_running_turn() {
 
 /// PRO-22: the sender uploads an image first; the message names it.
 fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
-    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), true).unwrap();
+    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), false, true).unwrap();
 }
 
 #[test]
@@ -1130,7 +1136,7 @@ fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed
 fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
     let h = harness();
     upload(&h.agents, "u-alice", "attach-0001", b"abc");
-    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false).unwrap();
+    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false, false).unwrap();
     // Someone else's upload, one never completed, one never uploaded, a malformed list, and a steer.
     for (id, kind, body) in [
         ("c1", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
@@ -1191,6 +1197,81 @@ fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
     assert!(h.ops.sent.lock().unwrap().is_empty());
     assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("its images are no longer on the workspace")));
     assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+}
+
+/// PRO-407: a file other than an image, uploaded first like an image.
+fn upload_file(agents: &CloudAgents, owner: &str, id: &str, name: &str, bytes: &[u8]) {
+    agents.attach_part(owner, id, 0, bytes, "text/markdown", Some(name), true, true).unwrap();
+}
+
+#[test]
+fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload_file(&h.agents, "u1", "attach-0002", "plan.md", b"# Plan");
+    let body = json!({ "v": 1, "text": "read the plan", "images": [{ "id": "attach-0001" }], "files": [{ "id": "attach-0002", "name": "plan.md" }] });
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", body)).outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["read the plan"]);
+    assert_eq!(h.ops.images.lock().unwrap()[0].len(), 1, "the image goes as an image");
+    let files = h.ops.files.lock().unwrap()[0].clone();
+    assert_eq!(files.len(), 1);
+    let folder = crate::store::attachments_dir("s1").unwrap().canonicalize().unwrap();
+    assert!(std::path::Path::new(&files[0].path).starts_with(&folder), "{:?}", files[0].path);
+    assert_eq!(std::fs::read(&files[0].path).unwrap(), b"# Plan");
+    assert!(h.agents.attachments.check_files("u1", &["attach-0002".into()]).is_err(), "typed: the upload is gone");
+    // Files alone are a message.
+    *h.ops.busy.lock().unwrap() = false;
+    upload_file(&h.agents, "u1", "attach-0003", "notes.txt", b"notes");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "files": [{ "id": "attach-0003" }] }))).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
+    assert_eq!(h.ops.files.lock().unwrap()[1][0].name, "notes.txt");
+}
+
+#[test]
+fn a_queued_message_takes_its_files_into_the_session_and_types_them_later() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload_file(&h.agents, "u1", "attach-0001", "plan.md", b"# Plan");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "then this", "files": [{ "id": "attach-0001" }] }))).outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    // Stored when it was queued, so a restart or a day's pruning cannot lose it.
+    let queued = h.agents.follow_ups.list("tab-1");
+    assert_eq!(queued[0].files.len(), 1);
+    assert!(std::path::Path::new(&queued[0].files[0].path).is_file());
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["then this"]);
+    assert_eq!(h.ops.files.lock().unwrap()[0], queued[0].files);
+}
+
+#[test]
+fn a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload_file(&h.agents, "u-alice", "attach-0001", "plan.md", b"# Plan");
+    upload(&h.agents, "u1", "attach-0002", b"abc");
+    for (id, body) in [
+        ("c1", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] })),
+        ("c2", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-9999" }] })),
+        // An image named as a file is not one.
+        ("c3", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0002" }] })),
+    ] {
+        let lease = lease(&h.agents, id, "send", body);
+        let receipt = handle(&h.agents, &lease);
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(ATTACHMENT_MISSING)), "{id}");
+        assert!(open_receipt(&h.agents, &lease, &receipt)["message"].as_str().unwrap().starts_with("Not sent: a file"));
+    }
+    let eleven: Vec<Value> = (0..11).map(|index| json!({ "id": format!("attach-1{index:03}") })).collect();
+    for (id, kind, body) in [("c4", "send", json!({ "v": 1, "text": "look", "files": eleven })), ("c5", "steer", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] }))] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, kind, body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.agents.attachments.check_files("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
 }
 
 /// Review of #309: a refused message must not leave its uploads behind, or

@@ -752,7 +752,7 @@ the pull request that adds it.
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
-| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3) |
+| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |
 | `pty.create` | `pty/1` | Needs a project | Unless it names a `sessionId` (`pty/2`), which places it in that session's folder |
 | `pty.list` | `pty/1` | Served | Every terminal; each names its session or project |
 | `pty.write` | `pty/1` | Served | |
@@ -846,9 +846,13 @@ the pull request that adds it.
 | `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
 | `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
 | `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
-| `session.usage` | `machine/7` | Served | Names the session; its tokens and cost read again from the machine's transcripts, how each agent signs in there, and the machine's usage windows (PRO-408, [Session parity](#as-built-pro-408-cost-account-continue-and-fix-check-errors)) |
-| `session.prepareContinuation` | `machine/7` | Served | Names the session and an agent tab; the tab's context with the machine's own transcript path |
-| `session.checkFailures` | `machine/7` | Served | Manage only; names the session, an agent tab and a pull request's https URL; its failed check logs read with the machine's `gh` into the session's attachments folder there |
+| `machine.sessionActions` | `machine/7` | Served | Names a session; its project's saved actions, preview URLs and setup script as the machine has them, its ports and its setup run (PRO-403, [Setup and Run](#as-built-pro-403-setup-and-run-in-a-machine-session)) |
+| `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
+| `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
+| `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
+| `session.usage` | `machine/8` | Served | Names the session; its tokens and cost read again from the machine's transcripts, how each agent signs in there, and the machine's usage windows (PRO-408, [Session parity](#as-built-pro-408-cost-account-continue-and-fix-check-errors)) |
+| `session.prepareContinuation` | `machine/8` | Served | Names the session and an agent tab; the tab's context with the machine's own transcript path |
+| `session.checkFailures` | `machine/8` | Served | Manage only; names the session, an agent tab and a pull request's https URL; its failed check logs read with the machine's `gh` into the session's attachments folder there |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -2041,13 +2045,13 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
 | Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
 | Image attachments | Works; uploaded to the machine by session | PRO-347 |
-| Other file attachments | Follow-up | PRO-407 |
+| Other file attachments | Works; uploaded to the machine (`composer/4`), stored in the session's attachments folder there, and the agent is handed those paths | PRO-407 |
 | Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
 | Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
 | Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
 | Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
-| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); the dock's Setup and Run tabs, each action's run a dock tab; previews open through a forward | PRO-403 |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
 | Header branch button: diff size, Create PR | Follow-up | PRO-404 |
@@ -2094,12 +2098,68 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
 
+### As built (PRO-403): Setup and Run in a machine session
+
+A local session's Run menu, Open button, restart offer and the dock's Setup
+and Run tabs read the project's scripts from this computer's settings and run
+them here. A machine session (screen 21.08 shows Setup and Run beside the
+machine's terminal) has all of them, and everything is the machine's.
+
+`machine/7` adds four methods. Only a runtime that serves its machine grants
+it; reading is open to whoever sees the session, running is the manager's.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.sessionActions` | `{ sessionId }` | `{ actions, previewUrls, setupScript, setupApplies, available, ports, setup }` |
+| `machine.runAction` | `{ sessionId, actionId, restart? }` | `{ started, run: { actionId, name, ptyId, state, exitCode }, terminal }` |
+| `machine.setupRerun` | `{ sessionId }` | `{ setup }` |
+| `machine.setupStop` | `{ sessionId, paneId }` | `{ setup }` |
+
+- **Read on the machine.** `actions` and `previewUrls` are the project's in
+  the machine's `projects.json`; `setupScript` is what the machine would run
+  (its project store, or the repository layers it trusts). Nothing is read
+  from this computer's settings, and the empty states say to save scripts on
+  the machine. `ports` is the session's port block there: a preview's `$PORT`
+  is the machine's port.
+- **Run on the machine.** `machine.runAction` and the setup calls go through
+  the machine runtime's own `action_runner` and `workspace_setup`, exactly as
+  its own window's Run menu does: in the session's folder there, with its
+  environment layers, `TERMINALX_PORT`/`TERMINALX_PORTS` and
+  `TERMINALX_ACTION_ID`. A non-concurrent action already running answers
+  `started: false` with that run; `restart` stops it and starts it again.
+  Its own "Run after setup" starts there too. Nothing runs on this computer.
+- **Runs are terminals.** Each run is the runtime's pane
+  (`<session>:action-…`, `<session>:workspace-setup-…`). The machine's
+  protocol server records it from its first byte, as an agent's terminal, and
+  `pty.list` lists it with its session and a `run`
+  (`{ kind: "action", actionId, name }` or `{ kind: "setup" }`); `pty.attach`,
+  `pty.write`, `pty.resize` and `pty.control` work on it as on any terminal.
+  The caller who started a run controls it. A run found already exited is
+  given what the runtime kept of its output; one still running that started
+  before the server existed shows its output from when it was first seen. It
+  is never counted against `MAX_PTYS` and an eviction drops only this record,
+  not the runtime's pane; `pty.kill` on an action's run ends it, and on the
+  setup's is refused (`machine.setupStop` stops it).
+- **The desktop.** `useMachineSessionRuns` (`src/lib/machineRuns.ts`) reads
+  `machine.sessionActions` on each connect, again whenever a run starts or
+  ends, and every 2 s while setup is going. The header's Run menu and Open
+  button are the local `RunControls` over that source; the restart offer is
+  the same strip. The dock (`MachineTerminalDock`) has Setup and Run first,
+  then the machine's shells, then each action's run as a tab named by its
+  action; the setup's terminal shows inside Setup. A machine without
+  `machine/7` shows no Run menu, and Setup and Run say in one line to update
+  it ("Setup and Run scripts" in `MACHINE_FEATURES`).
+- **Previews.** A preview URL on the machine itself (a loopback host) opens
+  in TerminalX's built-in browser through a forward of that port (`ports/1`,
+  PRO-355), made when there is none; with Forwarding off, or a machine
+  without `ports/1`, it is not opened and says why. Any other URL opens as
+  it is. No path of the machine is opened on this computer.
 ### As built (PRO-408): cost, account, Continue and Fix check errors
 
-`machine/7` adds three methods for a session the caller may see, and each tab
+`machine/8` adds three methods for a session the caller may see, and each tab
 of `session.list` and `session.sessions` carries the account it runs on
 (`src-tauri/src/remote/machine_session.rs`). A machine that does not grant
-`machine/7` (an older TerminalX) shows the cost its tabs' `usage` carries and
+`machine/8` (an older TerminalX) shows the cost its tabs' `usage` carries and
 none of the rest.
 
 - **Cost chip.** A machine tab's `usage` is in the session list, so the chip
@@ -2119,7 +2179,7 @@ none of the rest.
   mark read it, and never this
   computer's accounts (`TabAccountLabel`, `TabAccountMark`).
 - **Continue in a new tab.** The title-bar button reads "Continue in a new
-  tab…" where the machine grants `machine/7` and `session/2`. The dialog
+  tab…" where the machine grants `machine/8` and `session/2`. The dialog
   (`MachineContinueDialog`) reads `session.prepareContinuation`, offers the
   machine's agents and models starting from the source tab's settings, and
   Recent context or Full transcript (only when the machine has the transcript).
