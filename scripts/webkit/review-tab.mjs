@@ -106,7 +106,7 @@ try {
     await page.locator('[data-testid="conversation-list"]').getByRole("button", { name: /make-slugify|Local long session/ }).first().click();
 
     // Changes: opening a file must leave the panel there, on its scope.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).click();
     const scope = page.getByLabel("Changes scope");
     await page.getByText("slug.js", { exact: true }).first().click();
     const stack = page.getByTestId("review-stack").filter({ visible: true });
@@ -114,7 +114,7 @@ try {
     await stack.locator(".cm-content").first().waitFor();
     await page.waitForTimeout(300);
     const panel = {
-      changesSelected: (await page.getByRole("tab", { name: "Changes", exact: true }).getAttribute("aria-selected")) === "true",
+      changesSelected: (await page.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).getAttribute("aria-pressed")) === "true",
       scope: await scope.inputValue(),
       noTurnError: (await page.getByText("No turn snapshots are available").count()) === 0,
     };

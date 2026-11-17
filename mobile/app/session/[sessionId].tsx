@@ -19,6 +19,7 @@ import { hostDisplayName } from "@mobile/store/host-name";
 import { canRetry, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+import { useKeyboardShown } from "@mobile/ui/keyboard";
 import { Glass } from "@mobile/ui/glass";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useDictation } from "@mobile/ui/useDictation";
@@ -474,12 +475,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   // takes focus only when tapped.
   useEffect(() => { Keyboard.dismiss(); }, []);
   // Over the keyboard the composer needs no room for the home indicator.
-  const [keyboardShown, setKeyboardShown] = useState(false);
-  useEffect(() => {
-    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
-    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
-    return () => { shown.remove(); hidden.remove(); };
-  }, []);
+  const keyboardShown = useKeyboardShown();
 
   // Speaking into the composer: what is said goes after what was already typed.
   const [composerHeight, setComposerHeight] = useState(0);
@@ -690,12 +686,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
   const [input, setInput] = useConversationState(`${stateKey}:input`, "");
   const [rows, setRows] = useState<ScreenRow[]>([]);
   const insets = useSafeAreaInsets();
-  const [keyboardShown, setKeyboardShown] = useState(false);
-  useEffect(() => {
-    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
-    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
-    return () => { shown.remove(); hidden.remove(); };
-  }, []);
+  const keyboardShown = useKeyboardShown();
   const [opening, setOpening] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);

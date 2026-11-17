@@ -310,6 +310,56 @@ struct PtyState {
     /// PRO-350): never listed as a shell, and its exit makes the agents'
     /// logins be read again.
     setup: Option<SetupPty>,
+    /// Set for a session's own script run on a machine (`machine/7`,
+    /// PRO-403): the runtime's pane of one of its project's saved actions or
+    /// of its workspace setup. The runtime owns the process, so this entry
+    /// only records and relays it: it is listed with its session, never
+    /// counted against [`MAX_PTYS`] and never ended by an eviction.
+    run: Option<SessionRun>,
+}
+
+/// What a session's script run is (`machine/7`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SessionRun {
+    Action { action_id: String, name: String },
+    Setup,
+}
+
+impl SessionRun {
+    /// The session and run a runtime pane id names: `<session>:action-…`
+    /// ([`crate::action_runner`]) or `<session>:workspace-setup-…`
+    /// ([`crate::workspace_setup`]). A cheap test first: every pane's output
+    /// passes through here.
+    fn of_pane(pane: &str, title: Option<&str>) -> Option<(String, Self)> {
+        if !pane.contains(':') || pane.starts_with(AGENT_PTY_PREFIX) || pane.starts_with(PTY_PREFIX) {
+            return None;
+        }
+        if let Some(session) = crate::workspace_setup::pane_session(pane) {
+            return Some((session.to_string(), Self::Setup));
+        }
+        let (session, action_id) = crate::action_runner::parse_pane(pane)?;
+        Some((session.to_string(), Self::Action { name: title.unwrap_or(&action_id).to_string(), action_id }))
+    }
+
+    fn wire(&self) -> Value {
+        match self {
+            Self::Action { action_id, name } => json!({ "kind": "action", "actionId": action_id, "name": name }),
+            Self::Setup => json!({ "kind": "setup" }),
+        }
+    }
+}
+
+/// A workspace setup attempt on the wire (`machine/7`). Its pane, while the
+/// runtime keeps it, is the terminal `pty.list` lists as its `run`.
+fn setup_wire(setup: &crate::workspace_setup::Setup) -> Value {
+    json!({
+        "paneId": setup.pane_id,
+        "command": setup.command,
+        "status": setup.status,
+        "exitCode": setup.exit_code,
+        "error": setup.error,
+        "hasPane": setup.has_pane,
+    })
 }
 
 struct SetupPty {
@@ -1654,6 +1704,10 @@ impl WorkspaceRpc {
                 Scope::Machine { .. } => self.machine_projects_call(method, &params),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
+            "machine.sessionActions" | "machine.runAction" | "machine.setupRerun" | "machine.setupStop" => match &self.scope {
+                Scope::Machine { .. } => self.machine_session_run_call(peer, method, &params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
             "cleanup.scan" => self.cleanup_scan(),
             "cleanup.size" => self.cleanup_size(peer, params),
             "cleanup.cancel" => self.cleanup_cancel(peer),
@@ -2036,6 +2090,7 @@ impl WorkspaceRpc {
                     subscribers: HashMap::new(),
                     agent: Some(AgentPty { tab_id: tab_id.to_string(), session_id: None }),
                     setup: None,
+                    run: None,
                 },
             );
         }
@@ -2169,6 +2224,11 @@ impl WorkspaceRpc {
         if let Some(setup) = &pty.setup {
             described["setup"] = json!({ "harness": setup.harness, "step": setup.step.name() });
         }
+        // `machine/7`: one of its session's script runs, which the dock shows
+        // under Setup and Run rather than as a numbered shell.
+        if let Some(run) = &pty.run {
+            described["run"] = run.wire();
+        }
         // `pty/2`, and only a session this peer may see; absent for a
         // terminal that belongs to no session.
         if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
@@ -2248,7 +2308,7 @@ impl WorkspaceRpc {
         {
             let mut ptys = self.ptys.lock().unwrap();
             // A setup step is not one of the shells this limit is for.
-            if new.setup.is_none() && ptys.values().filter(|pty| pty.agent.is_none() && pty.setup.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
+            if new.setup.is_none() && ptys.values().filter(|pty| pty.agent.is_none() && pty.setup.is_none() && pty.run.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
                 return Err(RpcError::new("unavailable", format!("at most {MAX_PTYS} terminals may run at once")));
             }
             ptys.insert(
@@ -2280,6 +2340,7 @@ impl WorkspaceRpc {
                     subscribers: HashMap::new(),
                     agent: None,
                     setup: new.setup,
+                    run: None,
                 },
             );
         }
@@ -2322,7 +2383,10 @@ impl WorkspaceRpc {
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let scope = self.pty_session_scope(peer);
         let connected = self.connected_devices();
+        // Read before the terminals are locked: the runtime's own panes.
+        let shells = if self.is_machine() && scope.is_some() { self.terminals.shells() } else { Vec::new() };
         let mut ptys = self.ptys.lock().unwrap();
+        self.record_session_runs(&mut ptys, &shells, scope.as_ref());
         for (pty_id, pty) in ptys.iter_mut().filter(|(_, pty)| !pty.closed && pty.agent.is_none()) {
             self.resume_control(pty_id, pty, peer, &connected);
         }
@@ -2331,6 +2395,8 @@ impl WorkspaceRpc {
             // An agent tab's terminal is reached from its tab, never listed as a shell.
             // Nor is an agent's setup step: the machine's page shows it (PRO-350).
             .filter(|(_, pty)| !pty.closed && pty.agent.is_none() && pty.setup.is_none())
+            // A session's script run is listed only to those who see its session.
+            .filter(|(_, pty)| pty.run.is_none() || pty.session_id.as_ref().is_some_and(|id| scope.as_ref().is_some_and(|visible| visible.contains(id))))
             .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
             .collect();
         listed.sort_by_key(|(number, _)| *number);
@@ -2660,6 +2726,9 @@ impl WorkspaceRpc {
         let (pty_id, exited) = {
             let mut ptys = self.ptys.lock().unwrap();
             let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+            if pty.run == Some(SessionRun::Setup) {
+                return Err(RpcError::forbidden("a workspace's setup is stopped with machine.setupStop"));
+            }
             pty.closed = true;
             (pty_id, pty.exit.is_some())
         };
@@ -2756,9 +2825,97 @@ impl WorkspaceRpc {
         Ok(result)
     }
 
+    /// The entry of a session's script run (`machine/7`), made on its first
+    /// output, on the listing that first finds it, or when `machine.runAction`
+    /// starts it. `title` is the pane's, which names the action. An entry made
+    /// for a pane whose program has already exited (`backfill`) is given what
+    /// the runtime kept of its output: nothing more can arrive to repeat it.
+    /// A pane still running is recorded from here on, so one that started
+    /// before this server existed shows its output from then. Called with the
+    /// terminals locked; `None` for a pane of no session of this machine.
+    fn run_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pane: &str, title: Option<&str>, backfill: bool) -> Option<&'a mut PtyState> {
+        if !ptys.contains_key(pane) {
+            let Scope::Machine { projects, .. } = &self.scope else { return None };
+            let (session_id, run) = SessionRun::of_pane(pane, title.map(str::to_string).or_else(|| self.terminals.title(pane).map(|(title, _)| title)).as_deref())?;
+            let session = index::get(&session_id).ok()?;
+            let project = projects.get(&machine::project_id(&session.project_path)).ok()?;
+            let cwd = std::fs::canonicalize(&session.cwd).ok().filter(|cwd| project.files.contains(cwd)).map(|cwd| project.files.relative(&cwd)).unwrap_or_else(|| ".".into());
+            let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
+            let input_pending = Arc::new(AtomicUsize::new(0));
+            let terminals = self.terminals.clone();
+            let pending = input_pending.clone();
+            let writer = pane.to_string();
+            let manager = self.manager().ok().cloned();
+            std::thread::Builder::new()
+                .name(format!("run-pty-input-{session_id}"))
+                .spawn(move || {
+                    for data in queue {
+                        let written = data.write(&terminals, manager.as_ref(), &writer);
+                        pending.fetch_sub(data.data.len(), Ordering::SeqCst);
+                        if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
+                            break;
+                        }
+                    }
+                })
+                .ok()?;
+            let running = self.terminals.is_running(pane);
+            let ring: VecDeque<u8> = if backfill && !running {
+                let kept = self.terminals.read_output(pane).unwrap_or_default();
+                kept[kept.len().saturating_sub(PTY_RING_BYTES)..].iter().copied().collect()
+            } else {
+                VecDeque::new()
+            };
+            ptys.insert(
+                pane.to_string(),
+                PtyState {
+                    number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
+                    cwd,
+                    session_id: Some(session_id),
+                    project_id: project.id.clone(),
+                    created_at_ms: crate::cloud_agents::now_ms(),
+                    pid: self.terminals.pid(pane),
+                    cols: 120,
+                    rows: 30,
+                    controller: None,
+                    controller_user: None,
+                    controller_installation: None,
+                    end: ring.len() as u64,
+                    ring,
+                    // Its code was the runtime's to hear; this server did not.
+                    exit: (!running).then_some(None),
+                    exited_at: (!running).then(Instant::now),
+                    closed: false,
+                    stop_pending: false,
+                    applied_seq: HashMap::new(),
+                    input,
+                    input_pending,
+                    subscribers: HashMap::new(),
+                    agent: None,
+                    setup: None,
+                    run: Some(run),
+                },
+            );
+        }
+        ptys.get_mut(pane).filter(|pty| pty.run.is_some())
+    }
+
+    /// Record every script run of a visible session the runtime holds a pane
+    /// for, so a run started before anyone listened (or by the runtime itself,
+    /// "Run after setup") is listed too. Called with the terminals locked.
+    fn record_session_runs(&self, ptys: &mut HashMap<String, PtyState>, shells: &[crate::pty::ShellPane], scope: Option<&HashSet<String>>) {
+        let Some(visible) = scope else { return };
+        for shell in shells {
+            if visible.contains(&shell.session_id) && !ptys.contains_key(&shell.id) && SessionRun::of_pane(&shell.id, None).is_some() {
+                self.run_entry(ptys, &shell.id, shell.title.as_deref(), true);
+            }
+        }
+    }
+
     fn on_pty_data(&self, data: PtyData) {
         let agent = data.id.starts_with(AGENT_PTY_PREFIX);
-        if !agent && !data.id.starts_with(PTY_PREFIX) {
+        // A session's script run on a machine is recorded from its first byte, as an agent's terminal is.
+        let run = !agent && self.is_machine() && SessionRun::of_pane(&data.id, None).is_some();
+        if !agent && !run && !data.id.starts_with(PTY_PREFIX) {
             return;
         }
         let Ok(bytes) = STANDARD.decode(&data.data) else { return };
@@ -2774,6 +2931,11 @@ impl WorkspaceRpc {
                     Ok(pty) => pty,
                     // Its tab is gone (the last bytes of a CLI that was just stopped).
                     Err(_) => return,
+                }
+            } else if run {
+                match self.run_entry(&mut ptys, &data.id, None, false) {
+                    Some(pty) => pty,
+                    None => return,
                 }
             } else {
                 let Some(pty) = ptys.get_mut(&data.id) else { return };
@@ -2856,8 +3018,12 @@ impl WorkspaceRpc {
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
                 for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                    // A session's script run is the runtime's pane: only this record of it goes.
+                    let owned = ptys.get(&id).is_some_and(|pty| pty.run.is_none());
                     ended.extend(Self::remove_pty(&mut ptys, &id));
-                    evicted.push(id);
+                    if owned {
+                        evicted.push(id);
+                    }
                 }
             }
             evicted
@@ -3654,6 +3820,82 @@ impl WorkspaceRpc {
         *self.home_for_tests.lock().unwrap() = Some(std::fs::canonicalize(home).unwrap());
     }
 
+    /// `machine/7` (PRO-403): a session's Setup and Run on this machine. The
+    /// project's saved actions, preview URLs and setup script are read from
+    /// this machine's own store, and every run is this runtime's, in the
+    /// session's folder here, exactly as for a session of its own window.
+    fn machine_session_run_call(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(params, "sessionId")?)?;
+        if method == "machine.sessionActions" {
+            return self.machine_session_actions(&session);
+        }
+        let manager = self.manager()?;
+        // What the runtime refuses (a removed worktree, an action no longer saved, a restart still stopping) is the person's to read.
+        let refused = |error: anyhow::Error| RpcError::new("conflict", format!("{error:#}"));
+        match method {
+            "machine.runAction" => {
+                let action_id = required_str(params, "actionId")?;
+                let restart = params.get("restart").and_then(Value::as_bool).unwrap_or(false);
+                let outcome = crate::action_runner::run(manager, &session.id, action_id, crate::action_runner::RunOptions { restart }).map_err(refused)?;
+                let scope = self.pty_session_scope(peer);
+                let mut ptys = self.ptys.lock().unwrap();
+                let terminal = self.run_entry(&mut ptys, &outcome.run.pane_id, Some(&outcome.run.name), false).map(|pty| {
+                    // The person who started it types into it (a Ctrl-C, an answer to a prompt).
+                    if outcome.started {
+                        pty.controller = Some(peer.device_id.clone());
+                        pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+                        pty.controller_installation = peer.installation_key.clone();
+                    }
+                    self.describe_pty(&outcome.run.pane_id, pty, peer, scope.as_ref())
+                });
+                Ok(json!({
+                    "started": outcome.started,
+                    "run": {
+                        "actionId": outcome.run.action_id,
+                        "name": outcome.run.name,
+                        "ptyId": outcome.run.pane_id,
+                        "state": outcome.run.state,
+                        "exitCode": outcome.run.exit_code,
+                    },
+                    "terminal": terminal,
+                }))
+            }
+            "machine.setupRerun" => {
+                let setup = crate::workspace_setup::start(manager, &session.id, true).map_err(refused)?;
+                Ok(json!({ "setup": setup.as_ref().map(setup_wire) }))
+            }
+            "machine.setupStop" => {
+                let setup = crate::workspace_setup::stop(manager, &session.id, required_str(params, "paneId")?).map_err(refused)?;
+                Ok(json!({ "setup": setup.as_ref().map(setup_wire) }))
+            }
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/7 method"))),
+        }
+    }
+
+    /// `machine.sessionActions`: what the Run menu, the Open button and the
+    /// dock's Setup and Run tabs show for `session`, as this machine has it.
+    fn machine_session_actions(&self, session: &SessionEntry) -> Result<Value, RpcError> {
+        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let wanted = canonical(&session.project_path);
+        let project = machine::registered()?.into_iter().find(|project| canonical(&project.path) == wanted);
+        let (actions, preview_urls) = project.map(|project| (project.actions, project.preview_urls)).unwrap_or_default();
+        let setup = match self.manager() {
+            Ok(manager) => crate::workspace_setup::current(manager, &session.id).map_err(RpcError::internal)?,
+            Err(_) => None,
+        };
+        Ok(json!({
+            "actions": actions,
+            "previewUrls": preview_urls,
+            "setupScript": crate::workspace_setup::saved_script(&session.project_path),
+            // A workspace's own checkout runs setup; the project's folder does not.
+            "setupApplies": !session.worktree_removed && session.worktree_name.is_some() && session.cwd != session.project_path,
+            "available": !session.worktree_removed,
+            // What $PORT and $PORT_1..$PORT_9 are on the machine; null when not known.
+            "ports": index::workspace_ports::ports(&session.cwd).ok().filter(|ports| !ports.is_empty()),
+            "setup": setup.as_ref().map(setup_wire),
+        }))
+    }
+
     fn machine_agent_setup_running(&self, params: &Value) -> Result<Value, RpcError> {
         let harness = required_str(params, "harness")?;
         Ok(json!({ "run": self.setup_run(harness) }))
@@ -4108,14 +4350,16 @@ impl WorkspaceRpc {
                 permit.check_configuration().map_err(|_| RpcError::forbidden("Explicit configuration authority required"))?;
             }
         }
-        // Images uploaded with `session.attach` ride with the text, or alone.
+        // Images and files uploaded with `session.attach` ride with the text, or alone.
         let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
+        let file_ids = crate::cloud_agents::attachments::named_files(&params).ok_or_else(|| RpcError::invalid("files is a list of uploaded attachments; with the images, at most 10"))?;
+        let attached = !image_ids.is_empty() || !file_ids.is_empty();
         let text = match params.get("text").and_then(Value::as_str) {
             Some(text) => text,
-            None if !image_ids.is_empty() => "",
+            None if attached => "",
             None => return Err(RpcError::invalid("text is required")),
         };
-        if text.trim().is_empty() && image_ids.is_empty() {
+        if text.trim().is_empty() && !attached {
             return Err(RpcError::invalid("text is empty"));
         }
         // The same rule as a mailbox send (contract §21.5), for managers
@@ -4155,7 +4399,24 @@ impl WorkspaceRpc {
                 RpcError::invalid("Not sent: an image of this message did not reach the workspace. Attach it and send again.").with_data(json!({ "reason": "attachment-missing" }))
             })?
         };
-        let sent = self.manager().and_then(|manager| manager.send(&session.id, &tab.id, text.to_string(), images).map_err(RpcError::internal));
+        // Into the session's attachments folder on this computer (PRO-407):
+        // the agent is handed their paths here, as a local tab's files are.
+        let files = if file_ids.is_empty() {
+            Vec::new()
+        } else {
+            use crate::cloud_agents::attachments::FilesError;
+            match self.agents()?.attachments.take_files(&attachment_owner(peer), &session.id, &file_ids) {
+                Ok(files) => files,
+                Err(error) => {
+                    self.agents()?.attachments.remove(&image_ids);
+                    return Err(match error {
+                        FilesError::Missing(_) => RpcError::invalid(crate::cloud_agents::mailbox::FILE_MISSING_MESSAGE).with_data(json!({ "reason": "attachment-missing" })),
+                        FilesError::Failed(error) => RpcError::internal(error),
+                    });
+                }
+            }
+        };
+        let sent = self.manager().and_then(|manager| manager.send_pressed(&session.id, &tab.id, text.to_string(), images, None, files).map_err(RpcError::internal));
         if !image_ids.is_empty() {
             self.agents()?.attachments.remove(&image_ids);
         }
@@ -4396,8 +4657,14 @@ impl WorkspaceRpc {
         if !session.tabs.iter().any(|tab| tab.id == tab_id) {
             return Err(RpcError::not_found("no such tab"));
         }
+        // `kind: "file"` (`composer/4`, PRO-407): a file other than an image.
+        let file = match params.get("kind").and_then(Value::as_str) {
+            None | Some("image") => false,
+            Some("file") => true,
+            Some(_) => return Err(RpcError::invalid("kind is image or file")),
+        };
         if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
-            return Err(RpcError::forbidden("attaching an image needs driver access to the workspace"));
+            return Err(RpcError::forbidden(if file { "attaching a file needs driver access to the workspace" } else { "attaching an image needs driver access to the workspace" }));
         }
         let id = required_str(&params, "attachmentId")?;
         let media_type = required_str(&params, "mediaType")?;
@@ -4406,11 +4673,13 @@ impl WorkspaceRpc {
         let last = params.get("last").and_then(Value::as_bool).unwrap_or(false);
         let name = params.get("name").and_then(Value::as_str);
         use crate::cloud_agents::attachments::AttachError;
-        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, last) {
+        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, file, last) {
             Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
             Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
+            Err(AttachError::Refused(why)) => Err(RpcError::invalid(why).with_data(json!({ "reason": "file-refused" }))),
+            Err(AttachError::TooLarge) if file => Err(RpcError::invalid(format!("the file is larger than {} MB", crate::attachments::MAX_ATTACHMENT_BYTES / 1024 / 1024)).with_data(json!({ "reason": "file-too-large" }))),
             Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
-            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many attachments are waiting to be sent here; try again later").with_data(json!({ "reason": "attachments-full" }))),
             Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
         }
     }

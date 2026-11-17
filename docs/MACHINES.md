@@ -752,7 +752,7 @@ the pull request that adds it.
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
-| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3) |
+| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |
 | `pty.create` | `pty/1` | Needs a project | Unless it names a `sessionId` (`pty/2`), which places it in that session's folder |
 | `pty.list` | `pty/1` | Served | Every terminal; each names its session or project |
 | `pty.write` | `pty/1` | Served | |
@@ -846,6 +846,10 @@ the pull request that adds it.
 | `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
 | `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
 | `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
+| `machine.sessionActions` | `machine/7` | Served | Names a session; its project's saved actions, preview URLs and setup script as the machine has them, its ports and its setup run (PRO-403, [Setup and Run](#as-built-pro-403-setup-and-run-in-a-machine-session)) |
+| `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
+| `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
+| `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1041,14 +1045,17 @@ as a user service and is paired from its own terminal. The user's guide is
   witness's pid from the kernel (`SO_PEERCRED`, `LOCAL_PEERPID`), challenges it
   with the nonce, and refuses (`person_required`) the runtime itself, any
   process it started, one whose controlling terminal is one of its terminals,
-  and, on a runtime with no window, one with no controlling terminal. The
-  window's client sends a witness too. `pair` also refuses when its input or
-  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known
-  limits: a same-user process that detaches and opens a pseudo-terminal of its
-  own looks like a person anywhere; and on a desktop-launched runtime, which
-  must let the terminal-less window through, a process that detaches with
-  `setsid` and has no terminal is let through too, until the runtime can
-  recognise the window process itself (PRO-369).
+  and one with no controlling terminal: on a runtime with no window always;
+  on a runtime the desktop launched on a Mac, unless it proves it is the
+  window (PRO-369). The window's client sends a witness too, with a MAC of the
+  witness socket and nonce under a key derived from the machine's host key,
+  which only the window (its Keychain item) and the runtime (the copy the
+  window handed over) hold. `pair` also refuses when its input or output is
+  not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known limits: a
+  same-user process that detaches and opens a pseudo-terminal of its own
+  looks like a person anywhere; and a desktop-launched runtime that keeps its
+  own host key (not on a Mac) holds nothing only the window knows, so there a
+  process that detaches with `setsid` and has no terminal is let through.
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
@@ -1889,10 +1896,12 @@ which runs in a child process because data privacy is one switch per process.
 - **A shell on the operating computer can remove a machine** by editing
   `machines.json` or the Keychain. That loses this computer's own access and
   gains nothing, so no integrity key guards it.
-- **Consent cannot yet tell the window from a detached process** of the same
-  user on a desktop runtime (`serve_cli::consent`); recognising the window is
-  PRO-369. A same-user process that opens a pseudo-terminal of its own to run
-  `terminalx-serve pair` also passes.
+- **Consent tells the window from a detached process only on a Mac**
+  (`serve_cli::consent`, PRO-369): there the window proves it holds the host
+  key in its Keychain item. A desktop-launched runtime elsewhere keeps its own
+  key and lets a detached process with no terminal through. A same-user
+  process that opens a pseudo-terminal of its own to run
+  `terminalx-serve pair` passes anywhere.
 - **A computer on a runtime before PRO-357** does not rotate its token (it
   does not ask for `machine/5`). Its token still expires after 90 days unused.
 - **Whoever holds a computer's client key and token is that computer.** With
@@ -2038,16 +2047,16 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
 | Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
 | Image attachments | Works; uploaded to the machine by session | PRO-347 |
-| Other file attachments | Follow-up | PRO-407 |
+| Other file attachments | Works; uploaded to the machine (`composer/4`), stored in the session's attachments folder there, and the agent is handed those paths | PRO-407 |
 | Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
 | Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
 | Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
 | Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
-| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); the dock's Setup and Run tabs, each action's run a dock tab; previews open through a forward | PRO-403 |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
-| Header branch button: diff size, Create PR | Follow-up | PRO-404 |
+| Header branch button: diff size, Create PR, push, pull, mark ready, merge, agent steps | Works; read from the machine's `git/1` (`git.status`, `git.prs`, the branch's diff against its base) as files change there, and run there with its Git sign-in; Merge is pinned to the head that was read (`git.prMerge` `head`). A cloud workspace session keeps the branch chip only | 21.08, PRO-404 |
 | Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
 | Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
 | Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
@@ -2087,6 +2096,63 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
+
+### As built (PRO-403): Setup and Run in a machine session
+
+A local session's Run menu, Open button, restart offer and the dock's Setup
+and Run tabs read the project's scripts from this computer's settings and run
+them here. A machine session (screen 21.08 shows Setup and Run beside the
+machine's terminal) has all of them, and everything is the machine's.
+
+`machine/7` adds four methods. Only a runtime that serves its machine grants
+it; reading is open to whoever sees the session, running is the manager's.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.sessionActions` | `{ sessionId }` | `{ actions, previewUrls, setupScript, setupApplies, available, ports, setup }` |
+| `machine.runAction` | `{ sessionId, actionId, restart? }` | `{ started, run: { actionId, name, ptyId, state, exitCode }, terminal }` |
+| `machine.setupRerun` | `{ sessionId }` | `{ setup }` |
+| `machine.setupStop` | `{ sessionId, paneId }` | `{ setup }` |
+
+- **Read on the machine.** `actions` and `previewUrls` are the project's in
+  the machine's `projects.json`; `setupScript` is what the machine would run
+  (its project store, or the repository layers it trusts). Nothing is read
+  from this computer's settings, and the empty states say to save scripts on
+  the machine. `ports` is the session's port block there: a preview's `$PORT`
+  is the machine's port.
+- **Run on the machine.** `machine.runAction` and the setup calls go through
+  the machine runtime's own `action_runner` and `workspace_setup`, exactly as
+  its own window's Run menu does: in the session's folder there, with its
+  environment layers, `TERMINALX_PORT`/`TERMINALX_PORTS` and
+  `TERMINALX_ACTION_ID`. A non-concurrent action already running answers
+  `started: false` with that run; `restart` stops it and starts it again.
+  Its own "Run after setup" starts there too. Nothing runs on this computer.
+- **Runs are terminals.** Each run is the runtime's pane
+  (`<session>:action-…`, `<session>:workspace-setup-…`). The machine's
+  protocol server records it from its first byte, as an agent's terminal, and
+  `pty.list` lists it with its session and a `run`
+  (`{ kind: "action", actionId, name }` or `{ kind: "setup" }`); `pty.attach`,
+  `pty.write`, `pty.resize` and `pty.control` work on it as on any terminal.
+  The caller who started a run controls it. A run found already exited is
+  given what the runtime kept of its output; one still running that started
+  before the server existed shows its output from when it was first seen. It
+  is never counted against `MAX_PTYS` and an eviction drops only this record,
+  not the runtime's pane; `pty.kill` on an action's run ends it, and on the
+  setup's is refused (`machine.setupStop` stops it).
+- **The desktop.** `useMachineSessionRuns` (`src/lib/machineRuns.ts`) reads
+  `machine.sessionActions` on each connect, again whenever a run starts or
+  ends, and every 2 s while setup is going. The header's Run menu and Open
+  button are the local `RunControls` over that source; the restart offer is
+  the same strip. The dock (`MachineTerminalDock`) has Setup and Run first,
+  then the machine's shells, then each action's run as a tab named by its
+  action; the setup's terminal shows inside Setup. A machine without
+  `machine/7` shows no Run menu, and Setup and Run say in one line to update
+  it ("Setup and Run scripts" in `MACHINE_FEATURES`).
+- **Previews.** A preview URL on the machine itself (a loopback host) opens
+  in TerminalX's built-in browser through a forward of that port (`ports/1`,
+  PRO-355), made when there is none; with Forwarding off, or a machine
+  without `ports/1`, it is not opened and says why. Any other URL opens as
+  it is. No path of the machine is opened on this computer.
 
 ### As built (PRO-348): a new session on a machine
 
@@ -2469,8 +2535,8 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   desktop, agents and sign-in, the account route and the command line have
   their own tests but no two-machine scenario.
 - **Security review (PRO-357).** Every threat has a mitigation and a test, or
-  is an accepted risk above. The one open finding has a ticket: PRO-369
-  (telling the window from a detached process during consent), in Backlog.
+  is an accepted risk above. The one open finding, telling the window from a
+  detached process during consent, is closed on a Mac by PRO-369.
   The agent control changed in PRO-360 (pairing instead of the switch) by the
   owner's decision.
 - **Still open in the epic:** PRO-368 (relay registration for a signed-in

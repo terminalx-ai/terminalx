@@ -73,7 +73,7 @@ try {
     const dialog = await page.getByRole("dialog").count();
 
     // A comparison branch that is gone.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
     const target = page.getByRole("button", { name: "Comparison target", exact: true });
     await target.filter({ hasText: "vs main" }).waitFor();
     await target.click();

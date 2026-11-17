@@ -83,7 +83,8 @@ export interface GitSource {
   conversation?(pr: PullRequest, association?: PrAssociation): PrConversationAccess;
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
+  /** `head`, where given, pins the merge to that commit (a machine's or workspace's `git.prMerge`). */
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<void>;
   /** "Delete the branch after merge": only a local checkout can ask for it today. */
   deleteMergedBranch?(number: number, url?: string): Promise<void>;
   errorMessage(error: unknown): string;
@@ -288,7 +289,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;
     },
     readyPr: (number) => remote.readyPr(number).then(() => undefined),
-    mergePr: (number, method) => remote.mergePr(number, method).then(() => undefined),
+    mergePr: (number, method, head) => remote.mergePr(number, method, head).then(() => undefined),
     errorMessage: (error) => (error instanceof MissingIdentityError ? error.message : gitErrorMessage(error)),
   };
 }

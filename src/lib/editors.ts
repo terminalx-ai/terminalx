@@ -107,10 +107,32 @@ export interface AttachmentEditorEntry extends EditorBase {
   media: FileKind;
   attachment: AttachmentInfo;
 }
-export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
-export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
+/**
+ * A pull request check's log, open in a centre tab of its session (PRO-394,
+ * design 05.09). It holds the check as it was when opened; the tab reads the
+ * log itself. Not kept across a restart: a log is read fresh from GitHub.
+ */
+export interface CheckLogEditorEntry extends EditorBase {
+  kind: "checkLog";
+  check: {
+    prUrl: string;
+    prNumber: number;
+    name: string;
+    url: string;
+    state: string;
+    runId: number;
+    jobId: number | null;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    summary?: string | null;
+  };
+  /** How many of the pull request's checks were failing when it was opened, for the hand-off bar. */
+  failures: number;
+}
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry | CheckLogEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry | CheckLogEditorEntry;
 export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
-  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
+  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment" || entry.kind === "checkLog";
 }
 
 /**
@@ -385,6 +407,18 @@ export function openReviewStack(sessionId: string, root: string, rel: string, di
 export function openPr(sessionId: string, root: string, pr: PrAssociation) {
   const id = JSON.stringify([sessionId, root, "pr", pr.url.toLowerCase().replace(/\/$/, "")]);
   return openReview({ id, sessionId, root, workspaceRoot: root, rel: pr.url, name: `PR #${pr.number}`, kind: "pr", dirty: false, viewMode: "source", pr });
+}
+
+/**
+ * Open (or focus) a check's log in a centre tab (PRO-394). One tab per check:
+ * opening it again for a newer state of the check points the tab at that.
+ */
+export function openCheckLog(sessionId: string, root: string, pr: { url: string; number: number }, check: Omit<CheckLogEditorEntry["check"], "prUrl" | "prNumber">, failures: number) {
+  const id = JSON.stringify([sessionId, root, "checkLog", pr.url.toLowerCase().replace(/\/$/, ""), check.url]);
+  const entry: CheckLogEditorEntry = { id, sessionId, root, workspaceRoot: root, rel: check.url, name: `${check.name} · log`, kind: "checkLog", dirty: false, viewMode: "source",
+    check: { ...check, prUrl: pr.url, prNumber: pr.number }, failures };
+  if (state.editors.some((e) => e.id === id)) set({ editors: state.editors.map((e) => e.id === id ? { ...entry, created: e.created } : e) });
+  return openReview(entry);
 }
 
 /** A conflict tab's title: the file's name and what is left to resolve in it. */

@@ -24,7 +24,9 @@ import type { Project, SessionEntry } from "@/types/session";
  * non-concurrent action that is already running is not started twice: its
  * tab is shown, with an offer to restart it (`RunRestartOffer`).
  *
- * Local sessions only: a cloud session's actions and ports are its runtime's.
+ * The controls take a {@link RunSource}: a local session's is built here from
+ * this computer's project settings and runtime; a machine session's is the
+ * machine's own (`machineRuns`, PRO-403). A cloud workspace has neither.
  */
 
 type Place = Pick<SessionEntry, "id" | "cwd">;
@@ -89,6 +91,8 @@ export interface RestartOffer {
   sessionId: string;
   action: RepositoryAction;
   paneId: string;
+  /** Stop that run and start the action again, where it runs. */
+  restart: () => Promise<void>;
 }
 
 let offers: Record<string, RestartOffer> = {};
@@ -113,6 +117,11 @@ export function dismissRestartOffer(sessionId: string) {
   setOffer(sessionId, null);
 }
 
+/** `action` was already running in the session `sessionId` names, so its tab was shown: offer `restart` under the header. */
+export function offerRestart(sessionId: string, action: RepositoryAction, paneId: string, restart: () => Promise<void>) {
+  setOffer(sessionId, { sessionId, action, paneId, restart });
+}
+
 const focusRun = (sessionId: string, run: ActionRun) => selectSessionTab(sessionId, { kind: "terminal", id: run.paneId });
 
 /**
@@ -125,7 +134,7 @@ export async function startAction(session: Place, action: RepositoryAction, opti
   try {
     const outcome = await runAction(session.id, action.id, { restart: options.restart });
     focusRun(session.id, outcome.run);
-    if (!outcome.started) setOffer(session.id, { sessionId: session.id, action, paneId: outcome.run.paneId });
+    if (!outcome.started) offerRestart(session.id, action, outcome.run.paneId, () => startAction(session, action, { restart: true }));
   } catch (cause) {
     showError(`Couldn't run ${action.name}`, cause, { key: `action:${session.id}:${action.id}` });
   }
@@ -175,11 +184,42 @@ function RunState({ run }: { run: ActionRun | undefined }) {
   );
 }
 
+/**
+ * What the Run menu and Open button act on: a session's visible actions and
+ * preview URLs, the latest run of each action, the ports a preview's $PORT
+ * names, and how to start an action or open a preview where it runs.
+ */
+export interface RunSource {
+  actions: RepositoryAction[];
+  previews: RepositoryPreviewUrl[];
+  runs: Map<string, ActionRun>;
+  ports: number[] | null;
+  start: (action: RepositoryAction) => Promise<void>;
+  openPreview: (preview: RepositoryPreviewUrl) => Promise<void>;
+  /** Why a preview's expanded URL cannot be opened now (a machine's port that cannot be forwarded here); null when it can. */
+  previewBlocked?: (url: string) => string | null;
+}
+
+/** A local session's Run menu: the project's actions and previews as this computer saved them, run by this computer's runtime. */
 export function RunMenu({ session, project, className }: { session: SessionEntry; project: Project; className?: string }) {
   const actions = visibleActions(project.actions ?? []);
   const previews = project.previewUrls ?? [];
   const runs = useActionRuns(session.id, actions.length > 0);
   const ports = useSessionPorts(session.id, previews.length > 0);
+  const source: RunSource = {
+    actions,
+    previews,
+    runs,
+    ports,
+    start: (action) => startAction(session, action),
+    openPreview: (preview) => openPreview(session, preview, ports),
+  };
+  return <RunControls source={source} className={className} />;
+}
+
+/** The header's Run menu and Open button over any {@link RunSource}. */
+export function RunControls({ source, className }: { source: RunSource; className?: string }) {
+  const { actions, previews, runs, ports } = source;
   const [open, setOpen] = useState(false);
   const keys = useShortcutKeys("session.runAction");
   const first = actions[0];
@@ -187,9 +227,9 @@ export function RunMenu({ session, project, className }: { session: SessionEntry
   // ⌘R: the one action, or the menu as a picker for several. With none it is not this menu's key.
   const onRunKey = useCallback(() => {
     if (!first) return false;
-    if (actions.length === 1) void startAction(session, first);
+    if (actions.length === 1) void source.start(first);
     else setOpen(true);
-  }, [actions.length, first, session]);
+  }, [actions.length, first, source]);
   useShortcut("session.runAction", onRunKey);
 
   const runningCount = actions.filter((action) => runs.get(action.id)?.state === "running").length;
@@ -216,7 +256,7 @@ export function RunMenu({ session, project, className }: { session: SessionEntry
             {actions.map((action, index) => {
               const run = runs.get(action.id);
               return (
-                <DropdownMenuItem key={action.id} onSelect={() => void startAction(session, action)} data-action-id={action.id}>
+                <DropdownMenuItem key={action.id} onSelect={() => void source.start(action)} data-action-id={action.id}>
                   <RepositoryIcon value={action.icon} />
                   <span className="min-w-0 truncate" title={action.command}>{action.name}</span>
                   <RunState run={run} />
@@ -227,14 +267,19 @@ export function RunMenu({ session, project, className }: { session: SessionEntry
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-      {previews.length > 0 && <OpenButton session={session} previews={previews} ports={ports} />}
+      {previews.length > 0 && <OpenButton previews={previews} ports={ports} open={source.openPreview} blocked={source.previewBlocked} />}
     </div>
   );
 }
 
-function OpenButton({ session, previews, ports }: { session: SessionEntry; previews: RepositoryPreviewUrl[]; ports: number[] | null }) {
+function OpenButton({ previews, ports, open, blocked }: { previews: RepositoryPreviewUrl[]; ports: number[] | null; open: (preview: RepositoryPreviewUrl) => Promise<void>; blocked?: (url: string) => string | null }) {
   const [first, ...rest] = previews;
-  const target = previewTarget(first, ports);
+  const shownTarget = (preview: RepositoryPreviewUrl): ReturnType<typeof previewTarget> => {
+    const target = previewTarget(preview, ports);
+    const refusal = target.url ? blocked?.(target.url) : null;
+    return refusal ? { error: refusal } : target;
+  };
+  const target = shownTarget(first);
   return (
     <div className="flex items-stretch" data-testid="open-controls">
       <WithTooltip label={target.url ? `Open ${first.name} · ${target.url}` : `${first.name}: ${target.error}`}>
@@ -244,7 +289,7 @@ function OpenButton({ session, previews, ports }: { session: SessionEntry; previ
           className={cn("gap-1.5 px-2.5", !target.url && "opacity-50")}
           aria-label={`Open ${first.name}`}
           aria-disabled={!target.url || undefined}
-          onClick={() => void openPreview(session, first, ports)}
+          onClick={() => void open(first)}
           data-testid="open-preview"
         >
           <Globe className="size-4" />
@@ -261,9 +306,9 @@ function OpenButton({ session, previews, ports }: { session: SessionEntry; previ
           <DropdownMenuContent align="end" className="min-w-56 max-w-80" aria-label="Open" data-testid="open-menu">
             <DropdownMenuLabel>More previews</DropdownMenuLabel>
             {rest.map((preview) => {
-              const shown = previewTarget(preview, ports);
+              const shown = shownTarget(preview);
               return (
-                <DropdownMenuItem key={preview.id} disabled={!shown.url} onSelect={() => void openPreview(session, preview, ports)} data-preview-id={preview.id}>
+                <DropdownMenuItem key={preview.id} disabled={!shown.url} onSelect={() => void open(preview)} data-preview-id={preview.id}>
                   <Globe />
                   <span className="min-w-0 truncate">{preview.name}</span>
                   <span className="ml-auto min-w-0 truncate pl-3 text-[11px] text-faint" title={shown.url ?? shown.error}>{shown.url ?? shown.error}</span>
@@ -278,7 +323,7 @@ function OpenButton({ session, previews, ports }: { session: SessionEntry; previ
 }
 
 /** Under the header: an action that was already running had its tab shown; offer to restart it. */
-export function RunRestartOffer({ session }: { session: Place }) {
+export function RunRestartOffer({ session }: { session: Pick<Place, "id"> }) {
   const offer = useRestartOffer(session.id);
   const [busy, setBusy] = useState(false);
   if (!offer) return null;
@@ -293,7 +338,7 @@ export function RunRestartOffer({ session }: { session: Place }) {
         disabled={busy}
         onClick={() => {
           setBusy(true);
-          void startAction(session, offer.action, { restart: true }).finally(() => setBusy(false));
+          void offer.restart().finally(() => setBusy(false));
         }}
       >
         {busy ? <Loader2 className="size-3 animate-spin" /> : <RotateCw className="size-3" />}

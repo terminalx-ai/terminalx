@@ -107,9 +107,8 @@ jobs:
       # Every other 21.xx screen, from the built app, for review beside the
       # designs (PRO-360): pairing (21.04 to 21.06), connection states (21.09),
       # the machine page and adding a project (21.10, 21.11) and updates. These
-      # scripts are not layout gates, so a failure here does not fail the job.
+      # A failure in these scripts fails the job, like the other required steps.
       - name: Shoot the other machine screens
-        continue-on-error: true
         timeout-minutes: 8
         run: |
           status=0

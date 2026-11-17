@@ -3091,6 +3091,13 @@ pub async fn inspect_attachments(paths: Vec<String>) -> CmdResult<Vec<crate::att
     tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect(&paths))).await.map_err(err)?
 }
 
+/// One part of a file attached to a message for a machine (PRO-407), read
+/// here so only its bytes are uploaded, never its path.
+#[tauri::command]
+pub async fn read_attachment_part(path: String, offset: u64) -> CmdResult<crate::attachments::FilePart> {
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::read_part(&path, offset).map_err(err)).await.map_err(err)?
+}
+
 /// A file tab's Download: a copy of a stored attachment, written where the
 /// person chose in the save dialog.
 #[tauri::command]

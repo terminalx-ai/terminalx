@@ -2444,6 +2444,8 @@ export const attachments = {
   inspect: (paths: string[]) => invoke<FileFacts[]>("inspect_attachments", { paths }),
   /** Copy the files into one new folder of the session's attachments folder. Refuses reserved names, files over the size limit, and more than 10. */
   store: (sessionId: string, files: FileInput[]) => invoke<FileRef[]>("store_attachments", { sessionId, files }),
+  /** One part (at most 384 KiB, base64) of a file on this computer from `offset`, for an upload to a machine (PRO-407). */
+  readPart: (path: string, offset: number) => invoke<{ data: string; bytes: number; size: number }>("read_attachment_part", { path, offset }),
   /** Write a copy of a stored attachment to `to` (the file tab's Download). `path` must be inside an attachments folder. */
   saveCopy: (path: string, to: string) => invoke<void>("save_attachment_copy", { path, to }),
 };
@@ -2689,8 +2691,12 @@ export interface PullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has. Empty or absent on older workspace runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
+  /** The head commit GitHub has; absent on older workspace runtimes. */
+  headSha?: string;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   /** Absent on older workspace runtimes. */
   mergeState?: string;
