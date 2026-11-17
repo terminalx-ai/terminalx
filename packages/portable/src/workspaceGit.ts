@@ -288,7 +288,7 @@ export class RemoteGit {
     return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
-  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
+  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
   }
 

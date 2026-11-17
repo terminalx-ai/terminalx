@@ -659,7 +659,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
 
 pub(crate) enum BlobContents {
     Bytes(Vec<u8>),
-    TooLarge,
+    TooLarge(usize),
 }
 
 /// Read only local objects. The tree proves absence; a missing promised blob
@@ -689,27 +689,40 @@ pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) ->
     let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
     if !size.status.success() { bail!("{}", unavailable()); }
     let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
-    if size > limit { return Ok(Some(BlobContents::TooLarge)); }
+    if size > limit { return Ok(Some(BlobContents::TooLarge(size))); }
     let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
     if !content.status.success() { bail!("{}", unavailable()); }
-    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge } else { BlobContents::Bytes(content.stdout) }))
+    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge(content.stdout.len()) } else { BlobContents::Bytes(content.stdout) }))
 }
 
 /// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
 pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
-    Ok(blob_bytes_at(cwd, tree, path, 4 * 1024 * 1024)?.map(|content| match content {
-        BlobContents::TooLarge => "<file too large to show>".into(),
-        BlobContents::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-    }))
+    Ok(blob_text_at(cwd, tree, path, 4 * 1024 * 1024)?.0)
 }
 
-pub fn working_file(cwd: &Path, path: &str) -> Option<String> {
+/// Keep the byte count even when the preview is replaced with a marker.
+pub fn blob_text_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<(Option<String>, Option<u64>)> {
+    Ok(match blob_bytes_at(cwd, tree, path, limit)? {
+        None => (None, None),
+        Some(BlobContents::TooLarge(size)) => (Some("<file too large to show>".into()), Some(size as u64)),
+        Some(BlobContents::Bytes(bytes)) => {
+            let size = bytes.len() as u64;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            (Some(if text.len() > limit { "<file too large to show>".into() } else { text }), Some(size))
+        }
+    })
+}
+
+pub fn working_file_with_size(cwd: &Path, path: &str) -> (Option<String>, Option<u64>) {
     let p = cwd.join(path);
-    let meta = std::fs::metadata(&p).ok()?;
+    let Ok(meta) = std::fs::metadata(&p) else { return (None, None) };
     if meta.len() > 4 * 1024 * 1024 {
-        return Some("<file too large to show>".into());
+        return (Some("<file too large to show>".into()), Some(meta.len()));
     }
-    std::fs::read(&p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    match std::fs::read(&p) {
+        Ok(bytes) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
+        Err(_) => (None, None),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -103,3 +103,31 @@ it("keeps the working-tree view scoped to the workspace", async () => {
   expect(await screen.findByText("0 of 2 viewed")).toBeTruthy();
   expect(screen.getByTitle("Added · fixtures/untracked.json")).toBeTruthy();
 });
+
+it.each([
+  ["cloud:org:workspace", "cloud:org:workspace", "app", "app/large.ts"],
+  ["machine:m:p", "machine:m:p/trees/topic", "trees/topic", "large.ts"],
+  ["cloud:org:workspace", "cloud:other:workspace", "app", null],
+])("opens an oversized Changes file only through its matching file source (%s, %s)", async (workspaceKey, fileKey, repo, expectedPath) => {
+  const { cloudGitSource } = await import("@/lib/gitSource");
+  const { RemoteGit } = await import("@terminalx/portable/workspaceGit");
+  const { getEditors, dropEditors } = await import("@/lib/editors");
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.reviewRange") return { target: "main", base: "base", head: "head" };
+    if (method === "git.changesBetween") return { files: [{ path: "large.ts", status: "modified", additions: 0, deletions: 0 }] };
+    if (method === "git.branches") return { branches: [] };
+    if (method === "git.fileContents") return { before: "old", after: "<file too large to show>", afterSize: 5 * 1024 * 1024 };
+    throw new Error(method);
+  });
+  const gitSource = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as never, repo), canWrite: false, author: async () => null });
+  render(<RightPanel cwd="/remote" sessionId="large-panel" gitSource={gitSource} fileSource={{ key: fileKey } as never} />);
+  openChanges();
+  fireEvent.click(await screen.findByRole("button", { name: /large.ts/ }));
+  expect(await screen.findByText("5.0 MB")).toBeTruthy();
+  if (expectedPath) {
+    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+    expect(getEditors().editors.find((entry) => entry.sessionId === "large-panel")).toMatchObject({ rel: expectedPath, source: fileKey });
+  } else expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("file_contents_at", expect.anything());
+  dropEditors((entry) => entry.sessionId === "large-panel");
+});
