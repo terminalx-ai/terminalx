@@ -209,7 +209,7 @@ describe("cloud organizations in the sidebar", () => {
     // A repository with two workspaces is one project; each workspace names its sessions. A blank project is listed by its name.
     expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["acme/api", "image-only"]);
     const api = within(acme).getByRole("group", { name: "acme/api" });
-    expect(within(api).getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["ws-1", "ws-2"]);
+    expect(within(api).queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
     const fix = within(api).getByRole("button", { name: /^Fix login redirect/, description: /Status: Backlog$/ });
     // As 02.04: the mark leads, and the row ends in its PR number or its time, not its branch.
     expect(fix.querySelector("[data-session-status]")).toBeTruthy();

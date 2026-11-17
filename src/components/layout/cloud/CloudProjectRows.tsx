@@ -1,3 +1,7 @@
+import { MemberProfile, memberName } from "@/components/people/MemberProfile";
+import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
+import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { UserRound } from "@/icons";
 import { CloudWorkspaceAttention } from "@/components/cloud/CloudWorkspaceAttention";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { ManualStatusMenu } from "@/components/session/ManualStatus";
@@ -63,8 +67,8 @@ import { useFold } from "../useFold";
 
 /**
  * A cloud project's rows in the chat-first sidebar, drawn as the local
- * projects are: the project, then its sessions along a guide line; a project
- * with several workspaces names each over its sessions. Every row keeps its
+ * projects are: the project, then one row per session. Workspace rows remain
+ * only for empty or unloaded workspaces. Every row keeps its
  * menu: the project's (new session, pin, its section, the workspace
  * lifecycle), a workspace's (its lifecycle) and a session's (rename, pin,
  * archive, delete). Looking costs nothing: rows read the catalog and this
@@ -397,7 +401,7 @@ function OpenWorkspaceItem({ node }: { node: CloudWorkspaceNode }) {
   );
 }
 
-/** A workspace's sessions; with several workspaces in the project, under a row that names the workspace. */
+/** Loaded sessions are direct project children; empty workspaces retain their actions. */
 function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle }) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
@@ -429,7 +433,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
-  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
+  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} node={node} activity={activity} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
   const rows = (
     <>
       {sidebarLayout === "status" ? <StatusGroups sessions={sessions} scope={node.key}>{sessionRow}</StatusGroups> : sessions.map(sessionRow)}
@@ -448,6 +452,14 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
       )}
     </>
   );
+  const attentionInput = { tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state };
+  if (sessions.length) return <>
+    {rows}
+    {named && (resolveCloudAttention(node.item, attentionInput) || deletionLine(node.item)) && <li data-testid="cloud-workspace-notice" data-workspace={workspace.id}>
+      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
+      {deletionLine(node.item) && <p className="ml-6 text-[10px] text-faint">{deletionLine(node.item)}</p>}
+    </li>}
+  </>;
   if (!named) return rows;
   const selected = store.selectedCloudWorkspace === node.key;
   const extra = extraRepositories(node.item);
@@ -486,7 +498,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
           </DropdownMenu>
         </RowActions>
       </div>
-      <CloudWorkspaceAttention item={node.item} input={{ tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state }} compact />
+      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
       {deletionLine(node.item) && (
         <p className={cn("ml-6 text-[10px]", deletion(node.item) === "failed" ? "whitespace-normal break-words text-destructive" : "text-faint")} data-testid="cloud-workspace-row-deletion">
@@ -498,6 +510,22 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   );
 }
 
+/** Resolve only the catalog creator against this organization's authorized roster.
+ * Never consult session caches or the cross-organization people-name cache. */
+function CloudSessionOwner({ node }: { node: CloudWorkspaceNode }) {
+  const { workspace } = node.item;
+  const profiles = useFeatureFlag(featureFlags.teamRoster, workspace.orgId);
+  const enabled = profiles && workspace.you?.role !== "none" && !!workspace.createdBy;
+  const { roster, error } = useOrganizationRoster(workspace.orgId, enabled);
+  useEffect(() => {
+    if (enabled) void readOrganizationRoster(workspace.orgId).catch(() => {});
+  }, [enabled, workspace.orgId]);
+  const owner = enabled && !error ? roster?.members.find((member) => member.userId === workspace.createdBy) : null;
+  return owner ? <MemberProfile member={owner} title={`Workspace owner: ${memberName(owner)}`} aria-label={`Workspace owner: ${memberName(owner)}`} className="size-5" /> : (
+    <span role="img" aria-label="Workspace owner unavailable" title="Workspace owner unavailable" className="flex size-5 shrink-0 items-center justify-center rounded-full bg-well text-faint"><UserRound className="size-3" /></span>
+  );
+}
+
 // ---- sessions --------------------------------------------------------------
 
 /**
@@ -506,7 +534,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
+function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, selected }: { row: CloudSessionRow; node: CloudWorkspaceNode; activity: CloudActivity; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
   const statusDescriptionId = useId();
   const rowStatus = detailedStatus(row.rowStatus ?? { tabs: [{ status }] });
   const menu = useRowMenu();
@@ -559,7 +587,7 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
     <li>
       <div
         className={cn(actionRow, "relative flex h-[30px] items-center gap-2 rounded-md pl-[calc(1rem+var(--indent,0px))] pr-1", selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50")}
-        title={row.branch ? `${row.branch} · ${row.title}` : row.title}
+        title={[row.branch ? `${row.branch} · ${row.title}` : row.title, workspaceCard(node.item, activity)].join("\n")}
         data-testid="cloud-session-row"
         data-session={row.key}
         {...(manage ? menu.surface : {})}
@@ -600,6 +628,7 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
             )}
           </button>
         )}
+        <CloudSessionOwner node={node} />
         {manage && !renaming && (
           <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
             <AsyncDropdownMenu {...menu.root}>
