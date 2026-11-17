@@ -191,7 +191,7 @@ if args[0]=='inspect':
  assert args==['inspect','--format','{{json .}}','a'*64]
  import pathlib
  print((pathlib.Path(__file__).parent/'inspection.json').read_text());sys.exit(0)
-assert args[:10]==['exec','--detach','--user','cua','--workdir','/home/cua','a'*64,'/usr/bin/python3','-I','-c']
+assert args[:10]==['exec','--detach','--user','0:0','--workdir','/','a'*64,'/usr/bin/python3','-I','-c']
 assert len(args)==12
 assert base64.b64decode(args[-1])==b'{"action":"start"}'
 print('detached-engine-ack-is-not-a-runtime-receipt')
