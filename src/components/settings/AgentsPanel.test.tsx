@@ -209,7 +209,14 @@ describe("Agents · API key (PRO-306)", () => {
     expect(within(toast("API key saved to the Keychain")).queryByRole("button", { name: /Restart/ })).toBeNull();
   });
 
-  it("removes the key from the Keychain and goes back to the subscription login", async () => {
+  it.each([0, 1, 2])("removes the key with %i running tabs and goes back to the subscription login", async (count) => {
+    running.claude = running.claude.slice(0, count);
+    if (count) {
+      // A tab already on the new login must not inflate the retained-login count.
+      invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "agent_login_tabs"
+        ? [...running[args!.harness as string], { sessionId: "s4", tabId: "t4", current: true }]
+        : backend(command, args));
+    }
     logins.claude = { ...logins.claude, mode: "api_key", saved: { masked: MASKED, savedAt: "2026-11-11T09:00:00Z" }, verified: { ok: true, checkedAt: new Date().toISOString() } };
     show();
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
@@ -218,9 +225,19 @@ describe("Agents · API key (PRO-306)", () => {
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(calls("agent_login_remove_key")).toEqual([{ harness: "claude" }]);
     expect(toast(title).textContent).toContain("Deleted from the Keychain. New tabs sign in with Claude Max (ada@example.com).");
-    // PRO-377: the Removed toast is the change alone, with no restart offer.
-    expect(toast(title).textContent).not.toContain("running");
+    if (count) {
+      expect(toast(title).textContent).toContain(count === 1
+        ? "1 running tab keeps its current login until you restart it."
+        : "2 running tabs keep their current login until you restart them.");
+      expect(toast(title).textContent).toContain("Usage in these tabs may still be billed to their current login.");
+    } else {
+      expect(toast(title).textContent).not.toContain("running");
+      expect(toast(title).textContent).not.toContain("billed");
+    }
+    expect(toast(title).textContent).toContain("This does not revoke the key with your provider.");
     expect(within(toast(title)).queryByRole("button", { name: /Restart/ })).toBeNull();
+    expect(calls("stop_tab")).toEqual([]);
+    expect(startTabAgent).not.toHaveBeenCalled();
     expect(statusLine().textContent).toBe("Signed in");
     expect(screen.getByRole("radio", { name: /Claude subscription/, checked: true })).toBeTruthy();
     expect(row("Login")).toBe("Claude Max · ada@example.com");
@@ -236,6 +253,8 @@ describe("Agents · API key (PRO-306)", () => {
     const title = "API key removed · Claude Code needs a sign-in";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(toast(title).textContent).toContain("Deleted from the Keychain. Sign in to Claude Code below to start new tabs.");
+    expect(toast(title).textContent).not.toContain("running");
+    expect(within(toast(title)).queryByRole("button", { name: /Restart/ })).toBeNull();
     await waitFor(() => expect(statusLine().textContent).toBe("Sign in required"));
     expect(row("Login")).toBe("None · sign in required");
     expect(screen.getByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
