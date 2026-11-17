@@ -69,16 +69,15 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   const [picker, setPicker] = useState<{ title: string; choices: Choice[] } | null>(null);
   const [continuing, setContinuing] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     // Taken before the request: a Mac forgotten while it is under way is not saved again.
     const epoch = host ? cacheEpoch(host) : 0;
-    try {
-      const next = await app.api.tabControls(sessionId, tabId);
+    return app.api.tabControls(sessionId, tabId).then((next) => {
       setTab(next);
       if (next && host) void writeSaved(host, tabKey, next, epoch);
-    } catch {
+    }).catch(() => {
       // The connection failed: what is shown stays, dimmed, until it is back.
-    }
+    });
   }, [app.api, host, sessionId, tabId, tabKey]);
   // A setting applied, a turn begun or ended: each arrives as an event.
   useEffect(() => { if (supported && connected) void refresh(); }, [connected, events.length, refresh, supported]);
