@@ -861,6 +861,22 @@ describe("a cloud workspace on the phone", () => {
     };
     const wakeOptions = (h: ReturnType<typeof harness>) => h.api.enqueue.mock.calls.map((call) => (call as unknown[])[3]);
 
+    it("continues polling submitted commands while attention holds an unsent message", async () => {
+      const h = harness();
+      server(h, () => true);
+      await h.session.start();
+      await connected(h);
+      const queued = await h.session.send("t1", "submitted");
+      await h.session.outbox.enqueue("t1", "send", { text: "held" }, { post: false });
+      h.list("attention-required");
+      h.api.commandStatuses.mockResolvedValue([{ clientCommandId: queued.clientCommandId, tabId: "t1", kind: "send", state: "applied", keyId: "k1", createdAt: 1, updatedAt: 2 }]);
+      await h.session["syncOutbox"]();
+      expect(h.api.commandStatuses).toHaveBeenCalled();
+      expect(h.session.outbox.entries().map((entry) => entry.state)).toEqual(["applied", "unsent"]);
+      expect(h.posted).toHaveLength(1);
+      h.session.close();
+    });
+
     it("sends to a running workspace with wake: false and reads no list for it", async () => {
       const h = harness();
       server(h, () => true);

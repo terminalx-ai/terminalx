@@ -9,7 +9,7 @@ import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
 import type { CloudRole } from "@mobile/cloud/api";
-import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
+import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
@@ -159,9 +159,11 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   const changing = starting || asking || listedState === "resuming" || listedState === "provisioning";
   const mayStart = role === "manager";
   const needsAttention = listedState === "attention-required";
-  const start = () => Alert.alert(needsAttention ? "Retry resume?" : "Start this workspace?", "It is billed to the organization while it runs.", [
+  const operation = catalog.getSnapshot().organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.latestOperation;
+  const retryResume = needsAttention && operation?.state === "failed" && operation.action === "resume" && operation.errorCode === "cloud_workspace_runtime_bootstrap_failed";
+  const start = () => Alert.alert(retryResume ? "Retry resume?" : "Start this workspace?", "It is billed to the organization while it runs.", [
     { text: "Cancel", style: "cancel" },
-    { text: needsAttention ? "Retry resume" : "Start", onPress: () => {
+    { text: retryResume ? "Retry resume" : "Start", onPress: () => {
       setAsking(true);
       setFailure(null);
       void catalog.start(orgId, workspaceId).catch((error: unknown) => {
@@ -174,11 +176,11 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
       <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : "This workspace is stopped"}</Text>
-      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : needsAttention ? (mayStart ? "The workspace’s runtime could not be set up on its machine." : `The workspace’s runtime could not be set up on its machine. ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
+      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : needsAttention ? (retryResume ? (mayStart ? "The workspace’s runtime could not be set up on its machine." : `The workspace’s runtime could not be set up on its machine. ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : `${attentionDetail(operation?.errorCode)} Open this workspace on the desktop to see how to recover.`) : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
       {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
     </View>
-    {mayStart ? <Button label={changing ? "Starting…" : needsAttention ? "Retry resume" : "Start"} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
+    {mayStart && (!needsAttention || retryResume) ? <Button label={changing ? "Starting…" : retryResume ? "Retry resume" : "Start"} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
   </View>;
 }
 

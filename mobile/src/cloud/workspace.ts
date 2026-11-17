@@ -498,7 +498,10 @@ export class CloudWorkspaceSession {
   /** Read command states, and deliver what is unsent only when that starts nothing. */
   private async syncOutbox(): Promise<boolean> {
     if (this.paused) return false;
-    const verdict = this.outbox.unsent ? await this.mayPost(false) : "hold";
+    const verdict = this.outbox.unsent ? await this.mayPost(false).catch((error: unknown) => {
+      if (error instanceof CloudSendError && error.code === "needs-attention") return "hold" as const;
+      throw error;
+    }) : "hold";
     const deliver = verdict === "post" || verdict === "post-no-wake";
     // Deciding took a request (the list read). If the app went to the background meanwhile, nothing is
     // posted or polled now; and the check is made again before each message, so none leaves after that moment.
