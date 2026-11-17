@@ -34,6 +34,25 @@ fn automation_completion_waits_for_a_followup_turn_already_open() {
 }
 
 #[test]
+fn deferred_automation_keeps_tab_working_until_reconciled() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "automation", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.manager.set_display_status(&mut rig.rt.lock().unwrap(), TabStatus::Completed);
+    rig.manager.automation_deferred_status(SESSION, TAB, true);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::InProgress);
+    assert!(rig.manager.idle_for(SESSION, TAB, Instant::now()).is_none());
+    rig.manager.automation_deferred_status(SESSION, TAB, false);
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::Completed);
+}
+
+#[test]
 fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
     let rig = Rig::new();
     for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {

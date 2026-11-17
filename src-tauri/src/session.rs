@@ -4423,8 +4423,29 @@ impl SessionManager {
     /// completion is delivered. Background work can also wake a later turn.
     pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
         let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
-        if runtime.lock().unwrap().turn_open { return true; }
+        {
+            let rt = runtime.lock().unwrap();
+            if rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
+                || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
+                || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
+            { return true; }
+        }
         self.background_work(session_id, tab_id).is_some()
+    }
+
+    /// A deferred automation still owns work while its CLI waits at a prompt.
+    /// Keep this status persisted so all windows and the idle reaper agree.
+    pub(crate) fn automation_deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return };
+        let mut rt = runtime.lock().unwrap();
+        if rt.turn_open || rt.stopping || !rt.pending.is_empty() || rt.recovery.is_some() { return; }
+        if !active && (!rt.queued.is_empty() || rt.held_queue.keeps_runtime_busy()
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))) { return; }
+        if active && rt.status == TabStatus::Completed {
+            self.set_display_status(&mut rt, TabStatus::InProgress);
+        } else if !active && rt.status == TabStatus::InProgress {
+            self.set_display_status(&mut rt, TabStatus::Completed);
+        }
     }
 
     /// Every running agent that has nothing to do, with how long it has had
