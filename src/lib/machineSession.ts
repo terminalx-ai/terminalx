@@ -11,11 +11,13 @@ import { createCloudTerminal, followCloudTerminals, sessionTerminals, syncCloudT
 import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
 import { machineAgentScope, useMachineProjects } from "@/lib/machineCatalog";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
+import { machineWorkspaceHost } from "@/lib/machineWorkspaceHost";
 import { agentPtyServed, cloudSessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
 import { setPrefs } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource } from "@/lib/workspaceFiles";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { machineProjectKey, machineProjectRoot, machineSectionKey, parseMachineKey, type RemotePath } from "@/types/target";
 import type { MachineConnectionState } from "@/types/machines";
 import type { SessionEntry, TabEntry } from "@/types/session";
@@ -250,6 +252,25 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     };
   }, [fileSource]);
 
+  // The session's worktree, removed on the machine (`workspace/1`, PRO-406): the chat offers it once its pull request
+  // has merged, and the removal dialog asks the machine for every check. None for a session in the project's own folder.
+  const worktreeName = ownSession?.worktreeName ?? null;
+  const worktreePath = ownSession?.cwd ?? "";
+  const removesWorktrees = manage && !!client?.hasCapability("workspace/1");
+  const removableWorkspace = useMemo<RemovableWorkspace | undefined>(
+    () =>
+      client && removesWorktrees && worktreeName
+        ? {
+            host: machineWorkspaceHost({ machineId, name, sessionId: runtimeSessionId, sessionKey: key, client }),
+            projectPath: projectKey,
+            // The machine's own path: only shown, or sent back to it.
+            path: worktreePath,
+            name: worktreeName,
+          }
+        : undefined,
+    [client, removesWorktrees, worktreeName, worktreePath, machineId, name, runtimeSessionId, key, projectKey],
+  );
+
   const followUps = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.followUps ?? [], [agents.tabs]);
   const settingsNotice = useCallback(
     (tabId: string) => {
@@ -390,8 +411,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     selectRepository: setPicked,
     gitSource,
     fileSource,
-    // Removing a session's worktree from here is a follow-up (docs/MACHINES.md "Session feature parity").
-    removableWorkspace: undefined,
+    removableWorkspace,
     machine: { machineId, projectId, record: machine, name, state: machineState },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
