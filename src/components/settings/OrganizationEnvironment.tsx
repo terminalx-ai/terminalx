@@ -552,7 +552,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                             )}
                           </div>
                         )}
-                        {version.state === "failed" && log?.versionId === version.id && (
+                        {version.state === "failed" && (
                           <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
                             {confirming === `retry:${version.id}` ? (
                               <>

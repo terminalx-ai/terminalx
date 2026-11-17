@@ -307,7 +307,7 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   expect(within(row).getByLabelText("Failed")).toBeTruthy();
   expect(row.textContent).toMatch(/Failed in install script/);
   expect(row.textContent).not.toMatch(/cloud_environment_install_failed/);
-  expect(within(row).queryByRole("button", { name: "Build again…" })).toBeNull();
+  expect(within(row).getByRole("button", { name: "Build again…" })).toBeTruthy();
   fireEvent.click(within(row).getByRole("button", { name: "View log" }));
   expect(environment.version).toHaveBeenCalledWith("version-3");
   expect(within(row).getByLabelText("Build log of version 3").textContent).toBe("Loading the log…");
@@ -318,6 +318,26 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   expect(environment.retry).not.toHaveBeenCalled();
   fireEvent.click(within(row).getByRole("button", { name: "Start build" }));
   await waitFor(() => expect(environment.retry).toHaveBeenCalledWith("version-3", true, "rev-1"));
+});
+
+it("retries a failed row without opening its log, only after confirmation", async () => {
+  const failed = version({ id: "version-3", number: 3, state: "failed", publication: null });
+  environment.status.mockResolvedValue(status({ versions: [failed, version()] }));
+  environment.retry.mockResolvedValue(version());
+  mount();
+  await settled();
+  const row = screen.getByLabelText("Version 3");
+  expect(within(row).queryByLabelText("Build log of version 3")).toBeNull();
+  expect(within(screen.getByLabelText("Version 2")).queryByRole("button", { name: "Build again…" })).toBeNull();
+  fireEvent.click(within(row).getByRole("button", { name: "Build again…" }));
+  expect(row.textContent).toMatch(/Build version 3's template again as a new version/);
+  expect(environment.retry).not.toHaveBeenCalled();
+  fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+  expect(environment.retry).not.toHaveBeenCalled();
+  fireEvent.click(within(row).getByRole("button", { name: "Build again…" }));
+  fireEvent.click(within(row).getByRole("button", { name: "Start build" }));
+  await waitFor(() => expect(environment.retry).toHaveBeenCalledWith("version-3", true, "rev-1"));
+  expect(environment.version).not.toHaveBeenCalled();
 });
 
 it("lists a recipe as a proposal with its five results shown separately and a failure shown as a failure", async () => {
