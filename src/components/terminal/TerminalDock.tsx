@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Plus, X } from "@/icons";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, Plus, Smartphone, X } from "@/icons";
+import { ConnectedDevices } from "@/components/pairing/ConnectedDevices";
+import { pairedDevices } from "@/components/pairing/PairedDevices";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { usePairing } from "@/lib/pairing";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { closeTerminal, dockPanes, openDockTerminal, selectSessionTab, useTerminals } from "@/lib/terminal";
 import { useSessionStore } from "@/lib/sessions";
@@ -51,6 +54,15 @@ function runDot(runs: ActionRun[]) {
 export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: string }) {
   const prefs = usePrefs();
   const open = prefs.panelTerminalOpen;
+  const pairing = usePairing();
+  const devices = pairedDevices(pairing.status.devices).filter((device) => device.connection);
+  const deviceCount = devices.length;
+  const deviceTabId = useId();
+  const devicePanelId = useId();
+  const showConnectedDevices = !open && deviceCount > 0;
+  const toggleLabel = open ? "Hide terminal" : showConnectedDevices
+    ? `Show Device tab (${deviceCount} connected ${deviceCount === 1 ? "phone" : "phones"})`
+    : "Show terminal";
   const terminals = useTerminals();
   const panes = dockPanes(sessionId, terminals.panes);
   const moved = panes.find((pane) => pane.id === terminals.active[sessionId])?.id;
@@ -64,12 +76,12 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
   const runs = actions.map((action) => actionRuns.get(action.id)).filter((run): run is ActionRun => !!run);
   // A workspace's own checkout runs setup; the project's folder does not.
   const setupHere = !!session && session.cwd !== session.projectPath;
-  /** "setup", "run", or a docked shell's pane id. */
+  /** A fixed tab or a docked shell's pane id. */
   const [picked, setPicked] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const current = panes.find((pane) => pane.id === picked) ?? panes.at(-1);
-  const view = picked === "setup" || picked === "run" ? picked : current ? "terminal" : "setup";
+  const view = picked === "setup" || picked === "run" || picked === "device" ? picked : current ? "terminal" : "setup";
   const showingSetup = view === "setup";
   const showingRun = view === "run";
   useEffect(() => {
@@ -96,13 +108,14 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
     }
   }, [sessionId, cwd, starting]);
 
-  const toggle = () => {
-    if (open) return setPrefs({ panelTerminalOpen: false });
-    if (!panes.length && !setup) return void add();
-    setPrefs({ panelTerminalOpen: true });
-  };
   const show = (tab: string) => {
     setPicked(tab);
+    setPrefs({ panelTerminalOpen: true });
+  };
+  const toggle = () => {
+    if (open) return setPrefs({ panelTerminalOpen: false });
+    if (showConnectedDevices) return show("device");
+    if (!panes.length && !setup && view !== "device") return void add();
     setPrefs({ panelTerminalOpen: true });
   };
   const setupMark = setupDot(setup);
@@ -144,8 +157,13 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
         />
       )}
       <div className="flex h-8 shrink-0 items-center gap-1 px-1.5">
-        <Button variant="ghost" size="icon-xs" aria-label={open ? "Hide terminal" : "Show terminal"} aria-expanded={open} onClick={toggle} className="text-muted-foreground">
+        <Button variant="ghost" size="icon-xs" aria-label={toggleLabel} title={showConnectedDevices ? toggleLabel : undefined} aria-expanded={open} onClick={toggle} className="relative shrink-0 text-muted-foreground">
           {open ? <ChevronDown /> : <ChevronUp />}
+          {showConnectedDevices && (
+            <span className="absolute -right-0.5 -top-0.5 rounded-sm bg-background text-add" aria-hidden="true">
+              <Smartphone className="size-3" />
+            </span>
+          )}
         </Button>
         <div role="tablist" aria-label="Terminals" className="flex h-full min-w-0 flex-1 items-stretch gap-3 overflow-x-auto pr-2">
           <button type="button" role="tab" aria-selected={open && showingSetup} title={setup ? setupStatus(setup) : "Setup"} onClick={() => show("setup")} className={tabClass(open && showingSetup)}>
@@ -185,6 +203,17 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
               </div>
             );
           })}
+          <button
+            id={deviceTabId}
+            type="button"
+            role="tab"
+            aria-selected={open && view === "device"}
+            aria-controls={open && view === "device" ? devicePanelId : undefined}
+            onClick={() => show("device")}
+            className={tabClass(open && view === "device")}
+          >
+            {deviceCount > 0 ? `Device · ${deviceCount}` : "Device"}
+          </button>
         </div>
         <WithTooltip label="New terminal">
           <Button variant="ghost" size="icon-xs" aria-label="New terminal" disabled={starting} onClick={() => void add()} className="text-muted-foreground">
@@ -203,6 +232,11 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
             ? <WorkspaceSetupPane key={setup.paneId} run={setup} />
             : <WorkspaceSetupPane sessionId={setupHere ? sessionId : undefined} script={project?.scripts?.setup} />)}
           {showingRun && <DockRun sessionId={sessionId} cwd={cwd} actions={actions} runs={actionRuns} />}
+          {view === "device" && (
+            <div id={devicePanelId} role="tabpanel" aria-labelledby={deviceTabId} className="h-full">
+              <ConnectedDevices devices={devices} busy={pairing.busy} error={pairing.status.lastError} />
+            </div>
+          )}
           {panes.map((pane) => (
             <div key={pane.id} className={cn("absolute inset-0", (view !== "terminal" || pane.id !== current?.id) && "invisible")}>
               {/* The terminal's own header row (title, Move to tab, Clear); the dock's row has no Move button of its own. */}

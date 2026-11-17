@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PRO-402 (design 06.01): the right panel's terminal dock always has the tabs
-// Setup, Run (with a status dot) and Terminal, with and without a setup run.
+// Setup, Run (with a status dot), Terminal and Device, with and without a setup run.
 // Setup shows the "After setup" label, the script in a mono block and the
 // last outcome with its duration and exit code, keeps Rerun, and keeps the
 // run's output reachable below; a docked shell has its own header row with
@@ -47,7 +47,7 @@ function setup({ withRun }) {
   });
 }
 
-/** The dock's three fixed tabs, by their own text (the dot has no text). */
+/** The dock's fixed tabs, by their own text (the dot has no text). */
 const tabs = (dock) => dock.getByRole("tablist", { name: "Terminals" }).getByRole("tab").allTextContents();
 
 /** Dock content that spills sideways, and visible pieces of the Setup pane that overlap each other. */
@@ -82,7 +82,7 @@ async function check(browser, url, colorScheme) {
   await dock.getByTestId("setup-empty").waitFor();
   await page.waitForTimeout(250);
   failed += report(`${colorScheme} without a setup run`, {
-    "tabs are Setup, Run, Terminal": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal"]),
+    "tabs are Setup, Run, Terminal, Device": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal", "Device"]),
     "Setup is shown": (await dock.getByRole("tab", { name: /^Setup/ }).getAttribute("aria-selected")) === "true",
     "Run has a status dot": (await dock.getByRole("tab", { name: /^Run/ }).getByRole("img", { name: "Not running" }).count()) === 1,
     "Setup says where to add the script": (await dock.getByTestId("setup-empty").innerText()).includes("Settings → Projects → Scripts"),
@@ -94,7 +94,7 @@ async function check(browser, url, colorScheme) {
   await dock.getByTestId("run-empty").waitFor();
   failed += report(`${colorScheme} Run without actions`, {
     "Run says where to add the script": (await dock.getByTestId("run-empty").innerText()).includes("Settings → Projects → Actions"),
-    "tabs stay Setup, Run, Terminal": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal"]),
+    "tabs stay Setup, Run, Terminal, Device": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal", "Device"]),
   });
   assert.deepEqual(errors, [], "no page errors");
   await page.close();
@@ -114,7 +114,7 @@ async function check(browser, url, colorScheme) {
 
   // The docked shell first: its own header row with one Move to tab, none on the dock's row.
   failed += report(`${colorScheme} docked shell`, {
-    "tabs are Setup, Run, Terminal": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal"]),
+    "tabs are Setup, Run, Terminal, Device": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal", "Device"]),
     "the shell has its header row": (await dock.getByTestId("terminal-header").count()) === 1,
     "one Move to tab, in the header": (await dock.getByRole("button", { name: "Move to tab" }).count()) === 1 && (await dock.getByTestId("terminal-header").getByRole("button", { name: "Move to tab" }).count()) === 1,
   });
@@ -127,7 +127,7 @@ async function check(browser, url, colorScheme) {
   const outcome = await pane.getByTestId("setup-outcome").innerText();
   const font = await pane.getByTestId("setup-script").evaluate((el) => getComputedStyle(el).fontFamily);
   failed += report(`${colorScheme} with a setup run`, {
-    "tabs are Setup, Run, Terminal": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal"]),
+    "tabs are Setup, Run, Terminal, Device": JSON.stringify(await tabs(dock)) === JSON.stringify(["Setup", "Run", "Terminal", "Device"]),
     "Setup has its outcome dot": (await dock.getByRole("tab", { name: /^Setup/ }).getByRole("img", { name: "Setup succeeded" }).count()) === 1,
     "Run's dot says running": (await dock.getByRole("tab", { name: /^Run/ }).getByRole("img", { name: "Running" }).count()) === 1,
     "AFTER SETUP label": (await pane.innerText()).includes("AFTER SETUP"),

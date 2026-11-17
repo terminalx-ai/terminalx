@@ -47,9 +47,9 @@ const tabNames = () => screen.getAllByRole("tab").map((tab) => tab.textContent);
 afterEach(cleanup);
 
 describe("the right panel's terminal dock", () => {
-  it("always has Setup, Run and Terminal, with where to add each script when there is none", () => {
+  it("always has Setup, Run, Terminal and Device, with where to add each script when there is none", () => {
     render(<TerminalDock sessionId="s1" cwd="/repo" />);
-    expect(tabNames()).toEqual(["Setup", "Run", "Terminal"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
     expect(screen.getByRole("img", { name: "Setup not run" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "Not running" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /^Setup/ }));
@@ -75,7 +75,7 @@ describe("the right panel's terminal dock", () => {
     setups.runs = [{ sessionId: "s1", paneId: "s1:workspace-setup-test", command: "bun install", status: "succeeded", exitCode: 0, error: null, hasPane: true }];
     setups.times = { "s1:s1:workspace-setup-test": { started: 1_000, finished: 15_000 } };
     view.rerender(<TerminalDock sessionId="s1" cwd="/repo" />);
-    expect(tabNames()).toEqual(["Setup", "Run", "Terminal"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
     fireEvent.click(screen.getByRole("tab", { name: /^Setup/ }));
     expect(screen.getByRole("img", { name: "Setup succeeded" })).toBeTruthy();
     expect(screen.getByTestId("setup-script").textContent).toBe("bun install");
@@ -117,7 +117,7 @@ describe("the right panel's terminal dock", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
     const [first, second] = pty.spawn.mock.calls.map(([id]) => id as string);
-    expect(tabNames()).toEqual(["Setup", "Run", "Terminal 1", "Terminal 2"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal 1", "Terminal 2", "Device"]);
     // The shell's own header row carries Move to tab; the dock's row has no Move button.
     expect(screen.getAllByTestId("terminal-view").every((view) => view.dataset.moveToTab === "true")).toBe(true);
     expect(screen.queryByRole("button", { name: /Move to/ })).toBeNull();
@@ -128,7 +128,7 @@ describe("the right panel's terminal dock", () => {
 
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Close Terminal 1" })));
     expect(pty.kill).toHaveBeenCalledWith(first);
-    expect(tabNames()).toEqual(["Setup", "Run", "Terminal"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
     expect(shown()).toEqual([second]);
   });
 
