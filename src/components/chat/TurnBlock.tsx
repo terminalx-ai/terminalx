@@ -4,7 +4,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "reac
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { ArrowLeftRight, Bookmark, Brain, Check, ChevronRight, CircleAlert, CircleX, Clock, Copy, Ellipsis, FileText, FolderGit2, GitFork, Image as ImageIcon, Keyboard, Loader2, Pencil, RefreshCw, RotateCcw, Send, Shrink, Square, Unmute, Users, X } from "@/icons";
+import { ArrowLeftRight, Bookmark, Brain, Check, ChevronRight, CircleAlert, CircleX, Clock, Copy, Ellipsis, FileText, FolderGit2, GitFork, Image as ImageIcon, Keyboard, Loader2, Navigation, Pencil, RefreshCw, RotateCcw, Send, Shrink, Square, Unmute, Users, X } from "@/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { canReadAloud, readAloud, stopReading, useReadingAloud } from "@/lib/readAloud";
 import { copyText } from "@/lib/clipboard";
@@ -71,6 +71,8 @@ interface TurnProps {
   /** What the turn details say for settings a turn's own record lacks. */
   turnFallback?: TurnFallback;
   onReset?: (endSeq: number) => void;
+  /** The agent's name, for what a message taken mid-turn says ("Codex reads it at its next tool call"). */
+  agent?: { id: string; name: string };
   /** When the agent started working on the running turn (ms): the working line counts up from it. */
   workingSince?: number;
   /** Send a failed turn's prompt again, as a new message; absent where that cannot be done. */
@@ -80,6 +82,7 @@ interface TurnProps {
 }
 
 function TurnBody({
+  agent,
   turn,
   sessionId,
   checkpointTabId,
@@ -115,7 +118,7 @@ function TurnBody({
   // Opened, the fold holds everything up to the last step, in the order it happened: the agent's words before and
   // between its steps stay where it said them. What it said after its last step is the answer, under the fold.
   const lastStep = work.reduce((last, w, i) => (outsideFold(w) ? last : i), -1);
-  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />;
+  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />;
 
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
@@ -443,7 +446,7 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
+function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string } }) {
   const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
@@ -455,7 +458,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
     case "tool_group":
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "message":
-      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} />;
+      // Taken while the agent worked (#551): steering, said above the bubble (PRO-380, 03.12).
+      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
       return (
         <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
@@ -632,7 +636,10 @@ function ReaderMessage({
   linkContext,
   className,
   onSendAgain,
+  steered,
 }: {
+  /** Said above a message the agent took mid-turn; the bubble is edged in blue and keeps its time inside. */
+  steered?: string;
   message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
@@ -642,11 +649,18 @@ function ReaderMessage({
   const layout = usePrefs().transcriptLayout;
   const section = useSearchSection(`message:${message.seq}`);
   return (
-    <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+    <div className={cn(className, "group/msg relative flex", steered ? cn("flex-col", layout === "chat" ? "items-end" : "items-stretch") : layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+      {steered && (
+        <p className="mb-1 flex items-center justify-end gap-1.5 text-[11px] text-info" data-testid="steered-note">
+          <Navigation aria-hidden className="size-[11px] shrink-0" />
+          {steered}
+        </p>
+      )}
       <div
         className={cn(
-          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl border border-hairline bg-card px-4 pt-3 pb-2 text-[14px] leading-relaxed",
+          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl border bg-card px-4 pt-3 pb-2 text-[14px] leading-relaxed",
           layout === "chat" ? "max-w-[min(85%,560px)]" : "w-full",
+          steered ? "border-info/40" : "border-hairline",
         )}
       >
         {message.images?.length ? (
@@ -730,6 +744,12 @@ function BubbleTime({ ts }: { ts?: string }) {
       </time>
     </div>
   );
+}
+
+/** What a message the agent took mid-turn says above it: Codex reads one at its next tool call. */
+export function steeringNote(agent?: { id: string; name: string }): string {
+  if (agent?.id === "codex") return `Sent mid-turn · ${agent.name} reads it at its next tool call`;
+  return agent ? `Sent mid-turn · ${agent.name} read it while it worked` : "Sent mid-turn";
 }
 
 /**

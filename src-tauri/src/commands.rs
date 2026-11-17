@@ -2507,6 +2507,12 @@ pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readin
     tauri::async_runtime::spawn_blocking(move || harness::readiness::check(&harness)).await.map_err(err)
 }
 
+/// The latest published release of an agent's CLI, or `None` when it cannot be told (PRO-377).
+#[tauri::command]
+pub async fn agent_latest_version(harness: String) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || harness::readiness::latest_version(&harness)).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ skills
 
 #[tauri::command]
@@ -3858,6 +3864,11 @@ pub async fn pr_create(cwd: String, title: String, body: String, base: Option<St
 #[tauri::command]
 pub async fn pr_merge(cwd: String, number: u64, method: String, url: Option<String>) -> CmdResult<()> {
     github_work(move || crate::github::merge_associated_pr(Path::new(&cwd), number, &method, url.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn pr_delete_branch(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
+    github_work(move || crate::github::delete_merged_branch(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -5648,7 +5659,6 @@ pub fn set_experimental_settings(
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
     local_vm_tasks: Option<bool>,
-    machines: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
@@ -5662,9 +5672,6 @@ pub fn set_experimental_settings(
     }
     if let Some(on) = local_vm_tasks {
         settings.experimental.local_vm_tasks = on;
-    }
-    if let Some(on) = machines {
-        settings.experimental.machines = on;
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)

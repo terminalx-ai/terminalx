@@ -117,7 +117,11 @@ describe("a message queued behind the running turn", () => {
   it("is the reader's message once the agent has taken it, with nothing left to send now", () => {
     const taken: Turn = { ...turn([]), live: true, work: [{ kind: "message", text: "use the staging config", key: "m9", seq: 9, author: { userId: "sam", displayName: "Sam" } }] };
     render(<TooltipProvider><TurnBlock turn={taken} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} /></TooltipProvider>);
-    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual([expect.stringContaining("what is this?"), "Samuse the staging config"]);
+    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual([expect.stringContaining("what is this?"), "Sent mid-turnSamuse the staging config"]);
+    // PRO-380: taken mid-turn, it says so above the bubble, in the agent's words when the chat knows the agent.
+    cleanup();
+    render(<TooltipProvider><TurnBlock turn={taken} sessionId="s" stream={[]} working agent={{ id: "codex", name: "Codex" }} /></TooltipProvider>);
+    expect(screen.getByTestId("steered-note").textContent).toBe("Sent mid-turn · Codex reads it at its next tool call");
     expect(screen.queryByTestId("queued-message")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });

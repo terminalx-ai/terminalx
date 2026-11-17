@@ -78,7 +78,7 @@ async function openScripts(page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const repositories = page.getByRole("group", { name: "Projects", exact: true });
   await repositories.getByRole("button", { name: "terminalx-server", exact: true }).click();
-  await page.getByRole("navigation", { name: "Project settings", exact: true }).getByRole("button", { name: "Scripts", exact: true }).click();
+  await page.getByRole("group", { name: "terminalx-server settings", exact: true }).getByRole("button", { name: "Scripts", exact: true }).click();
   await page.getByLabel("Setup script", { exact: true }).waitFor();
   await page.waitForTimeout(1000);
 }

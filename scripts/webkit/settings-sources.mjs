@@ -147,7 +147,7 @@ try {
     checks["subtitle"] = await filesView.getByText(/Edits made in an editor show up here within a second\./).isVisible();
     await settings.getByRole("button", { name: "More ways to open settings.json" }).click();
     const openMenu = page.getByRole("menu");
-    checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path"]);
+    checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
     await shoot(browser, page, "11.10-settings-files", mode);
     await openMenu.getByRole("menuitem", { name: "VS Code" }).click();
     await page.waitForFunction(() => window.__PW_CALLS__.some((call) => call[0] === "open_settings_file"));

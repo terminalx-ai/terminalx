@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // PRO-347: a session on a paired machine opens in the same session view as a
-// local or cloud one (screens 21.08 and 21.09), in the desktop's WebKit with
-// Experimental → Machines on.
+// local or cloud one (screens 21.08 and 21.09), in the desktop's WebKit.
 //
 // "Mac mini" (Direct) is paired, with one project and two sessions; its
 // runtime is stubbed as scripts/webkit/machine-sidebar.mjs does (PRO-346) and
@@ -26,7 +25,7 @@
 //   of this computer;
 // - Mac mini reconnecting: "Reconnecting to Mac mini" under the strips, and
 //   the composer can't send until it is back;
-// - nothing scrolls sideways; with Machines off the session is not shown.
+// - nothing scrolls sideways; with no machine paired the session is not shown.
 //
 // Pictures of each state go to MACHINE_SESSION_SHOTS when it is set (the PR
 // evidence puts them beside 21.08 and 21.09), named after the state.
@@ -46,16 +45,18 @@ const TITLE = "Add read markers to the catalog feed";
 const SEND_BUDGET_MS = 100;
 
 // Runs in the page, after the stub: Mac mini, its project and sessions, and its runtime.
-const fixture = (machines) => `(() => {
+const fixture = (paired) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   // This desktop's version, which the header compares with the machine's since PRO-352; the stub's generic plugin answer is not a string.
   answers["plugin:app|version"] = "0.2.33";
   answers.machines_list = [{ machineId: "m-mini", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5",
     directEndpoints: ["ws://192.168.1.20:6768/machine/1"], route: "relayAndNearby", pairedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: Date.now(), lastRoute: null, relay: null }];
   let view = { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.7:6768/machine/1" }, since: Date.now(), rttMs: 9 };
   answers.machines_connections = () => [{ machineId: "m-mini", state: view }];
+  // No machine paired (PRO-360): the app is as it was before Machines.
+  if (!${paired}) { answers.machines_list = []; answers.machines_connections = () => []; }
 
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const project = { projectId: "p-tx", name: "terminalx", path: "/Users/paresh/code/terminalx", kind: "git", defaultBranch: "main", archived: false };
@@ -330,12 +331,12 @@ for (const colorScheme of ["light", "dark"]) {
   await page.close();
 }
 
-// ---- Machines off: no machine session.
+// ---- No machine paired: no machine session (PRO-360).
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1280, height: 820 }, { extra: fixture(false) });
   await sidebar(page);
   await page.waitForTimeout(400);
-  failed += report("Machines off", {
+  failed += report("no machine paired", {
     "no machine session or strip": (await page.locator('[data-testid="machine-session-row"], [data-testid="machine-tab-strip"]').count()) === 0,
   });
   await page.close();

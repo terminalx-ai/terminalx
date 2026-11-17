@@ -602,3 +602,76 @@ async fn control_frames_prove_liveness_and_carry_the_pairing_hint() {
         .expect("the poll sees the channel close");
     server.abort();
 }
+
+/// PRO-368: through the runtime's registration the window sends the frames
+/// its own control connection sends.
+#[test]
+fn requests_through_the_runtime_are_the_windows_own_frames() {
+    let (respond, _) = oneshot::channel();
+    let invite = runtime_frame(&ControlCommand::CreateInvite { device_id: "phone-1".into(), share_expires_at: Some(42), respond }).unwrap();
+    assert_eq!(invite["type"], "invite-create");
+    assert_eq!(invite["relayDeviceId"], "phone-1");
+    assert_eq!(invite["sessionShare"], serde_json::json!({ "expiresAt": 42 }));
+    assert!(valid_request_id(invite["reqId"].as_str().unwrap()));
+    let revoke = runtime_frame(&ControlCommand::Revoke { device_id: "phone-1".into() }).unwrap();
+    assert_eq!((revoke["type"].as_str(), revoke["relayDeviceId"].as_str()), (Some("device-revoke"), Some("phone-1")));
+    assert_ne!(revoke["reqId"], invite["reqId"], "each request has its own id");
+    let (respond, _) = oneshot::channel();
+    let install = runtime_frame(&ControlCommand::InstallCredential {
+        req_id: "req-install".into(),
+        relay_device_id: "phone-1".into(),
+        new_resume_token_hash: "new-hash".into(),
+        expected_current_hash: Some("old-hash".into()),
+        authorization: DeviceCredentialInstallAuthorization::RelayBasis { basis_conn_id: "connection-1".into() },
+        respond,
+    })
+    .unwrap();
+    assert_eq!(
+        install,
+        serde_json::json!({
+            "type": "device-credential-install",
+            "v": 1,
+            "reqId": "req-install",
+            "relayDeviceId": "phone-1",
+            "newResumeTokenHash": "new-hash",
+            "expectedCurrentHash": "old-hash",
+            "authorization": { "mode": "relay-basis", "basisConnId": "connection-1" },
+        })
+    );
+    let (respond, _) = oneshot::channel();
+    let confirm = runtime_frame(&ControlCommand::ConfirmResume { req_id: "req-confirm".into(), basis_conn_id: "connection-1".into(), respond }).unwrap();
+    assert_eq!(confirm, serde_json::json!({ "type": "device-resume-confirm", "v": 1, "reqId": "req-confirm", "basisConnId": "connection-1" }));
+    assert!(runtime_frame(&ControlCommand::Shutdown).is_none());
+}
+
+/// The relay's replies through the runtime are checked as on the window's
+/// own connection: a valid invite reaches the caller, a `control-error`, an
+/// invalid reply or the runtime's own failure fails it.
+#[test]
+fn replies_through_the_runtime_are_checked_as_the_windows_own() {
+    let invite = |reply: Result<serde_json::Value>| {
+        let (respond, mut receive) = oneshot::channel();
+        answer_from_runtime(ControlCommand::CreateInvite { device_id: "phone-1".into(), share_expires_at: None, respond }, reply);
+        receive.try_recv().unwrap()
+    };
+    let token = general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
+    let created = invite(Ok(serde_json::json!({ "type": "invite-created", "reqId": "req-1", "inviteToken": token, "expiresAt": now_ms() + 60_000, "maxAttempts": 3 }))).unwrap();
+    assert_eq!(created.invite_token, token);
+    assert!(invite(Ok(serde_json::json!({ "type": "control-error", "reqId": "req-1", "code": "rate_limited" }))).is_err());
+    assert!(invite(Ok(serde_json::json!({ "type": "invite-created", "reqId": "req-1", "inviteToken": "short", "expiresAt": now_ms() + 60_000, "maxAttempts": 3 }))).is_err());
+    assert!(invite(Err(anyhow!("relay control is offline"))).is_err());
+
+    let (respond, mut receive) = oneshot::channel();
+    answer_from_runtime(
+        ControlCommand::ConfirmResume { req_id: "req-2".into(), basis_conn_id: "connection-1".into(), respond },
+        Ok(serde_json::json!({ "type": "device-resume-confirmed", "v": 1, "reqId": "req-2", "currentVersion": 2, "acceptedAs": "current", "renewed": true, "resumeExpiresAt": 1 })),
+    );
+    assert_eq!(receive.try_recv().unwrap().unwrap().current_version, 2);
+    // Another kind of reply to the same id is not this request's answer.
+    let (respond, mut receive) = oneshot::channel();
+    answer_from_runtime(
+        ControlCommand::ConfirmResume { req_id: "req-3".into(), basis_conn_id: "connection-1".into(), respond },
+        Ok(serde_json::json!({ "type": "device-credential-install-status-result", "v": 1, "reqId": "req-3", "state": "not-found" })),
+    );
+    assert!(receive.try_recv().unwrap().is_err());
+}

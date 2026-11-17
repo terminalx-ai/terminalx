@@ -270,6 +270,17 @@ impl PairingManager {
                 }
             }),
         );
+        // The relay's hint on the runtime's registration (PRO-368), as on the
+        // window's own: the account pairing grants changed.
+        let hinted = Arc::downgrade(self);
+        sink.listen(
+            crate::machine_wire::RELAY_HINT_EVENT,
+            Box::new(move |_| {
+                if let Some(relay) = hinted.upgrade().and_then(|manager| manager.current_relay()) {
+                    relay.signals.hint_pairing_changed();
+                }
+            }),
+        );
         let events = self.clone();
         sink.listen(
             "agent_event",

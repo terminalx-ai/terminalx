@@ -9,8 +9,7 @@ import { isArchived } from "@/lib/cloudLifecycle";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
-import { useExperimentalSettings } from "@/lib/experimentalSettings";
-import { allMachineSessions, getMachineCatalog, subscribeMachineCatalog, type MachineCatalogState, type MachineSessionRow } from "@/lib/machineCatalog";
+import { allMachineSessions, getMachineCatalog, subscribeMachineCatalog, type MachineSessionRow } from "@/lib/machineCatalog";
 import { cloudProjectKey, cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey } from "@/types/target";
 
 /**
@@ -22,8 +21,8 @@ import { cloudProjectKey, cloudWorkspaceKey, machineProjectKey, parseCloudWorksp
  *
  * Cloud sessions are read from the same projection as the dashboard: the
  * catalog and this desktop's caches. Filtering never attaches to, resumes or
- * wakes a workspace. With Experimental → Machines on, the sessions of paired
- * machines count too, as their catalog last knew them (PRO-346).
+ * wakes a workspace. The sessions of paired machines count too, as their
+ * catalog last knew them (PRO-346).
  *
  * The choice is kept per window and person (prefs), so it survives a relaunch and one
  * account's filter is never applied to another's sidebar.
@@ -108,13 +107,10 @@ export function machineDashboardSession(row: MachineSessionRow): DashboardSessio
   };
 }
 
-const NO_MACHINES: MachineCatalogState = { machines: {} };
-const quiet = () => () => undefined;
-
-/** The machines' catalog while Machines is on; nothing (and nothing read) while it is off. */
-function useMachineSessions(on: boolean): MachineSessionRow[] {
-  const catalog = useSyncExternalStore(on ? subscribeMachineCatalog : quiet, on ? getMachineCatalog : () => NO_MACHINES, on ? getMachineCatalog : () => NO_MACHINES);
-  return useMemo(() => (on && Object.keys(catalog.machines).length ? allMachineSessions() : []), [on, catalog]);
+/** The paired machines' sessions, as their catalog knows them; none while no machine is paired. */
+function useMachineSessions(): MachineSessionRow[] {
+  const catalog = useSyncExternalStore(subscribeMachineCatalog, getMachineCatalog, getMachineCatalog);
+  return useMemo(() => (Object.keys(catalog.machines).length ? allMachineSessions() : []), [catalog]);
 }
 
 export interface SidebarFilterState {
@@ -144,7 +140,7 @@ export function useSidebarFilter(): SidebarFilterState {
   const filter: SidebarFilter = (prefs.sidebarFilters[filterOwner(status)] as SidebarFilter | undefined) ?? "all";
   const selected = store.selectedSessionId;
   const { visibleIds } = useOrganizationVisibility();
-  const machineRows = useMachineSessions(useExperimentalSettings()?.machines === true);
+  const machineRows = useMachineSessions();
   return useMemo(() => {
     if (filter === "all" && !project) return { ...EVERYTHING, count: 0 };
     const sessions = new Set<string>();

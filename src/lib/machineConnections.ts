@@ -12,11 +12,11 @@ import type { MachineConnectionState, MachineConnectionView, PairedMachine } fro
  * The machines this computer paired with and how each is connected (PRO-345,
  * docs/MACHINES.md "As built (PRO-345)").
  *
- * While Experimental → Machines is on ({@link startMachineConnections}), every
- * paired machine is attached: the native side keeps one owner per machine that
+ * While a window holds {@link startMachineConnections}, every paired machine is
+ * attached: the native side keeps one owner per machine that
  * connects direct first, then through the relay, and reconnects on its own.
  * Each machine's state comes from `machines_connections` and then
- * `machines_connection_changed`. Turned off, the connections are closed and
+ * `machines_connection_changed`. When the window lets go, the connections are closed and
  * nothing here touches the network.
  */
 export interface MachineConnectionsState {
@@ -101,7 +101,7 @@ const AWAY = new Set<MachineConnectionState["state"]>(["reconnecting", "offline"
 /**
  * Whether a state change is a machine coming back (21.09's "Connected to Mac
  * mini" toast): a link after the machine was away, or after "Try again". The
- * first link of a launch, or of turning Machines on, is not news; nor is a
+ * first link of a launch, or of pairing a machine, is not news; nor is a
  * move between direct and the relay.
  */
 export function machineCameBack(before: MachineConnectionState | undefined, after: MachineConnectionState, triedAgain: boolean): boolean {
@@ -209,8 +209,8 @@ function detach(machineId: string) {
 
 /**
  * Attach every paired machine and keep them attached until the returned
- * stop is called by every holder (Experimental → Machines turned off, or the
- * window going away). The runtime keeps its sessions running either way.
+ * stop is called by every holder (the window going away). With no machine
+ * paired it only reads the empty list: nothing touches the network. The runtime keeps its sessions running either way.
  */
 export function startMachineConnections(): () => void {
   holders++;
@@ -224,7 +224,7 @@ export function startMachineConnections(): () => void {
     holders--;
     if (holders > 0) return;
     for (const machineId of Object.keys(state.connections)) detach(machineId);
-    // A machine's view is shown only while Machines is on.
+    // A machine's view is shown only while its connection is held.
     if (isMachineKey(getSessionStore().selectedCloudWorkspace)) selectCloudWorkspace(null);
   };
 }

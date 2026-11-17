@@ -52,18 +52,25 @@ export function TerminalViewSwitch({ session, tab }: { session: SessionEntry; ta
   );
 }
 
-export function WorkspacePanes({ session, selected, strip, selectionRequested, continuationOpen }: {
-  session: SessionEntry;
-  selected: SelectedSessionTab | null;
-  strip: boolean;
-  selectionRequested: boolean;
-  continuationOpen: boolean;
-}) {
+/** Shared with the header so switch placement follows the strips actually rendered. */
+export function useWorkspacePaneLayout(session: SessionEntry, selected: SelectedSessionTab | null, strip: boolean) {
   const row = useTabRow(session);
   const keys = row.tabs.map((tab) => tab.key);
   const selectedKey = selected ? tabKey(selected.kind, selected.id) : null;
   const panes = panesOf(row.layout, keys, selectedKey);
   const split = panes.length === 2;
+  return { row, keys, selectedKey, panes, split, showStrip: strip || split };
+}
+
+export function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen }: {
+  session: SessionEntry;
+  selected: SelectedSessionTab | null;
+  strip: boolean;
+  layout: ReturnType<typeof useWorkspacePaneLayout>;
+  selectionRequested: boolean;
+  continuationOpen: boolean;
+}) {
+  const { row, keys, selectedKey, panes, split, showStrip } = layout;
   const focused = panes.find((pane) => pane.tabs.includes(selectedKey ?? "")) ?? panes.find((pane) => pane.id === row.layout.focusedPane) ?? panes[0];
   const root = useRef<HTMLDivElement>(null);
   const [dragTarget, setDragTarget] = useState<"left" | "right" | null>(null);
@@ -125,7 +132,6 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
     const box = root.current!.getBoundingClientRect();
     return Math.max(0.2, Math.min(0.8, (x - box.left) / box.width));
   };
-  const showStrip = strip || split;
   return (
     <div ref={root} data-testid="workspace-panes" className="relative grid min-h-0 min-w-0 flex-1 overflow-hidden"
       style={{ gridTemplateColumns: split ? `minmax(0, ${ratio}fr) 5px minmax(0, ${1 - ratio}fr)` : "minmax(0, 1fr)", gridTemplateRows: showStrip ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)" }}>
