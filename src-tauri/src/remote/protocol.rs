@@ -101,7 +101,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -331,6 +331,14 @@ pub const METHODS: &[Method] = &[
     method("machine.cloneProject", "machine/6", Manage, false),
     method("machine.cloneStatus", "machine/6", Manage, false),
     method("machine.cloneCancel", "machine/6", Manage, false),
+    // PRO-403: a machine session's Setup and Run. What the session's project
+    // saved on the machine, read there; its runs are the machine runtime's
+    // own panes, listed by `pty.list` with the session and attached as any
+    // terminal. Starting, rerunning or stopping one is the machine's to do.
+    method("machine.sessionActions", "machine/7", Participate, false),
+    method("machine.runAction", "machine/7", Manage, false),
+    method("machine.setupRerun", "machine/7", Manage, false),
+    method("machine.setupStop", "machine/7", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -362,6 +370,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
         "machine/5" => &["machine.rotateCredential"],
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
+        "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }

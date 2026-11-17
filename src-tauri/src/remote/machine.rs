@@ -49,6 +49,11 @@ pub const MACHINE_5: &str = "machine/5";
 /// `machine_projects.rs`).
 pub const MACHINE_6: &str = "machine/6";
 
+/// `machine/7` (PRO-403): `machine.sessionActions`, `machine.runAction`,
+/// `machine.setupRerun` and `machine.setupStop`, a machine session's Setup
+/// and Run from another computer (docs/MACHINES.md, "As built (PRO-403)").
+pub const MACHINE_7: &str = "machine/7";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).

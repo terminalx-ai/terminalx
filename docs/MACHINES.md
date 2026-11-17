@@ -846,6 +846,10 @@ the pull request that adds it.
 | `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
 | `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
 | `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
+| `machine.sessionActions` | `machine/7` | Served | Names a session; its project's saved actions, preview URLs and setup script as the machine has them, its ports and its setup run (PRO-403, [Setup and Run](#as-built-pro-403-setup-and-run-in-a-machine-session)) |
+| `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
+| `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
+| `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -2044,7 +2048,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
 | Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
 | Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
-| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); the dock's Setup and Run tabs, each action's run a dock tab; previews open through a forward | PRO-403 |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
 | Header branch button: diff size, Create PR | Follow-up | PRO-404 |
@@ -2087,6 +2091,63 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
+
+### As built (PRO-403): Setup and Run in a machine session
+
+A local session's Run menu, Open button, restart offer and the dock's Setup
+and Run tabs read the project's scripts from this computer's settings and run
+them here. A machine session (screen 21.08 shows Setup and Run beside the
+machine's terminal) has all of them, and everything is the machine's.
+
+`machine/7` adds four methods. Only a runtime that serves its machine grants
+it; reading is open to whoever sees the session, running is the manager's.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.sessionActions` | `{ sessionId }` | `{ actions, previewUrls, setupScript, setupApplies, available, ports, setup }` |
+| `machine.runAction` | `{ sessionId, actionId, restart? }` | `{ started, run: { actionId, name, ptyId, state, exitCode }, terminal }` |
+| `machine.setupRerun` | `{ sessionId }` | `{ setup }` |
+| `machine.setupStop` | `{ sessionId, paneId }` | `{ setup }` |
+
+- **Read on the machine.** `actions` and `previewUrls` are the project's in
+  the machine's `projects.json`; `setupScript` is what the machine would run
+  (its project store, or the repository layers it trusts). Nothing is read
+  from this computer's settings, and the empty states say to save scripts on
+  the machine. `ports` is the session's port block there: a preview's `$PORT`
+  is the machine's port.
+- **Run on the machine.** `machine.runAction` and the setup calls go through
+  the machine runtime's own `action_runner` and `workspace_setup`, exactly as
+  its own window's Run menu does: in the session's folder there, with its
+  environment layers, `TERMINALX_PORT`/`TERMINALX_PORTS` and
+  `TERMINALX_ACTION_ID`. A non-concurrent action already running answers
+  `started: false` with that run; `restart` stops it and starts it again.
+  Its own "Run after setup" starts there too. Nothing runs on this computer.
+- **Runs are terminals.** Each run is the runtime's pane
+  (`<session>:action-…`, `<session>:workspace-setup-…`). The machine's
+  protocol server records it from its first byte, as an agent's terminal, and
+  `pty.list` lists it with its session and a `run`
+  (`{ kind: "action", actionId, name }` or `{ kind: "setup" }`); `pty.attach`,
+  `pty.write`, `pty.resize` and `pty.control` work on it as on any terminal.
+  The caller who started a run controls it. A run found already exited is
+  given what the runtime kept of its output; one still running that started
+  before the server existed shows its output from when it was first seen. It
+  is never counted against `MAX_PTYS` and an eviction drops only this record,
+  not the runtime's pane; `pty.kill` on an action's run ends it, and on the
+  setup's is refused (`machine.setupStop` stops it).
+- **The desktop.** `useMachineSessionRuns` (`src/lib/machineRuns.ts`) reads
+  `machine.sessionActions` on each connect, again whenever a run starts or
+  ends, and every 2 s while setup is going. The header's Run menu and Open
+  button are the local `RunControls` over that source; the restart offer is
+  the same strip. The dock (`MachineTerminalDock`) has Setup and Run first,
+  then the machine's shells, then each action's run as a tab named by its
+  action; the setup's terminal shows inside Setup. A machine without
+  `machine/7` shows no Run menu, and Setup and Run say in one line to update
+  it ("Setup and Run scripts" in `MACHINE_FEATURES`).
+- **Previews.** A preview URL on the machine itself (a loopback host) opens
+  in TerminalX's built-in browser through a forward of that port (`ports/1`,
+  PRO-355), made when there is none; with Forwarding off, or a machine
+  without `ports/1`, it is not opened and says why. Any other URL opens as
+  it is. No path of the machine is opened on this computer.
 
 ### As built (PRO-348): a new session on a machine
 
