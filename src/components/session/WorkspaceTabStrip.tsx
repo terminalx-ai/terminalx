@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, TerminalSquare, TriangleAlert, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, ScrollText, TerminalSquare, TriangleAlert, X } from "@/icons";
+import { isFailingCheck } from "@/lib/checks";
 import { AgentMark } from "@/components/AgentMark";
 import { fileChipIcon } from "@/components/chat/FileChip";
 import { StatusStripe } from "@/components/layout/SidebarRows";
@@ -47,7 +48,8 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
   if (tab.kind === "review" && tab.editor.kind === "attachment") { const Icon = fileChipIcon(tab.editor.name); return <Icon className={className} />; }
   if (tab.kind === "review") return tab.editor.kind === "diff" ? <FileDiff className={className} />
-    : tab.editor.kind === "conflict" ? <TriangleAlert className={cn(className, "text-warning")} aria-label="Merge conflict" /> : <GitPullRequest className={className} />;
+    : tab.editor.kind === "conflict" ? <TriangleAlert className={cn(className, "text-warning")} aria-label="Merge conflict" />
+    : tab.editor.kind === "checkLog" ? <ScrollText className={cn(className, isFailingCheck(tab.editor.check) && "text-destructive")} aria-label="Check log" /> : <GitPullRequest className={className} />;
   const agent = peerAgent(tab);
   if (agent) return <AgentMark id={agent} className={className} decorative />;
   return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
