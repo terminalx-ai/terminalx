@@ -440,6 +440,21 @@ describe("the tab's agent account", () => {
     expect(document.querySelector('[data-tab="t-codex"]')!.textContent).toBe("");
   });
 
+  // PRO-408: a machine session's tab names what the machine says, never this computer's account.
+  it("names a machine session's tab by the account its machine names, and this computer's accounts say nothing of it", async () => {
+    act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
+    marks([
+      tab("claude", { id: "t-on-machine", accountLabel: "ops@acme.dev · team" }),
+      // One account there: nothing, even though this computer has two for Claude Code.
+      tab("claude", { id: "t-one-there", accountLabel: null }),
+    ]);
+    await flush();
+    expect(screen.getAllByTestId("tab-account-mark").map((mark) => mark.getAttribute("aria-label"))).toEqual(["On ops@acme.dev · team"]);
+    expect(screen.getByTestId("tab-account-mark").textContent).toBe("O");
+    expect(screen.getAllByTestId("tab-account-label").map((label) => label.textContent)).toEqual(["ops@acme.dev · team"]);
+    expect(document.querySelector('[data-tab="t-one-there"]')!.textContent).toBe("");
+  });
+
   it("marks the agent tabs in the workspace's row of tabs, and not a cloud session's", async () => {
     act(() => takeAgentAccounts({ agent: "claude", accounts: [account("claude", "local", "This Mac's login"), account("claude", WORK, "Work · Max")], defaultAccount: "local", projectDefaults: {} }));
     act(() => takeAgentAccounts({ agent: "codex", accounts: [account("codex", "local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} }));

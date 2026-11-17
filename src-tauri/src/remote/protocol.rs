@@ -101,7 +101,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -331,6 +331,13 @@ pub const METHODS: &[Method] = &[
     method("machine.cloneProject", "machine/6", Manage, false),
     method("machine.cloneStatus", "machine/6", Manage, false),
     method("machine.cloneCancel", "machine/6", Manage, false),
+    // PRO-408: a machine session's cost, Continue in a new tab and Fix check
+    // errors. Reading usage and a continuation's context is a participant's
+    // read; reading check logs runs `gh` and writes a file there, so it is
+    // the manager's. None is replayed: each reads the moment.
+    method("session.usage", "machine/7", Participate, false),
+    method("session.prepareContinuation", "machine/7", Participate, false),
+    method("session.checkFailures", "machine/7", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -361,6 +368,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/3" => &["machine.updateStatus", "machine.update"],
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
         "machine/5" => &["machine.rotateCredential"],
+        "machine/7" => &["session.usage", "session.prepareContinuation", "session.checkFailures"],
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
@@ -730,6 +738,22 @@ mod tests {
         for code in ["update_confirm", "update_busy", "update_unavailable"] {
             assert_eq!(leak_code(code), code);
         }
+    }
+
+    /// PRO-408: `machine/7` is offered by a machine only; reading usage and
+    /// a continuation is a participant's, reading check logs the manager's.
+    #[test]
+    fn machine_7_is_a_machines_session_parity_only() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/7"));
+        assert!(!workspace.contains(&"machine/7"));
+        for (name, authority) in [("session.usage", Participate), ("session.prepareContinuation", Participate), ("session.checkFailures", Manage)] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("machine/7", authority, false), "{name}");
+            assert!(namespace_prefixes("machine/7").contains(&name), "{name}");
+        }
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/6"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/6"], "an older desktop is not handed machine/7");
     }
 
     /// PRO-351: `machine/6` is offered by a machine only, and every one of

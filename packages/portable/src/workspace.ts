@@ -83,8 +83,11 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * for the paired computer.
  * `machine/6` (PRO-351): browse the machine's folders, add, clone and remove
  * its projects (docs/MACHINES.md "As built (PRO-351)").
+ * `machine/7` (PRO-408): `session.usage`, `session.prepareContinuation` and
+ * `session.checkFailures`, a machine session's cost chip, Continue in a new
+ * tab and Fix check errors read and done on the machine.
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -104,6 +107,9 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.cloneProject": "machine/6",
   "machine.cloneStatus": "machine/6",
   "machine.cloneCancel": "machine/6",
+  "session.usage": "machine/7",
+  "session.prepareContinuation": "machine/7",
+  "session.checkFailures": "machine/7",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -410,6 +416,52 @@ export interface RuntimeSessionTab {
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
   hasMessages?: boolean;
+  /** Tokens and estimated cost by model as of its last turn end (PRO-273); absent until one is read. */
+  usage?: RuntimeTabUsage | null;
+  /** On a machine (`machine/7`): the account the tab runs on, only when its agent has several there. */
+  accountLabel?: string | null;
+}
+
+/** One model's tokens in a tab or session. `costUsd` is the API list price; `null` when the model has no price. */
+export interface RuntimeModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+}
+
+export interface RuntimeTabUsage {
+  models: RuntimeModelUsage[];
+  updated: string;
+}
+
+/** A usage window of an agent's login, as the runtime reads it. */
+export interface RuntimeUsageWindow {
+  agent: "claude" | "codex";
+  key: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+  windowMinutes: number | null;
+  updatedAt: number;
+  stale: boolean;
+  source?: string;
+}
+
+/** `session.usage` (`machine/7`): what `terminalx sessions usage` reports there, how each agent signs in there, and its usage windows. */
+export interface RuntimeSessionUsage {
+  usage: {
+    sessionId: string;
+    title: string;
+    tabs: { tabId: string; title?: string | null; agent: string; models: RuntimeModelUsage[]; updated: string }[];
+    models: RuntimeModelUsage[];
+    estimate: true;
+  };
+  /** By agent: "Claude account", "ChatGPT account", "API key", or `null` when not known or mixed. */
+  loginMethods: Record<string, string | null>;
+  windows: RuntimeUsageWindow[];
 }
 
 /** `workspace.remove`: the sessions that went with the worktree, and what became of its branch. */
@@ -1451,6 +1503,24 @@ export class WorkspaceRpcClient {
   ): Promise<{ sessionId: string; tabId: string; session: RuntimeSession; tab?: AgentTabInfo | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.addTab", { sessionId, ...defined });
+  }
+
+  /** `session.usage` (`machine/7`): the session's usage, read again on the machine. */
+  sessionUsage(sessionId: string): Promise<RuntimeSessionUsage> {
+    this.assertCapability("machine/7", "session.usage");
+    return this.call("session.usage", { sessionId });
+  }
+
+  /** `session.prepareContinuation` (`machine/7`): a tab's context for Continue in a new tab, with the machine's own paths. */
+  prepareContinuation(sessionId: string, tabId: string): Promise<import("./continuation").ContinuationContext> {
+    this.assertCapability("machine/7", "session.prepareContinuation");
+    return this.call("session.prepareContinuation", { sessionId, tabId });
+  }
+
+  /** `session.checkFailures` (`machine/7`, manage only): a pull request's failed check logs, saved on the machine for the tab's agent to read. */
+  checkFailures(sessionId: string, tabId: string, prUrl: string): Promise<{ path: string; truncated: boolean }> {
+    this.assertCapability("machine/7", "session.checkFailures");
+    return this.call("session.checkFailures", { sessionId, tabId, prUrl });
   }
 
   /**

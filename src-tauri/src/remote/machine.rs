@@ -49,6 +49,12 @@ pub const MACHINE_5: &str = "machine/5";
 /// `machine_projects.rs`).
 pub const MACHINE_6: &str = "machine/6";
 
+/// `machine/7` (PRO-408): `session.usage`, `session.prepareContinuation` and
+/// `session.checkFailures`, a machine session's cost chip, Continue in a new
+/// tab and Fix check errors read and done on the machine (docs/MACHINES.md
+/// "Session feature parity"; `machine_session.rs`).
+pub const MACHINE_7: &str = "machine/7";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
