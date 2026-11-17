@@ -55,7 +55,12 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
   );
 }
 
-/** Draws the question `confirmInApp` is waiting on. Mounted once per window. */
+/**
+ * Draws the question `confirmInApp` is waiting on. Mounted once per window.
+ *
+ * Two questions are not asked here. Quitting is asked from Rust, which may have no window to draw in (PRO-455).
+ * Cloud control's agreement is a system alert on purpose: an agent driving this web view must not be able to give it.
+ */
 export function ConfirmDialogHost() {
   const pending = usePendingConfirm();
   if (!pending) return null;

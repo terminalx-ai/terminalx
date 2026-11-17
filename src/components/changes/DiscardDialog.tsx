@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import type { GitSource } from "@/lib/gitSource";
-import type { ChangeStatus } from "@/types/session";
+import type { ChangedFile, ChangeStatus } from "@/types/session";
 
 /** The file a discard is asked about: its path, and what the list knows of its change. */
 export interface DiscardTarget {
@@ -34,6 +34,26 @@ export function discardSummary(file: DiscardTarget, base?: string | null): strin
   if (file.status === "added") what += " The file is not in that version, so it is deleted.";
   else if (file.oldPath) what += ` It goes back to ${file.oldPath}.`;
   return `${what} This can’t be undone.`;
+}
+
+/**
+ * What discarding `path` from the working tree undoes. A discard puts the index and the file both back to the last
+ * commit, so it is described from both sides of the index, not from whichever list the row came from.
+ *
+ * A file on one side only is that record: its counts are the file's against the last commit. A file on both sides
+ * (staged, then edited again) has no such count: the staged one is commit to index and the other index to file, and
+ * neither is what goes back. None is claimed then, and what the index knows is kept: a file staged as new is not in
+ * the last commit, so it is deleted, and a staged rename is undone to its old path.
+ */
+export function workingDiscardTarget(path: string, staged: ChangedFile[], unstaged: ChangedFile[]): DiscardTarget | null {
+  const inIndex = staged.find((file) => file.path === path);
+  const inTree = unstaged.find((file) => file.path === path);
+  if (!inIndex || !inTree) return inIndex ?? inTree ?? null;
+  return {
+    path,
+    oldPath: inIndex.oldPath ?? inTree.oldPath,
+    status: inIndex.status === "added" || inIndex.status === "renamed" ? inIndex.status : "modified",
+  };
 }
 
 /** Shared by the file list and the diff header. The base is exactly the one being reviewed. */

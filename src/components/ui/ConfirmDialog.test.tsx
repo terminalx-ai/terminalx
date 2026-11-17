@@ -55,6 +55,23 @@ describe("the app's confirmation dialog", () => {
     expect(await answer).toBe("alternative");
   });
 
+  // The card does not hold the window as a system alert did: the same shortcut pressed again asks the same thing.
+  it("does not queue a question that is already waiting; the repeat is declined and the first asker acts once", async () => {
+    render(<ConfirmDialogHost />);
+    const request = { title: "Close a.ts without saving?", body: "Its unsaved changes are lost.", action: "Discard", cancel: "Keep editing", destructive: true };
+    const { answer: first } = await asking(() => confirmInApp(request));
+    const { answer: repeat } = await asking(() => confirmInApp({ ...request }));
+    expect(await repeat).toBe(false);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" })); });
+    expect(await first).toBe(true);
+    // Nothing came back for the repeat, and the same question can be asked afresh once it is answered.
+    expect(pendingConfirm()).toBeNull();
+    const { answer: later } = await asking(() => confirmInApp(request));
+    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Keep editing" })); });
+    expect(await later).toBe(false);
+  });
+
   it("asks one question at a time, in the order they were asked", async () => {
     render(<ConfirmDialogHost />);
     const { answer: first } = await asking(() => confirmInApp({ title: "First?", action: "Yes" }));

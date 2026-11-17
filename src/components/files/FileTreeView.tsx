@@ -11,7 +11,7 @@ import { openDiff, openFile, useEditors } from "@/lib/editors";
 import { showError } from "@/lib/errorToasts";
 import { localGitSource } from "@/lib/gitSource";
 import { runShortcut } from "@/lib/hotkeys";
-import { DiscardDialog } from "@/components/changes/DiscardDialog";
+import { DiscardDialog, workingDiscardTarget, type DiscardTarget } from "@/components/changes/DiscardDialog";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource, type SourceEntry } from "@/lib/workspaceFiles";
 import { cn } from "@/lib/cn";
 import { isContextMenuKey, openContextMenu } from "@/lib/contextMenu";
@@ -161,7 +161,7 @@ function RootedFileTreeView({
   // The filter field shows only while the header's filter button is on.
   const [filterOpen, setFilterOpen] = useState(false);
   const [creating, setCreating] = useState<{ parent: string; name: string; error: string | null; busy: boolean } | null>(null);
-  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
+  const [discarding, setDiscarding] = useState<DiscardTarget | null>(null);
   // The whole list for the filter, by the tree's own rules; `truncated` when the cap cut it.
   const [allFiles, setAllFiles] = useState<{ paths: string[]; truncated: boolean } | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -756,7 +756,7 @@ function RootedFileTreeView({
                   {!row.isDir && git?.discard && (
                     <>
                       <ContextMenuSeparator />
-                      <ContextMenuItem destructive disabled={!status || !!row.escapes} onSelect={() => setDiscarding({ path: row.path, oldPath: oldPaths.get(row.path) })}>
+                      <ContextMenuItem destructive disabled={!status || !!row.escapes} onSelect={() => setDiscarding(workingDiscardTarget(row.path, localChanges.staged, localChanges.unstaged) ?? { path: row.path, oldPath: oldPaths.get(row.path), status })}>
                         <Undo2 /> Discard changes
                       </ContextMenuItem>
                     </>

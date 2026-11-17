@@ -33,8 +33,19 @@ let nextId = 0;
 const listeners = new Set<() => void>();
 const emit = () => { for (const listener of listeners) listener(); };
 
-/** Ask, and resolve to the button pressed. One question is on screen at a time; later ones wait their turn. */
+const same = (one: ConfirmRequest, other: ConfirmRequest) =>
+  one.title === other.title && one.body === other.body && one.action === other.action && one.cancel === other.cancel
+  && one.alternative === other.alternative && !!one.destructive === !!other.destructive;
+
+/**
+ * Ask, and resolve to the button pressed. One question is on screen at a time; later ones wait their turn.
+ *
+ * A system alert held the window; this card does not stop the shortcuts behind it, so the same key pressed again
+ * asks the same thing again. A question already waiting is not queued a second time: the repeat is answered
+ * "cancel" at once and the first asker alone acts on the answer, so nothing is asked about, or done, twice.
+ */
 export function chooseInApp(request: ConfirmRequest): Promise<ConfirmAnswer> {
+  if (queue.some((entry) => same(entry.request, request))) return Promise.resolve("cancel");
   return new Promise((resolve) => {
     queue = [...queue, { id: ++nextId, request, settle: resolve }];
     emit();
