@@ -6,6 +6,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
 import { useAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
+import { compareAgentVersions } from "@/lib/agentVersion";
 import { setupActive, useAgentSetupFlow, type AgentSetupFlow } from "@/lib/agentSetupFlow";
 import {
   agentLogins, keepLine, KEY_PAGES, showAgentLoginNotice, tabsKeepingOlderLogin, takesApiKey, useAgentLogin,
@@ -350,21 +351,10 @@ function useLatestVersion(harness: string, version: string | null): string | nul
   return latest;
 }
 
-/** Whether `a` is a later release than `b`, by their numeric parts. */
-function laterRelease(a: string, b: string): boolean {
-  const parts = (v: string) => v.split(/[.+-]/).map((part) => Number.parseInt(part, 10));
-  const [x, y] = [parts(a), parts(b)];
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const [p, q] = [x[i] ?? 0, y[i] ?? 0];
-    if (Number.isNaN(p) || Number.isNaN(q)) return false;
-    if (p !== q) return p > q;
-  }
-  return false;
-}
-
-/** "2.3.41 · up to date", or the newer release when there is one; the version alone when the latest is not known. */
+/** Show the version alone when release precedence is unknown. */
 function VersionLine({ version, latest }: { version: string; latest: string | null }) {
-  const note = !latest ? null : latest === version || !laterRelease(latest, version) ? "up to date" : `${latest} available`;
+  const comparison = latest === null ? null : compareAgentVersions(latest, version);
+  const note = comparison === null ? null : comparison > 0 ? `${latest} available` : "up to date";
   return <>{version}{note && <span className="text-faint"> · {note}</span>}</>;
 }
 
