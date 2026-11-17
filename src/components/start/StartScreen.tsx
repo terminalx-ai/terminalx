@@ -10,14 +10,14 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { useAccount } from "@/lib/account";
-import { READINESS_LABELS, useAgentReadiness, useAllSignedOut, useKnownReadiness, type AgentReadiness } from "@/lib/agentReadiness";
+import { READINESS_LABELS, checkAgentReadiness, startingAgent, useAgentReadiness, useAllSignedOut, useKnownReadiness, type AgentReadiness } from "@/lib/agentReadiness";
 import { setupActive, startAgentSetup, useAgentSetupFlows } from "@/lib/agentSetupFlow";
 import { errorMessage } from "@/lib/api";
 import { onAppResume } from "@/lib/appResume";
 import { cn } from "@/lib/cn";
 import { chooseMode } from "@/lib/dialogs";
 import { registerFileDropTarget } from "@/lib/fileDrop";
-import { setPrefs, usePrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { START_ACTIONS, attachProject, projectStartDialogOpen, type StartAction } from "@/lib/projectStart";
 import { REPO_URL } from "@/lib/repo";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
@@ -116,7 +116,6 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
   const stage = noAgent || settingUp || signedOut ? "agent" : "project";
   // Step 1 is done only on an answer: an agent that is installed and whose login was found.
   const ready = installed.some((id) => answers[id]?.state === "ready");
-  const starts = newChatAgent(store.harnesses, answers, prefs.lastAgent);
 
   // While an agent is being set up, one installed in a terminal of the reader's own shows when they come
   // back: each card asks about its login again by itself, and this is what says the agent is there at all.
@@ -214,7 +213,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
               </Step>
             )}
 
-            <PermissionStep saved={prefs.lastMode} agent={starts} />
+            <PermissionStep saved={prefs.lastMode} savedAgent={prefs.lastAgent} harnesses={store.harnesses} />
           </div>
 
           {error && (
@@ -299,20 +298,6 @@ function StartAgent({ harness }: { harness: HarnessInfo }) {
   );
 }
 
-/**
- * The agent a new chat would start with now, as New Session picks it: one whose
- * login was found, else one whose login could not be told, the saved agent
- * first among them; with no answer yet, the saved agent if it is installed,
- * else the first that is. `null` while none is installed.
- */
-function newChatAgent(harnesses: readonly HarnessInfo[], answers: Readonly<Record<string, AgentReadiness>>, saved: string | undefined): HarnessInfo | null {
-  const installed = harnesses.filter((harness) => harness.available);
-  const inState = (state: AgentReadiness["state"]) => installed.filter((harness) => answers[harness.id]?.state === state);
-  const [ready, unknown] = [inState("ready"), inState("unknown")];
-  const candidates = ready.length ? ready : unknown.length ? unknown : installed;
-  return candidates.find((harness) => harness.id === saved) ?? candidates[0] ?? null;
-}
-
 /** What an agent's line says after its name: the login found and whose, or how far it has got. */
 function agentLine(harness: HarnessInfo, answer: AgentReadiness | null): string {
   if (!harness.available) return READINESS_LABELS.missing;
@@ -355,17 +340,41 @@ function AgentLine({ harness, answer }: { harness: HarnessInfo; answer: AgentRea
  * Step 3: the permission mode new chats start in (`prefs.lastMode`), the same
  * choice as the picker in a new session, read the way a new chat reads it.
  *
- * Bypass asks first, in the terms of `agent`, the one a new chat would start
- * with: its flag and what that flag turns off differ by agent (Codex loses its
- * sandbox too). With no agent installed there is none to name, so Bypass waits
- * until one is.
+ * Bypass asks first, in the terms of the agent a new chat would start with:
+ * its flag and what that flag turns off differ by agent (Codex loses its
+ * sandbox too). Which agent that is takes every installed agent's answer, the
+ * way New Session finds it (`startingAgent`); Home asks about one agent at
+ * most, so the pick of Bypass asks about them all, then and only then. While
+ * no agent can start a chat there is none to name, and Bypass waits.
  */
-function PermissionStep({ saved, agent }: { saved: string; agent: HarnessInfo | null }) {
+function PermissionStep({ saved, savedAgent, harnesses }: { saved: string; savedAgent: string; harnesses: readonly HarnessInfo[] }) {
   const mode = pickerMode(saved) ?? pickerMode(FIRST_RUN_PERMISSION_MODE)!;
   const safe = mode.id === FIRST_RUN_PERMISSION_MODE;
-  const choose = (id: string) => {
-    if (id === BYPASS_MODE && !agent) return;
-    chooseMode(agent?.id ?? "", id, (picked) => setPrefs({ lastMode: picked }));
+  const installed = harnesses.filter((harness) => harness.available);
+  const [asking, setAsking] = useState(false);
+  // Bypass was picked while every installed agent is signed out.
+  const [held, setHeld] = useState(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const apply = (picked: string) => setPrefs({ lastMode: picked });
+  const choose = async (id: string) => {
+    setHeld(false);
+    // Every other mode applies itself, and so does Bypass once the reader said not to be asked again.
+    if (id !== BYPASS_MODE || getPrefs().bypassConfirmed) {
+      chooseMode("", id, apply);
+      return;
+    }
+    if (!installed.length) return;
+    setAsking(true);
+    const answers = Object.fromEntries(await Promise.all(installed.map(async (harness) => [harness.id, await checkAgentReadiness(harness.id)] as const)));
+    if (!alive.current) return;
+    setAsking(false);
+    const agent = startingAgent(installed, answers, savedAgent);
+    if (agent) chooseMode(agent.id, id, apply);
+    else setHeld(true);
   };
   return (
     <Step
@@ -380,17 +389,19 @@ function PermissionStep({ saved, agent }: { saved: string; agent: HarnessInfo | 
             <button
               type="button"
               aria-label={`Permissions: ${mode.label}`}
+              aria-busy={asking || undefined}
+              disabled={asking}
               data-testid="start-permissions"
-              className="flex h-8 min-w-[150px] items-center justify-between gap-3 rounded-md border border-border bg-card px-2.5 text-[12.5px] outline-none transition-colors hover:bg-veil-raised focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+              className="flex h-8 min-w-[150px] items-center justify-between gap-3 rounded-md border border-border bg-card px-2.5 text-[12.5px] outline-none transition-colors hover:bg-veil-raised focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60"
             >
               <span className="truncate">{mode.label}</span>
               <ChevronsUpDown aria-hidden className="size-3 shrink-0 text-faint" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[17rem]">
-            <DropdownMenuRadioGroup value={mode.id} onValueChange={choose}>
+            <DropdownMenuRadioGroup value={mode.id} onValueChange={(id) => void choose(id)}>
               {PERMISSION_MODES.map((candidate) => {
-                const waits = candidate.id === BYPASS_MODE && !agent;
+                const waits = candidate.id === BYPASS_MODE && !installed.length;
                 return (
                   <DropdownMenuRadioItem key={candidate.id} value={candidate.id} disabled={waits} className="flex-col items-start gap-0">
                     <span>{candidate.label}</span>
@@ -402,6 +413,8 @@ function PermissionStep({ saved, agent }: { saved: string; agent: HarnessInfo | 
           </DropdownMenuContent>
         </DropdownMenu>
       }
-    />
+    >
+      {held && <p role="status" className="mt-2 text-xs text-muted-foreground">Sign in to an agent first: what Bypass permissions turns off depends on the agent that runs. The mode is unchanged.</p>}
+    </Step>
   );
 }

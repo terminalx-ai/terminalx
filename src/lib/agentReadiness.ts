@@ -248,6 +248,26 @@ export function useSignInReadiness(harness: string | null, onReady: () => void) 
 
 export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
 
+/**
+ * The installed agent a new chat on this computer starts with, given every
+ * installed agent's answer. Known logins win over an unknown probe (unknown can
+ * be a working custom route; a failed probe is not a signed-out login), and the
+ * saved agent comes first among those that can start. `picked` is an agent
+ * chosen in the form itself: it holds while it is also the saved one. `null`
+ * when none can start a chat: nothing installed, every one signed out, or the
+ * answers not in yet.
+ *
+ * One rule for New Session and for anything that must name the agent a chat
+ * will run before there is one (first run's Bypass warning).
+ */
+export function startingAgent<H extends Pick<HarnessInfo, "id" | "available">>(harnesses: readonly H[], readiness: AgentReadinessMap | null | undefined, saved: string, picked?: string | null): H | null {
+  const eligible = (state: "ready" | "unknown") => harnesses.filter((h) => h.available && readiness?.[h.id]?.state === state);
+  const [ready, unknown] = [eligible("ready"), eligible("unknown")];
+  const candidates = ready.length ? ready : unknown;
+  const explicit = [...ready, ...unknown].find((h) => h.id === picked && h.id === saved);
+  return explicit ?? candidates.find((h) => h.id === saved) ?? candidates[0] ?? null;
+}
+
 /** Check all candidates before choosing a default, without persisting a fallback as a preference. */
 export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id" | "available" | "path">[], enabled = true) {
   // Discovery can return a fresh array on every render. Only a changed installation needs another check.

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, useAgentReadiness, useAgentReadinessList, useAllSignedOut, useKnownReadiness, useSignInReadiness, type AgentReadiness } from "./agentReadiness";
+import { announceReadiness, checkAgentReadiness, forgetReadiness, readinessBlock, startingAgent, useAgentReadiness, useAgentReadinessList, useAllSignedOut, useKnownReadiness, useSignInReadiness, type AgentReadiness } from "./agentReadiness";
 
 const answer = (state: AgentReadiness["state"]): AgentReadiness => ({ state, checkedAt: "2026-10-26T14:00:00Z", version: "0.164.0" });
 const exits = new Set<() => void>();
@@ -290,6 +290,41 @@ describe("new-chat readiness discovery", () => {
     rerender({ agents: harnesses, enabled: false });
     await waitFor(() => expect(result.current.checking).toBe(false));
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("the agent a new chat starts with", () => {
+  const claude = { id: "claude", available: true };
+  const codex = { id: "codex", available: true };
+  const map = (states: Record<string, AgentReadiness["state"]>) => Object.fromEntries(Object.entries(states).map(([id, state]) => [id, answer(state)]));
+
+  it("is the saved agent when it can start, wherever it is in the list", () => {
+    const both = map({ claude: "ready", codex: "ready" });
+    expect(startingAgent([claude, codex], both, "codex")?.id).toBe("codex");
+    expect(startingAgent([codex, claude], both, "claude")?.id).toBe("claude");
+    // A saved agent nobody has installed is no choice: the first that can start is.
+    expect(startingAgent([codex, claude], both, "cursor")?.id).toBe("codex");
+  });
+
+  it("puts a found login before one that cannot be told, and never picks a signed-out or missing agent", () => {
+    expect(startingAgent([claude, codex], map({ claude: "unknown", codex: "ready" }), "claude")?.id).toBe("codex");
+    expect(startingAgent([claude, codex], map({ claude: "unknown", codex: "signed_out" }), "codex")?.id).toBe("claude");
+    expect(startingAgent([claude, codex], map({ claude: "signed_out", codex: "signed_out" }), "claude")).toBeNull();
+    expect(startingAgent([{ ...claude, available: false }, codex], map({ claude: "ready", codex: "ready" }), "claude")?.id).toBe("codex");
+  });
+
+  it("works only from the answers it is given, which is why they must all be in", () => {
+    // Only the first agent asked about: the saved one has no answer, so the other is named. A caller that
+    // must name the agent a chat will run asks about every installed one first.
+    expect(startingAgent([claude, codex], map({ claude: "ready" }), "codex")?.id).toBe("claude");
+    expect(startingAgent([claude, codex], null, "claude")).toBeNull();
+    expect(startingAgent([claude, codex], {}, "claude")).toBeNull();
+  });
+
+  it("keeps an agent picked in the form while it is the saved one, even with an unknown login", () => {
+    const states = map({ claude: "unknown", codex: "ready" });
+    expect(startingAgent([claude, codex], states, "claude", "claude")?.id).toBe("claude");
+    expect(startingAgent([claude, codex], states, "claude", "codex")?.id).toBe("codex");
   });
 });
 

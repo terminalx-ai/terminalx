@@ -422,6 +422,80 @@ describe("the start screen", () => {
     expect(setPrefs).toHaveBeenCalledWith({ lastMode: "bypassPermissions" });
   });
 
+  it.each([
+    { saved: "codex", order: ["claude", "codex"], title: "Let Codex run without asking?", flag: "--dangerously-bypass-approvals-and-sandbox" },
+    { saved: "claude", order: ["codex", "claude"], title: "Let Claude Code run without asking?", flag: "--dangerously-skip-permissions" },
+    { saved: "claude", order: ["claude", "codex"], title: "Let Claude Code run without asking?", flag: "--dangerously-skip-permissions" },
+  ])("names the saved agent ($saved) when both are signed in, though Home asked only about the first ($order)", async ({ saved, order, title, flag }) => {
+    const both = { claude, codex: { ...codex, available: true } };
+    store.harnesses = order.map((id) => both[id as keyof typeof both]);
+    Object.assign(prefs, { lastAgent: saved });
+    try {
+      render(
+        <>
+          <StartScreen onOpenSettings={vi.fn()} />
+          <BypassDialog />
+        </>,
+      );
+      await screen.findByRole("heading", { name: "Agents ready" });
+      // Home's own cost is unchanged: one agent asked about.
+      expect(probed()).toEqual([order[0]]);
+
+      fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+      fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
+
+      // The pick asks about every installed agent, as New Session does, and names the one it would start.
+      const warning = await screen.findByRole("dialog", { name: title });
+      expect(warning.textContent).toContain(flag);
+      expect(probed().slice(1).sort()).toEqual(["claude", "codex"]);
+      expect(setPrefs).not.toHaveBeenCalled();
+    } finally {
+      Object.assign(prefs, { lastAgent: "claude" });
+    }
+  });
+
+  it("holds Bypass back when every installed agent is signed out, and says why", async () => {
+    store.harnesses = [{ ...claude, installable: true }, { ...codex, available: true, installable: true }];
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "check_agent_readiness") return { state: "signed_out", checkedAt: null, version: null };
+      throw new Error(`unexpected command ${command}`);
+    });
+    render(
+      <>
+        <StartScreen onOpenSettings={vi.fn()} />
+        <BypassDialog />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByTestId("start-screen").getAttribute("data-stage")).toBe("agent"));
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
+
+    const step = screen.getByRole("region", { name: "Choose how much the agent may do alone" });
+    expect((await within(step).findByRole("status")).textContent).toContain("Sign in to an agent first");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(setPrefs).not.toHaveBeenCalled();
+    expect(within(step).getByRole("button", { name: "Permissions: Ask every time" })).toBeTruthy();
+  });
+
+  it("applies Bypass at once, with no check, for a reader who said not to be asked again", async () => {
+    store.harnesses = [claude, { ...codex, available: true }];
+    Object.assign(prefs, { bypassConfirmed: true });
+    render(
+      <>
+        <StartScreen onOpenSettings={vi.fn()} />
+        <BypassDialog />
+      </>,
+    );
+    await screen.findByRole("heading", { name: "Agents ready" });
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Permissions: Ask every time" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /^Bypass permissions/ }));
+    expect(setPrefs).toHaveBeenCalledWith({ lastMode: "bypassPermissions" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(probed()).toEqual(["claude"]);
+  });
+
   it("names the agent whose login was found when two are installed, whatever the saved one is", async () => {
     store.harnesses = [claude, { ...codex, available: true }];
     invoke.mockImplementation(async (command: string, args: { harness: string }) => {

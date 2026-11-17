@@ -156,16 +156,19 @@ try {
         "the step says what the pick means": (await start.locator('[data-step="3"]').textContent()).includes("Auto: Routine actions are approved; risky ones ask."),
       }, { smallInMenu });
 
-      // Bypass is warned about in the terms of the agent a new chat starts with (Codex here; the saved agent is Claude).
+      // Bypass is warned about in the terms of the agent a new chat starts with. Both agents are signed in
+      // and the saved one is Claude Code, the second in the list: Home asked only about Codex, the pick asks
+      // about both, and the warning is Claude Code's.
       await start.getByRole("button", { name: "Permissions: Auto" }).click();
       await page.getByRole("menuitemradio", { name: /^Bypass permissions/ }).click();
-      const warning = page.getByRole("dialog", { name: "Let Codex run without asking?" });
+      const warning = page.getByRole("dialog", { name: "Let Claude Code run without asking?" });
       await warning.waitFor();
       const warned = await warning.textContent();
       await warning.getByRole("button", { name: "Cancel" }).click();
       await warning.waitFor({ state: "detached" });
       failures += report(`${colorScheme} Bypass warning`, {
-        "it names the agent that will run and its flag": warned.includes("--dangerously-bypass-approvals-and-sandbox") && !warned.includes("--dangerously-skip-permissions"),
+        "it names the agent a new chat starts with (the saved one) and its flag": warned.includes("--dangerously-skip-permissions") && !warned.includes("--dangerously-bypass-approvals-and-sandbox"),
+        "the pick asked about every installed agent": (await page.evaluate(() => [...new Set(window.__PROBES__)].sort().join())) === "claude,codex",
         "backing out keeps the mode": await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")).lastMode === "auto"),
       }, warned);
 
