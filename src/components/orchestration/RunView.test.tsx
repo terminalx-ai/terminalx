@@ -103,6 +103,75 @@ const choose = (id: string, title: string, which: "model" | "effort", name: stri
   fireEvent.click(within(groups[which]).getByRole("menuitemradio", { name }));
 };
 
+describe("brief edits across column changes", () => {
+  it.each(["resize", "right panel toggle"])("keeps the edit and saves its draft after the width change from %s", async (change) => {
+    const run = waiting();
+    answers.orchestration_run_for_session = run;
+    answers.orchestration_update_plan = run;
+    let availableWidth = change === "resize" ? 900 : 1200;
+    const observers = new Set<ResizeObserverCallback>();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private callback: ResizeObserverCallback) { observers.add(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() { observers.delete(this.callback); }
+    });
+    const column = document.createElement("div");
+    document.body.append(column);
+    const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const columnWidth = column.childElementCount ? 420 : 0;
+      const width = this === column ? columnWidth : this.dataset.testid === "run-view" ? availableWidth - columnWidth : 0;
+      return { width, height: 0, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 0, toJSON() {} };
+    });
+    const resize = (width: number) => act(() => {
+      availableWidth = width;
+      for (const callback of observers) callback([], {} as ResizeObserver);
+    });
+    try {
+      render(<RunView session={session} onShowChat={() => {}} pieceColumn={column} />);
+      await waitFor(() => expect(column.contains(detail())).toBe(true));
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Unsaved title" } });
+      fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Unsaved goal" } });
+      fireEvent.change(screen.getByLabelText("Known", { exact: false }), { target: { value: "First fact\nSecond fact" } });
+      const assertDraft = () => {
+        expect(screen.getByRole("form", { name: "Edit the brief of Map every settings read" })).toBeTruthy();
+        expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Unsaved title");
+        expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toBe("Unsaved goal");
+        expect((screen.getByLabelText("Known", { exact: false }) as HTMLTextAreaElement).value).toBe("First fact\nSecond fact");
+        expect(calls("orchestration_update_plan")).toEqual([]);
+      };
+      // SessionView keeps pieceColumn mounted when its right panel toggles.
+      // The sibling panel takes space from the run, notifying this ResizeObserver.
+      resize(change === "resize" ? 899 : 800);
+      expect(screen.getByTestId("run-view").contains(detail())).toBe(true);
+      assertDraft();
+      resize(change === "resize" ? 900 : 1200);
+      expect(column.contains(detail())).toBe(true);
+      assertDraft();
+      fireEvent.click(screen.getByRole("button", { name: "Save brief" }));
+      await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
+      expect(calls("orchestration_update_plan")[0].plan.pieces[0]).toMatchObject({
+        id: "map", title: "Unsaved title", goal: "Unsaved goal", known: ["First fact", "Second fact"],
+      });
+      await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+      // Cancel discards the draft, and selecting another piece starts with its own brief.
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe(run.pieces[0].title);
+      fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Discard me" } });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(row("store"));
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Typed store module");
+    } finally {
+      cleanup();
+      column.remove();
+      measure.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("a plan waiting for approval (PRO-274)", () => {
   it("shows the plan a person approves: each piece with its model, effort, done-check, what it waits on and its estimate", async () => {
     await open(waiting());

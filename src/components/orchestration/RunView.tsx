@@ -156,7 +156,7 @@ function RunBoard({ run, lead, onShowChat, column }: { run: Run; lead: SessionEn
       piece={piece}
       number={numbers[piece.id]}
       editable={editable}
-      inColumn={!!column}
+      column={column}
       busy={!!busy}
       cost={ledger.costOf(piece)}
       act={act}
@@ -244,7 +244,7 @@ function RunBoard({ run, lead, onShowChat, column }: { run: Run; lead: SessionEn
           </p>
         )}
       </div>
-      {piece && (column ? createPortal(detail, column) : detail)}
+      {detail}
     </div>
   );
 }
@@ -1304,13 +1304,13 @@ function BlockedActions({ run, piece, busy, act }: { run: Run; piece: RunPiece; 
 }
 
 /** One piece: once it has a worker, what it reported and where that stands, then its brief as its worker is sent it. */
-function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, onShowChat, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
+function PieceDetail({ run, piece, number, editable, column, busy, cost, act, onShowChat, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
   run: Run;
   piece: RunPiece;
   number: number;
   editable: boolean;
   /** It is the window's full-height right column (PRO-383), its header level with the title bar. */
-  inColumn: boolean;
+  column: HTMLElement | null;
   busy: boolean;
   cost: string | null;
   act: Act;
@@ -1322,7 +1322,9 @@ function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, 
   onSave: (patch: Partial<RunPlanPiece>) => Promise<boolean>;
   onRemove: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  // Keep the edit above the portal boundary: changing columns remounts its contents.
+  const [draft, setDraft] = useState<BriefDraft | null>(null);
+  const inColumn = !!column;
   const mode = pieceMode(run, piece);
   const brief = piece.brief;
   const tries = piece.tries ?? [];
@@ -1339,7 +1341,7 @@ function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, 
   const workerTries = tries.filter((attempt) => attempt.step !== "lead").length;
   // The worker it has, or the last one a try had: a blocked or done piece keeps its worker on its try.
   const worker = piece.worker ?? [...tries].reverse().find((attempt) => attempt.worker && attempt.step !== "lead")?.worker;
-  return (
+  const content = (
     <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" data-piece-state={piece.state} className={cn("flex shrink-0 flex-col bg-background", inColumn ? "h-full min-h-0 w-[420px] border-l border-hairline" : "w-full border-t border-hairline")}>
       <header data-tauri-drag-region className={cn("flex shrink-0 items-center gap-2 border-b border-hairline px-4", inColumn ? "h-(--titlebar-h)" : "h-10")}>
         <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-veil-raised text-[11px] text-muted-foreground">{number}</span>
@@ -1348,8 +1350,8 @@ function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, 
         {editable && <span className="shrink-0 text-xs text-faint">brief</span>}
         <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close piece" onClick={onClose}><X /></Button>
       </header>
-      {editing && editable ? (
-        <BriefForm piece={piece} run={run} busy={busy} onCancel={() => setEditing(false)} onSave={async (patch) => { if (await onSave(patch)) setEditing(false); }} />
+      {draft && editable ? (
+        <BriefForm draft={draft} onChange={setDraft} piece={piece} run={run} busy={busy} onCancel={() => setDraft(null)} onSave={async (patch) => { if (await onSave(patch)) setDraft(null); }} />
       ) : <>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
           {/* A piece whose merge stopped opens on that: its result was accepted, which its tries below still say. */}
@@ -1434,7 +1436,7 @@ function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, 
         </div>
         <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-hairline px-4 py-3">
           {editable ? <>
-            <Button variant="outline" disabled={busy} onClick={() => setEditing(true)}><Pencil />Edit brief</Button>
+            <Button variant="outline" disabled={busy} onClick={() => setDraft(briefDraft(piece))}><Pencil />Edit brief</Button>
             <Button variant="outline" disabled={busy || run.pieces.length < 2} title={run.pieces.length < 2 ? "A run needs at least one piece. Discard the plan instead." : undefined} onClick={onRemove}><Trash2 />Remove piece</Button>
           </> : unmerged ? <>
             <Button size="sm" variant="accent" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onSendBack}><CornerUpLeft />Send back to worker</Button>
@@ -1472,6 +1474,7 @@ function PieceDetail({ run, piece, number, editable, inColumn, busy, cost, act, 
       </>}
     </aside>
   );
+  return column ? createPortal(content, column) : content;
 }
 
 /** One conflicting place as git marks it: the lead's side, the piece's side, and the marks between. */
@@ -1542,16 +1545,19 @@ function MergePanel({ run, piece }: { run: Run; piece: RunPiece }) {
 
 const split = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean);
 
-function BriefForm({ run, piece, busy, onCancel, onSave }: { run: Run; piece: RunPiece; busy: boolean; onCancel: () => void; onSave: (patch: Partial<RunPlanPiece>) => void }) {
-  const [draft, setDraft] = useState(() => ({
-    title: piece.title, goal: piece.brief.goal, why: piece.brief.why, scope: piece.brief.scope, outOfScope: piece.brief.outOfScope,
-    known: piece.brief.known.join("\n"), readFirst: piece.brief.readFirst.join("\n"), limits: piece.brief.limits.join("\n"), owns: piece.owns.join("\n"),
-    commands: piece.doneChecks.filter((check) => check.type === "command").map(checkText).join("\n"),
-    reviews: piece.doneChecks.filter((check) => check.type === "review").map(checkText).join("\n"),
-    reviewOnly: !!piece.reviewOnly, reviewOnlyReason: piece.reviewOnlyReason ?? "",
-    permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
-  }));
-  const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) => setDraft((before) => ({ ...before, [key]: value }));
+const briefDraft = (piece: RunPiece) => ({
+  title: piece.title, goal: piece.brief.goal, why: piece.brief.why, scope: piece.brief.scope, outOfScope: piece.brief.outOfScope,
+  known: piece.brief.known.join("\n"), readFirst: piece.brief.readFirst.join("\n"), limits: piece.brief.limits.join("\n"), owns: piece.owns.join("\n"),
+  commands: piece.doneChecks.filter((check) => check.type === "command").map(checkText).join("\n"),
+  reviews: piece.doneChecks.filter((check) => check.type === "review").map(checkText).join("\n"),
+  reviewOnly: !!piece.reviewOnly, reviewOnlyReason: piece.reviewOnlyReason ?? "",
+  permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
+});
+
+type BriefDraft = ReturnType<typeof briefDraft>;
+
+function BriefForm({ run, piece, draft, onChange, busy, onCancel, onSave }: { run: Run; piece: RunPiece; draft: BriefDraft; onChange: (draft: BriefDraft) => void; busy: boolean; onCancel: () => void; onSave: (patch: Partial<RunPlanPiece>) => void }) {
+  const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) => onChange({ ...draft, [key]: value });
   const text = (key: "title" | "goal" | "why" | "scope" | "outOfScope" | "known" | "readFirst" | "limits" | "owns" | "commands" | "reviews" | "reviewOnlyReason", label: string, hint?: string, rows = 2) => (
     <label className="flex flex-col gap-1 text-xs text-muted-foreground">{label}
       {rows === 1
