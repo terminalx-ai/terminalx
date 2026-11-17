@@ -472,6 +472,7 @@ export function ListSection({
   title,
   mark,
   note,
+  description,
   heading = true,
   forceOpen = false,
   onMenu,
@@ -485,11 +486,14 @@ export function ListSection({
   title?: string;
   mark?: ReactNode;
   note?: ReactNode;
+  /** Persistent accessible description, also revealed on hover or keyboard focus. */
+  description?: string;
   heading?: boolean;
   forceOpen?: boolean;
   /** Open the section's menu: a right-click, or the context-menu key, on its header. */
   onMenu?: () => void;
 } & Record<`data-${string}`, string>) {
+  const descriptionId = useId();
   const [expanded, toggle] = useFold(`list:${id}`, true);
   const open = expanded || forceOpen || !heading;
   return (
@@ -504,22 +508,26 @@ export function ListSection({
             onMenu();
           })}
         >
-          <button
-            type="button"
-            id={`list-${id}`}
-            onClick={toggle}
-            aria-expanded={open}
-            aria-label={label}
-            title={title}
-            className={cn(
-              "flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-              !mark && "text-[11px] font-medium uppercase tracking-[.08em] text-faint hover:text-muted-foreground",
-            )}
-          >
-            {mark}
-            <span data-list-name className={cn("min-w-0 shrink-0 truncate", mark && "max-w-[60%] text-[12.5px] font-medium text-foreground/90")}>{label}</span>
-            {note && <span className="min-w-0 truncate text-[11px] text-faint">{note}</span>}
-          </button>
+          <WithTooltip label={description}>
+            <button
+              type="button"
+              id={`list-${id}`}
+              onClick={toggle}
+              aria-expanded={open}
+              aria-label={label}
+              aria-describedby={description ? descriptionId : undefined}
+              title={title}
+              className={cn(
+                "flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                !mark && "text-[11px] font-medium uppercase tracking-[.08em] text-faint hover:text-muted-foreground",
+              )}
+            >
+              {mark}
+              <span data-list-name className={cn("min-w-0 shrink-0 truncate", mark && "max-w-[60%] text-[12.5px] font-medium text-foreground/90")}>{label}</span>
+              {note && <span className="min-w-0 truncate text-[11px] text-faint">{note}</span>}
+            </button>
+          </WithTooltip>
+          {description && <span id={descriptionId} className="sr-only">{description}</span>}
           {actions && <div className="flex min-w-0 shrink-0 items-center gap-0.5">{actions}</div>}
           {/* The fold at the header's end, as on a project's row: shown on hover or focus, and always while folded. */}
           <button
