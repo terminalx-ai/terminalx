@@ -97,7 +97,7 @@ describe("Home navigation (#1103)", () => {
     render(<HomeShortcut />);
     const home = screen.getByRole("button", { name: "Home" });
     expect(home.getAttribute("aria-pressed")).toBe("false");
-    expect(home.textContent).toContain("CtrlShiftG");
+    expect(home.textContent).toContain("CtrlAlt0");
     fireEvent.click(home);
     expect(store.getSessionStore().view).toBe("home");
     expect(store.getSessionStore().selectedSessionId).toBeNull();
@@ -105,7 +105,7 @@ describe("Home navigation (#1103)", () => {
 
     act(() => store.selectSession("here"));
     expect(home.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.keyDown(window, { key: "G", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: "0", code: "Digit0", ctrlKey: true, altKey: true });
     expect(store.getSessionStore().view).toBe("home");
     expect(store.getSessionStore().selectedSessionId).toBeNull();
     expect(home.getAttribute("aria-pressed")).toBe("true");

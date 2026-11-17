@@ -76,9 +76,9 @@ describe("the shortcut registry", () => {
 
   it("gives Home a default on both platforms while respecting custom or disabled bindings", () => {
     for (const mac of [true, false]) {
-      expect(resolveKeymap({}, mac)["app.home"]).toEqual(["mod+shift+g"]);
-      expect(bindingProblem("app.home", "mod+shift+g", mac)).toBeNull();
-      expect(isTerminalReserved("mod+shift+g", mac)).toBe(false);
+      expect(resolveKeymap({}, mac)["app.home"]).toEqual(["mod+alt+0"]);
+      expect(bindingProblem("app.home", "mod+alt+0", mac)).toBeNull();
+      expect(isTerminalReserved("mod+alt+0", mac)).toBe(false);
       expect(resolveKeymap({ "app.home": [] }, mac)["app.home"]).toEqual([]);
       expect(resolveKeymap({ "app.home": ["mod+alt+g"] }, mac)["app.home"]).toEqual(["mod+alt+g"]);
     }

@@ -64,7 +64,8 @@ const ACTIONS = [
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
 
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
-  { id: "app.home", label: "Home", group: "App", keys: ["mod+shift+g"] },
+  // Keep Mod+G / Mod+Shift+G for next/previous search matches in editors and chats.
+  { id: "app.home", label: "Home", group: "App", keys: ["mod+alt+0"] },
   { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"], menu: { section: "file", order: 0, label: "New Chat", target: "focused" } },
   { id: "app.startFrom", label: "Start session from…", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1.5, label: "Start From…" } },
   { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"], menu: { section: "go", order: 1, label: "Issues" } },
