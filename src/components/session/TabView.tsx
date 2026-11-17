@@ -967,6 +967,7 @@ export function TabView({
           commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
           remote={!local}
+          attachFiles={backend.caps.files}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {
