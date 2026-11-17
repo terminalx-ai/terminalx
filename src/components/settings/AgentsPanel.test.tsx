@@ -163,6 +163,23 @@ describe("Agents · API key (PRO-306)", () => {
     expect(row("Version")).toBe("2.3.41");
   });
 
+  it.each([
+    ["2.3.41-beta.1", "2.3.41", " · 2.3.41 available"],
+    ["2.3.41-beta.2", "2.3.41-beta.11", " · 2.3.41-beta.11 available"],
+    ["2.3.41", "2.3.41-beta.1", " · up to date"],
+    ["2.3.41+build.1", "2.3.41+build.2", " · up to date"],
+    ["2.3.41-beta.1", "2.3.41-beta.1", " · up to date"],
+    ["2.3.41oops", "2.3.42", ""],
+    ["2.3.41", "3.invalid", ""],
+    ["unknown", "unknown", ""],
+  ])("shows the release status for installed %s and latest %s", async (version, release, note) => {
+    readiness.claude = ready("claude", { version });
+    latest.claude = release;
+    show([claude]);
+    await waitFor(() => expect(calls("agent_latest_version")).toEqual([{ harness: "claude" }]));
+    await waitFor(() => expect(row("Version")).toBe(version + note));
+  });
+
   it("saves a key to the Keychain, shows it masked, and restarts exactly the agent's running tabs", async () => {
     show();
     fireEvent.click(await screen.findByRole("radio", { name: /API key/ }));
