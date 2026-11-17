@@ -3,6 +3,7 @@ import { Bot, Check, Circle, CircleCheck, CircleX, Copy, FolderGit2, Loader2, Pe
 import { Button } from "@/components/ui/button";
 import { api, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
 import { listedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderIsPlatform } from "@/lib/cloudProviders";
 import { providerLabel } from "@/lib/organizationCompute";
 import type { BuildFailureContext } from "@/lib/environmentProposal";
 import { useEnvironmentRun } from "@/lib/environmentRun";
@@ -596,7 +597,8 @@ export function EnvironmentStep(props: StepProps) {
         if (!alive.current) return;
         const listed = listedProviders(response.providers);
         const wanted = machine.current?.provider;
-        const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null);
+        // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
+        const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
         const id = wanted ?? summary?.id ?? null;
         setProvider(id ? { id, name: summary?.displayName ?? providerLabel(id) } : null);
         if (!id) setLoading(false);

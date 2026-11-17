@@ -1,6 +1,6 @@
 import { useSyncExternalStore, type ComponentType } from "react";
 import { Box, Cloud, Container, Server, Ship } from "@/icons";
-import { api, type CloudProviderDescriptor, type CloudProviderSummary } from "@/lib/api";
+import { api, type CloudProviderCredentialSource, type CloudProviderDescriptor, type CloudProviderSummary } from "@/lib/api";
 
 /**
  * What the app knows about cloud providers, all of it from the server's
@@ -145,6 +145,48 @@ export function orderedCloudProviders<T extends CloudProviderSummary>(providers:
 export function cloudProviderOffered(provider: CloudProviderSummary): boolean {
   return provider.descriptor?.listed !== false;
 }
+
+/**
+ * Whose credential a provider runs on (PRO-452): `platform` only when its
+ * descriptor says exactly that. A descriptor without the field (an older
+ * server), a value this app does not know, and a provider without a
+ * descriptor are all `organization`, the only kind there was. A provider id
+ * is looked up among the descriptors the app has read.
+ */
+export function cloudProviderCredentialSource(provider: string | CloudProviderSummary | CloudProviderDescriptor | null | undefined): CloudProviderCredentialSource {
+  const descriptor = !provider ? null : typeof provider === "string" ? known.get(provider) : "descriptor" in provider ? provider.descriptor : provider;
+  return descriptor?.credentialSource === "platform" ? "platform" : "organization";
+}
+
+/**
+ * True for a provider TerminalX itself provides: there is no key to connect,
+ * replace, check or disconnect, and no connection of the organization's to
+ * read. It is ready to use from the start.
+ */
+export function cloudProviderIsPlatform(provider: string | CloudProviderSummary | CloudProviderDescriptor | null | undefined): boolean {
+  return cloudProviderCredentialSource(provider) === "platform";
+}
+
+/**
+ * Whether the organization has this provider in place: a connection it made
+ * (which the list shows to whoever may manage it), or a platform provider,
+ * which needs none.
+ */
+export function cloudProviderInPlace(provider: CloudProviderSummary): boolean {
+  return Boolean(provider.connection) || cloudProviderIsPlatform(provider);
+}
+
+/**
+ * In place and working: a connection that is connected, or a platform
+ * provider that does not need attention.
+ */
+export function cloudProviderReady(provider: CloudProviderSummary): boolean {
+  if (cloudProviderIsPlatform(provider)) return provider.availability === "available" || provider.availability === "disabled-for-create";
+  return provider.connection?.state === "connected";
+}
+
+/** What a platform provider says wherever a connected provider would show its key. */
+export const PLATFORM_PROVIDER_NOTE = "Provided by TerminalX";
 
 /**
  * Whether a provider bills for its machines: from its descriptor, else from

@@ -668,7 +668,8 @@ pub async fn cloud_provider_connect(
     let service = state.cloud_workspaces.clone();
     let (authorization, summary) = tauri::async_runtime::spawn_blocking(move || {
         let authorization = service.authorize_connect(provider)?;
-        let summary = service.provider_summary(&authorization);
+        // Refused for a provider TerminalX itself provides (PRO-452): no dialog opens and nothing is sent.
+        let summary = service.connectable_provider_summary(&authorization)?;
         Ok::<_, crate::cloud_workspaces::CloudWorkspaceClientError>((authorization, summary))
     })
     .await
