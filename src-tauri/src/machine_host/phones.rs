@@ -530,6 +530,8 @@ impl Phones {
     /// Track before rereading credentials and account binding. If a revoke or
     /// account-change tick already ran, the fresh read rejects the snapshot;
     /// if it runs after tracking, it sees this connection and cancels it.
+    /// The final owner acquisition checks the admission epoch under the same
+    /// state lock the tick uses to invalidate it, fencing a tick during the read.
     /// Blocking: admission reads both shared files before acquiring an owner.
     pub(super) fn admit(self: &Arc<Self>, device: &DeviceEntry, client_key: &str, epoch: u64) -> Result<(TrackedPhone, mpsc::UnboundedReceiver<ConnectionSignal>)> {
         let (id, signals) = self.track(&device.id);

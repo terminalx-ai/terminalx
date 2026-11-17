@@ -348,10 +348,13 @@ async fn account_change_fences_automatic_relay_phones(next_user: &str, next_gene
     mirror.user_id = next_user.into();
     save_account_mirror(&mirror).unwrap();
     rig.phones.tick(now_ms());
+    assert_ne!(*stopped.borrow(), epoch, "a changed user or generation must fence in-flight admission");
     assert!(phone.read().await.is_none());
     assert!(tokio::time::timeout(Duration::from_secs(5), pre_auth.next()).await.unwrap()
         .is_none_or(|frame| frame.is_err() || matches!(frame, Ok(Message::Close(_)))));
-    assert_eq!(rig.command().await["type"], "device-revoke");
+    let revoked = rig.command().await;
+    assert_eq!(revoked["type"], "device-revoke");
+    assert_eq!(revoked["relayDeviceId"], "phone");
     let mut stale = rig.connect("phone", "token", "resume", [7; 32]).await;
     assert!(stale.read().await.is_none());
     // QR pairings survive account changes and sign-out; automatic credentials
@@ -382,12 +385,15 @@ async fn admission_rechecks_account_when_tick_ran_before_the_phone_was_tracked()
     // This is the snapshot held after token authentication and key pinning.
     let authenticated = DeviceRegistry.find_by_token("token", Some(5)).unwrap().unwrap();
     let stopped = rig.phones.stopped();
-    let epoch = *stopped.borrow();
     for changed in [
         Some(AccountMirror { binding_generation: 6, ..mirror.clone() }),
         Some(AccountMirror { user_id: "another".into(), ..mirror.clone() }),
         None,
     ] {
+        // Each case starts with a valid binding and a fresh admission epoch.
+        save_account_mirror(&mirror).unwrap();
+        rig.phones.tick(now_ms());
+        let epoch = *stopped.borrow();
         match changed {
             Some(changed) => save_account_mirror(&changed).unwrap(),
             None => std::fs::remove_file(crate::store::root().unwrap().join("account.json")).unwrap(),
@@ -398,10 +404,17 @@ async fn admission_rechecks_account_when_tick_ran_before_the_phone_was_tracked()
         assert!(rig.phones.status().connected.is_empty());
         assert!(rig.phones.admit(&authenticated, "phone-key", epoch).is_err());
         assert!(rig.phones.status().connected.is_empty(), "failed admission must untrack itself");
+        // Also try the current epoch: this must fail on the fresh account
+        // read, not merely because the tick invalidated the earlier epoch.
+        let current_epoch = *stopped.borrow();
+        let error = rig.phones.admit(&authenticated, "phone-key", current_epoch).err().expect("stale credential admitted");
+        assert!(error.to_string().contains("account changed during admission"), "{error:#}");
+        assert!(rig.phones.status().connected.is_empty(), "account rejection must remove the tracked connection");
     }
     std::fs::write(crate::store::root().unwrap().join("account.json"), "invalid").unwrap();
     rig.phones.tick(now_ms());
-    assert!(rig.phones.admit(&authenticated, "phone-key", epoch).is_err());
+    let current_epoch = *stopped.borrow();
+    assert!(rig.phones.admit(&authenticated, "phone-key", current_epoch).is_err());
     assert!(rig.phones.status().connected.is_empty());
 }
 
