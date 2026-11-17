@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -7,6 +7,7 @@ import { getPrefs, setPrefs } from "@/lib/prefs";
 import { movePaletteSelection } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
+import { api, experimental } from "@/lib/api";
 
 const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
 vi.mock("@/lib/settingsFile", () => ({
@@ -20,7 +21,7 @@ beforeEach(() => {
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Settings search", () => {
   const search = () => screen.getByRole("combobox", { name: "Search settings" }) as HTMLInputElement;
@@ -34,6 +35,56 @@ describe("Settings search", () => {
     expect(screen.getByRole("option", { name: /Text size/ })).toBeTruthy();
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
+  });
+
+  // PRO-374 (design 09.01): a result row carries the row's live control, which changes the setting in place.
+  it("puts each row's live control on its result, and using it does not open the page", async () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "link actions" } });
+    const option = screen.getByRole("option", { name: /Link actions/ });
+    const control = await within(option).findByRole("switch");
+    const before = control.getAttribute("aria-checked");
+    fireEvent.click(control);
+    await waitFor(() => expect(control.getAttribute("aria-checked")).not.toBe(before));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “link actions”");
+    // The description is one line; the full text is its tooltip.
+    expect(option.querySelector("[title]")?.className).toContain("truncate");
+  });
+
+  // Review of PRO-374: typing a query must not start a page's disk or network work.
+  it("does not mount Storage, with its leftover scan, to search it", async () => {
+    const scan = vi.spyOn(api, "scanLeftovers").mockResolvedValue([] as never);
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "leftovers" } });
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    await act(async () => {});
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it("lends the open page's controls to its results instead of mounting it again", async () => {
+    const settings = vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    render(<SettingsPage initialTab="experimental" onBack={vi.fn()} />);
+    // The page has read its switches (the app's shared store reads them too).
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Session cost" }).hasAttribute("disabled")).toBe(false));
+    await act(async () => {});
+    const before = settings.mock.calls.length;
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await act(async () => {});
+    expect(settings.mock.calls.length).toBe(before);
+  });
+
+  it("says, above the results, when a change made from a result is refused", async () => {
+    vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    vi.spyOn(experimental, "setSessionCost").mockRejectedValue(new Error("refused by the runtime"));
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    const control = await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await waitFor(() => expect(control.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(control);
+    // The page's own alert is hidden with the page; the results say it.
+    await waitFor(() => expect(screen.getAllByRole("alert").map((element) => element.textContent)).toContain("Experimental: refused by the runtime"));
+    expect(control.getAttribute("aria-checked")).toBe("false");
   });
 
   it("lists matching rows grouped by page under the query, a count and the keys (design 09.31)", () => {
@@ -240,7 +291,7 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "zzqx" } });
     fireEvent.click(screen.getByRole("button", { name: "search keyboard shortcuts" }));
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Shortcuts");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Keyboard shortcuts");
     expect(search().value).toBe("");
   });
 
@@ -335,7 +386,7 @@ describe("Settings dismissal", () => {
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
 
     expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
@@ -376,12 +427,12 @@ describe("Settings dismissal", () => {
 });
 
 describe("the section Settings opens on", () => {
-  // PRO-81: the general way into Settings shows Account.
-  it("is Account when no section is asked for", () => {
+  // PRO-374: the general way into Settings shows General, first in the menu (it was Account, PRO-81).
+  it("is General when no section is asked for", () => {
     render(<SettingsPage onBack={vi.fn()} />);
-    expect(DEFAULT_SETTINGS_TAB).toBe("account");
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(DEFAULT_SETTINGS_TAB).toBe("general");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-current") === "page")).toHaveLength(1);
   });
 
@@ -402,8 +453,8 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
     // …asking for Settings again does not.
     rerender(<SettingsPage openRequest={2} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     // The same for a section asked for by name twice.
     rerender(<SettingsPage initialTab="agents" openRequest={3} onBack={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "General" }));
@@ -411,12 +462,12 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
   });
 
-  it("is Account, not a blank page, when it is handed something that names no section", () => {
+  it("is General, not a blank page, when it is handed something that names no section", () => {
     // What a click handler passes along: the click's event (O1 of the live check).
     const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];
     render(<SettingsPage initialTab={event} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
   });
 });
 

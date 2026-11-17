@@ -116,7 +116,6 @@ export function ExperimentalTab() {
 
   return (
     <div className="flex flex-col" data-testid="experimental-settings">
-      <p className="pb-3 text-[13px] text-muted-foreground">These features are still being tested. Turn one off at any time; sessions it already started keep working.</p>
       <RegisteredSetting setting="experimental.nativeCodex"
         control={<Switch aria-label="Native Codex" checked={nativeCodex ?? false} disabled={nativeCodex === null} onCheckedChange={(on) => void change(on)} />}
       />

@@ -5,15 +5,16 @@ import { SettingsFileError } from "./SettingsFile";
 import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSources";
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Bot, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Settings2, Smartphone, UserRound, X } from "@/icons";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ArrowLeft, Bot, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
-import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { userFileKeys } from "@/lib/settingSources";
+import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_ROWS, SettingControlSlots, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
@@ -26,14 +27,14 @@ import { groupSettingsByPage, searchSettings, settingsSearchSummary, type Settin
 
 /** Legacy section names and stable row ids are both accepted by every existing entry point. */
 export type SettingsTab = SettingsSection | SettingId;
-export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
+export const DEFAULT_SETTINGS_TAB: SettingsTab = "general";
 
 /** Each section's icon in the menu: a row is an icon and a word, read at a glance. */
 const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   account: UserRound,
   devices: Smartphone,
   machines: Laptop,
-  general: Settings2,
+  general: Settings,
   appearance: Palette,
   agents: Bot,
   orchestrator: Network,
@@ -53,6 +54,17 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
 /** How long a row opened from search or a link stays marked before it fades, and how long the fade takes. */
 export const SETTING_HIGHLIGHT_HOLD_MS = 1200;
 export const SETTING_HIGHLIGHT_FADE_MS = 700;
+
+/**
+ * Pages mounted, hidden, while a search lists their rows, so those rows bring their live control into the result.
+ * Only pages whose mount reads local settings and nothing more: a page that scans disk or the network on mount
+ * (Storage's leftover scan, Agents' install checks, Account, Machines…) is not started by typing a query. Its
+ * results open the page instead. The open page needs no copy: it stays mounted, hidden, and lends its controls.
+ */
+const LIVE_CONTROL_SECTIONS: ReadonlySet<SettingsSection> = new Set<SettingsSection>(["general", "appearance", "orchestrator", "experimental"]);
+
+/** The row kept at a user-file key, for the Can't save toast to name. */
+const userKeySettingTitle = (key: string) => SETTINGS_ROWS.find((row) => row.layout !== "content" && userFileKeys(row.storage.location).includes(key))?.title;
 
 /** The listbox option id of a search result. */
 const resultId = (id: string) => `settings-result-${id}`;
@@ -95,6 +107,22 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns, localVmTasks]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
+  // The live control slot of each result row, by row id (see SettingControlSlots).
+  const [slots, setSlots] = useState<ReadonlyMap<string, HTMLElement>>(() => new Map());
+  const slotRefs = useRef(new Map<string, (element: HTMLElement | null) => void>());
+  const slotRef = (id: string) => {
+    let ref = slotRefs.current.get(id);
+    if (!ref) {
+      ref = (element) => setSlots((current) => {
+        if ((current.get(id) ?? null) === element) return current;
+        const next = new Map(current);
+        if (element) next.set(id, element); else next.delete(id);
+        return next;
+      });
+      slotRefs.current.set(id, ref);
+    }
+    return ref;
+  };
   const highlight = useRef<{ row: HTMLElement; timers: number[] } | null>(null);
   const clearHighlight = useCallback(() => {
     const current = highlight.current;
@@ -222,9 +250,9 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const path = project?.path ?? repositories[0]?.path;
     return path ? choose("repositories", path, match.id) : choose("repositories");
   };
-  // The project sidebar's rows: 32px, edge to edge with square corners, text 16px in.
+  // Menu rows (design 09.02): 32px, inset 8px from both edges with rounded corners, text 16px in.
   const navClass = (selected: boolean) => cn(
-    "-mx-2 flex h-8 w-[calc(100%+1rem)] min-w-0 items-center gap-2.5 px-4 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+    "flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
     selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground",
   );
 
@@ -234,9 +262,15 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     <SettingsLeaveGuardContext.Provider value={leaveGuards}>
     <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
       <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
-        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pl-[78px] pr-2">
-          <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={close}><ArrowLeft /></Button>
-          <h1 className="px-1 text-sm font-medium">Settings</h1>
+        {/* Design 09.02: "← Back to app" with its esc key, right of the traffic lights. The page is named by <main>. */}
+        <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center justify-end pl-[78px] pr-2">
+          <h1 className="sr-only">Settings</h1>
+          <button type="button" aria-label="Back to app" aria-keyshortcuts="Escape" onClick={close}
+            className="flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[12px] text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
+            <ArrowLeft aria-hidden className="size-3.5" />
+            <span>Back to app</span>
+            <kbd aria-hidden className="rounded border border-hairline px-1 font-sans text-[11px] leading-4 text-faint">esc</kbd>
+          </button>
         </div>
         {/* Search heads the menu, as it does the things it searches. */}
           <div className="mx-2 mb-1 flex h-8 shrink-0 items-center gap-2 rounded-md bg-well px-2.5 hairline focus-within:ring-1 focus-within:ring-ring/40">
@@ -266,13 +300,13 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             }}
             className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint"
           />
-          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-xs text-faint">⌘F</kbd>}
+          {!query && <kbd className="shrink-0 rounded border border-hairline px-1 font-sans text-[12px] leading-4 text-faint">⌘F</kbd>}
           {query && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" className="-mr-1.5 size-6" onClick={() => { changeQuery(""); inputRef.current?.focus(); }}><X /></Button>}
           </div>
         <nav aria-label="Settings sections" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pt-2 scrollbar-thin">
           {SETTINGS_GROUPS.map((group, index) => (
             <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
-              <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[12px] text-faint">{group}</div>
+              <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[11px] font-medium uppercase tracking-[.08em] text-faint">{group}</div>
               {group === "Projects" && (
                 <button type="button" aria-current={section === "projects" ? "page" : undefined} onClick={() => choose("projects")} className={navClass(section === "projects")}>
                   <FolderPlus aria-hidden className="size-4 shrink-0" />
@@ -340,10 +374,11 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           "[&_[data-setting-highlight]]:rounded-md [&_[data-setting-highlight]]:transition-[background-color,box-shadow] [&_[data-setting-highlight]]:duration-700 [&_[data-setting-highlight]]:ease-out motion-reduce:[&_[data-setting-highlight]]:transition-none",
           "[&_[data-setting-highlight=on]]:bg-selected [&_[data-setting-highlight=on]]:shadow-[0_0_0_6px_var(--color-selected),0_0_0_7px_color-mix(in_oklab,var(--color-accent)_40%,transparent)]",
         )} aria-labelledby={searching ? "settings-results-title" : "settings-section-title"}>
-          <div className="mx-auto w-full max-w-[48rem] px-6 pt-6 empty:hidden"><SettingsFileError /></div>
-          {searching && <div className="mx-auto w-full max-w-[48rem] p-6">
+          {/* A broken settings file is named by the red Open settings.json and the Can't save toast, not a banner (09.43). */}
+          <div className="mx-auto w-full max-w-[48rem] px-6 pt-2 empty:hidden"><SettingsFileError /></div>
+          {searching && <div className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-6">
             {/* Design 09.31: the query as the page title, the count and the keys beneath it, then the rows by page. */}
-            <h2 id="settings-results-title" className="break-words text-xl font-semibold tracking-tight">Results for “{query.trim()}”</h2>
+            <h2 id="settings-results-title" className="break-words text-[22px] font-semibold tracking-tight">Results for “{query.trim()}”</h2>
             {results.length > 0 && <p className="mt-1 text-[13px] text-muted-foreground">{settingsSearchSummary(results)} · ↑↓ to move · ↵ opens the setting · esc clears</p>}
             <div ref={resultsRef} id="settings-search-results" role="listbox" aria-label="Settings search results" className="mt-2">
               {pages.map((page) => {
@@ -355,58 +390,72 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                       const index = results.indexOf(match);
                       const current = selected === index;
                       return (
-                        <button
+                        // An option, not a button: it holds the row's live control (design 09.01), which takes its own clicks.
+                        <div
                           key={match.id}
                           id={resultId(match.id)}
-                          type="button"
                           role="option"
                           aria-selected={current}
                           onMouseEnter={() => setSelected(index)}
                           onClick={() => open(match)}
                           className={cn(
-                            "flex w-full items-center gap-5 rounded-lg px-3 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                            "flex w-full cursor-default items-center gap-5 rounded-lg px-3 py-2.5 text-left outline-none",
                             current ? "bg-selected ring-1 ring-accent/40" : "hover:bg-veil-raised",
                           )}
                         >
                           <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
                           <span className="flex min-w-0 flex-1 flex-col [&_mark]:rounded-[3px] [&_mark]:bg-accent/25 [&_mark]:px-px [&_mark]:[font-weight:inherit]">
-                            <span className="text-sm font-medium"><HighlightedText text={match.row.title} ranges={match.titleRanges} /></span>
-                            <span className="text-[12.5px] text-muted-foreground"><HighlightedText text={match.row.description} ranges={match.descriptionRanges} /></span>
+                            <span className="text-[13px] font-medium"><HighlightedText text={match.row.title} ranges={match.titleRanges} /></span>
+                            {/* One line, as designed; the full text is on the page and in the tooltip. */}
+                            <span title={match.row.description} className="truncate text-xs text-muted-foreground"><HighlightedText text={match.row.description} ranges={match.descriptionRanges} /></span>
                           </span>
+                          <span ref={slotRef(match.id)} data-result-control="" className="flex shrink-0 items-center empty:hidden" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
                           {current && <Return aria-hidden className="size-3.5 shrink-0 text-faint" />}
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
                 );
               })}
             </div>
+            {/* A change made from a result that its page refuses shows on its page, which is hidden: say it here. */}
+            <SearchPageAlerts root={content} pages={pages} />
+            {/* Each other result page, hidden, hands its rows' live controls to the slots above. */}
+            <SettingControlSlots.Provider value={slots}>
+              <div hidden aria-hidden>
+                {pages.filter((page) => page.section !== section && LIVE_CONTROL_SECTIONS.has(page.section) && page.matches.some((match) => slots.has(match.id))).map((page) => (
+                  <div key={page.section} data-search-page={page.section}>{settingsSectionRenderers[page.section]({ onOpenSkills, onOpenUsage })}</div>
+                ))}
+              </div>
+            </SettingControlSlots.Provider>
             {/* Design 09.33. */}
             {!results.length && <div role="status" className="py-6 text-center">
               <p className="text-sm text-muted-foreground">No settings match “{query.trim()}”</p>
               <p className="mt-1 text-[12px] text-faint">Try fewer letters, or <button type="button" className="text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => choose("shortcuts")}>search keyboard shortcuts</button>.</p>
             </div>}
           </div>}
-          <div hidden={searching} className="mx-auto w-full max-w-[48rem] p-6 pb-12" key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
+          <div hidden={searching} data-search-page={section} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
             <div className={cn("flex flex-wrap items-start justify-between gap-3", section === "repositories" && project ? "mb-3" : "mb-5")}>
               {section === "repositories" && project ? <div className="min-w-0 flex-1 basis-48">
                 {/* One title a page, the page's name, with the project beneath it (design 11.02, 11.10). */}
                 <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="break-words text-[22px] font-semibold tracking-tight outline-none">{pageLabel}</h2>
                 <ProjectPageSubtitle project={project} page={page} />
-              </div> : <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="min-w-0 flex-1 basis-48 break-words text-xl font-semibold tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2>}
+              </div> : <div className="min-w-0 flex-1 basis-48"><h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2><p id="settings-section-subtitle" className="mt-1 text-[13px] text-muted-foreground">{SETTINGS_SECTIONS[section].subtitle}</p></div>}
               {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
               <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
             </div>
             {leaveWarning && <p role="alert" className="mb-3 text-sm text-destructive">Save your script changes before leaving Settings. If a save is in progress, wait for it to finish.</p>}
             <SettingsHeaderSlotProvider value={headerSlot}>
-              {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+              <SettingControlSlots.Provider value={searching ? slots : null}>
+                {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+              </SettingControlSlots.Provider>
             </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />
           </div>
         </section>
         </div>
       </div>
-      <CantSaveToast />
+      <CantSaveToast settingTitle={userKeySettingTitle} />
     </main>
     </SettingsLeaveGuardContext.Provider>
   );
@@ -427,12 +476,42 @@ function ProjectPageSubtitle({ project, page }: { project: Project; page: Projec
 }
 
 /**
- * The badges a page can show. General holds Layered configuration, whose values
- * come from every layer; other pages show "Your value" on rows kept in the user file.
+ * The alerts (role="alert") of the hidden pages a search lists, shown above its results: a refused change made
+ * from a result's control is said where the person is looking (Experimental and Orchestrator report a failed
+ * save on their page).
  */
-const LAYERED_BADGES: readonly SourceBadgeKind[] = ["managed", "project", "overridesProject", "yours"];
+function SearchPageAlerts({ root, pages }: { root: RefObject<HTMLElement | null>; pages: readonly { section: SettingsSection; title: string }[] }) {
+  const [alerts, setAlerts] = useState<readonly { key: string; title: string; text: string }[]>([]);
+  const listed = pages.map((page) => page.section).join(" ");
+  useEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const titles = new Map(pages.map((page) => [page.section as string, page.title]));
+    const read = () => {
+      const next = [...element.querySelectorAll<HTMLElement>("[data-search-page] [role=alert]")].flatMap((alert, index) => {
+        const page = alert.closest<HTMLElement>("[data-search-page]")!.dataset.searchPage!;
+        const text = alert.textContent?.trim();
+        return text && titles.has(page) ? [{ key: `${page}:${index}`, title: titles.get(page)!, text }] : [];
+      });
+      setAlerts((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(element, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+    // `listed` stands for `pages`: the observer restarts when the pages listed change, not on every render.
+  }, [root, listed]);
+  if (!alerts.length) return null;
+  return <div className="mt-3 flex flex-col gap-1">
+    {alerts.map((alert) => <p key={alert.key} role="alert" className="text-xs text-destructive">{alert.title}: {alert.text}</p>)}
+  </div>;
+}
+
+/** The badges a page can show: "Your value" on rows kept in the user file. */
 function SectionBadgeLegend({ section }: { section: SettingsSection }) {
   const { file } = useSettingsFile();
-  const kinds: readonly SourceBadgeKind[] = section === "general" ? LAYERED_BADGES : file && sectionShowsUserValues(section) ? ["yours"] : [];
+  // General's legend sits under Layered configuration, where its "Where this value comes from" popover opens (PRO-374).
+  if (section === "general") return null;
+  const kinds: readonly SourceBadgeKind[] = file && sectionShowsUserValues(section) ? ["yours"] : [];
   return <BadgeLegend kinds={kinds} />;
 }

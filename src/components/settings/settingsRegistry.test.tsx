@@ -62,7 +62,7 @@ describe("settings registry", () => {
     // PRO-377 moved these rows from Appearance: a link copied before still opens the row.
     expect(resolveSetting("appearance.textSize").id).toBe("general.textSize");
     expect(resolveSetting("appearance.statusBar").id).toBe("general.statusBar");
-    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("account.identity");
+    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("general.websiteLinks");
   });
 
   it("keeps the linkable allowlist to reversible, local display and sound switches", () => {

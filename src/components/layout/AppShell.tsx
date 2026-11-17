@@ -109,8 +109,8 @@ const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((modul
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const MachineMain = lazy(() => import("@/components/machines/MachineMain").then((module) => ({ default: module.MachineMain })));
-/** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
-const GENERAL_SETTINGS_TAB: SettingsTab = "account";
+/** Where Settings opens when no section is asked for: General (PRO-374; it was Account, PRO-81). SettingsPage falls back to the same one. */
+const GENERAL_SETTINGS_TAB: SettingsTab = "general";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;

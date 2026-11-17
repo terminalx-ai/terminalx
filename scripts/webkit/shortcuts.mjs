@@ -22,7 +22,7 @@ let failed = 0;
 const openShortcuts = async (page) => {
   // The gear at the end of the account row (PRO-49): icon-only, named for assistive technology.
   await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Shortcuts", exact: true }).click();
+  await page.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
   await page.locator('[data-testid="shortcuts-tab"]').waitFor();
 };
 
@@ -129,7 +129,7 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
-  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
+  await page.getByRole("button", { name: "Back to app", exact: true }).click(); // Settings leaves by its one Back.
   await sidebar(page);
   // Since #847 the sidebar slides out (320 ms) and stays on screen until it has, so
   // wait out the motion: longer than a slide before saying the old keys did nothing,

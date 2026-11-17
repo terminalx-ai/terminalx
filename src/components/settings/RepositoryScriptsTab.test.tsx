@@ -282,7 +282,7 @@ it("keeps Settings and the draft open after a failed save, with an explicit retr
   state.resolve.mockResolvedValue(resolved({ setupScript: { value: "echo retry", source: "user" } }));
   fireEvent.click(button("Save setup script"));
   await screen.findByText("Setup script saved.");
-  fireEvent.click(button("Back to previous page"));
+  fireEvent.click(button("Back to app"));
   expect(button("Reopen Settings")).toBeTruthy();
 });
 
