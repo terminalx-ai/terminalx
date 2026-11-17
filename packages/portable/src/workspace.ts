@@ -16,6 +16,13 @@
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
+/** PRO-212: sample lifecycle.resources only while the details card is open and
+ * this runtime is connected. Reuse runtimeResources in workspaceGit: v1 memory
+ * and storage are bytes, observedAt is epoch ms, absent samples stay unavailable.
+ * v1 has no CPU field. Discard samples on disconnect/runtime generation change.
+ */
+export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
+
 /**
  * Namespace versions, as `src-tauri/src/remote/protocol.rs` `CAPABILITIES`.
  * A newer version only adds to its namespace (CS-12):
@@ -25,6 +32,8 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   running turn. Live only, never queued or resent;
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
  * - `agents/1`: `runtime.agents`;
+ * - `environment/1`: bounded installed-tool versions (`environment.report`)
+ *   and attachment-scoped cancellation (`environment.cancel`);
  * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
  *   the `pty.*` methods as `agentPtyId(tabId)`. It adds no method;
  * - `composer/1` (PRO-22): `session.commands`, the slash commands an agent
@@ -63,7 +72,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -107,6 +116,8 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.interrupt": "session/3",
   "session.toTerminal": "session/3",
   "runtime.agents": "agents/1",
+  "environment.report": "environment/1",
+  "environment.cancel": "environment/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
   "session.attach": "composer/3",

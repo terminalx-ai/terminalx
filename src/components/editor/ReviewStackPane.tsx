@@ -5,11 +5,11 @@ import { Checkbox } from "@/components/ui/controls";
 import { ReviewCommentsProvider } from "@/components/changes/ReviewComments";
 import { DiffPane } from "@/components/changes/DiffPane";
 import { DiffViewToggles } from "@/components/changes/DiffOptions";
-import { diffMediaKind } from "@/components/changes/FileDiff";
+import { diffMediaKind, formatSize, TOO_LARGE, TooLargeState } from "@/components/changes/FileDiff";
 import { useSessionThreads } from "@/components/changes/ReviewThreads";
 import { cn } from "@/lib/cn";
 import { diffFileKey, useDiffOptions } from "@/lib/diffOptions";
-import { openDiff, updateDiffRange, type DiffEditorEntry } from "@/lib/editors";
+import { openFile as openWorkspaceFile, openDiff, updateDiffRange, type DiffEditorEntry } from "@/lib/editors";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { useSessionStore } from "@/lib/sessions";
 import { useViewedChanges } from "@/lib/viewedChanges";
@@ -146,15 +146,16 @@ function ReviewStack({ entry, source, visible }: { entry: DiffEditorEntry; sourc
         : files === null ? !error && <p role="status" className="p-4 text-sm text-muted-foreground">Loading changes…</p>
         : !files.length ? <p className="p-4 text-sm text-muted-foreground">No changes in this scope.</p>
         : <div ref={content}>{files.map((file) => <StackedFile key={JSON.stringify([file.path, file.oldPath, range.base, range.head])} source={source} file={file} range={range} mode={mode} hideWhitespace={hideWhitespace}
-          viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpen={() => openFile(file)} />)}</div>}
+          viewed={viewed.status(file).viewed} onViewed={file.blobHash ? (on) => viewed.set(file, on) : undefined} onOpenFile={file.status !== "deleted" ? () => openWorkspaceFile(entry.sessionId, entry.root, file.path, undefined, entry.workspaceRoot) : undefined} onOpen={() => openFile(file)} />)}</div>}
     </div>
   </div>;
 }
 
-type Pair = { before: string; after: string };
+type Pair = { before: string; after: string; size?: number | null };
 
-function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onViewed, onOpen }: {
+function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onViewed, onOpen, onOpenFile }: {
   source: GitSource; file: ChangedFile; range: ChangeRange; mode: "unified" | "split"; hideWhitespace: boolean;
+  onOpenFile?: () => void;
   viewed: boolean; onViewed?: (on: boolean) => void; onOpen(): void;
 }) {
   const { wrap } = useDiffOptions(diffFileKey(source.key, file.path));
@@ -177,14 +178,12 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
     setError(null);
     void (async () => {
       const next = await source.fileContentsAt(file.path, range.base, range.head);
-      const before = file.oldPath ? (await source.fileContentsAt(file.oldPath, range.base, range.head)).before : next.before;
-      if (before === "<file too large to show>" || next.after === "<file too large to show>") {
-        throw new Error("This file exceeds the text preview limit. Open it in its own tab or in the workspace.");
-      }
-      if (!cancelled) setPair({ before: before ?? "", after: next.after ?? "" });
+      const previous = file.oldPath ? await source.fileContentsAt(file.oldPath, range.base, range.head) : next;
+      if (!cancelled) setPair({ before: previous.before ?? "", after: next.after ?? "", size: next.after === TOO_LARGE ? next.afterSize : previous.beforeSize });
     })().catch((e: unknown) => { if (!cancelled) setError(source.errorMessage(e)); });
     return () => { cancelled = true; };
   }, [near, source, file.path, file.oldPath, range.base, range.head, media, retry]);
+  const tooLarge = pair?.before === TOO_LARGE || pair?.after === TOO_LARGE;
   const binary = !!pair && (pair.before.includes("\0") || pair.after.includes("\0"));
 
   return <section ref={section} data-review-file={file.path} aria-label={file.path} className="border-b border-hairline">
@@ -195,6 +194,7 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
         {file.additions > 0 && <span className="text-add">+{file.additions}</span>}{" "}
         {file.deletions > 0 && <span className="text-destructive">−{file.deletions}</span>}
       </span>
+      {tooLarge && pair?.size != null && <span className="shrink-0 font-mono text-xs text-faint">{formatSize(pair.size)}</span>}
       <Button className="ml-auto" variant="ghost" size="icon-xs" aria-label={`Open ${file.path} in its own tab`} title="Open in its own tab" onClick={onOpen}><ExternalLink /></Button>
       <Checkbox label={`Viewed ${file.path}`} checked={viewed} disabled={!onViewed}
         title={!onViewed ? "Viewed marks require file identities from the workspace." : undefined} onChange={(on) => onViewed?.(on)}>Viewed</Checkbox>
@@ -204,6 +204,7 @@ function StackedFile({ source, file, range, mode, hideWhitespace, viewed, onView
       {media && media !== "svg" ? <p className="px-4 py-3 text-xs text-muted-foreground">{media === "pdf" ? "PDF" : "Image"} changed. <Button size="xs" variant="outline" onClick={onOpen}>Open to compare</Button></p>
         : error ? <div role="alert" className="px-4 py-3 text-xs text-destructive">{error} <Button size="xs" variant="outline" onClick={() => setRetry((n) => n + 1)}>Retry</Button></div>
         : !pair ? <p role="status" className="min-h-16 px-4 py-3 text-xs text-muted-foreground">Loading file diff…</p>
+        : tooLarge ? <TooLargeState path={file.path} size={pair.size} onOpenFile={onOpenFile} />
         : binary ? <p className="px-4 py-3 text-xs text-muted-foreground">Binary file changed.</p>
         : <DiffPane stacked workspace={source.key} path={file.path} before={pair.before} after={pair.after} base={range.base} originalPath={file.oldPath} mode={mode} wrap={wrap} hideWhitespace={hideWhitespace} />}
     </div>

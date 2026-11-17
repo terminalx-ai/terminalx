@@ -10,8 +10,9 @@ export const Switch = React.forwardRef<
   <SwitchPrimitive.Root
     ref={ref}
     className={cn(
-      "peer inline-flex shrink-0 items-center rounded-full border border-transparent transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent data-[state=unchecked]:bg-well",
-      size === "md" ? "h-4 w-7" : "h-3 w-5",
+      "peer inline-flex shrink-0 items-center rounded-full border border-transparent transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent data-[state=unchecked]:bg-(--switch-off)",
+      // 36×20 as designed (PRO-374); sm stays the compact size for dense lists.
+      size === "md" ? "h-5 w-9" : "h-3 w-5",
       className,
     )}
     {...props}
@@ -20,7 +21,7 @@ export const Switch = React.forwardRef<
       className={cn(
         "pointer-events-none block rounded-full bg-white shadow-button transition-transform",
         size === "md"
-          ? "size-3 data-[state=checked]:translate-x-3.5 data-[state=unchecked]:translate-x-0.5"
+          ? "size-4 data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0.5"
           : "size-2 data-[state=checked]:translate-x-2.5 data-[state=unchecked]:translate-x-0.5",
       )}
     />
@@ -120,6 +121,9 @@ export function Segmented<T extends string>({
   );
 }
 
+/** A setting row: ~14px above and below and a hairline under it, so a long page reads as rows (PRO-374, design 09.02). */
+export const SETTING_ROW_CLASS = "flex flex-col gap-1.5 border-b border-hairline-strong py-3.5";
+
 export function SettingRow({
   label,
   description,
@@ -139,7 +143,7 @@ export function SettingRow({
   id?: string;
 }) {
   return (
-    <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
+    <div className={cn(SETTING_ROW_CLASS, disabled && "opacity-60")}>
       <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
         <div className="min-w-0">
           {titleAccessory ? (

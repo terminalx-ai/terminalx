@@ -43,7 +43,7 @@ const formatTime = (timestamp: number | null) => (timestamp ? ago(timestamp, Dat
 /** The age or progress a version row shows beside its name. */
 function versionAge(version: EnvironmentVersion, now: number): string {
   if (version.state === "queued") return "waiting to build";
-  if (version.state === "running") return `building · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
+  if (version.state === "running") return `building: ${stageLabel(version.stage).toLowerCase()} · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
   const age = ago(version.finishedAt ?? version.createdAt, now);
   if (version.state === "canceled") return `canceled · ${age}`;
   if (version.publication === "expired") return `${age} · expired`;
@@ -467,13 +467,13 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         </p>
       )}
 
+      {status.supported && <ActiveVersion version={active} />}
       {!status.supported ? (
         <p className="text-xs" role="status">
           {name} cannot build environment images yet. Workspaces on {name} clone their repositories when they start, so there is nothing to configure here.
         </p>
       ) : !status.canManage ? (
         <>
-          <ActiveVersion version={active} />
           <p className="text-xs text-muted-foreground">Organization owners and admins set up the environment and build its versions.</p>
         </>
       ) : (
@@ -553,7 +553,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                             )}
                           </div>
                         )}
-                        {version.state === "failed" && log?.versionId === version.id && (
+                        {version.state === "failed" && (
                           <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
                             {confirming === `retry:${version.id}` ? (
                               <>

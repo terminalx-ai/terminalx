@@ -99,8 +99,27 @@ jobs:
       # scripts/webkit/run-all.mjs runs them several at once, permission-details among them.
       - name: WebKit layout checks
         run: pnpm test:webkit-layout
+        # The machine checks among them also keep their pictures (PRO-360).
+        env:
+          MACHINE_SIDEBAR_SHOTS: scripts/webkit/output/machines-screens/machine-sidebar
+          MACHINE_SESSION_SHOTS: scripts/webkit/output/machines-screens/machine-session
+          MACHINE_PORTS_SHOTS: scripts/webkit/output/machines-screens/machine-ports
+      # Every other 21.xx screen, from the built app, for review beside the
+      # designs (PRO-360): pairing (21.04 to 21.06), connection states (21.09),
+      # the machine page and adding a project (21.10, 21.11) and updates. These
+      # scripts are not layout gates, so a failure here does not fail the job.
+      - name: Shoot the other machine screens
+        continue-on-error: true
+        timeout-minutes: 8
+        run: |
+          status=0
+          for name in machines-pairing machine-connection machine-page machine-update; do
+            mkdir -p "scripts/webkit/output/machines-screens/$name"
+            MACHINES_SHOTS="scripts/webkit/output/machines-screens/$name" node "scripts/webkit/$name.mjs" || status=1
+          done
+          exit $status
       # The machine screens the WebKit fixture shoots against two machines
-      # (PRO-358, scripts/webkit/machines-screens.mjs), kept for review.
+      # (PRO-358, scripts/webkit/machines-screens.mjs), and the ones above, kept for review.
       - name: Upload the machine screens
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

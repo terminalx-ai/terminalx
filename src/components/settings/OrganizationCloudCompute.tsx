@@ -17,7 +17,7 @@ export type CloudComputeTab = (typeof CLOUD_COMPUTE_TABS)[number]["id"];
  * Every tab stays mounted while hidden, so an unsaved template or limit
  * survives a switch. A settings link or search result opens the tab that
  * holds the row it names: Settings marks that row (data-setting-highlight),
- * which shows its tab and scrolls it into view.
+ * which shows its tab before Settings scrolls and focuses the row.
  */
 export function OrganizationCloudCompute({ organizationName, panels, initialTab = "providers" }: {
   organizationName: string;
@@ -36,8 +36,7 @@ export function OrganizationCloudCompute({ organizationName, panels, initialTab 
       if (!panel || !element.contains(panel)) return;
       const id = panel.dataset.cloudComputePanel as CloudComputeTab;
       setTab(id);
-      // Shown on the next frame; then the row the link names is in view.
-      requestAnimationFrame(() => (target as HTMLElement).scrollIntoView?.({ block: "start" }));
+
     };
     const marked = element.querySelector("[data-setting-highlight]");
     if (marked) follow(marked);

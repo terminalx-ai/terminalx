@@ -11,6 +11,11 @@
 //! Only a person may answer: `pair` refuses unless its input and output are a
 //! terminal, and the runtime refuses to make a code or approve for a process
 //! it started or one in its terminals (`consent`).
+//!
+//! `pair --phone` pairs a phone the same way (PRO-359): it prints the
+//! `terminalx://pair` link as a QR in the terminal, the phone scans it, and the
+//! person compares the fingerprint the phone shows and answers Allow here. The
+//! runtime serves that phone itself while no TerminalX window takes phones.
 
 use std::io::Write;
 use std::path::Path;
@@ -20,15 +25,18 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use super::control_client::{refusal_code, Attachment, Runtime};
-use crate::machine_wire::{self, CreatedCode, MachineCode, Status};
+use crate::machine_wire::{self, CreatedCode, CreatedPhoneCode, MachineCode, Status};
 
 const USAGE: &str = "\
-Usage: terminalx-serve pair [--data-dir <dir>]
+Usage: terminalx-serve pair [--phone] [--data-dir <dir>]
 
 Let another computer operate this one. Shows a one-time pairing code to paste
 into TerminalX on that computer (Settings → Machines → Add a machine), then
 asks you to allow it. Run it in a terminal of your own: it will not approve
-for an agent or a terminal TerminalX runs.";
+for an agent or a terminal TerminalX runs.
+
+  --phone   Pair a phone instead: shows a QR to scan with TerminalX on the
+            phone (Machines → Add), then asks you to allow it.";
 
 /// How long `pair` waits for hosting to start once it is on.
 const LISTEN_WAIT: Duration = Duration::from_secs(30);
@@ -49,8 +57,10 @@ pub fn run(args: &[String]) -> i32 {
 
 fn pair(args: &[String]) -> Result<i32> {
     let (flag, rest) = super::take_data_dir(args)?;
+    let mut phone = false;
     match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => {}
+        ["--phone"] => phone = true,
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             return Ok(0);
@@ -73,8 +83,18 @@ fn pair(args: &[String]) -> Result<i32> {
     std::env::set_var("TERMINALX_HOME", &canonical);
 
     let mut status = runtime.status()?;
+    // Before anything is turned on: a window pairs this Mac's phones.
+    if phone && (status.phone_route || status.phones.window_open) {
+        eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
+        return Ok(1);
+    }
     if !status.enabled {
-        println!("Other computers may not operate this server now. A computer you pair can run");
+        if phone {
+            // Phones reach a server through the same listener computers use.
+            println!("This server does not take connections now. Phones and other computers you pair");
+        } else {
+            println!("Other computers may not operate this server now. A computer you pair can run");
+        }
         println!("agents, terminals and Git here, and read and change files, as {}.", user_label());
         match terminal::ask("Let other computers operate this server? [y/N] ", None)? {
             terminal::Answer::Line(line) if allows(&line) => {}
@@ -89,6 +109,9 @@ fn pair(args: &[String]) -> Result<i32> {
     status = wait_until_listening(&runtime, status)?;
     let machine_id = status.machine_id.clone().context("the runtime has no machine id")?;
     let attachment = runtime.attach()?;
+    if phone {
+        return pair_phone(&runtime, &attachment, &machine_id);
+    }
     let mut first = true;
     loop {
         let created = match create_code(&attachment) {
@@ -280,6 +303,144 @@ fn wait(runtime: &Runtime, attachment: &Attachment, expires_at: i64) -> Result<O
     }
 }
 
+/// `pair --phone`: a QR for the phone, then the person's answer.
+fn pair_phone(runtime: &Runtime, attachment: &Attachment, machine_id: &str) -> Result<i32> {
+    let mut first = true;
+    loop {
+        let created = match attachment.call(machine_wire::PHONE_CODE, json!({})) {
+            Ok(created) => serde_json::from_value::<CreatedPhoneCode>(created).context("read the phone pairing code")?,
+            Err(error) if refusal_code(&error) == Some("window_takes_phones") => {
+                eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
+                return Ok(1);
+            }
+            Err(error) => {
+                eprintln!("terminalx-serve pair: {error:#}");
+                return Ok(1);
+            }
+        };
+        if first {
+            let name = crate::machine_name::computer_name().unwrap_or_else(|| "this server".into());
+            print!(
+                "TerminalX {} · {} {}\n{:<12}{}\n{:<12}{}\n",
+                env!("CARGO_PKG_VERSION"),
+                os_label(std::env::consts::OS),
+                std::env::consts::ARCH,
+                "Name",
+                printable(&name),
+                "Machine ID",
+                machine_id
+            );
+            first = false;
+        }
+        println!();
+        println!("Scan with TerminalX on your phone (Machines → Add). Valid for {}, works once:", clock(created.expires_at - now_ms()));
+        println!();
+        print!("{}", qr(&created.link)?);
+        println!();
+        println!("Or paste this link on the phone:");
+        println!("{}", created.link);
+        println!();
+        match wait_phone(runtime, attachment, created.expires_at)? {
+            Outcome::Approved => return Ok(0),
+            Outcome::Declined => return Ok(1),
+            Outcome::Interrupted => return Ok(130),
+            Outcome::Ended(why) => {
+                println!("{why}");
+                match terminal::ask("Make a new code? [y/N] ", None)? {
+                    terminal::Answer::Line(line) if allows(&line) => continue,
+                    terminal::Answer::Interrupted => return Ok(130),
+                    _ => return Ok(1),
+                }
+            }
+        }
+    }
+}
+
+/// `text` as a QR drawn with half blocks, two modules a character, dark on
+/// light whatever the terminal's colours, with the quiet zone scanners need.
+fn qr(text: &str) -> Result<String> {
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::L).context("the pairing link does not fit a QR")?;
+    let width = code.width();
+    let colors = code.to_colors();
+    const QUIET: usize = 2;
+    let dark = |x: usize, y: usize| -> bool {
+        x >= QUIET && y >= QUIET && x - QUIET < width && y - QUIET < width && colors[(y - QUIET) * width + (x - QUIET)] == qrcode::Color::Dark
+    };
+    let side = width + 2 * QUIET;
+    let mut out = String::new();
+    for row in (0..side).step_by(2) {
+        for column in 0..side {
+            // Upper module as the foreground of "▀", lower as its background.
+            let colour = |is_dark: bool| if is_dark { 16 } else { 231 };
+            out.push_str(&format!("\x1b[38;5;{}m\x1b[48;5;{}m▀", colour(dark(column, row)), colour(dark(column, row + 1))));
+        }
+        out.push_str("\x1b[0m\n");
+    }
+    Ok(out)
+}
+
+/// Wait for the phone to scan the code, and ask the person.
+fn wait_phone(runtime: &Runtime, attachment: &Attachment, expires_at: i64) -> Result<Outcome> {
+    let mut out = std::io::stdout();
+    loop {
+        if terminal::interrupted() {
+            println!();
+            return Ok(Outcome::Interrupted);
+        }
+        let status = runtime.status()?;
+        if let Some(pending) = status.phones.pending {
+            write!(out, "\r\x1b[K")?;
+            println!("✓ A phone asks to connect. Check it shows the fingerprint {}.", printable(&pending.fingerprint));
+            let deadline = Instant::now() + Duration::from_millis((pending.expires_at - now_ms()).max(0) as u64);
+            let answer = terminal::ask("Allow? [y/N] ", Some(deadline))?;
+            if !matches!(&answer, terminal::Answer::Line(line) if allows(line)) {
+                let _ = attachment.call(machine_wire::PHONE_DECLINE, json!({ "requestId": pending.request_id }));
+                return Ok(match answer {
+                    terminal::Answer::Interrupted => {
+                        println!("\nNot allowed.");
+                        Outcome::Interrupted
+                    }
+                    terminal::Answer::TimedOut => {
+                        println!("\nNo answer in time: not allowed.");
+                        Outcome::Declined
+                    }
+                    terminal::Answer::Closed => {
+                        println!("\nNot allowed.");
+                        Outcome::Declined
+                    }
+                    terminal::Answer::Line(_) => {
+                        println!("Not allowed.");
+                        Outcome::Declined
+                    }
+                });
+            }
+            return match attachment.call(machine_wire::PHONE_APPROVE, json!({ "requestId": pending.request_id })) {
+                Ok(_) => {
+                    println!("✓ The phone is paired. It lists this server under Machines; `terminalx-serve devices` lists it.");
+                    Ok(Outcome::Approved)
+                }
+                Err(error) if refusal_code(&error) == Some("not_found") => Ok(Outcome::Ended("The phone stopped waiting before it was allowed.")),
+                Err(error) => {
+                    eprintln!("terminalx-serve pair: {error:#}");
+                    Ok(Outcome::Declined)
+                }
+            };
+        }
+        let left = expires_at - now_ms();
+        if left <= 0 {
+            write!(out, "\r\x1b[K")?;
+            return Ok(Outcome::Ended("The code expired."));
+        }
+        if status.phones.code.is_none() {
+            write!(out, "\r\x1b[K")?;
+            return Ok(Outcome::Ended("The code ended: the phone that used it stopped asking, another code was made, or a TerminalX window opened."));
+        }
+        write!(out, "\r\x1b[KWaiting for the phone… {}", clock(left))?;
+        out.flush()?;
+        std::thread::sleep(POLL);
+    }
+}
+
 /// The person's terminal: answers read with a deadline, and Ctrl-C caught
 /// so it declines instead of leaving a computer waiting.
 mod terminal {
@@ -404,6 +565,17 @@ mod tests {
         for no in ["", "n", "N", "no", "yes", "yy", "ok", "y please", "\u{1b}y"] {
             assert!(!allows(no), "{no:?}");
         }
+    }
+
+    #[test]
+    fn the_phone_qr_is_square_with_its_quiet_zone_and_resets_colour() {
+        let link = "terminalx://pair?code=".to_string() + &"A".repeat(400) + "&name=Build%20server";
+        let drawn = qr(&link).unwrap();
+        let side = qrcode::QrCode::with_error_correction_level(link.as_bytes(), qrcode::EcLevel::L).unwrap().width() + 4;
+        let rows: Vec<&str> = drawn.lines().collect();
+        assert_eq!(rows.len(), side.div_ceil(2), "two modules a row");
+        assert!(rows.iter().all(|row| row.matches('▀').count() == side && row.ends_with("\x1b[0m")), "every row is the full width and resets the colour");
+        assert!(rows[0].starts_with("\x1b[38;5;231m\x1b[48;5;231m▀"), "the quiet zone is light");
     }
 
     #[test]

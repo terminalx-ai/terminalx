@@ -363,6 +363,7 @@ let enqueued: { kind: string; tabId: string; payload: Record<string, unknown> }[
 
 function cloudHandlers() {
   guard.handlers = {
+    phase2_desktop_contracts_available: () => false,
     organization_members_in: ({ orgId }) => {
       expect(orgId).toBe(ORG);
       return guard.handlers.organization_members?.({}) ?? { members: [], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "" };
@@ -456,6 +457,17 @@ async function openConnected(authority: "manage" | "participate" = "manage") {
 }
 
 describe("the same SessionView for local and cloud sessions", () => {
+  it("keeps details/restart/copy held in the cloud location without waking compute", async () => {
+    guard.handlers.cloud_schedules = () => { throw new Error("Schedules not offered in this fixture"); };
+    await openConnected();
+    expect(screen.queryByRole("button", { name: "Workspace details" })).toBeNull();
+    await mouseClick(screen.getByTestId("session-location"));
+    expect(screen.queryByText("Restart workspace…")).toBeNull();
+    expect(screen.queryByText("Copy machine ID")).toBeNull();
+    expect(guard.calls.filter((call) => ["cloud_workspace_details", "cloud_workspace_restart"].includes(call.command))).toEqual([]);
+    expect(mocks.workspaceConnection.mock.calls.every((call) => call[1] === "connect")).toBe(true);
+    expect(guard.violations).toEqual([]);
+  });
   it("restores cloud usage exhaustion without retry when reopening the session", async () => {
     const message = "Model allowance exhausted · resets at 11pm";
     runtime.events = [
@@ -637,6 +649,9 @@ describe("cloud session actions", () => {
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "permission-decision")?.payload).toEqual({ requestId: "req-9", optionId: "allow" }));
 
     // Steer while the turn runs, then stop it.
+    // A /goal is never steered past the composer's check (PRO-380).
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal keep the tests green" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "steer")?.payload).toEqual({ text: "use the staging config" }));

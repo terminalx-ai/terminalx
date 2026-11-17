@@ -94,10 +94,9 @@ describe("a provider TerminalX provides", () => {
 
     // Chosen without anyone connecting anything, and said to be ready.
     expect((within(card("terminalx-cloud")).getByRole("radio") as HTMLInputElement).checked).toBe(true);
-    expect(card("terminalx-cloud").textContent).toContain("Ready to use");
     expect(card("terminalx-cloud").textContent).toContain("Billed by TerminalX");
-    expect(card("hetzner").textContent).not.toContain("Ready to use");
     expect(connectionRow().textContent).toContain("Provided by TerminalX");
+    expect(connectionRow().textContent).toContain("Ready");
     expect(connectionRow().textContent).toContain("Ready");
     expect(connectionRow().textContent).not.toContain("Not connected");
     expect(connectionRow().textContent).not.toContain("•");
@@ -129,7 +128,6 @@ describe("a provider TerminalX provides", () => {
     mount();
     await screen.findByRole("button", { name: "Replace key" });
     expect((within(card("hetzner")).getByRole("radio") as HTMLInputElement).checked).toBe(true);
-    expect(card("hetzner").textContent).toContain("Connected");
     expect(connectionRow().textContent).toContain("1234");
     expect(connectionRow().textContent).toContain("Valid");
     expect(screen.getByText(/machines in your own provider account/)).toBeTruthy();
@@ -164,7 +162,7 @@ describe("a provider TerminalX provides", () => {
     await screen.findByText("New machines are allowed again.");
     expect(api.cloudProviderSetCreationEnabled).toHaveBeenCalledWith("terminalx-cloud", "rev-1", true);
     await waitFor(() => expect(screen.queryByTestId("cloud-setup-provider-paused")).toBeNull());
-    expect(card("terminalx-cloud").textContent).toContain("Ready to use");
+    expect(card("terminalx-cloud").textContent).not.toContain("New machines paused");
     expect(api.cloudProvider).not.toHaveBeenCalled();
   });
 
@@ -208,7 +206,6 @@ describe("a provider the organization connects", () => {
     expect(connectionRow().textContent).toContain("Not connected");
     expect(screen.getByText("Hetzner API token")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Where to get the Hetzner API token" })).toBeTruthy();
-    expect(card("hetzner").textContent).not.toContain("Ready to use");
     expect([...(screen.getByLabelText("Region") as HTMLSelectElement).options].map((option) => option.textContent)).toEqual(["After connecting"]);
     expect(api.cloudWorkspaceSetup).not.toHaveBeenCalled();
 

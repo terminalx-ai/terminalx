@@ -156,6 +156,40 @@ it("says so when the provider cannot build environment images", async () => {
   expect(environment.recipes).not.toHaveBeenCalled();
 });
 
+it.each([false, true])("shows active repository details independently of the template and build history (canManage=%s)", async (canManage) => {
+  const activeVersion = version({ repositories: [
+    { owner: "acme", name: "widgets", defaultBranch: "release", commit: "abcdef0123456789abcdef0123456789abcdef0123" },
+    { owner: "acme", name: "tools", defaultBranch: "stable", commit: "fedcba9876543210fedcba9876543210fedcba98" },
+  ] });
+  environment.status.mockResolvedValue(status({ canManage, activeVersion }));
+  mount();
+  const active = await screen.findByLabelText("Active environment version");
+  expect(screen.getAllByLabelText("Active environment version")).toHaveLength(1);
+  expect(active.textContent).toMatch(/start from version 2/);
+  expect(within(active).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "acme/widgets on release at abcdef0",
+    "acme/tools on stable at fedcba9",
+  ]);
+  if (canManage) {
+    await settled();
+    expect((screen.getByRole("button", { name: "Build environment" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Activate" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "History (2)" }));
+    expect(screen.queryByLabelText("Environment versions")).toBeNull();
+    expect(screen.getByLabelText("Active environment version")).toBe(active);
+  } else {
+    expect(screen.queryByRole("button", { name: "Build environment" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
+  }
+});
+
+it.each([false, true])("explains when no version is active (canManage=%s)", async (canManage) => {
+  environment.status.mockResolvedValue(status({ canManage, activeVersion: null }));
+  mount();
+  expect(await screen.findByText(/No version is published yet/)).toBeTruthy();
+  expect(screen.queryByLabelText("Active environment version")).toBeNull();
+});
+
 it("saves an edit against the revision the draft started from, and builds nothing", async () => {
   environment.update.mockResolvedValue(status());
   mount();
@@ -270,6 +304,29 @@ it("lists versions as rows with a status icon, relative age and ACTIVE badge, an
   await waitFor(() => expect(environment.rollback).toHaveBeenCalledWith("version-1", "rev-1"));
 });
 
+it("shows the current stage and elapsed duration as a running build progresses", async () => {
+  const now = Date.UTC(2026, 9, 2);
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  try {
+    const building = version({ id: "version-3", number: 3, state: "running", stage: "install", publication: null, startedAt: now - 125_000, finishedAt: null });
+    environment.status.mockResolvedValue(status({ versions: [building, version()] }));
+    mount();
+    await settled();
+    expect(within(screen.getByLabelText("Version 3")).getByText("building: running the machine install script · 2m 5s")).toBeTruthy();
+
+    clock.mockReturnValue(now + 60_000);
+    environment.status.mockResolvedValue(status({ versions: [{ ...building, stage: "snapshot" }, version()] }));
+    fireEvent.click(screen.getByLabelText("Refresh cloud environment"));
+    await waitFor(() => {
+      const row = within(screen.getByLabelText("Version 3"));
+      expect(row.getByText("building: saving the image · 3m 5s")).toBeTruthy();
+      expect(row.queryByText(/running the machine install script/)).toBeNull();
+    });
+  } finally {
+    clock.mockRestore();
+  }
+});
+
 it("shows a failed build as failed, with where it failed, and asks before building again", async () => {
   const failed = version({ id: "version-3", number: 3, state: "failed", stage: "install", failurePhase: "install", errorCode: "cloud_environment_install_failed", publication: null });
   environment.status.mockResolvedValue(status({ versions: [failed, version()] }));
@@ -284,7 +341,7 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   expect(within(row).getByLabelText("Failed")).toBeTruthy();
   expect(row.textContent).toMatch(/Failed in install script/);
   expect(row.textContent).not.toMatch(/cloud_environment_install_failed/);
-  expect(within(row).queryByRole("button", { name: "Build again…" })).toBeNull();
+  expect(within(row).getByRole("button", { name: "Build again…" })).toBeTruthy();
   fireEvent.click(within(row).getByRole("button", { name: "View log" }));
   expect(environment.version).toHaveBeenCalledWith("version-3");
   expect(within(row).getByLabelText("Build log of version 3").textContent).toBe("Loading the log…");
@@ -295,6 +352,26 @@ it("shows a failed build as failed, with where it failed, and asks before buildi
   expect(environment.retry).not.toHaveBeenCalled();
   fireEvent.click(within(row).getByRole("button", { name: "Start build" }));
   await waitFor(() => expect(environment.retry).toHaveBeenCalledWith("version-3", true, "rev-1"));
+});
+
+it("retries a failed row without opening its log, only after confirmation", async () => {
+  const failed = version({ id: "version-3", number: 3, state: "failed", publication: null });
+  environment.status.mockResolvedValue(status({ versions: [failed, version()] }));
+  environment.retry.mockResolvedValue(version());
+  mount();
+  await settled();
+  const row = screen.getByLabelText("Version 3");
+  expect(within(row).queryByLabelText("Build log of version 3")).toBeNull();
+  expect(within(screen.getByLabelText("Version 2")).queryByRole("button", { name: "Build again…" })).toBeNull();
+  fireEvent.click(within(row).getByRole("button", { name: "Build again…" }));
+  expect(row.textContent).toMatch(/Build version 3's template again as a new version/);
+  expect(environment.retry).not.toHaveBeenCalled();
+  fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+  expect(environment.retry).not.toHaveBeenCalled();
+  fireEvent.click(within(row).getByRole("button", { name: "Build again…" }));
+  fireEvent.click(within(row).getByRole("button", { name: "Start build" }));
+  await waitFor(() => expect(environment.retry).toHaveBeenCalledWith("version-3", true, "rev-1"));
+  expect(environment.version).not.toHaveBeenCalled();
 });
 
 it("lists a recipe as a proposal with its five results shown separately and a failure shown as a failure", async () => {

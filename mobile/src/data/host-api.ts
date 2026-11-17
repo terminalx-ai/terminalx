@@ -6,6 +6,9 @@ import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache"
 import type { HostConnection } from "../transport/connection";
 import { recordStartedSessionOn } from "../notifications/store";
 
+
+/** A computer's answer to `host.describe`. */
+export type HostDescription = { name: string | null; hasWindow: boolean | null; platform: string | null };
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
   rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
@@ -213,10 +216,24 @@ export class HostApi {
 
   /** What the computer calls itself (PRO-87). Null from a desktop that predates the question, or when it has no name to give. */
   async describe(): Promise<string | null> {
+    return (await this.describeHost())?.name ?? null;
+  }
+
+  /**
+   * What the computer says of itself: its name (PRO-87), and since PRO-359
+   * whether a TerminalX window runs there and its OS. A machine with no
+   * window is a headless server. Null when it would not answer; a field an
+   * older computer does not send is null.
+   */
+  async describeHost(): Promise<HostDescription | null> {
     const result = await this.connection.request<unknown>("host.describe");
     if (!result.ok) return null;
-    const name = (result.value as { name?: unknown } | null)?.name;
-    return typeof name === "string" ? name : null;
+    const value = result.value as { name?: unknown; hasWindow?: unknown; platform?: unknown } | null;
+    return {
+      name: typeof value?.name === "string" ? value.name : null,
+      hasWindow: typeof value?.hasWindow === "boolean" ? value.hasWindow : null,
+      platform: typeof value?.platform === "string" && /^[a-z0-9_-]{1,32}$/.test(value.platform) ? value.platform : null,
+    };
   }
 
   /** Ask the computer to drop this phone from its paired devices. Best effort: true only when it said it did. */

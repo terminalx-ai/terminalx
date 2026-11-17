@@ -534,3 +534,55 @@ None of the following is required by this plan:
 If a future product requires one of these, it needs a separate server proposal,
 compatibility plan, rollout, and operational approval. TerminalX's baseline ships
 without it.
+
+## Cloud setup invite-link dependency (#1114 / PRO-389)
+
+Status: **blocked on an accepted server domain-join policy**. The reviewed
+“Copy invite link · anyone with a <domain> email can join as a member” criterion
+is not complete. [Issue #1114](https://github.com/terminalx-ai/terminalx/issues/1114)
+tracks this dependency from the
+[PR #1066 review](https://github.com/terminalx-ai/terminalx/pull/1066#issuecomment-6920980206).
+The unavailable row and recipient-link improvements do not activate domain
+joining or satisfy that original criterion.
+
+The desktop contract in `src/lib/organizationMembers.ts` and
+`src-tauri/src/organization_members.rs` only exposes a recipient-specific
+`inviteUrl` on an issued invitation, alongside its email and role. A roster's
+`canManageMembers` / `canInvite` permissions authorize individual invitations;
+they do not authorize a shared join link. Neither the account's email domain
+nor an organization's display name is evidence of domain ownership or eligibility.
+
+Server source inspected in `terminalx-saas` at `0720ecea`:
+`apps/api/src/controllers/desktop/orgMembers.ts` issues per-address tokens;
+`apps/api/src/controllers/organizations/acceptInvite.ts` checks the token,
+expiry, matching signed-in email and applicable license requirement, then uses
+the stored role and consumes the invitation. This inspection is evidence for
+recipient-link wording, not a deployment verification or a domain-join contract.
+
+Until a server contract is accepted, setup displays “Shared invite link
+unavailable. Invite each person by email.” It offers no shared copy action or
+domain eligibility claim. Recipient links remain in memory, only for invitations
+issued in this setup context, with the exact recipient and role shown. Copying
+requires invitation permission and a matching, unexpired pending invitation.
+Clipboard failures are visible and retryable. Changing the organization, account
+revision or account email discards tokens and pending feedback.
+
+To unblock the domain-wide row, the account-service policy owner must supply an
+accepted contract and server enforcement for:
+
+- Who may obtain/share the link, its organization, and the explicit supported,
+  disabled and unauthorized states.
+- The allowed verified email domain(s), including exact subdomain semantics,
+  and the role granted at redemption. The server must check identity and policy
+  at redemption, not rely on client copy or inferred email suffixes.
+- Link lifetime, revocation/rotation, policy changes, entitlement requirements,
+  and behavior after membership or administrative permission changes.
+- A real server-issued URL and organization/account context fencing. Endpoint
+  names and response fields must come from that contract, not this UI work.
+
+Activation requires a separately authorized server change and client integration,
+with server tests proving eligible/ineligible identities and assigned roles, plus
+client tests for authorized/unauthorized and unsupported policy, copy rejection,
+revocation/expiry and account/organization changes during reads and copying.
+Current `InviteStep.test.tsx` covers the unsupported fallback and recipient-link
+behavior; it cannot establish domain-wide joining authority.

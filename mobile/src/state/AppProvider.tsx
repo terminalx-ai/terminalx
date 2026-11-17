@@ -14,7 +14,7 @@ import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing, type PairingProgress } from "../pairing/pair";
 import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/parse";
-import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
+import { readHostCredential, readHosts, removeHost, setHostKind, setHostNames, type StoredHost } from "../store/hosts";
 import { readAccountMachinePrefs, setAccountMachineHidden, setAccountMachineName, takeAccountMachinePrefs, type AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
 import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
@@ -167,8 +167,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   const refreshHostName = useCallback(async () => {
     const host = activeHostRef.current;
     if (!host) return;
-    const name = cleanHostName(await api.describe().catch(() => null));
-    if (!name || activeHostRef.current?.id !== host.id || name === host.hostName) return;
+    const described = await api.describeHost().catch(() => null);
+    // PRO-359: whether a window runs there marks a headless server. A computer too old to say leaves it as it was.
+    if (described?.hasWindow != null && activeHostRef.current?.id === host.id && (host.headless !== !described.hasWindow || (described.platform ?? undefined) !== host.platform)) {
+      const kept = await setHostKind(host.id, { headless: !described.hasWindow, platform: described.platform });
+      if (kept && activeHostRef.current?.id === host.id) adoptHost(kept);
+    }
+    const name = cleanHostName(described?.name ?? null);
+    const current = activeHostRef.current;
+    if (!name || current?.id !== host.id || name === current.hostName) return;
     adoptHost(await setHostNames(host.id, { hostName: name }));
   }, [adoptHost, api]);
 

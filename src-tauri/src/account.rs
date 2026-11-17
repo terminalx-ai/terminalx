@@ -424,6 +424,9 @@ pub struct AccountManager {
     /// When the server last answered with organizations and roles. Held while
     /// asking, so concurrent callers share one answer.
     roles_refreshed: Mutex<Option<Instant>>,
+    /// When the runtime's copy of the session last changed, as last checked
+    /// (see "The runtime's copy" below).
+    runtime_copy_seen: Mutex<Option<SystemTime>>,
 }
 
 enum CallbackAction {
@@ -671,6 +674,7 @@ impl AccountManager {
     /// Access tokens never cross the Tauri command boundary.
     pub(crate) fn context(&self) -> Option<AccountContext> {
         self.ensure_loaded();
+        self.adopt_runtime_rotation();
         self.refresh_if_needed();
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(|session| AccountContext {
@@ -723,6 +727,21 @@ impl AccountManager {
         }
         context.organization_id = organization_id.to_string();
         Ok((context, if scope.multi_org { OrgAccess::Member } else { OrgAccess::Active }))
+    }
+
+    /// PRO-125 authorizes read markers by membership even on an inactive target.
+    /// This does not widen the authorization of existing cloud APIs.
+    pub(crate) fn inbox_member_context(&self, organization: &str) -> Result<AccountContext, &'static str> {
+        let mut context = self.context().ok_or("account_signed_out")?;
+        if !self.inbox_member_is_current(&context, organization) {
+            return Err("cloud_organization_unavailable");
+        }
+        context.organization_id = organization.into();
+        Ok(context)
+    }
+
+    pub(crate) fn inbox_member_is_current(&self, context: &AccountContext, organization: &str) -> bool {
+        self.scope_if_same_account(context).is_some_and(|scope| scope.members.contains(organization))
     }
 
     /// [`Self::is_current`] for a context from [`Self::context_in`]: a
@@ -994,7 +1013,12 @@ impl AccountManager {
     /// may already own the account by the time the logout request finishes.
     pub fn sign_out(&self, app: &AppHandle) -> (AccountStatus, u64) {
         self.ensure_loaded();
+        // Signed out with the token the runtime may have rotated meanwhile,
+        // so the account service ends the session, not a superseded token.
+        self.adopt_runtime_rotation();
         let (session, generation) = self.end_session();
+        // The runtime ends its relay registration (PRO-368).
+        self.sync_runtime_copy_after(session.as_ref());
         let status = self.snapshot();
         self.emit(app);
 
@@ -1141,6 +1165,7 @@ impl AccountManager {
         if self.persist(generation, Some("Signed in for this run, but macOS Keychain could not save the session.")) {
             self.emit(app);
         }
+        self.sync_runtime_copy();
     }
 
     /// Take a sign-in's outcome, in memory. False when the sign-in it belongs
@@ -1213,15 +1238,39 @@ impl AccountManager {
         // Refresh tokens rotate. Serializing this section prevents two status
         // reads from submitting the same token family at once.
         let _gate = self.refresh_gate.lock().unwrap();
-        let (generation, session) = {
+        let due = || {
             let inner = self.inner.lock().unwrap();
             inner.session.as_ref().and_then(|session| {
                 should_refresh(session.expires_at, now_ms())
                     .then(|| (inner.generation, session.clone()))
             })
-        }?;
-        let result = refresh(&session);
-        Some((generation, self.apply_refresh(generation, &session, result)))
+        };
+        due()?;
+        // The runtime rotates this same session while no window is attached
+        // (PRO-368). Under the session file's lock, a rotation it made is
+        // taken instead of presenting the token it superseded, which would
+        // end the session; and this one is written there before the lock
+        // is released.
+        let rotate = || {
+            let adopted = self.adopt_runtime_rotation_now();
+            let Some((generation, session)) = due() else { return adopted };
+            let result = refresh(&session);
+            let changed = self.apply_refresh(generation, &session, result);
+            self.write_runtime_copy(None);
+            Some((generation, changed))
+        };
+        match crate::store::root() {
+            Ok(root) if Self::runtime_copy_wanted() || crate::machine_account::session_path(&root).exists() => {
+                match crate::machine_account::locked(&root, || Ok(rotate())) {
+                    Ok(rotated) => rotated,
+                    Err(error) => {
+                        log::warn!("could not take the account session's lock: {error:#}");
+                        rotate()
+                    }
+                }
+            }
+            _ => rotate(),
+        }
     }
 
     /// After a change made in memory for `generation`: announce it, then
@@ -1290,6 +1339,112 @@ impl AccountManager {
         }
         self.inner.lock().unwrap().stored_revision = revision;
         Ok(())
+    }
+
+    // ------------------------------------------------ The runtime's copy
+    //
+    // While "Let other computers operate this Mac" is on, the runtime
+    // registers this Mac with the relay from the account (PRO-368), with the
+    // window closed too. It reads the session from
+    // `<data dir>/account/session.json` (`machine_account`), which the window
+    // keeps from here, mode 0600 in a 0700 folder, as a headless machine
+    // keeps its own. Refresh tokens rotate, and presenting a superseded one
+    // ends the whole session, so one process rotates at a time, under that
+    // file's lock: the window while it is attached (the runtime asks it,
+    // `account.refresh`), the runtime while it is not. Whichever rotated
+    // writes the file before releasing the lock; the window takes a rotation
+    // it finds there before it uses or refreshes its own tokens. With the
+    // switch off the file is removed, after any rotation in it is taken.
+
+    /// Whether the runtime keeps a copy of the session.
+    fn runtime_copy_wanted() -> bool {
+        crate::store::settings::load().machines.allow_operating && !crate::data_privacy::enabled()
+    }
+
+    /// Take a rotation the runtime made, when its copy changed since the
+    /// last look. Cheap enough for every [`Self::context`]: one `stat`.
+    fn adopt_runtime_rotation(&self) {
+        let Ok(root) = crate::store::root() else { return };
+        let modified = std::fs::metadata(crate::machine_account::session_path(&root)).and_then(|metadata| metadata.modified()).ok();
+        {
+            let mut seen = self.runtime_copy_seen.lock().unwrap();
+            if modified.is_none() || *seen == modified {
+                return;
+            }
+            *seen = modified;
+        }
+        self.adopt_runtime_rotation_now();
+    }
+
+    /// Take the runtime's copy when it is a later rotation of the session in
+    /// memory, and store it. The generation it was taken for, when it was.
+    fn adopt_runtime_rotation_now(&self) -> Option<(u64, bool)> {
+        let root = crate::store::root().ok()?;
+        let saved = crate::machine_account::load(&root).ok().flatten()?;
+        let generation = {
+            let mut inner = self.inner.lock().unwrap();
+            let generation = inner.generation;
+            let current = inner.session.as_ref()?;
+            if !crate::machine_account::rotated(&current.refresh_token, current.expires_at, &saved) {
+                return None;
+            }
+            let mut session = current.clone();
+            session.access_token = saved.access_token;
+            session.refresh_token = saved.refresh_token;
+            session.expires_at = saved.expires_at;
+            inner.set_session(Some(session));
+            generation
+        };
+        log::info!("took the account session the runtime refreshed while this window was closed");
+        self.settle(generation, false, Some(REFRESH_NOT_SAVED));
+        Some((generation, false))
+    }
+
+    /// Bring the runtime's copy in line with the session in memory and the
+    /// switch, under the file's lock. Blocking.
+    pub(crate) fn sync_runtime_copy(&self) {
+        self.sync_runtime_copy_after(None);
+    }
+
+    /// [`Self::sync_runtime_copy`]; `ended`: a session just signed out,
+    /// whose copy goes too.
+    fn sync_runtime_copy_after(&self, ended: Option<&DesktopSession>) {
+        let Ok(root) = crate::store::root() else { return };
+        if let Err(error) = crate::machine_account::locked(&root, || {
+            self.adopt_runtime_rotation_now();
+            self.write_runtime_copy(ended);
+            Ok(())
+        }) {
+            log::warn!("could not update the runtime's copy of the account session: {error:#}");
+        }
+    }
+
+    /// Write, keep or remove the copy, holding its lock: written while the
+    /// switch is on, removed when it is off or the session ended, if it is
+    /// this window's session. A session that `terminalx-serve login` saved
+    /// for another account stays.
+    fn write_runtime_copy(&self, ended: Option<&DesktopSession>) {
+        let Ok(root) = crate::store::root() else { return };
+        let session = self.inner.lock().unwrap().session.clone();
+        let saved = crate::machine_account::load(&root).ok().flatten();
+        let ours = |session: &DesktopSession| {
+            saved.as_ref().is_some_and(|saved| crate::machine_account::family(&saved.refresh_token).is_some() && crate::machine_account::family(&saved.refresh_token) == crate::machine_account::family(&session.refresh_token))
+        };
+        let result = match (&session, Self::runtime_copy_wanted()) {
+            (Some(session), true) => serde_json::to_value(session)
+                .and_then(serde_json::from_value::<crate::machine_account::Session>)
+                .map_err(anyhow::Error::from)
+                .and_then(|copy| crate::machine_account::save(&root, &copy)),
+            (Some(session), false) if ours(session) => crate::machine_account::remove(&root).map(|_| ()),
+            _ => match ended {
+                Some(ended) if ours(ended) => crate::machine_account::remove(&root).map(|_| ()),
+                _ => Ok(()),
+            },
+        };
+        if let Err(error) = result {
+            log::warn!("could not keep the runtime's copy of the account session: {error:#}");
+        }
+        *self.runtime_copy_seen.lock().unwrap() = std::fs::metadata(crate::machine_account::session_path(&root)).and_then(|metadata| metadata.modified()).ok();
     }
 
     fn ensure_loaded(&self) {

@@ -170,7 +170,9 @@ describe("a waiting cloud tab", () => {
     await poll(OTHER, [item("ws-b", OTHER, { repositories: [betaSite], runtimeActivity: pending(1) })]);
     await settle();
     expect(mocks.badge).toHaveBeenLastCalledWith(1);
-    const toast = await screen.findByRole("status");
+    const body = await screen.findByText("Landing page copy · Beta cloud. Open the session to review its pending request.", { exact: true });
+    const toast = body.closest<HTMLElement>('[role="status"]')!;
+    expect(toast?.getAttribute("role")).toBe("status");
     expect(toast.textContent).toContain("Claude needs attention");
     fireEvent.click(toast);
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`);
@@ -211,7 +213,9 @@ describe("a waiting cloud tab", () => {
     render(<Toasts />);
     await poll(ORG, [...acmeWorkspaces(1).slice(0, 1), item("ws-2", ORG, { runtimeActivity: pending(1) }), acmeWorkspaces(1)[2]]);
     await settle();
-    const toast = await screen.findByRole("status");
+    const body = await screen.findByText("Add tests · Acme cloud. Open the session to review its pending request.", { exact: true });
+    const toast = body.closest<HTMLElement>('[role="status"]')!;
+    expect(toast?.getAttribute("role")).toBe("status");
     expect(toast.textContent).toContain("Claude needs attention");
     fireEvent.click(toast);
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-2:s2`);
@@ -394,8 +398,6 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   await settle();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Display" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("button", { name: "Table" }));
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(screen.queryByRole("row", { name: /Archived cloud work/ })).toBeNull();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Hiding archived" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));

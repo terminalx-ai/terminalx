@@ -29,23 +29,23 @@ const KEEP_COUNT: usize = 1_000;
 
 /// Shown after "Message not sent: ". The id still matches, so sending again
 /// later gets the first copy's reply instead of a second prompt.
-pub(super) const STILL_SENDING: &str =
+pub(crate) const STILL_SENDING: &str =
     "your Mac is still sending an earlier try of this message; send it again in a moment to see whether it arrived";
 /// The phone gives each draft its own id; this one came with other text.
-pub(super) const ID_REUSED: &str =
+pub(crate) const ID_REUSED: &str =
     "your Mac already has a different message with this message's id; change the message and send it again";
 
 /// One send: the tab it went to and the id the phone gave it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct SendKey {
+pub(crate) struct SendKey {
     pub tab_id: String,
     pub client_message_id: String,
 }
 
 /// What a send came to, and whether that answers a repeat.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Reply {
+pub(crate) enum Reply {
     /// The agent has the message: a repeat gets this reply and sends nothing.
     Settled(Value),
     /// Queued behind the agent's turn, where the copy can still be dropped:
@@ -54,7 +54,7 @@ pub(super) enum Reply {
 }
 
 impl Reply {
-    pub(super) fn into_value(self) -> Value {
+    pub(crate) fn into_value(self) -> Value {
         match self {
             Reply::Settled(value) | Reply::Unsettled(value) => value,
         }
@@ -103,19 +103,19 @@ impl State {
     }
 }
 
-pub(super) struct SendIds {
+pub(crate) struct SendIds {
     path: Box<dyn Fn() -> Result<PathBuf> + Send + Sync>,
     clock: fn() -> i64,
     state: Mutex<State>,
 }
 
 impl SendIds {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with(Box::new(|| Ok(crate::store::root()?.join("mobile-sends.json"))), now)
     }
 
     #[cfg(test)]
-    pub(super) fn at(path: PathBuf) -> Self {
+    pub(crate) fn at(path: PathBuf) -> Self {
         Self::with(Box::new(move || Ok(path.clone())), now)
     }
 
@@ -128,7 +128,7 @@ impl SendIds {
     /// the first is still being sent is refused at once rather than made to
     /// wait: the connection it came over must keep answering meanwhile. The
     /// same id with another message is refused.
-    pub(super) fn once(&self, key: SendKey, digest: String, send: impl FnOnce() -> Result<Reply>) -> Result<Value> {
+    pub(crate) fn once(&self, key: SendKey, digest: String, send: impl FnOnce() -> Result<Reply>) -> Result<Value> {
         let mut state = self.state();
         state.prune((self.clock)());
         if let Some(first) = state.sending.get(&key) {

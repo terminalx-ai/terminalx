@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentEvent } from "@/types/events";
+import type { HeldQueue, AgentEvent } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
 
 // #727: the real TabView, Chat and Composer over the local backend; only the
@@ -24,6 +24,9 @@ vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 import { TabView } from "./TabView";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { upsertSession, useSessionStore } from "@/lib/sessions";
+import { applyEvent } from "@/lib/agentEvents";
+import { getErrorToasts, dismissError } from "@/lib/errorToasts";
+import type { HeldQueueChange } from "@/lib/heldQueue";
 import { syntheticLog } from "@/demo/synthetic";
 
 let session: SessionEntry;
@@ -295,4 +298,74 @@ describe("sending files (PRO-290)", () => {
       setPrefs({ followUps: "now" });
     }
   });
+});
+
+// #1115: real tray -> owning TabView -> local backend -> runtime command boundary.
+describe("editing held goal commands", () => {
+  afterEach(() => { for (const toast of getErrorToasts()) dismissError(toast.id); });
+  for (const sendNow of [false, true]) {
+    it.each([
+      ["claude", "/goal objective", "Codex chats only"],
+      ["codex", " /goal  ", "Type a goal after /goal"],
+      ["codex", "/goal objective", null],
+      ["codex", "/goal pause", null],
+      ["codex", "/goal resume", null],
+      ["claude", "ordinary edited text", null],
+    ] as const)(`%s: %s with ${sendNow ? "Save and send now" : "Save then automatic dequeue"}`, async (harness, text, error) => {
+      session.tabs[0].harness = harness;
+      session.tabs[0].status = "in_progress";
+      upsertSession(session);
+      // Bare Codex goals need no attachments to match the composer's refusal policy.
+      const attachments = text.trim() === "/goal" ? {} : {
+        images: [{ url: "/image.png", name: "image.png" }],
+        files: [{ path: "/notes.md", name: "notes.md", mediaType: "text/markdown", size: 3 }],
+      };
+      let queue: HeldQueue = { items: [
+        { id: "first", text: "original", images: [], ...attachments },
+        { id: "second", text: "later", images: [] },
+      ], paused: false, sending: null, next: null, error: null };
+      const original = structuredClone(queue);
+      const snapshot = (): AgentEvent => ({ id: `q-${++nextSeq}`, seq: nextSeq, sessionId: session.id, tabId: session.tabs[0].id, harness, ts: "",
+        payload: { type: "held_queue", queue: structuredClone(queue) } });
+      saved = [snapshot()];
+      runtime(false);
+      const normal = mocks.invoke.getMockImplementation()!;
+      const delivered: HeldQueue["items"] = [];
+      const dequeue = () => {
+        delivered.push(queue.items[0]);
+        queue = { ...queue, items: queue.items.slice(1) };
+        return snapshot();
+      };
+      mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+        if (command !== "change_held_queue") return normal(command, args);
+        const change = args!.change as HeldQueueChange;
+        if (change.type === "edit") queue = { ...queue, items: queue.items.map(item => item.id === change.id ? { ...item, text: change.text } : item) };
+        return { queued: true, events: [change.type === "sendNow" ? dequeue() : snapshot()] };
+      });
+      render(<Tab />);
+      fireEvent.click(await screen.findByLabelText("Edit follow-up 1"));
+      const editor = screen.getByLabelText("Edit held follow-up") as HTMLTextAreaElement;
+      fireEvent.change(editor, { target: { value: text } });
+      fireEvent.click(screen.getByRole("button", { name: sendNow ? "Save and send now" : "Save" }));
+      if (error) {
+        await waitFor(() => expect(getErrorToasts().some(toast => toast.cause.includes(error))).toBe(true));
+        expect(editor.value).toBe(text);
+        expect(queue).toEqual(original);
+        expect(mocks.invoke.mock.calls.filter(([command]) => command === "change_held_queue")).toEqual([]);
+      } else {
+        await waitFor(() => expect(screen.queryByLabelText("Edit held follow-up")).toBeNull());
+        if (sendNow) await waitFor(() => expect(delivered).toHaveLength(1));
+        else {
+          expect(queue.items).toEqual([{ ...original.items[0], text }, original.items[1]]);
+          // The runtime publishes its next queue snapshot when the active turn ends.
+          act(() => applyEvent(dequeue()));
+        }
+        expect(delivered).toEqual([{ ...original.items[0], text }]);
+        expect(queue.items).toEqual([original.items[1]]);
+        expect(mocks.invoke.mock.calls.filter(([command]) => command === "change_held_queue").map(([, args]) => args.change)).toEqual([
+          { type: "edit", id: "first", text }, ...(sendNow ? [{ type: "sendNow", id: "first" }] : []),
+        ]);
+      }
+    });
+  }
 });

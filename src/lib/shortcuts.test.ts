@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "./prefs";
 import {
   SHORTCUT_ACTIONS,
+  ariaKeyShortcut,
   bindingKind,
   bindingProblem,
   bindingsOf,
@@ -72,6 +73,43 @@ describe("the shortcut registry", () => {
     }
     expect(isTerminalReserved("mod+r", false)).toBe(true);
     expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
+  });
+
+  it("gives Home a default on both platforms while respecting custom or disabled bindings", () => {
+    for (const mac of [true, false]) {
+      expect(resolveKeymap({}, mac)["app.home"]).toEqual(["mod+alt+0"]);
+      expect(bindingProblem("app.home", "mod+alt+0", mac)).toBeNull();
+      expect(isTerminalReserved("mod+alt+0", mac)).toBe(false);
+      expect(resolveKeymap({ "app.home": [] }, mac)["app.home"]).toEqual([]);
+      expect(resolveKeymap({ "app.home": ["mod+alt+g"] }, mac)["app.home"]).toEqual(["mod+alt+g"]);
+    }
+  });
+
+  // #1131: the design's theme chord belongs to reopen on macOS.
+  it.each([true, false])("keeps light/dark and reopen distinct, including Option-modified key events (mac=%s)", (mac) => {
+    const keymap = resolveKeymap({}, mac);
+    const toggle = "mod+alt+shift+l";
+    const reopen = mac ? "mod+alt+t" : "mod+alt+shift+t";
+    expect(keymap["app.toggleMode"]).toEqual([toggle]);
+    expect(keymap["session.reopenTab"]).toEqual([reopen]);
+    const modifiers = mac ? { metaKey: true } : { ctrlKey: true };
+    for (const [event, owner] of [
+      [key({ ...modifiers, altKey: true, shiftKey: true, key: "Ò", code: "KeyL" }), "app.toggleMode"],
+      [key({ ...modifiers, altKey: true, shiftKey: !mac, key: "†", code: "KeyT" }), "session.reopenTab"],
+    ] as const) {
+      const chord = chordOf(event, mac);
+      expect(SHORTCUT_ACTIONS.filter((action) => keymap[action.id].includes(chord)).map((action) => action.id)).toEqual([owner]);
+      expect(bindingProblem(owner, chord, mac)).toBeNull();
+    }
+    expect(keycaps(toggle, mac)).toEqual(mac ? ["⌘", "⌥", "⇧", "L"] : ["Ctrl", "Alt", "Shift", "L"]);
+    expect(keycaps(reopen, mac)).toEqual(mac ? ["⌘", "⌥", "T"] : ["Ctrl", "Alt", "Shift", "T"]);
+  });
+
+  it("requires an explicit replacement to give the macOS reopen chord to light/dark", () => {
+    expect(saveShortcut("app.toggleMode", ["mod+alt+t"], { mac: true })).toMatchObject({
+      ok: false, conflict: { id: "session.reopenTab" },
+    });
+    expect(getPrefs().shortcuts).toEqual({});
   });
 
   it("covers the three kinds of binding", () => {
@@ -332,5 +370,21 @@ describe("matching a key event to an action", () => {
     target.addEventListener("keydown", (e) => seen.push(matchesShortcut(e, "composer.send"), matchesShortcut(e, "composer.newLine")));
     sendShortcut("composer.send", target);
     expect(seen).toEqual([true, false]);
+  });
+});
+
+
+describe("Overview navigation defaults", () => {
+  it.each([true, false])("reserves mod+1 for Overview and preserves explicit choices (mac=%s)", (mac) => {
+    const defaults = resolveKeymap({}, mac);
+    expect(defaults["app.agentDashboard"]).toEqual(["mod+1"]);
+    expect(defaults["session.tab1"]).toEqual(["mod+shift+1"]);
+    expect(conflictOf("mod+1", "session.tab1", defaults)?.id).toBe("app.agentDashboard");
+    expect(ariaKeyShortcut("mod+1", mac)).toBe(mac ? "Meta+1" : "Control+1");
+    expect(resolveKeymap({ "session.tab1": ["mod+1"] }, mac)["app.agentDashboard"]).toEqual([]);
+    const custom = resolveKeymap({ "app.agentDashboard": ["mod+shift+a"], "session.tab1": ["mod+1"] }, mac);
+    expect(custom["app.agentDashboard"]).toEqual(["mod+shift+a"]);
+    expect(custom["session.tab1"]).toEqual(["mod+1"]);
+    expect(resolveKeymap({ "app.agentDashboard": [] }, mac)["app.agentDashboard"]).toEqual([]);
   });
 });

@@ -50,7 +50,8 @@ pub const PARAM: &str = "consent";
 
 /// The runtime IPC commands only a person may send.
 /// Letting a disconnected computer back is an approval too (PRO-357).
-pub const GUARDED: [&str; 3] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK];
+/// A phone's code and its Allow are a person's to give too (PRO-359).
+pub const GUARDED: [&str; 5] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK, machine_wire::PHONE_CODE, machine_wire::PHONE_APPROVE];
 
 /// How long the runtime waits for a witness to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);

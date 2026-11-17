@@ -321,6 +321,38 @@ impl Lifetime {
             .ok_or_else(|| anyhow::anyhow!("The runtime attachment expired or disconnected."))
     }
 
+    /// An attachment the runtime holds for the phones it serves itself
+    /// (PRO-359), as a window holds one for the phones it serves: their
+    /// grants belong to it. It needs no heartbeat. It ends with
+    /// [`Self::release`], Stop all or shutdown, and while it is held the
+    /// runtime is not idle. Answers its lease.
+    pub(crate) fn hold(&self) -> anyhow::Result<String> {
+        /// Far enough that it never lapses, near enough not to overflow.
+        const HELD: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+        let mut state = self.state.lock().unwrap();
+        if state.starting || state.exiting || state.stop_requested {
+            bail!("The local runtime is not accepting attachments now.");
+        }
+        if state.leases.len() >= MAX_CLIENTS {
+            bail!("Too many attached local clients.");
+        }
+        let lease = uuid::Uuid::new_v4().to_string();
+        state.leases.insert(lease.clone(), Arc::new(Attachment(Mutex::new(Some(Instant::now() + HELD)))));
+        state.idle_since = None;
+        Ok(lease)
+    }
+
+    /// Let a lease from [`Self::hold`] go: every grant under it ends.
+    pub(crate) fn release(&self, lease: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(attachment) = state.leases.remove(lease) {
+            attachment.revoke();
+        }
+        if state.leases.is_empty() && state.idle_since.is_none() {
+            state.idle_since = Some(Instant::now());
+        }
+    }
+
     /// Signal/logout closes owner admission before any blocking child cleanup.
     pub(crate) fn begin_shutdown(&self) {
         let mut state=self.state.lock().unwrap();

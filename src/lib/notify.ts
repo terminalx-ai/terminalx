@@ -499,7 +499,7 @@ function onCloudSessions() {
   for (const event of observeCloud(getCloudDashboard())) raiseCloudAttention(event);
 }
 
-// ---- sessions on paired machines (PRO-346), only while Experimental → Machines is on
+// ---- sessions on paired machines (PRO-346)
 
 let observeMachines: ReturnType<typeof createMachineAttentionTracker> | null = null;
 
@@ -553,7 +553,7 @@ function refreshBadge() {
   const local = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
   // Cloud sessions that want the reader back: waiting, or finished and unread.
   const cloud = getCloudDashboard().filter(wantsReader).length;
-  // Sessions on paired machines count the same way; none while Experimental → Machines is off.
+  // Sessions on paired machines count the same way; none while no machine is paired.
   const machines = getMachineDashboard().filter(wantsReader).length;
   const n = local + cloud + machines;
   if (n === lastBadge) return;

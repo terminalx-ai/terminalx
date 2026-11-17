@@ -93,6 +93,8 @@ import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
 import { dropSessionTerminals, selectSessionTab } from "@/lib/terminal";
 import { TERMINAL_VIEW_OLD_RUNTIME, resetCloudWakes } from "@/lib/sessionBackend";
+import { resetTabLayouts, saveTabLayout } from "@/lib/tabLayouts";
+import { workspaceRow } from "@/lib/sessionTabs";
 import { resetTabViews } from "@/lib/tabViews";
 import { addProject, getSessionStore, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { cloudSessionKey } from "@/types/target";
@@ -164,6 +166,7 @@ beforeEach(async () => {
   enqueued = [];
   cache = {};
   guard.handlers = {
+    phase2_desktop_contracts_available: () => false,
     data_privacy_status: () => ({ enabled: false, managed: false }),
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
@@ -200,6 +203,7 @@ afterEach(() => {
   resetCloudConnections();
   resetCollab();
   resetTabViews();
+  resetTabLayouts();
   client.close();
 });
 
@@ -370,6 +374,34 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(screen.getByRole("tabpanel", { name: "Write the fix" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name }));
     expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
+  });
+
+  it.each([false, true])("keeps one switch per split pane with tabStrip=%s, then restores the header when collapsed (#1107)", async (strip) => {
+    mocks.prefs.tabStrip = strip;
+    const header = show();
+    const row = workspaceRow(local());
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:st-2"], active: "agent:st-2" },
+    ] }));
+    const strips = screen.getAllByTestId("workspace-tab-strip");
+    expect(strips).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(2);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    for (const pane of strips) {
+      fireEvent.click(within(pane).getByRole("button", { name: "Show terminal view" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Back to chat" })).toBeTruthy());
+      fireEvent.click(within(pane).getByRole("button", { name: "Back to chat" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Show terminal view" })).toBeTruthy());
+    }
+    // A saved second pane with no surviving tabs is not a rendered split.
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1", "agent:st-2"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:closed"], active: "agent:closed" },
+    ] }));
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(1);
+    expect(screen.queryAllByTestId("workspace-tab-strip")).toHaveLength(strip ? 1 : 0);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" }) !== null).toBe(!strip);
   });
 
   it("puts the terminal view switch at the right end of the strip, not in the title bar (PRO-381)", async () => {
@@ -607,10 +639,11 @@ describe("a quick chat in the floating window's compact chrome", () => {
     guard.local = () => null;
   });
 
-  it("is the same session view with less around it: no sidebar toggle, no panel, the window's own controls in the header", async () => {
+  it.each([false, true])("keeps the compact header switch with tabStrip=%s and the window's own controls", async (tabStrip) => {
     const session = quick();
     upsertSession(session);
-    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={{ ...compact, tabStrip }} />));
+    expect(screen.queryByTestId("strip-terminal-view")).toBeNull();
     // What a compact window has no room for.
     expect(screen.queryByRole("button", { name: "Show sidebar" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();

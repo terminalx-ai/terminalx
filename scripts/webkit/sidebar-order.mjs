@@ -155,10 +155,10 @@ try {
   assert.equal(await group.getByRole("button", { name: "View all", exact: true }).count(), 0);
   await folded.getByRole("button", { name: "Settings", exact: true }).click();
   const settings = folded.getByRole("main", { name: "Settings", exact: true });
-  await settings.getByRole("button", { name: "Appearance", exact: true }).click();
+  await settings.getByRole("button", { name: "General", exact: true }).click();
   const custom = settings.getByRole("switch", { name: "Custom order" });
   assert.equal(await custom.getAttribute("aria-checked"), "true");
-  assert.equal(await settings.locator('[data-setting-id="appearance.customOrder"]').count(), 1);
+  assert.equal(await settings.locator('[data-setting-id="general.customOrder"]').count(), 1);
   await custom.click();
   await folded.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.custom === false);
   await custom.click();

@@ -94,11 +94,11 @@ describe("the new-tab button", () => {
 });
 
 describe("the tab shortcuts", () => {
-  it("are nine remappable actions for a place in the row, with the browser's keys", () => {
+  it("are nine remappable actions for a place in the row, reserving unshifted mod+1 for Overview", () => {
     const places = SHORTCUT_ACTIONS.filter((action) => /^session\.(tab\d|lastTab)$/.test(action.id));
     expect(places.map((action) => action.label)).toEqual([...Array.from({ length: 8 }, (_, i) => `Switch to tab ${i + 1}`), "Switch to last tab"]);
     for (const mac of [true, false]) {
-      expect(places.map((action) => defaultBindings(action.id, mac))).toEqual([...Array.from({ length: 8 }, (_, i) => [`mod+${i + 1}`]), ["mod+9"]]);
+      expect(places.map((action) => defaultBindings(action.id, mac))).toEqual([["mod+shift+1"], ...Array.from({ length: 7 }, (_, i) => [`mod+${i + 2}`]), ["mod+9"]]);
       // Each default is a key the app may take, and no other action has it.
       const all = SHORTCUT_ACTIONS.flatMap((action) => defaultBindings(action.id, mac));
       for (const action of [...places, ...SHORTCUT_ACTIONS.filter((other) => ["session.moveTabLeft", "session.moveTabRight", "session.reopenTab"].includes(other.id))]) {
@@ -141,7 +141,7 @@ describe("the tab shortcuts", () => {
     expect(getSessionStore().selectedSessionId).toBe("b");
     expect(shown()).toBe("Docs");
     for (let n = 1; n <= 9; n++) {
-      press(composer(), digit(n));
+      press(composer(), { ...digit(n), shiftKey: n === 1 });
       await flush();
       expect(getSessionStore().selectedSessionId).not.toBe("other");
     }
@@ -153,7 +153,7 @@ describe("the tab shortcuts", () => {
     press(composer(), { key: "}", code: "BracketRight", altKey: true, shiftKey: true });
     await flush();
     expect(names().slice(0, 2)).toEqual(["Fix flaky test", LONG]);
-    press(composer(), digit(1));
+    press(composer(), { ...digit(1), shiftKey: true });
     expect(shown()).toBe("Fix flaky test");
     press(composer(), { key: "{", code: "BracketLeft", altKey: true, shiftKey: true });
     await flush();

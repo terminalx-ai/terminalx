@@ -57,6 +57,8 @@ const backend = `(() => {
   answers.list_harnesses = ${JSON.stringify(harnesses)};
   answers.check_agent_readiness = ({ harness }) => harness === "opencode" ? { state: "missing", checkedAt: now(), version: null } : ready(harness);
   answers.agent_setup_running = null;
+  // PRO-377: the latest releases, for "· up to date" beside the version.
+  answers.agent_latest_version = ({ harness }) => harness === "claude" ? "2.3.41" : harness === "codex" ? "0.167.0" : null;
   answers.agent_login_status = ({ harness }) => state.logins[harness];
   answers.agent_login_shell_offer = ({ harness }) => state.offers[harness] ?? null;
   answers.agent_login_save_key = log("save", ({ harness }) => { state.logins[harness] = { ...state.logins[harness], mode: "api_key", saved: { masked: masked(harness), savedAt: now() }, verified: undefined }; stale(harness); return state.logins[harness]; });
@@ -125,6 +127,7 @@ try {
   await check("Claude Code signed in", ({ text }) => ({
     "the sign-in choice names the variable": /Claude subscriptionclaude \/loginAPI keyANTHROPIC_API_KEY/.test(text),
     "the Login row says which login": text.includes("LoginClaude Max · ada@example.com") && text.includes("OrganizationAcme"),
+    "the version is up to date": text.includes("Version2.3.41 · up to date"),
   }));
 
   // 10.19: a key saved, verified, and the running tabs counted.
@@ -139,6 +142,7 @@ try {
     "the key is masked, with Saved and Remove": text.includes("sk-ant-api03-••••••••••••••••••••••••4f2a") && text.includes("Saved") && text.includes("Remove"),
     "the Keychain line": text.includes("Kept in the Keychain. TerminalX passes it to Claude Code when a tab starts, in place of ANTHROPIC_API_KEY."),
     "the Login row says API key, the variable and Keychain": text.includes("LoginAPI key · ANTHROPIC_API_KEY · Keychain"),
+    "the Organization row stays with a key (PRO-377)": text.includes("OrganizationAcme"),
   }));
   failed += report("saved toast", {
     "says new tabs use it and how many keep their login": /New Claude Code tabs use it\. 2 running tabs keep their current login until you restart them\./.test(await saved.textContent()),
@@ -156,7 +160,10 @@ try {
     "signed in with the account": text.includes("Signed in") && text.includes("LoginClaude Max · ada@example.com"),
     "no key field is left": !text.includes("Anthropic API key"),
   }));
-  failed += report("removed toast", { "says where the key went and which login new tabs use": /Deleted from the Keychain\. New tabs sign in with Claude Max \(ada@example\.com\)\./.test(await removed.textContent()) });
+  failed += report("removed toast", {
+    "says where the key went and which login new tabs use": /Deleted from the Keychain\. New tabs sign in with Claude Max \(ada@example\.com\)\./.test(await removed.textContent()),
+    "has no restart offer (PRO-377)": (await removed.getByRole("button", { name: /Restart/ }).count()) === 0 && !(await removed.textContent()).includes("running"),
+  });
   await removed.getByRole("button", { name: "Dismiss" }).click();
 
   // A key the provider refuses.
@@ -189,6 +196,8 @@ try {
     "the From your shell note names the file": text.includes("From your shellFound in your login shell (~/.zshrc). A copy is now in the Keychain, so it works without that file."),
     "the key is masked with Remove": text.includes("sk-proj-••••••••••••••••••••••••9Qx1") && text.includes("Remove"),
     "the Config and Executable rows": text.includes("Config~/.codex/config.toml") && text.includes("Executable/opt/homebrew/bin/codex"),
+    "no second Keychain note under the imported key (PRO-377)": !text.includes("Kept in the Keychain"),
+    "the version names the newer release": text.includes("Version0.166.0 · 0.167.0 available"),
   }));
   failed += report("imported toast", { "says Codex uses it and the user can switch back": /Codex uses it in new tabs\. Switch back to ChatGPT any time\./.test(await imported.textContent()) });
   await imported.getByRole("button", { name: "Dismiss" }).click();

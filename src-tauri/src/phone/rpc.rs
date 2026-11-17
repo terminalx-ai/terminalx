@@ -17,15 +17,21 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::model::{AccountMirror, DeviceProvenance};
+use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceProvenance, DeviceScope};
 use super::send_ids::{Reply, SendIds, SendKey, ID_REUSED, STILL_SENDING};
 use crate::local_runtime::mobile::Repeat;
 use super::wire::{megabytes, ReplyLimits, Transport, Wire};
-use super::{DeviceEntry, DeviceScope, PairingManager};
+use super::PhoneHost;
 use crate::events::{AgentEvent, Payload};
 use crate::store::index::{self, SessionEntry, TabEntry};
 use crate::sink::{EventSink, ListenerId};
 use crate::{store, summaries};
+
+/// The account this computer's phones were paired under (`account.json`),
+/// as the window's pairing registry keeps it.
+fn account_mirror() -> Result<Option<AccountMirror>> {
+    store::read_json(&store::root()?.join("account.json"))
+}
 
 const NOTES_LIMIT: usize = 1_000;
 const NOTE_BYTES_LIMIT: usize = 16 * 1024;
@@ -44,7 +50,7 @@ const RUNTIME_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Runtime calls block on a local socket for up to two minutes. They run on
 /// the blocking pool, so a stalled runtime cannot hold the async workers that
 /// Relay's control channel also runs on (#666, #661).
-pub(super) async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+pub(crate) async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(work).await.context("a paired-device runtime call stopped")?
 }
 
@@ -52,7 +58,7 @@ pub(super) async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Result
 /// or whose result undoes itself when dropped, as a `MobileConnection` does.
 async fn off_runtime_within<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::time::timeout(RUNTIME_CALL_TIMEOUT, off_runtime(work)).await.map_err(|_| {
-        anyhow!(super::diagnostics::Category::LocalRuntime)
+        anyhow!(super::RuntimeUnanswered)
             .context(format!("The local runtime did not answer within {} s.", RUNTIME_CALL_TIMEOUT.as_secs()))
     })?
 }
@@ -226,7 +232,7 @@ struct MobileClient {
     filter: ConnectionFilter,
 }
 
-pub(super) struct MobileRuntime {
+pub(crate) struct MobileRuntime {
     sink: OnceLock<Arc<dyn EventSink>>,
     clients: Mutex<HashMap<String, MobileClient>>,
     notifications: Mutex<VecDeque<MobileNotification>>,
@@ -255,7 +261,7 @@ pub(super) struct MobileRuntime {
 }
 
 impl MobileRuntime {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sink: OnceLock::new(),
             clients: Mutex::new(HashMap::new()),
@@ -272,11 +278,11 @@ impl MobileRuntime {
         }
     }
 
-    pub(super) fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
+    pub(crate) fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
         let _ = self.codex_models.set(cache);
     }
 
-    pub(super) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
+    pub(crate) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
         self.sink.set(sink.clone()).map_err(|_| anyhow!("mobile runtime was already configured"))?;
         for event in ["tab_status", "session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT] {
             let runtime = Arc::downgrade(self);
@@ -336,11 +342,11 @@ impl MobileRuntime {
         });
     }
 
-    pub(super) fn broadcast_sessions_changed(&self) {
+    pub(crate) fn broadcast_sessions_changed(&self) {
         self.broadcast(json!({ "method": "sessions.changed" }));
     }
 
-    pub(super) fn broadcast_settings_changed(&self) {
+    pub(crate) fn broadcast_settings_changed(&self) {
         self.broadcast(json!({ "method": "settings.changed" }));
     }
 
@@ -349,16 +355,16 @@ impl MobileRuntime {
     /// replaced checks that attachment before it sends this, finds it gone
     /// and closes, so its phone connects again and asks afresh; one admitted
     /// by this attachment passes it on, and its phone asks again.
-    pub(super) fn broadcast_capabilities_changed(&self) {
+    pub(crate) fn broadcast_capabilities_changed(&self) {
         self.broadcast(json!({ "method": "sync.capabilitiesChanged" }));
     }
 
-    pub(super) fn capture_agent_event(&self, manager: &PairingManager, payload: &str) {
+    pub(crate) fn capture_agent_event(&self, manager: &PhoneHost, payload: &str) {
         let Ok(event) = serde_json::from_str::<AgentEvent>(payload) else { return };
         self.broadcast(json!({ "method": "session.event", "params": { "event": event } }));
         self.broadcast_sessions_changed();
         let Some(notification) = self.agent_notification(&event, || index::get(&event.session_id).ok().map(|session| session.title)) else { return };
-        self.publish(manager.sink.get().map(|sink| &**sink), notification);
+        self.publish(manager.sink().map(|sink| &**sink), notification);
     }
 
     fn next_seq(&self) -> u64 {
@@ -553,9 +559,9 @@ impl MobileRuntime {
 
 }
 
-pub(super) struct MobileConnection {
+pub(crate) struct MobileConnection {
     id: String,
-    owner: Arc<crate::local_runtime::desktop::Desktop>,
+    owner: Arc<dyn super::Owner>,
     actor: crate::local_runtime::mobile::Actor,
     runtime: Arc<MobileRuntime>,
     outbound: mpsc::Sender<Value>,
@@ -571,19 +577,19 @@ pub(super) struct MobileConnection {
 
 impl MobileConnection {
     /// `new`, with the runtime's `register` round trip off the async workers.
-    pub(super) async fn open(manager: &Arc<PairingManager>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+    pub(crate) async fn open(manager: &Arc<PhoneHost>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
         let (manager, device) = (manager.clone(), device.clone());
         off_runtime_within(move || Self::new(&manager, &device, manager.mobile.clone(), outbound, transport)).await
     }
 
-    fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+    fn new(manager: &PhoneHost, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
-        let owner = manager.runtime.lock().unwrap().clone().context("The local runtime is unavailable.")?;
+        let owner = manager.owner().context("The local runtime is unavailable.")?;
         let attachment = owner.attachment()?;
         let actor = crate::local_runtime::mobile::Actor {
             epoch: attachment.epoch, lease: attachment.lease,
-            generation: manager.account.current_generation(),
-            user_id: super::registry::load_account_mirror()?.map(|mirror| mirror.user_id),
+            generation: manager.generation(),
+            user_id: account_mirror()?.map(|mirror| mirror.user_id),
         };
         owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id}))?;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -601,33 +607,33 @@ impl MobileConnection {
         })
     }
 
-    pub(super) fn wire(&self) -> &Wire {
+    pub(crate) fn wire(&self) -> &Wire {
         &self.wire
     }
 
-    pub(super) fn check_buffer(&self) -> Result<()> {
+    pub(crate) fn check_buffer(&self) -> Result<()> {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
             bail!("The mobile stream disconnected or fell behind. Reconnect to load retained history.");
         }
         Ok(())
     }
 
-    pub(super) fn check(&self, manager: &PairingManager) -> Result<()> {
+    pub(crate) fn check(&self, manager: &PhoneHost) -> Result<()> {
         self.check_current(manager)?;
         self.call("check", json!({}))?;
         Ok(())
     }
 
     /// `check`, with the runtime round trip off the async workers.
-    pub(super) async fn check_off_runtime(self: &Arc<Self>, manager: &PairingManager) -> Result<()> {
+    pub(crate) async fn check_off_runtime(self: &Arc<Self>, manager: &PhoneHost) -> Result<()> {
         self.check_current(manager)?;
         let connection = self.clone();
         off_runtime_within(move || connection.call("check", json!({})).map(drop)).await
     }
 
-    fn check_current(&self, manager: &PairingManager) -> Result<()> {
+    fn check_current(&self, manager: &PhoneHost) -> Result<()> {
         self.check_buffer()?;
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.account.current_generation() {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.generation() {
             bail!("The paired-device connection or account changed.");
         }
         Ok(())
@@ -638,7 +644,7 @@ impl MobileConnection {
         self.owner.mobile(&self.actor, method, params).map_err(outdated)
     }
 
-    pub(super) fn close(&self, _manager: &PairingManager) { self.finish(); }
+    pub(crate) fn close(&self) { self.finish(); }
 
     fn finish(&self) {
         if self
@@ -743,8 +749,8 @@ impl Drop for MobileConnection {
 }
 
 /// Synchronous throughout: callers run it with `off_runtime`.
-pub(super) fn dispatch(
-    manager: &PairingManager,
+pub(crate) fn dispatch(
+    manager: &PhoneHost,
     connection: &Arc<MobileConnection>,
     request: &Value,
     device: &DeviceEntry,
@@ -753,7 +759,7 @@ pub(super) fn dispatch(
     if let Err(error) = connection.check(manager) { return Some(Err(error)); }
     let method = request.get("method")?.as_str()?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    let sink = manager.sink.get().cloned();
+    let sink = manager.sink().cloned();
     let result = match method {
         "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
@@ -861,7 +867,7 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
 
 /// What a phone is told when the runtime refuses an operation it does not
 /// know: a feature this Mac named and its runtime cannot serve after all.
-pub(super) const OUTDATED: &str = "TerminalX on your Mac needs updating or restarting to do this.";
+pub(crate) const OUTDATED: &str = "TerminalX on your Mac needs updating or restarting to do this.";
 
 /// The runtime's refusal of an operation it does not know, said so a person
 /// knows what to do (#730). Any other error is left as it is.
@@ -978,7 +984,7 @@ fn request_id(request: &Value) -> &str {
     request.get("id").and_then(Value::as_str).unwrap_or("")
 }
 
-pub(super) fn success_response(id: &str, result: Value) -> Value {
+pub(crate) fn success_response(id: &str, result: Value) -> Value {
     json!({ "id": id, "ok": true, "result": result, "_meta": { "runtimeId": "desktop" } })
 }
 
@@ -1469,7 +1475,7 @@ struct SessionSendParams {
     client_message_id: Option<String>,
 }
 
-fn send_session(manager: &PairingManager, connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
+fn send_session(manager: &PhoneHost, connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
     send_once(&manager.mobile.send_ids, params, |tab_id, text, attachments, message| {
         let (session, _) = find_tab(tab_id)?;
         send_attributed(connection, &session.id, tab_id, text, attachments, message)
@@ -1546,7 +1552,7 @@ fn send_digest(text: &str, attachments: &[RemoteAttachmentInput]) -> String {
 /// starting sessions on an agent account (#980), each agent with several
 /// accounts also lists them, to a device that may start sessions (`driver`):
 /// a read-only phone cannot choose one, so it is not told their labels.
-fn new_session_options(manager: &PairingManager, runtime: &crate::local_runtime::client::Build, driver: bool) -> Result<Value> {
+fn new_session_options(manager: &PhoneHost, runtime: &crate::local_runtime::client::Build, driver: bool) -> Result<Value> {
     let projects = phone_projects()?;
     let codex = manager.mobile.codex_models.get().map(|cache| cache.get(false)).unwrap_or_default();
     let models = crate::models::offered(crate::harness::claude::models::get(false), codex);
@@ -1663,7 +1669,7 @@ struct SessionCreateParams {
 /// finds the session the first try made instead of making another, and its
 /// message is answered once as any send is. A first message that could not be
 /// sent leaves the session, and says why, for the phone to open and retry.
-fn create_session(manager: &PairingManager, connection: &MobileConnection, params: SessionCreateParams) -> Result<Value> {
+fn create_session(manager: &PhoneHost, connection: &MobileConnection, params: SessionCreateParams) -> Result<Value> {
     if params.text.trim().is_empty() && params.attachments.is_empty() {
         bail!("A new session needs a first message.");
     }
@@ -1791,7 +1797,7 @@ struct ChatListParams {
     limit: usize,
 }
 
-fn list_notes(manager: &PairingManager, params: ChatListParams) -> Result<Value> {
+fn list_notes(manager: &PhoneHost, params: ChatListParams) -> Result<Value> {
     index::get(&params.worktree_id)?;
     if !(1..=100).contains(&params.limit) {
         bail!("chat limit must be between 1 and 100");
@@ -1817,7 +1823,7 @@ struct ChatPostParams {
     client_message_id: Option<String>,
 }
 
-fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostParams) -> Result<Value> {
+fn post_note(manager: &PhoneHost, device: &DeviceEntry, params: ChatPostParams) -> Result<Value> {
     index::get(&params.worktree_id)?;
     let body = validate_note(&params.body)?;
     let client_message_id = checked_message_id(params.client_message_id)?;
@@ -1882,7 +1888,7 @@ struct ChatPromoteParams {
     attachments: Vec<RemoteAttachmentInput>,
 }
 
-fn promote_notes(manager: &PairingManager, connection: &MobileConnection, params: ChatPromoteParams) -> Result<Value> {
+fn promote_notes(manager: &PhoneHost, connection: &MobileConnection, params: ChatPromoteParams) -> Result<Value> {
     validate_session_tab(&params.worktree_id, &params.tab_id)?;
     if params.message_ids.is_empty() || params.message_ids.len() > 20 {
         bail!("promotion must name between 1 and 20 notes");
@@ -1919,7 +1925,7 @@ fn promote_notes(manager: &PairingManager, connection: &MobileConnection, params
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
-fn record_promotion(manager: &PairingManager, worktree_id: &str, ids: &HashSet<&String>, promotion: &NotePromotion) -> Result<bool> {
+fn record_promotion(manager: &PhoneHost, worktree_id: &str, ids: &HashSet<&String>, promotion: &NotePromotion) -> Result<bool> {
     let _guard = manager.mobile.notes.lock().unwrap();
     let mut file = load_notes()?;
     let Some(notes) = file.sessions.get_mut(worktree_id) else { return Ok(false) };
@@ -2037,7 +2043,7 @@ fn validate_note(body: &str) -> Result<String> {
 }
 
 fn effective_user(device: &DeviceEntry) -> Result<NoteAuthor> {
-    effective_user_from_mirror(device, super::registry::load_account_mirror()?)
+    effective_user_from_mirror(device, account_mirror()?)
 }
 
 fn effective_user_from_mirror(device: &DeviceEntry, mirror: Option<AccountMirror>) -> Result<NoteAuthor> {
@@ -2154,7 +2160,7 @@ struct MissedNotificationsParams {
     filter: Option<NotificationFilter>,
 }
 
-fn missed_notifications(manager: &PairingManager, params: MissedNotificationsParams) -> Value {
+fn missed_notifications(manager: &PhoneHost, params: MissedNotificationsParams) -> Value {
     json!({
         "epoch": manager.mobile.notification_epoch,
         "events": manager
@@ -2871,7 +2877,8 @@ mod tests {
 
     #[tokio::test]
     async fn large_history_pages_fit_the_encrypted_websocket_and_preserve_every_cursor() {
-        use super::super::{crypto::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind}, pairing_websocket_config, send_encrypted_text};
+        use crate::relay_e2ee::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind};
+        use super::super::{pairing_websocket_config, send_encrypted_text};
         use futures_util::StreamExt;
         use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
 
@@ -2923,7 +2930,8 @@ mod tests {
 
     #[tokio::test]
     async fn over_relay_no_frame_exceeds_the_cell_and_an_oversized_reply_fails_alone() {
-        use super::super::{crypto::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind}, pairing_websocket_config, send_message, wire::{Reassembly, RELAY_MESSAGE_BYTES_LIMIT}};
+        use crate::relay_e2ee::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind};
+        use super::super::{pairing_websocket_config, send_message, wire::{Reassembly, RELAY_MESSAGE_BYTES_LIMIT}};
         use futures_util::StreamExt;
         use tokio_tungstenite::{tungstenite::{protocol::Role, Message}, WebSocketStream};
 

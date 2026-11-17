@@ -495,48 +495,77 @@ export const api = {
   cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) =>
     invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input, orgId: orgId ?? null }),
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_create", { input, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   /** `agent`: the one a first prompt would go to; the answer then says whether the organization has a login for it. */
   cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null, agent?: string | null) =>
     invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null, agent: agent ?? null }),
   cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
-  cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceListDto>("cloud_workspaces", { orgId: orgId ?? null }).then(projectCloudWorkspaceList),
   /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
-  cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
+  cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeedDto>("cloud_catalog_feed", { cursor: cursor ?? null }).then(projectCloudCatalogFeed),
+  /** Held until SaaS integration/live readiness is explicitly confirmed. */
+  phase2DesktopContractsAvailable: () => invoke<boolean>("phase2_desktop_contracts_available"),
+  /** Internal PRO-133/137 transport; production refuses locally while phase 2 is held. */
+  cloudWorkspaceFollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_put", { orgId, workspaceId, input: {} }),
+  cloudWorkspaceUnfollow: (orgId: string, workspaceId: string) => invoke<WorkspaceFollowingResponse>("cloud_workspace_follow_delete", { orgId, workspaceId, input: {} }),
+  cloudWorkspaceReassign: (orgId: string, workspaceId: string, input: WorkspaceReassignInput) => invoke<WorkspaceReassignResponse>("cloud_workspace_reassign", { orgId, workspaceId, input }),
+  desktopPresencePut: (orgId: string, input: PresencePutInput) => invoke<PresencePutResponse>("desktop_presence_put", { orgId, input }),
+  desktopPresenceRead: (orgId: string, input: PresenceReadInput) => invoke<PresenceReadResponse>("desktop_presence_read", { orgId, input }),
+  desktopInbox: (after = "0", waitMs = 25000) => invoke<DesktopInboxPage>("desktop_inbox", { after, waitMs }),
+  /** One SSE page through its checkpoint; apply/dedupe events before saving cursor. */
+  desktopInboxStream: (after: string, lastEventId?: string | null) => invoke<DesktopInboxStreamPage>("desktop_inbox_stream", { after, lastEventId: lastEventId ?? null }),
+  desktopInboxReceipts: (eventIds: string[]) => invoke<{ acknowledged: boolean }>("desktop_inbox_receipts", { eventIds }),
+  cloudWorkspaceReadMarker: (orgId: string, workspaceId: string, readAt: string, sessionId?: string | null) =>
+    invoke<DesktopReadMarker>("cloud_workspace_read_marker", { orgId, workspaceId, readAt, sessionId: sessionId ?? null }),
+  cloudWorkspaceRestart: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_restart", { workspaceId, orgId: orgId ?? null }),
+  cloudWorkspaceDetails: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceDetailsResponse>("cloud_workspace_details", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   /**
    * Archive (30-day trash by default). `force` only after the person confirmed
    * stopping running agent work. `retentionDays` only when the person chose a
    * period the disposition facts offer; a server without the choice refuses it.
    */
   cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null, retentionDays?: number | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null, retentionDays: retentionDays ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null, retentionDays: retentionDays ?? null }).then(projectCloudWorkspaceSnapshot),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
   cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   /** Out of the archive; it stays suspended until the next interactive action. */
   cloudWorkspaceUnarchive: (workspaceId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   cloudWorkspaceDisposition: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
   /** Scheduled tasks (PRO-37, saas contract §24): the organization's, or one workspace's. Owners and admins only; a server with the feature off answers 404. */
   cloudSchedules: (workspaceId?: string | null, orgId?: string | null) =>
-    invoke<{ schedules: CloudSchedule[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+    invoke<{ schedules: CloudAutomationDto[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }).then(({ schedules }) => ({ schedules: schedules.map(projectLegacyCloudSchedule).filter((schedule): schedule is CloudSchedule => schedule !== null) })),
   /** One scheduled task and its newest runs. */
-  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudScheduleDetail>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudAutomationDetailDto>("cloud_schedule", { scheduleId, orgId: orgId ?? null }).then((detail): CloudScheduleDetail => ({ ...detail, schedule: requireLegacyCloudSchedule(detail.schedule) })),
   /** What a schedule would cost and when it would first run, before it is saved. Writes nothing. */
   cloudScheduleEstimate: (input: CloudScheduleEstimateInput, orgId?: string | null) =>
     invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
   /** Make a scheduled task. Only after the person confirmed that it starts billed compute by itself. */
-  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudSchedule>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudAutomationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }).then(requireLegacyCloudSchedule),
   /** Pause a scheduled task, or resume a paused one (which then runs for the person resuming it). */
   cloudScheduleSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
-    invoke<CloudSchedule>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
+    invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }).then(requireLegacyCloudSchedule),
+  /** Exact automation DTOs over existing native commands; no timer projection. */
+  cloudAutomations: (workspaceId?: string | null, orgId?: string | null) =>
+    invoke<{ schedules: CloudAutomationDto[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+  cloudAutomation: (scheduleId: string, orgId?: string | null) =>
+    invoke<CloudAutomationDetailDto>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  cloudAutomationEstimate: (input: CloudAutomationEstimateInput, orgId?: string | null) =>
+    invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
+  cloudAutomationCreate: (input: CloudAutomationCreateInput, orgId?: string | null) =>
+    invoke<CloudAutomationDto>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  cloudAutomationSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
+    invoke<CloudAutomationDto>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
   cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
   /** Pause every active scheduled task of the organization. */
   cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
@@ -569,9 +598,12 @@ export const api = {
   cloudAgentPurgeWorkspace: (organizationId: string, workspaceId: string) =>
     invoke<{ removed: boolean; unsentCommands: number; cachedTabs: number }>("cloud_agent_purge_workspace", { organizationId, workspaceId }),
   cloudWorkspaceOperation: (operationId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation", { operationId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_operation", { operationId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
+  /** Exact transport action, including restart; uses the same existing polling endpoint. */
+  cloudWorkspaceOperationDto: (operationId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_operation", { operationId, orgId: orgId ?? null }),
   cloudWorkspaceOperationCancel: (operationId: string, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }),
+    invoke<CloudWorkspaceSnapshotDto>("cloud_workspace_operation_cancel", { operationId, orgId: orgId ?? null }).then(projectCloudWorkspaceSnapshot),
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
@@ -751,6 +783,9 @@ export const api = {
   /** Keep the worktree on disk but run the session in the project itself from now on. */
   relocateSession: (sessionId: string) => invoke<SessionEntry>("relocate_session", { sessionId }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
+  /** Fork the conversation as it stood at the end of the turn `endSeq` (PRO-379), into a tab beside it or a session of its own. */
+  forkTurn: (sessionId: string, tabId: string, endSeq: number, into: "tab" | "session") =>
+    invoke<{ session: SessionEntry; tabId: string; note: string | null }>("fork_turn", { sessionId, tabId, endSeq, into }),
 
   // harnesses
   listHarnesses: () => invoke<HarnessInfo[]>("list_harnesses"),
@@ -822,7 +857,7 @@ export const api = {
   diffMediaContent: (cwd: string, path: string, tree: string | null) =>
     invoke<{ data: string; mime: string } | null>("diff_media_content", { cwd, path, tree }),
   fileContentsAt: (cwd: string, path: string, base: string, head: string | null) =>
-    invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
+    invoke<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
@@ -879,6 +914,7 @@ export interface AccountStatus {
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
 export interface CloudCatalogOrganization {
   orgId: string;
+  presence?: { activeMembers: PresencePerson[] };
   workspaces: CloudWorkspaceListItem[];
   tombstones: CloudWorkspaceTombstone[];
   quota?: CloudWorkspaceQuota | null;
@@ -892,6 +928,8 @@ export interface CloudCatalogOrganization {
  * listed and `deletedWorkspaceIds` names the ones to drop.
  */
 export interface CloudCatalogFeed {
+  /** Native authenticated identity, never a selector supplied by the page. */
+  viewerUserId?: string;
   changed: boolean;
   cursor: string | null;
   reset: boolean;
@@ -1352,6 +1390,7 @@ export interface CloudWorkspace {
    */
   repositories?: CloudWorkspaceRepository[] | null;
   createdBy?: string | null;
+  creator?: PresencePerson | null;
   lastActivityAt?: number | null;
   /** Minutes without activity before TerminalX stops it, 0 for never (PRO-410); absent from older servers. */
   idleSuspendMinutes?: number | null;
@@ -1367,6 +1406,8 @@ export interface CloudWorkspace {
   sharedWith?: number | null;
   /** A preparation workspace (PRO-20): when the server stops it for good. Absent on every other workspace. */
   preparation?: { stopAfter: number } | null;
+  checkout?: { state: "ready" | "failed"; repositories: { repository: string; state: "ready" | "failed"; category?: string }[]; reportedAt: number } | null;
+  runtime?: { sha256: string; protocol: number | null; installedAt: number } | null;
 }
 
 /** One repository checkout of a workspace, as the enriched list reports it (S1). */
@@ -1422,7 +1463,7 @@ export interface CloudWorkspaceDisposition {
 }
 
 /** What a share grants (contract §21.2). */
-export type CloudShareRole = "viewer" | "driver";
+export type CloudShareRole = "viewer" | "driver" | "manager";
 /** A person's effective role on a workspace (§21.1); `none` sees no content. */
 export type CloudCollaborationRole = "manager" | "driver" | "viewer" | "none";
 
@@ -1453,6 +1494,8 @@ export interface CloudScheduleEstimate {
   hourlyMicros: number;
   /** The longest a run can keep the workspace on: starting it, the time limit, and ending the run. Absent from a server that priced the time limit alone. */
   perRunMaxMinutes?: number;
+  /** Fresh workspace admission allowance, included in perRunMaxMinutes. */
+  createPerRunMinutes?: number;
   perRunMaxMicros: number;
   monthlyRuns: number;
   monthlyMaxMicros: number;
@@ -1467,7 +1510,13 @@ export interface CloudScheduleRun {
   id: string;
   scheduledFor: number;
   trigger: string;
-  /** queued | provisioning | working | completed | failed | skipped | canceled | expired */
+  /** Own workspace link target; unavailable before fresh allocation. Never substitute the template ID. */
+  workspaceId?: string | null;
+  workBranch?: string | null;
+  archiveAt?: number | null;
+  /** Archival was observed, not merely requested. */
+  archivedAt?: number | null;
+  /** queued | creating-workspace | provisioning | working | completed | failed | skipped | canceled | expired */
   state: string;
   category?: string;
   sessionId?: string;
@@ -1531,6 +1580,63 @@ export interface CloudScheduleCreateInput extends CloudScheduleEstimateInput {
   missedRunPolicy: "skip" | "run-once";
 }
 
+export interface CloudScheduleGithubFilter {
+  field: "label" | "author" | "baseBranch";
+  operator: "is" | "is-not";
+  value: string;
+}
+
+export interface CloudScheduleGithubTrigger {
+  /** Selected organization repository row ID. */
+  repositoryId: string;
+  event: "opened" | "pushed" | "merged";
+  /** At most five, ANDed by the service. */
+  filters: CloudScheduleGithubFilter[];
+  /** Defaults false and is persisted. UI label: Allow pull requests from forks. */
+  allowForkPullRequests?: boolean;
+}
+
+/** Raw native response. GitHub timers are absent/null, never fabricated. */
+export interface CloudAutomationDto extends Omit<CloudSchedule, "schedule" | "nextRunAt" | "lastRun"> {
+  schedule?: CloudScheduleTiming | null;
+  githubTrigger?: CloudScheduleGithubTrigger | null;
+  workspaceMode?: "existing" | "fresh" | null;
+  archiveAfterDays?: number | null;
+  archiveOnPrMerge?: boolean | null;
+  nextRunAt?: number | null;
+  lastRun?: CloudScheduleRun | null;
+}
+
+export interface CloudAutomationDetailDto {
+  schedule: CloudAutomationDto;
+  runs: CloudScheduleRun[];
+}
+
+export type CloudAutomationTriggerInput =
+  | { schedule: CloudScheduleTiming; githubTrigger?: never }
+  | { schedule?: never; githubTrigger: CloudScheduleGithubTrigger };
+
+export type CloudAutomationWorkspaceInput =
+  | { workspaceMode?: "existing"; archiveAfterDays?: never; archiveOnPrMerge?: false }
+  | { workspaceMode: "fresh"; archiveAfterDays?: number; archiveOnPrMerge?: boolean };
+
+export type CloudAutomationEstimateInput = Omit<CloudScheduleEstimateInput, "schedule"> &
+  CloudAutomationTriggerInput & { workspaceMode?: "existing" | "fresh" };
+export type CloudAutomationCreateInput = Omit<CloudScheduleCreateInput, "schedule"> &
+  CloudAutomationTriggerInput & CloudAutomationWorkspaceInput;
+
+/** Existing timer UI only. No fabricated timer or fresh workspace identity. */
+function projectLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule | null {
+  if (value.schedule == null || value.githubTrigger != null || (value.workspaceMode != null && value.workspaceMode !== "existing")) return null;
+  return { ...value, schedule: value.schedule, nextRunAt: value.nextRunAt ?? undefined, lastRun: value.lastRun ?? undefined };
+}
+
+function requireLegacyCloudSchedule(value: CloudAutomationDto): CloudSchedule {
+  const schedule = projectLegacyCloudSchedule(value);
+  if (schedule === null) throw new Error("This automation requires the automation API.");
+  return schedule;
+}
+
 export interface CloudWorkspaceShares {
   shares: CloudWorkspaceShare[];
   you: { role: CloudCollaborationRole; canApprove: boolean; canManageShares: boolean };
@@ -1576,6 +1682,8 @@ export interface CloudWorkspaceOperation {
   workspaceId: string;
   type: "create";
   action: "suspend" | "resume" | "archive" | "delete" | null;
+  /** Original wire action when projected to the compatible resume recovery path. */
+  transportAction?: "restart";
   state: "queued" | "running" | "cancel-requested" | "succeeded" | "failed" | "canceled";
   stage: "queued" | "preflight" | "creating-machine" | "bootstrapping" | "connecting-relay" | "cleanup" | "ready";
   cancelable: boolean;
@@ -1599,6 +1707,81 @@ export interface CloudWorkspaceOperation {
   /** When the runtime reported it; absent when it never answered. */
   checkpointAt?: number | null;
   cleanup?: CloudWorkspaceCleanup | null;
+  logs?: { source: string; content: string; occurredAt: number }[];
+  reason?: "idle" | "provider-stopped" | "attention-stopped";
+  reasonDetail?: string;
+}
+
+/** Canonical decimal bigint strings, never converted to JS numbers. ISO event/marker timestamps. */
+export interface DesktopReadMarker { sessionId: string; readAt: string }
+export type DesktopInboxEvent =
+  | { id: string; type: "workspace.share-removed"; workspaceId: string; createdAt: string }
+  | { id: string; type: "workspace.share-added" | "workspace.presence-changed"; workspaceId: string; organizationId: string; payload: Record<string, never>; createdAt: string }
+  | { id: string; type: "workspace.reassigned"; workspaceId: string; organizationId: string; payload: WorkspaceReassignedPayload; createdAt: string }
+  | { id: string; type: "workspace.read-marker-changed"; workspaceId: string; organizationId: string; payload: DesktopReadMarker; createdAt: string };
+export interface WorkspaceReassignedPayload { actorId: string; previousOwnerId: string; note?: string }
+export interface DesktopInboxPage { v: 1; cursor: string; hasMore: boolean; events: DesktopInboxEvent[] }
+export interface DesktopInboxStreamPage { cursor: string; events: DesktopInboxEvent[] }
+
+export interface CloudWorkspaceDetailsResponse { workspace: CloudWorkspace; details: CloudWorkspaceDetails }
+/** Original pinned setup. Timestamps here and on workspace are epoch milliseconds. */
+export interface CloudWorkspaceDetails {
+  organizationId: string;
+  workspaceId: string;
+  createdBy: string;
+  provider: string;
+  repositories: { identity: string | null; fullName: string | null; cloneUrl: string; ref: string | null; targetDirectory: string | null; primary: boolean }[];
+  machineId: string | null;
+  environmentVersionId: string | null;
+  environmentVersion: { id: string; versionNumber: number; toolchainVersion: number } | null;
+  runtime: { sha256: string; protocol: number | null; installedAt: number } | null;
+  /** Manager-only console organization entry link, not an expanded-row deep link. */
+  provisioningLog: { url: string; operationId: string | null } | null;
+}
+
+/** Exact native/server DTO. Existing catalog recovery consumes the compatible projection below. */
+export interface CloudWorkspaceOperationDto extends Omit<CloudWorkspaceOperation, "action" | "transportAction"> {
+  action: CloudWorkspaceOperation["action"] | "restart";
+}
+
+export interface CloudWorkspaceSnapshotDto {
+  workspace: CloudWorkspace;
+  operation: CloudWorkspaceOperationDto;
+}
+
+export interface CloudWorkspaceListItemDto extends Omit<CloudWorkspaceListItem, "latestOperation"> {
+  latestOperation: CloudWorkspaceOperationDto | null;
+}
+
+export interface CloudWorkspaceListDto extends Omit<CloudWorkspaceList, "workspaces"> {
+  workspaces: CloudWorkspaceListItemDto[];
+}
+
+export interface CloudCatalogFeedDto extends Omit<CloudCatalogFeed, "organizations"> {
+  organizations: (Omit<CloudCatalogOrganization, "workspaces"> & { workspaces: CloudWorkspaceListItemDto[] })[];
+}
+
+/** Failed restart recovers through resume on the same machine. Keep the wire action for display. */
+export function projectCloudWorkspaceOperation(operation: CloudWorkspaceOperationDto): CloudWorkspaceOperation {
+  const { action } = operation;
+  return action === "restart" ? { ...operation, action: "resume", transportAction: "restart" } : { ...operation, action };
+}
+
+/** Use before inserting an exact restart/poll DTO into the existing catalog. */
+export function projectCloudWorkspaceSnapshot(snapshot: CloudWorkspaceSnapshotDto): CloudWorkspaceSnapshot {
+  return { ...snapshot, operation: projectCloudWorkspaceOperation(snapshot.operation) };
+}
+
+function projectCloudWorkspaceItem(item: CloudWorkspaceListItemDto): CloudWorkspaceListItem {
+  return { ...item, latestOperation: item.latestOperation ? projectCloudWorkspaceOperation(item.latestOperation) : null };
+}
+
+function projectCloudWorkspaceList(list: CloudWorkspaceListDto): CloudWorkspaceList {
+  return { ...list, workspaces: list.workspaces.map(projectCloudWorkspaceItem) };
+}
+
+function projectCloudCatalogFeed(feed: CloudCatalogFeedDto): CloudCatalogFeed {
+  return { ...feed, organizations: feed.organizations.map((org) => ({ ...org, workspaces: org.workspaces.map(projectCloudWorkspaceItem) })) };
 }
 
 export interface CloudWorkspaceSnapshot {
@@ -1607,8 +1790,11 @@ export interface CloudWorkspaceSnapshot {
 }
 
 export interface CloudWorkspaceListItem {
+  following?: boolean;
   workspace: CloudWorkspace;
   latestOperation: CloudWorkspaceOperation | null;
+  readMarkers?: DesktopReadMarker[];
+  presence?: { activeMembers: PresencePerson[] };
 }
 
 export interface CloudWorkspaceList {
@@ -1736,6 +1922,21 @@ export interface CloudSelectedRepositories {
   repositories: CloudSelectedRepository[];
 }
 
+/** Held PRO-137 transport: UUID/payload ownership and retries belong to a future caller. */
+export interface WorkspaceReassignInput { targetUserId: string; expectedOwnerId: string; requestId: string; confirmPrivate?: boolean; note?: string }
+export interface WorkspaceFollowingResponse { workspaceId: string; following: boolean }
+/** reassigned=false is a committed request receipt, not current ownership. */
+export interface WorkspaceReassignResponse { workspaceId: string; ownerId: string; previousOwnerId: string; reassigned: boolean }
+
+export interface PresencePutInput { deviceId: string; sequence: number; workspaceId: string | null }
+export interface PresenceReadInput { workspaceIds: string[] }
+export interface PresencePerson { userId: string; displayName: string | null; photoUrl: string | null }
+/** Owner follows current created_by; identities never use an email fallback. */
+export interface PresenceWorkspace { workspaceId: string; owner: PresencePerson; activeMembers: PresencePerson[] }
+export interface PresencePutResponse { applied: boolean; ttlSeconds: 45 }
+/** Workspaces are a requested-visible subset; activeMembers spans all visible workspaces. */
+export interface PresenceReadResponse { ttlSeconds: 45; activeMembers: PresencePerson[]; workspaces: PresenceWorkspace[] }
+
 export interface CloudWorkspaceClientError {
   code: CloudWorkspaceSafeErrorCode;
   status: number | null;
@@ -1746,6 +1947,22 @@ export interface CloudWorkspaceClientError {
 }
 
 export type CloudWorkspaceSafeErrorCode =
+  | "workspace_owner_changed"
+  | "workspace_reassign_same_owner"
+  | "workspace_reassign_private_confirmation_required"
+  | "workspace_reassign_target_not_visible"
+  | "workspace_reassign_busy"
+  | "workspace_reassign_personal_route_held"
+  | "workspace_reassign_credential_restricted"
+  | "workspace_reassign_runtime_unsupported"
+  | "workspace_reassign_idempotency_conflict"
+  | "cloud_workspace_last_admin"
+  | "workspace_following_unavailable"
+  | "presence_rate_limited"
+  | "presence_device_limit"
+  | "presence_capacity_exceeded"
+  | "presence_unavailable"
+  | "inbox_unavailable"
   | "invalid_access_token"
   | "organization_admin_required"
   | "active_organization_required"
@@ -1782,6 +1999,11 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_teardown_in_progress"
   | "cloud_workspace_quota_exceeded"
   | "cloud_workspace_concurrency_exceeded"
+  | "cloud_workspace_manager_required"
+  | "cloud_workspace_runtime_unsupported"
+  | "cloud_workspace_runtime_not_ready"
+  | "cloud_workspace_member_concurrency_exceeded"
+  | "cloud_preparation_workspace_expired"
   | "idempotency_key_reused"
   | "cloud_workspace_quote_expired"
   | "cloud_workspace_request_invalid"
@@ -1805,6 +2027,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "github_installation_suspended"
   | "github_installation_revoked"
   | "organization_member_not_found"
+  | "cloud_workspace_share_unavailable"
   | "cloud_workspace_share_not_found"
   | "cloud_workspace_share_redundant"
   | "cloud_workspace_share_requires_organization_access"
@@ -2590,6 +2813,8 @@ export const gh = {
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  /** After a merge: the head branch on GitHub, only when merged, in this repository and still at the merged head. */
+  deleteBranch: (cwd: string, number: number, url?: string) => invoke<void>("pr_delete_branch", { cwd, number, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 
@@ -3005,8 +3230,6 @@ export interface ExperimentalSettings {
   orchestratorRuns?: boolean;
   /** Show Local VM tasks and chosen computers: Settings → Local VMs, a tab's computer choice, its task cards (PRO-114). */
   localVmTasks?: boolean;
-  /** Show Settings → Machines: operate this Mac from other computers, and add machines (PRO-342). */
-  machines?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -3016,7 +3239,6 @@ export const experimental = {
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
-  setMachines: (machines: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { machines }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;

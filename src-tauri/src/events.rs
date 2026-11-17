@@ -191,6 +191,13 @@ pub struct Usage {
     /// says: what a family alias actually ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The reasoning effort the turn's requests ran at, when the agent's
+    /// records say (Claude Code per request, Codex per turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Whether the turn ran in the agent's fast mode, when its records say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -7,7 +7,7 @@ import { OrganizationsTab } from "./OrganizationsTab";
 import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from "./SettingsSections";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
-import { RepositoriesTab } from "./RepositoriesTab";
+import { RepositoriesTab, type ProjectPage } from "./RepositoriesTab";
 import { StorageTab } from "./StorageTab";
 import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
@@ -22,6 +22,8 @@ interface SectionContext {
   onOpenSkills?: () => void;
   onOpenUsage?: () => void;
   projectPath?: string;
+  /** The project page open in the sidebar (PRO-387). */
+  projectPage?: ProjectPage;
   row?: string | null;
   openRequest?: number;
   onSelectRow?: (row: SettingId) => void;
@@ -30,18 +32,18 @@ interface SectionContext {
 export const settingsSectionRenderers: Record<SettingsSection, (context: SectionContext) => ReactNode> = {
   account: () => <AccountTab />,
   devices: () => <DevicesTab />,
-  machines: () => <MachinesSettings />,
-  general: () => <GeneralTab />,
-  appearance: ({ onOpenUsage }) => <AppearanceTab onOpenUsage={onOpenUsage} />,
+  machines: () => <MachinesSettings showIntroduction={false} />,
+  general: ({ onOpenUsage }) => <GeneralTab onOpenUsage={onOpenUsage} />,
+  appearance: () => <AppearanceTab />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
-  agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} />,
+  agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,
   localVms: () => <RegisteredSetting setting="localVms.tasks"><section><EnvironmentsTab /></section></RegisteredSetting>,
   transcription: () => <TranscriptionTab />,
   integrations: () => <IntegrationsTab />,
   projects: () => <ProjectTemplatesSettings />,
-  repositories: ({ projectPath, row, onSelectRow }) => <RepositoriesTab projectPath={projectPath} row={row} onSelectRow={onSelectRow} />,
+  repositories: ({ projectPath, projectPage }) => <RepositoriesTab projectPath={projectPath} page={projectPage} />,
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,
   experimental: () => <ExperimentalTab />,

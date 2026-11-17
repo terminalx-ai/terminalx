@@ -42,7 +42,7 @@ pub const UPDATING: &str = "machine_updating";
 pub const ACCESS_REMOVED: &str = "machine_access_removed";
 /// The person at the machine pressed Disconnect.
 pub const DISCONNECTED: &str = "machine_disconnected";
-/// Settings → Experimental → Machines is off.
+/// Data privacy mode is on: this computer operates no machine (PRO-357).
 pub const DISABLED: &str = "machines_disabled";
 /// The machine is connected, but its version does not serve this command.
 /// The window sets it, from the namespaces the machine granted
@@ -222,7 +222,6 @@ pub(crate) fn pairing_route(params: &Value) -> Result<&'static str, ControlError
     }
 }
 
-/// A pairing that did not pair, by `MachinePairingFailure`, as the CLI's error.
 /// Only the fingerprint's letters and digits count: `cef4 2468…` is `CEF4·2468·…`.
 fn fingerprint_digits(fingerprint: &str) -> String {
     fingerprint.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect()
@@ -256,6 +255,7 @@ pub(crate) fn fingerprint_gate(name: &str, fingerprint: &str, expires_at: i64, g
     Ok(())
 }
 
+/// A pairing that did not pair, by `MachinePairingFailure`, as the CLI's error.
 pub(crate) fn pairing_refusal(reason: &str, message: &str) -> ControlError {
     let recovery = match reason {
         "not-approved" => "Ask the person at the machine to press Allow, then run terminalx machines add again with a new code.",
@@ -348,11 +348,13 @@ mod desktop {
 
     /// Run `machine.<action>`.
     pub(crate) fn execute(connections: &Arc<MachineConnections>, sink: &dyn EventSink, action: &str, params: Value) -> Result<Value, ControlError> {
-        if !crate::store::settings::load().experimental.machines {
+        // Machines are on for everyone (PRO-360); what a command can reach is the machines the person paired
+        // in the app. Data privacy mode makes no machine connection (PRO-357), so it answers nothing here either.
+        if crate::data_privacy::enabled() {
             return Err(ControlError::new(
                 DISABLED,
-                "Machines are off in this TerminalX.",
-                Some("In TerminalX, open Settings → Experimental and turn on Machines.".into()),
+                "Data privacy mode is on, so this computer operates no machine.",
+                Some("Turn off data privacy mode in TerminalX to operate your machines.".into()),
             ));
         }
         match action {
