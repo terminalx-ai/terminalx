@@ -114,16 +114,18 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
 }
 
 /** Reuse PRO-128's current roster and profile. Missing roles/emails stay unavailable. */
-export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean; compact?: boolean }) {
+/** `quiet` renders nothing unless presence is live and someone is there (a table cell beside other text). */
+export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact = false, quiet = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean; compact?: boolean; quiet?: boolean }) {
   const presence = useCloudPresence(orgId);
   const { roster } = useOrganizationRoster(orgId, presence.state === "live");
   const catalog = useCloudCatalog();
   const privacy = useDataPrivacy();
-  const unavailable = (label: string) => <span className="shrink-0 text-[10px] text-faint" aria-label={compact ? label : undefined} title={compact ? label : undefined}>{compact ? "—" : label}</span>;
+  const unavailable = (label: string) => quiet ? null : <span className="shrink-0 text-[10px] text-faint" aria-label={compact ? label : undefined} title={compact ? label : undefined}>{compact ? "—" : label}</span>;
   if (privacy.enabled || presence.state !== "live") return unavailable(presence.state === "loading" ? "Loading presence…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable");
   const people = (workspaceId ? presence.workspaces.find((row) => row.workspaceId === workspaceId)?.activeMembers : presence.activeMembers);
   if (!people) return unavailable("Presence unavailable");
   const visible = othersOnly ? people.filter((person) => person.userId !== catalog.viewerUserId) : people;
+  if (quiet && !visible.length) return null;
   return <span className="inline-flex items-center gap-1" aria-label={workspaceId ? "People here" : "Active now"}>
     {!workspaceId && <span className="mr-1 text-xs text-faint">Active now</span>}
     {visible.map((person: PresencePerson) => {

@@ -46,7 +46,7 @@ it.each(appearances)("uses muted amber only for managed privacy in $theme/$mode"
   await act(refreshDataPrivacy);
   expect(control.getAttribute("data-state")).toBe("unchecked");
   expect(control.matches(":disabled")).toBe(false);
-  expect(control.classList.contains("data-[state=unchecked]:bg-well")).toBe(true);
+  expect(control.classList.contains("data-[state=unchecked]:bg-(--switch-off)")).toBe(true);
   expect(control.className).not.toContain("bg-warning");
 });
 

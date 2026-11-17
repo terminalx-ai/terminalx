@@ -29,6 +29,7 @@ const REVIEWED: Record<string, { count: number; why: string }> = {
   "src/types/target.ts": { count: 6, why: "the key helpers themselves; isLocalKey refuses cloud, machine and guest keys" },
   "src/components/layout/AppShell.tsx": { count: 1, why: "cloudKey: only a cloud session renders the cloud view; a machine session has its own branch" },
   "src/lib/cloudSelection.ts": { count: 1, why: "accepts only a cloud session key" },
+  "src/lib/cloudPresence.ts": { count: 1, why: "presence targets only a selected cloud session's workspace key; a machine session is never a target" },
   "src/lib/cloudControl.ts": { count: 2, why: "refuses anything but a cloud project key" },
   "src/lib/prefs.ts": { count: 1, why: "issueCloudProject keeps only a cloud project key" },
   "src/lib/mergedCleanup.ts": { count: 1, why: "counts cloud toggles; local toggles use isLocalKey" },

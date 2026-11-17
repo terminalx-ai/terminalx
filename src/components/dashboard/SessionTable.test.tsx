@@ -12,7 +12,7 @@ it("renders change counts, dates and missing values, and opens PR links without 
     { number: 10, url: "file:///tmp/example", head: "other", scope: { kind: "local", cwd: "/repo" } },
   ], updated: "2026-11-01T12:00:00Z", created: null };
   const onOpen = vi.fn();
-  render(<SessionTable containerRef={createRef()} rows={[row]} hiddenColumns={[]} sort={{ column: "updated", direction: "desc" }} onSort={() => undefined} selectedId={null} onFocus={() => undefined} onOpen={onOpen} loading={false} />);
+  render(<SessionTable containerRef={createRef()} rows={[row]} hiddenColumns={[]} sort={{ column: "updated", direction: "desc" }} onSort={() => undefined} selectedId={null} onFocus={() => undefined} onOpen={onOpen} loading={false} where />);
   expect(screen.getByText("+10")).toBeTruthy();
   expect(screen.getByText("−2")).toBeTruthy();
   expect(screen.getAllByText("—")).toHaveLength(2);
