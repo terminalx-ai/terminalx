@@ -112,6 +112,41 @@ export function useAllSignedOut(harnesses: readonly string[]): boolean {
   return harnesses.length > 0 && harnesses.every((id) => states[id] === "signed_out");
 }
 
+/** The answers of the last few minutes for `ids`, from the checks already made in this window. */
+function recentAnswers(ids: readonly string[]): Record<string, AgentReadiness> {
+  const recent: Record<string, AgentReadiness> = {};
+  for (const id of ids) {
+    const answer = known.get(id);
+    if (answer && Date.now() - answer.at < RECENT_ANSWER_MS) recent[id] = answer.value;
+  }
+  return recent;
+}
+
+/**
+ * What is already known about each of `harnesses`: the answers of the last
+ * few minutes, and every one that any check in this window gets from now on.
+ * It asks nothing itself, so a view that only reports (Home's line per agent)
+ * costs no check of its own. An agent nobody asked about has no entry.
+ */
+export function useKnownReadiness(harnesses: readonly string[]): Readonly<Record<string, AgentReadiness>> {
+  const key = harnesses.join(",");
+  const [values, setValues] = useState<Record<string, AgentReadiness>>(() => recentAnswers(harnesses));
+  useEffect(() => {
+    if (!key) return;
+    const ids = key.split(",");
+    let live = true;
+    const take = (id: string, value: AgentReadiness) => {
+      if (live && ids.includes(id)) setValues((before) => (before[id] === value ? before : { ...before, [id]: value }));
+    };
+    hearing.add(take);
+    // Answers that came between the first render and now, or for a list that changed.
+    const recent = recentAnswers(ids);
+    setValues((before) => (Object.keys(recent).every((id) => before[id] === recent[id]) ? before : { ...before, ...recent }));
+    return () => { live = false; hearing.delete(take); };
+  }, [key]);
+  return values;
+}
+
 /** For tests: forget every answer. */
 export function forgetReadiness() {
   known.clear();
@@ -212,6 +247,26 @@ export function useSignInReadiness(harness: string | null, onReady: () => void) 
 }
 
 export type AgentReadinessMap = Readonly<Record<string, AgentReadiness>>;
+
+/**
+ * The installed agent a new chat on this computer starts with, given every
+ * installed agent's answer. Known logins win over an unknown probe (unknown can
+ * be a working custom route; a failed probe is not a signed-out login), and the
+ * saved agent comes first among those that can start. `picked` is an agent
+ * chosen in the form itself: it holds while it is also the saved one. `null`
+ * when none can start a chat: nothing installed, every one signed out, or the
+ * answers not in yet.
+ *
+ * One rule for New Session and for anything that must name the agent a chat
+ * will run before there is one (first run's Bypass warning).
+ */
+export function startingAgent<H extends Pick<HarnessInfo, "id" | "available">>(harnesses: readonly H[], readiness: AgentReadinessMap | null | undefined, saved: string, picked?: string | null): H | null {
+  const eligible = (state: "ready" | "unknown") => harnesses.filter((h) => h.available && readiness?.[h.id]?.state === state);
+  const [ready, unknown] = [eligible("ready"), eligible("unknown")];
+  const candidates = ready.length ? ready : unknown;
+  const explicit = [...ready, ...unknown].find((h) => h.id === picked && h.id === saved);
+  return explicit ?? candidates.find((h) => h.id === saved) ?? candidates[0] ?? null;
+}
 
 /** Check all candidates before choosing a default, without persisting a fallback as a preference. */
 export function useAgentReadinessList(harnesses: readonly Pick<HarnessInfo, "id" | "available" | "path">[], enabled = true) {
