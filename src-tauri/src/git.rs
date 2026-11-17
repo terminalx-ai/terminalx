@@ -971,7 +971,7 @@ fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout:
             None => run(&path, &["checkout", "-q"]).map(|_| ()),
         };
         if let Err(error) = checkout {
-            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit);
+            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit, false);
             return Err(match cleanup { Ok(()) => error, Err(cleanup) => anyhow!("{error:#}; cleanup failed: {cleanup:#}") });
         }
     } else {
@@ -987,7 +987,7 @@ fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout:
         Err(error) if !fork => return Err(error),
         Err(error) => {
             // The branch was just made at `base`; retain it if it has moved.
-            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit);
+            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit, false);
             return Err(match cleanup { Ok(()) => error, Err(cleanup) => anyhow!("{error:#}; cleanup failed: {cleanup:#}") });
         }
     };
@@ -1001,11 +1001,28 @@ fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout:
 /// Roll back only the worktree and branch made for an unpublished fork.
 /// Compare the branch tip before deleting it so a branch moved by another
 /// process is retained and reported instead of losing new commits.
-pub(crate) fn rollback_created_worktree(project: &Path, worktree: &CreatedWorktree, expected: &str) -> Result<()> {
-    rollback_new_worktree(project, Path::new(&worktree.path), &worktree.branch, expected)
+pub(crate) fn rollback_created_worktree(project: &Path, worktree: &CreatedWorktree, expected: &str, snapshot: Option<&str>) -> Result<()> {
+    let path = Path::new(&worktree.path);
+    let snapshot = snapshot.context("worktree contains changes not owned by the fork; it was kept")?;
+    if fork_worktree_snapshot(path)? != snapshot { bail!("worktree changes were added or modified; it was kept"); }
+    rollback_new_worktree(project, path, &worktree.branch, expected, true)
 }
 
-fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &str) -> Result<()> {
+/// Capture the index and tracked changes. Untracked and ignored files are
+/// never considered owned: retaining the workspace is safer than deleting them.
+pub(crate) fn fork_worktree_snapshot(path: &Path) -> Result<String> {
+    let status = run(path, &["status", "--porcelain=v1", "--untracked-files=all", "--ignored"])?;
+    if status.lines().any(|line| line.starts_with("??") || line.starts_with("!!")) {
+        bail!("worktree contains untracked or ignored files; it was kept");
+    }
+    let staged = run(path, &["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
+    let unstaged = run(path, &["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
+    if status.is_empty() { return Ok(String::new()); }
+    Ok(format!("{status}\0{staged}\0{unstaged}"))
+}
+
+fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &str, verified: bool) -> Result<()> {
+    if !verified && !fork_worktree_snapshot(path)?.is_empty() { bail!("worktree contains changes; it was kept"); }
     if !is_worktree_of(project, path) { bail!("{} is no longer this repository's worktree", path.display()); }
     let actual_branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if actual_branch.trim() != branch { bail!("{} no longer has branch {branch}", path.display()); }

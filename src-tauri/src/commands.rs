@@ -2811,7 +2811,7 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
                 // The fork's CLI reopens the parent conversation from the new
                 // directory, and Claude Code looks for it under that directory's name.
                 if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
-                    let _ = crate::harness::claude::transcript::rehome_in(&projects, &src.cwd, scratch, parent, true);
+                    allocation.rehome_claude(&projects, &src.cwd, scratch, parent).map_err(err)?;
                 }
             }
             let mut entry = SessionEntry {
@@ -2857,7 +2857,7 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
             if let (Some(end_seq), Some(conversation)) = (at, &conversation) {
                 if entry.worktree_name.is_some() {
                     let files = crate::checkpoints::turn_end(&src.id, &tab.id, end_seq)
-                        .and_then(|(tree, index)| crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index));
+                        .and_then(|(tree, index)| allocation.checkpoint(&tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index)));
                     if let Err(error) = files {
                         note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
                     }

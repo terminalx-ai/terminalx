@@ -11,7 +11,7 @@ use crate::git;
 pub(crate) struct ForkAllocation {
     files: Vec<PathBuf>,
     directories: Vec<PathBuf>,
-    worktree: Option<(PathBuf, git::CreatedWorktree, String)>,
+    worktree: Option<(PathBuf, git::CreatedWorktree, String, Option<String>)>,
 }
 
 impl ForkAllocation {
@@ -49,8 +49,40 @@ impl ForkAllocation {
         write(self, &session_dir.join(format!("{tab_id}.jsonl")), log)
     }
 
+    pub fn rehome_claude(&mut self, projects: &Path, from: &str, to: &str, id: &str) -> Result<()> {
+        if id.is_empty() || id.contains(['/', '\\']) || id.starts_with('.') { return Ok(()); }
+        let source = crate::harness::claude::transcript::locate_in(projects, from, id);
+        let target = crate::harness::claude::transcript::transcript_in(projects, to, id);
+        if source == target || !std::fs::symlink_metadata(&source).is_ok_and(|m| m.file_type().is_file())
+            || std::fs::symlink_metadata(&target).is_ok() { return Ok(()); }
+        self.write(&target, &std::fs::read(&source).with_context(|| format!("read {}", source.display()))?)
+    }
+
     pub fn worktree(&mut self, project: &Path, worktree: git::CreatedWorktree, created_commit: String) {
-        self.worktree = Some((project.to_owned(), worktree, created_commit));
+        let snapshot = git::fork_worktree_snapshot(Path::new(&worktree.path)).ok().filter(|snapshot| snapshot.is_empty());
+        self.worktree = Some((project.to_owned(), worktree, created_commit, snapshot));
+    }
+
+    /// Record only changes made by the checkpoint checkout, and only if the
+    /// checkout was clean immediately before it. Other changes remain unowned.
+    pub fn checkpoint(&mut self, tree: &str, index: &str, checkout: impl FnOnce() -> Result<()>) -> Result<()> {
+        let Some((_, wt, _, expected)) = &mut self.worktree else { return checkout(); };
+        let path = Path::new(&wt.path);
+        let before = git::fork_worktree_snapshot(path)?;
+        if expected.as_ref() != Some(&before) { anyhow::bail!("The new worktree contains other changes; its files were kept."); }
+        let result = checkout();
+        // A failed checkout may have made partial changes, which are not safe
+        // to distinguish from another process's work.
+        if result.is_err() { *expected = None; return result; }
+        *expected = None;
+        // The checkout owns only the requested tree and index. Do not adopt
+        // an unrelated edit made while the checkout was running.
+        git::run(path, &["diff", "--quiet", "--no-ext-diff", tree, "--"])
+            .context("worktree changed during checkpoint checkout")?;
+        let actual_index = git::run(path, &["write-tree"])?;
+        anyhow::ensure!(actual_index.trim() == index, "index changed during checkpoint checkout");
+        *expected = Some(git::fork_worktree_snapshot(path)?);
+        Ok(())
     }
 
     /// Commit means the index now owns these resources.
@@ -72,8 +104,8 @@ impl ForkAllocation {
                 if e.kind() != std::io::ErrorKind::NotFound { failures.push(format!("remove {}: {e}", path.display())); }
             }
         }
-        if let Some((project, worktree, created_commit)) = self.worktree {
-            if let Err(e) = git::rollback_created_worktree(&project, &worktree, &created_commit) {
+        if let Some((project, worktree, created_commit, snapshot)) = self.worktree {
+            if let Err(e) = git::rollback_created_worktree(&project, &worktree, &created_commit, snapshot.as_deref()) {
                 failures.push(format!("remove worktree {} and branch {}: {e:#}", worktree.path, worktree.branch));
             }
         }
@@ -156,6 +188,107 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&original_log).unwrap(), "source transcript");
             assert_eq!(std::fs::read_to_string(repo.path().join("source")).unwrap(), "original");
             assert!(git::branch_exists(repo.path(), "main"));
+        }
+    }
+
+    #[test]
+    fn quick_fork_rehome_is_owned_and_existing_transcripts_are_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = root.path().join("projects");
+        let source = crate::harness::claude::transcript::transcript_in(&projects, "/source", "parent");
+        let target = crate::harness::claude::transcript::transcript_in(&projects, "/scratch", "parent");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "original").unwrap();
+        let mut allocation = ForkAllocation::default();
+        allocation.rehome_claude(&projects, "/source", "/scratch", "parent").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        assert_eq!(allocation.rollback("index failed".into()), "index failed");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "original");
+        std::fs::write(&target, "preexisting").unwrap();
+        let mut allocation = ForkAllocation::default();
+        allocation.rehome_claude(&projects, "/source", "/scratch", "parent").unwrap();
+        allocation.rollback("index failed".into());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "preexisting");
+    }
+
+    #[test]
+    fn rollback_keeps_staged_unstaged_and_untracked_work() {
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        for kind in ["staged", "unstaged", "untracked", "ignored"] {
+            let (wt, commit) = git::create_fork_worktree(repo.path(), kind, Some("main")).unwrap();
+            let path = PathBuf::from(&wt.path);
+            let branch = wt.branch.clone();
+            let mut allocation = ForkAllocation::default();
+            allocation.worktree(repo.path(), wt, commit);
+            if kind == "untracked" || kind == "ignored" {
+                if kind == "ignored" { std::fs::write(repo.path().join(".git/info/exclude"), "ignored-file\n").unwrap(); }
+                std::fs::write(path.join(if kind == "ignored" { "ignored-file" } else { "new-file" }), "keep").unwrap();
+            } else {
+                std::fs::write(path.join("source"), "keep").unwrap();
+                if kind == "staged" { git::run(&path, &["add", "source"]).unwrap(); }
+            }
+            let error = allocation.rollback("index failed".into());
+            assert!(error.contains("cleanup failed"), "{kind}: {error}");
+            assert!(path.exists() && git::branch_exists(repo.path(), &branch));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_hook_work_is_kept_and_checkpoint_does_not_overwrite_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        let hook = repo.path().join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\nprintf hook > source\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (wt, commit) = git::create_fork_worktree(repo.path(), "hook", Some("main")).unwrap();
+        let path = PathBuf::from(&wt.path);
+        let mut allocation = ForkAllocation::default();
+        allocation.worktree(repo.path(), wt, commit);
+        assert!(allocation.checkpoint("HEAD", "HEAD", || { std::fs::write(path.join("source"), "checkpoint")?; Ok(()) }).is_err());
+        assert!(allocation.rollback("index failed".into()).contains("cleanup failed"));
+        assert_eq!(std::fs::read_to_string(path.join("source")).unwrap(), "hook");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_checkout_hook_retains_its_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        let hook = repo.path().join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\nprintf hook > source\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = git::create_fork_worktree(repo.path(), "hook-failure", Some("main")).unwrap_err();
+        assert!(format!("{error:#}").contains("cleanup failed"));
+        let path = git::worktree_path(repo.path(), "hook-failure");
+        assert_eq!(std::fs::read_to_string(path.join("source")).unwrap(), "hook");
+    }
+
+    #[test]
+    fn rollback_removes_unchanged_checkpoint_but_keeps_later_edits() {
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        std::fs::write(repo.path().join("source"), "checkpoint").unwrap();
+        git::run(repo.path(), &["add", "source"]).unwrap();
+        let tree = git::run(repo.path(), &["write-tree"]).unwrap().trim().to_string();
+        git::run(repo.path(), &["reset", "--hard", "HEAD"]).unwrap();
+        let base_tree = git::run(repo.path(), &["rev-parse", "HEAD^{tree}"]).unwrap().trim().to_string();
+        for later in [false, true] {
+            let name = if later { "later" } else { "checkpoint" };
+            let (wt, commit) = git::create_fork_worktree(repo.path(), name, Some("main")).unwrap();
+            let path = PathBuf::from(&wt.path);
+            let mut allocation = ForkAllocation::default();
+            allocation.worktree(repo.path(), wt, commit);
+            let index = if later { &base_tree } else { &tree };
+            allocation.checkpoint(&tree, index, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &tree, index)).unwrap();
+            if later { std::fs::write(path.join("source"), "later work").unwrap(); }
+            let error = allocation.rollback("index failed".into());
+            assert_eq!(path.exists(), later, "{error}");
+            if later { assert!(error.contains("cleanup failed")); }
         }
     }
 
