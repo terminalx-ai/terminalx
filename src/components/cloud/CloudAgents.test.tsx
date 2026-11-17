@@ -403,6 +403,11 @@ describe("cloud agent tabs", () => {
     const followUp = await screen.findByTestId("cloud-agent-followup");
     expect(followUp.textContent).toContain("then run the linter");
     expect(followUp.textContent).toContain("sends when the agent finishes");
+    // A /goal is never steered past the composer's check (PRO-380): no Steer now for it.
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal ship it" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use pnpm instead" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
     await waitFor(() => expect(enqueued[0]).toMatchObject({ kind: "steer", payload: { text: "use pnpm instead" } }));
