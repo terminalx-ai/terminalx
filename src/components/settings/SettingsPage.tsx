@@ -148,6 +148,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       if (!hasEscapeOverlay(resultsRef.current)) headingRef.current?.focus({ preventScroll: true });
       return;
     }
+    let markedRow: HTMLElement | null = null;
     const reveal = () => {
       // Starting a search cancels any deferred row focus while its section loads.
       if (resultsRef.current) return true;
@@ -161,7 +162,12 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       if (!visible) return false;
       // Marking the row asks nested tab containers to reveal it. Keep observing
       // until that tab commits its visibility before scrolling or moving focus.
-      if (highlight.current?.row !== visible) highlightRow(visible);
+      // Each navigation must signal again, even if a previous request still
+      // highlights this row. Retries within this request need no new signal.
+      if (markedRow !== visible) {
+        highlightRow(visible);
+        markedRow = visible;
+      }
       if (visible.closest("[hidden]")) return false;
       visible.scrollIntoView?.({ block: "start" });
       // Sign-in links may also open their existing consent dialog. Keep focus there.

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SettingsPage } from "./SettingsPage";
 import { OrganizationCloudCompute } from "./OrganizationCloudCompute";
@@ -60,5 +60,34 @@ it("preserves focus in an existing dialog when the linked cloud tab becomes visi
     expect(document.activeElement).toBe(button);
   } finally {
     dialog.remove();
+  }
+});
+
+it("reopens the same linked cloud row while its previous highlight is still active", async () => {
+  vi.useFakeTimers();
+  try {
+    const onBack = vi.fn();
+    const view = render(<SettingsPage initialTab="organizations" onBack={onBack} />);
+    await act(async () => {
+      view.rerender(<SettingsPage initialTab="organizations.environment" openRequest={1} onBack={onBack} />);
+    });
+    const target = screen.getByTestId("environment-row");
+    expect(target.closest("[hidden]")).toBeNull();
+    expect(document.activeElement).toBe(target);
+    const providers = screen.getByRole("tab", { name: "Providers" });
+    fireEvent.click(providers);
+    providers.focus();
+    expect(target.closest("[hidden]")).not.toBeNull();
+    expect(target.dataset.settingHighlight).toBe("on");
+
+    await act(async () => {
+      view.rerender(<SettingsPage initialTab="organizations.environment" openRequest={2} onBack={onBack} />);
+    });
+    expect(target.closest("[hidden]")).toBeNull();
+    expect(document.activeElement).toBe(target);
+    expect(target.dataset.settingHighlight).toBe("on");
+  } finally {
+    cleanup();
+    vi.useRealTimers();
   }
 });
