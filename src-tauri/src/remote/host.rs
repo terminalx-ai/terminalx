@@ -388,7 +388,6 @@ pub struct RelayHost {
 /// revocations, as it makes them on its own registration (`pairing::relay`).
 const FORWARDED_REQUESTS: &[&str] = &["invite-create", "device-revoke", "device-credential-install", "device-credential-install-status", "device-resume-confirm"];
 
-/// The relay's replies to them, each naming the request's `reqId`.
 /// How long a forwarded request waits for the relay's reply. The window's
 /// caller gives up after 15 s (`RELAY_CONTROL_WAIT` in machine_host.rs); a
 /// later reply has nobody to go to.
@@ -402,6 +401,7 @@ fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
     forwarded.retain(|_, (_, sent)| now.saturating_duration_since(*sent) < FORWARDED_TTL);
 }
 
+/// The relay's replies to them, each naming the request's `reqId`.
 const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
 
 /// A live registration, as the window needs it to use it (PRO-368).
