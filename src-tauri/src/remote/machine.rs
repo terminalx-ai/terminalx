@@ -49,6 +49,34 @@ pub const MACHINE_5: &str = "machine/5";
 /// `machine_projects.rs`).
 pub const MACHINE_6: &str = "machine/6";
 
+/// `machine/7` (PRO-403): `machine.sessionActions`, `machine.runAction`,
+/// `machine.setupRerun` and `machine.setupStop`, a machine session's Setup
+/// and Run scripts, run there by the machine's own action runner and
+/// workspace setup (`machine_runs.rs`). The contract main ships (PR #1198):
+/// none of them is idempotent, so a start is not resent after a drop.
+pub const MACHINE_7: &str = "machine/7";
+
+/// `machine/8` (PRO-405): every `fs.*` call may name a `sessionId` in place
+/// of a `projectId`, and is then served rooted at that session's own
+/// worktree, which must be its project's folder or one of the project's own
+/// worktrees, inside the folder or not (`machine_files.rs`).
+pub const MACHINE_8: &str = "machine/8";
+
+/// `machine/9` (PRO-404): `git.prMerge` honours `head`, the commit the
+/// person saw, as a local merge does (`--match-head-commit`). It adds no
+/// method: a desktop sends `head` only once it is granted, since a runtime
+/// from before it would merge whatever the head is by then.
+pub const MACHINE_9: &str = "machine/9";
+
+/// `machine/10` (PRO-408): `session.usage`, `session.prepareContinuation`
+/// and `session.checkFailures`, and each agent tab's `accountLabel` on the
+/// sessions a machine sends: the cost chip, the account label, Continue in a
+/// new tab and Fix check errors of a machine session (`machine_session.rs`).
+pub const MACHINE_10: &str = "machine/10";
+
+/// The `machine/N` namespaces a machine serves, oldest first.
+pub const SERVED: [&str; 10] = [MACHINE, MACHINE_2, MACHINE_3, MACHINE_4, MACHINE_5, MACHINE_6, MACHINE_7, MACHINE_8, MACHINE_9, MACHINE_10];
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -69,7 +97,9 @@ pub fn needs_project(method: &str, params: &Value) -> bool {
         // A session's terminal opens in that session's folder (`pty/2`).
         "pty.create" => params.get("sessionId").is_none_or(Value::is_null),
         "fs.cancel" | "fs.unwatch" => false,
-        _ => method.starts_with("fs.") || method.starts_with("git."),
+        // `machine/8`: a session's own worktree, which the runtime resolves.
+        fs if fs.starts_with("fs.") => params.get("sessionId").is_none_or(Value::is_null),
+        _ => method.starts_with("git."),
     }
 }
 
@@ -224,25 +254,41 @@ pub struct ServedProject {
     pub files: Arc<WorkspaceFiles>,
     pub git: WorkspaceGit,
     refreshed: Mutex<Option<Instant>>,
+    /// Served at a session's worktree (`machine/8`): its root is all it
+    /// serves, and no other worktree is ever added to it.
+    fixed: bool,
 }
 
 impl ServedProject {
     /// The one root of a workspace runtime, served as before `machine/1`.
     pub fn workspace(root: PathBuf) -> Self {
         let files = Arc::new(WorkspaceFiles::new(root.clone()));
-        Self { id: None, git: WorkspaceGit::new(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None) }
+        Self { id: None, git: WorkspaceGit::new(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None), fixed: false }
     }
 
     fn machine(id: String, root: PathBuf) -> Self {
         let files = Arc::new(WorkspaceFiles::new(root.clone()));
-        Self { id: Some(id), git: WorkspaceGit::for_project(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None) }
+        Self { id: Some(id), git: WorkspaceGit::for_project(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None), fixed: false }
+    }
+
+    /// One worktree of project `id`, served as a root of its own for the
+    /// sessions that run in it (`machine/8`). It names the project, so a
+    /// watch or search in it is that project's.
+    pub(super) fn session_worktree(id: String, root: PathBuf) -> Self {
+        let files = Arc::new(WorkspaceFiles::new(root.clone()));
+        Self { id: Some(id), git: WorkspaceGit::for_project(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None), fixed: true }
+    }
+
+    /// Served at one session's worktree rather than a whole project.
+    pub fn is_session_worktree(&self) -> bool {
+        self.fixed
     }
 
     /// Bring the worktrees an absolute path may name up to date, at most
     /// every [`WORKTREES_FRESH_FOR`]: one made since is reachable, one
     /// removed is not. Only a machine project has any.
     pub fn refresh(&self) {
-        if self.id.is_none() {
+        if self.id.is_none() || self.fixed {
             return;
         }
         let mut refreshed = self.refreshed.lock().unwrap();
@@ -260,6 +306,10 @@ impl ServedProject {
 #[derive(Default)]
 pub struct Projects {
     served: Mutex<HashMap<String, Arc<ServedProject>>>,
+    /// Sessions' worktrees served as roots of their own (`machine/8`), by
+    /// canonical folder, with when each was last found to be one of its
+    /// project's worktrees (`machine_files.rs`).
+    pub(super) worktrees: Mutex<HashMap<PathBuf, (Arc<ServedProject>, Instant)>>,
 }
 
 impl Projects {
@@ -286,9 +336,12 @@ impl Projects {
         Ok(fresh)
     }
 
-    /// Every project served so far: searches and uploads live in each.
+    /// Every project served so far, and every session worktree: searches,
+    /// uploads and watches live in each.
     pub fn served(&self) -> Vec<Arc<ServedProject>> {
-        self.served.lock().unwrap().values().cloned().collect()
+        let mut served: Vec<Arc<ServedProject>> = self.served.lock().unwrap().values().cloned().collect();
+        served.extend(self.worktrees.lock().unwrap().values().map(|(project, _)| project.clone()));
+        served
     }
 }
 
@@ -311,6 +364,10 @@ mod tests {
             assert!(needs_project(method, &json!({})), "{method}");
         }
         assert!(needs_project("pty.create", &json!({ "sessionId": null })));
+        // `machine/8`: a session's worktree names the session instead.
+        assert!(needs_project("fs.read", &json!({ "sessionId": null })));
+        assert!(!needs_project("fs.read", &json!({ "sessionId": "s" })));
+        assert!(needs_project("git.status", &json!({ "sessionId": "s" })), "Git still names its project");
         for (method, params) in [("pty.create", json!({ "sessionId": "s" })), ("fs.cancel", json!({})), ("fs.unwatch", json!({})), ("session.list", json!({})), ("pipeline.act", json!({}))] {
             assert!(!needs_project(method, &params), "{method}");
         }

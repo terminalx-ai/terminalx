@@ -3,7 +3,7 @@ import type { MachineProject, RuntimeSession } from "@terminalx/portable/workspa
 
 vi.mock("@/components/terminal/TerminalView", () => ({ createTerminal: vi.fn() }));
 
-const { machinePortsOffered, machineSendBlocked, resetMachinePortsGrants, sessionRepository, worktreeInProject } = await import("./machineSession");
+const { machinePortsOffered, machineSendBlocked, resetMachinePortsGrants, sessionFilesPlace, sessionRepository, worktreeInProject } = await import("./machineSession");
 
 const project = { projectId: "p1", name: "terminalx", path: "/Users/me/code/terminalx", kind: "git", defaultBranch: "main", archived: false } as MachineProject;
 const session = (cwd: string) => ({ id: "s1", projectId: "p1", cwd }) as RuntimeSession;
@@ -75,5 +75,22 @@ describe("the Ports tab and forward chip of a machine session (PRO-355)", () => 
     // Updated, it grants ports/1 on its next connection; an update that drops it again hides them again.
     expect(machinePortsOffered("old", connected(["pty/1", "ports/1"]))).toBe(true);
     expect(machinePortsOffered("old", connected(["pty/1"]))).toBe(false);
+  });
+});
+
+describe("where a machine session's Files are rooted (PRO-405)", () => {
+  it("is the project's fs/1 at the worktree inside it, as before", () => {
+    expect(sessionFilesPlace(project.path, project.path, true)).toEqual({ scope: "project", base: "" });
+    expect(sessionFilesPlace(project.path, `${project.path}/.raccoon/worktrees/read`, true)).toEqual({ scope: "project", base: ".raccoon/worktrees/read" });
+  });
+
+  it("is the session's own fs/1 for a worktree outside the project, named by its folder for display only", () => {
+    expect(sessionFilesPlace(project.path, "/Users/me/worktrees/read/", true)).toEqual({ scope: "session", label: "read" });
+  });
+
+  it("stays the project's folder on a machine without machine/8, or while the paths are unknown", () => {
+    expect(sessionFilesPlace(project.path, "/Users/me/worktrees/read", false)).toEqual({ scope: "project", base: "" });
+    expect(sessionFilesPlace(null, "/Users/me/worktrees/read", true)).toEqual({ scope: "project", base: "" });
+    expect(sessionFilesPlace(project.path, null, true)).toEqual({ scope: "project", base: "" });
   });
 });

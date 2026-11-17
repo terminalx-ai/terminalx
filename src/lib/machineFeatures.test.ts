@@ -15,7 +15,7 @@ import {
 
 // What a current machine grants: every namespace but the ones it withholds by design, and machine/1–4 and machine/6.
 const WITHHELD = ["keys/1", "mirror/1", "collab/1"];
-const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"];
+const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8", "machine/9", "machine/10"];
 const without = (...names: string[]) => CURRENT.filter((name) => !names.includes(name));
 const connected = { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 4 } as const;
 
@@ -101,5 +101,15 @@ describe("machine features", () => {
     expect(machineFeaturesMessage("dev-server", "0.2.33", missingMachineFeatures(without("machine/4", "machine/6")))).toBe(
       "dev-server runs TerminalX 0.2.33. Update it to sign in its agents and add and remove its projects from here.",
     );
+  });
+
+  it("names each session parity namespace a machine before PRO-403 to PRO-408 lacks (machine/7 to machine/10)", () => {
+    expect(["machine/7", "machine/8", "machine/9", "machine/10"].map((capability) => machineFeature(capability)?.id)).toEqual(["scripts", "outsideWorktreeFiles", "mergePin", "sessionAgents"]);
+    for (const capability of ["machine/7", "machine/8", "machine/9", "machine/10"]) {
+      expect(machineHasFeature(CURRENT, capability)).toBe(true);
+      expect(missingMachineFeatures(without(capability)).map((entry) => entry.capability)).toEqual([capability]);
+    }
+    expect(machineFeatureMessage("dev-server", "0.2.33", machineFeature("machine/7")!)).toBe("dev-server runs TerminalX 0.2.33. Update it to run a session's Setup and Run scripts from here.");
+    expect(machineFeature("machine/11")).toBeNull();
   });
 });

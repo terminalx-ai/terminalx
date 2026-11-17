@@ -79,7 +79,12 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
-/// list, which every runtime of this build knows: see [`served`].
+/// list, which every runtime of this build knows: see [`served`]. Nor are the
+/// later `machine/N` ([`super::machine::SERVED`]): `machine/7` (Setup and
+/// Run, PRO-403), `machine/8` (a session's worktree as the root of `fs.*`,
+/// PRO-405), `machine/9` (a pull request merge pinned to its head, PRO-404)
+/// and `machine/10` (usage, Continue in a new tab and Fix check errors,
+/// PRO-408).
 pub const CAPABILITIES: [&str; 27] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1",
@@ -101,7 +106,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain(super::machine::SERVED).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -331,6 +336,24 @@ pub const METHODS: &[Method] = &[
     method("machine.cloneProject", "machine/6", Manage, false),
     method("machine.cloneStatus", "machine/6", Manage, false),
     method("machine.cloneCancel", "machine/6", Manage, false),
+    // PRO-403: a machine session's Setup and Run. What its project saved on
+    // the machine is read there by whoever may see the session; each run is
+    // the machine runtime's own pane, listed by `pty.list` with its session.
+    // Starting, rerunning or stopping one runs a command there: the
+    // manager's, as `pty.create` is. A resend is answered from the cache, so
+    // a dropped answer never starts a concurrent action twice.
+    method("machine.sessionActions", "machine/7", Participate, false),
+    method("machine.runAction", "machine/7", Manage, false),
+    method("machine.setupRerun", "machine/7", Manage, false),
+    method("machine.setupStop", "machine/7", Manage, false),
+    // PRO-408: a machine session's cost, Continue in a new tab and Fix check
+    // errors. Usage and a continuation's context are reads of what the
+    // caller may see; reading check logs runs the machine's `gh` and writes
+    // a file in the session's attachments folder there: the manager's, and
+    // answered once per request id.
+    method("session.usage", "machine/10", Participate, false),
+    method("session.prepareContinuation", "machine/10", Participate, false),
+    method("session.checkFailures", "machine/10", Manage, true),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -362,6 +385,10 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
         "machine/5" => &["machine.rotateCredential"],
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
+        // `machine/8` and `machine/9` add fields, not methods: a `sessionId`
+        // on `fs.*`, and `head` on `git.prMerge`.
+        "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
+        "machine/10" => &["session.usage", "session.prepareContinuation", "session.checkFailures"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
@@ -719,7 +746,7 @@ mod tests {
         // A machine/2 client is granted what it asked for, and nothing of machine/3.
         let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/2"]}), &machine).unwrap();
         assert_eq!(older, vec!["machine/1", "machine/2"]);
-        let refused = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/9"]}), &machine).unwrap_err();
+        let refused = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/99"]}), &machine).unwrap_err();
         assert_eq!(refused.code, "update_required");
         let data = refused.data.clone().expect("update_required carries data");
         assert_eq!(data["runtimeVersion"], env!("CARGO_PKG_VERSION"));
@@ -747,6 +774,39 @@ mod tests {
         let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/4"]}), &machine).unwrap();
         assert_eq!(older, vec!["machine/1", "machine/4"], "an older desktop is not handed machine/6");
         assert_eq!(leak_code("invalid_project"), "invalid_project");
+    }
+
+    /// PRO-403 to PRO-408: the session parity namespaces are a machine's
+    /// only, each method has the authority its doc comment names, and an
+    /// older desktop is not handed any of them.
+    #[test]
+    fn machine_7_to_10_are_a_machines_session_parity_only() {
+        let (workspace, machine) = (served(false), served(true));
+        for capability in ["machine/7", "machine/8", "machine/9", "machine/10"] {
+            assert!(machine.contains(&capability), "{capability}");
+            assert!(!workspace.contains(&capability), "{capability}");
+        }
+        for (name, capability, authority, idempotent) in [
+            ("machine.sessionActions", "machine/7", Participate, false),
+            // As main ships them (PR #1198): a start is not resent after a drop.
+            ("machine.runAction", "machine/7", Manage, false),
+            ("machine.setupRerun", "machine/7", Manage, false),
+            ("machine.setupStop", "machine/7", Manage, false),
+            ("session.usage", "machine/10", Participate, false),
+            ("session.prepareContinuation", "machine/10", Participate, false),
+            ("session.checkFailures", "machine/10", Manage, true),
+        ] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), (capability, authority, idempotent), "{name}");
+            assert!(namespace_prefixes(capability).contains(&name), "{name}");
+        }
+        assert!(namespace_prefixes("machine/8").is_empty() && namespace_prefixes("machine/9").is_empty(), "fields, not methods");
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/6"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/6"], "an older desktop is not handed machine/7 to machine/10");
+        let today = negotiate(&json!({"protocol": PROTOCOL, "want": super::super::machine_client::wanted_capabilities()}), &machine).unwrap();
+        for capability in super::super::machine::SERVED {
+            assert!(today.iter().any(|granted| granted == capability), "this desktop asks for {capability}");
+        }
     }
 
     #[test]

@@ -234,6 +234,22 @@ export interface CloudSessionModel {
    * mirror) is absent for it; `orgId` is empty and `collab` never live.
    */
   machine?: MachineSessionPlace;
+  /** A machine session's Setup and Run, read and run on the machine (`machine/7`, PRO-403). Absent for a cloud session. */
+  scripts?: import("@/lib/machineSessionRuns").MachineSessionScripts;
+  /** A machine session's branch, diff size, pull requests and next Git step, from the machine's `git/1` (PRO-404). Absent for a cloud session. */
+  branch?: import("@/lib/machineSessionBranch").MachineSessionBranch;
+  /** A machine session's usage, read again on the machine (`machine/10`, PRO-408); each tab's totals and account are on `session.tabs`. */
+  usage?: import("@/lib/machineSessionAgents").MachineSessionUsage;
+  /** A machine session's pull request's failed checks and Fix check errors, done on the machine (`machine/10`, PRO-408). */
+  checks?: import("@/lib/machineSessionAgents").MachineSessionChecks;
+  /**
+   * Continue a tab's conversation in a new agent tab of the machine session
+   * (`machine/10`, PRO-408): its context is read on the machine, the new tab
+   * is added there and sent the prompt. Resolves to the new tab's id.
+   */
+  continueInNewTab?(input: import("@/lib/machineSessionAgents").MachineContinueInput): Promise<{ tabId: string; queued: boolean }>;
+  /** Why Continue in a new tab cannot be used now; null when it can. Absent for a cloud session. */
+  continueBlocked?: string | null;
   /**
    * PRO-28: the Ports panel's inputs. `offered` is false for anyone who may
    * not use previews (not a manager, nor a driver who may approve) and for a

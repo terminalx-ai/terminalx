@@ -1178,6 +1178,38 @@ describe("machine/3: a machine's update (PRO-354)", () => {
   });
 });
 
+describe("a machine session's view of its files (machine/8, PRO-405)", () => {
+  const params = (runtime: FakeRuntime, method: string) => runtime.sent.filter((frame) => frame.method === method).map((frame) => frame.params as Record<string, unknown>);
+
+  it("names the session on every fs call, in place of a project, and on nothing else", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect(["fs/1", "git/1", "session/1", "machine/1", "machine/8"]);
+    const session = client.forSession("s1");
+    await session.call("fs.list", { path: "src" }).catch(() => undefined);
+    await session.call("fs.read", { path: "a", projectId: "p2" }).catch(() => undefined);
+    await session.call("fs.cancel", { searchId: "search-1" }).catch(() => undefined);
+    await session.call("git.status", { repo: "." }).catch(() => undefined);
+    expect(params(runtime, "fs.list")).toEqual([{ path: "src", sessionId: "s1" }]);
+    expect(params(runtime, "fs.read")).toEqual([{ path: "a", sessionId: "s1" }]);
+    // A cancel names its search, not the session's files.
+    expect(params(runtime, "fs.cancel")).toEqual([{ searchId: "search-1" }]);
+    expect(params(runtime, "git.status")[0]).not.toHaveProperty("sessionId");
+    expect(client.forSession("s1")).toBe(session);
+    expect(client.forSession("s2")).not.toBe(session);
+    client.close();
+  });
+
+  it("is refused before sending on a machine without machine/8", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect(["fs/1", "session/1", "machine/1"]);
+    await expect(client.forSession("s1").call("fs.list", { path: "" })).rejects.toMatchObject({ code: "capability_not_granted" });
+    expect(params(runtime, "fs.list")).toEqual([]);
+    client.close();
+  });
+});
+
 describe("a machine project's view of the connection (PRO-347)", () => {
   const params = (runtime: FakeRuntime, method: string) => runtime.sent.filter((frame) => frame.method === method).map((frame) => frame.params as Record<string, unknown>);
 

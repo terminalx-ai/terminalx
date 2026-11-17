@@ -424,6 +424,28 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
 }
 
+/// PRO-404 (`machine/9`): a merge names the head the person saw, which the
+/// runtime passes to GitHub to hold the merge to (`--match-head-commit`);
+/// anything but a commit id is refused before GitHub is asked.
+#[test]
+fn a_merge_names_the_head_it_is_pinned_to() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let head = "a".repeat(40);
+    let pr = json!({
+        "number": 8, "title": "Pinned", "url": "https://github.test/octo/repo/pull/8",
+        "state": "OPEN", "headRefName": "feature/p", "baseRefName": "main", "headRefOid": head,
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": []
+    });
+    std::fs::write(f.state.join("pr-8.json"), pr.to_string()).unwrap();
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"not a sha"})), "invalid_params");
+    assert!(!f.gh_calls().contains("merge"), "nothing was asked of GitHub");
+    let merged = f.call("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":head})).unwrap();
+    assert_eq!(merged["pr"]["state"], "MERGED");
+    assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")), "{}", f.gh_calls());
+}
+
 #[test]
 fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let f = fixture();

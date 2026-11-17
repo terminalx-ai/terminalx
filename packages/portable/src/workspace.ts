@@ -13,6 +13,7 @@
 //   replacement nothing is sent to them and their views are told they ended;
 // - subscriptions resume from their last offset or cursor after a
 //   reconnect, and resync from a snapshot when the runtime generation moved.
+import type { ContinuationContext } from "./continuation";
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
@@ -83,8 +84,16 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * for the paired computer.
  * `machine/6` (PRO-351): browse the machine's folders, add, clone and remove
  * its projects (docs/MACHINES.md "As built (PRO-351)").
+ * The session parity namespaces (docs/MACHINES.md "As built (PRO-403 to PRO-408)"):
+ * `machine/7` (PRO-403): `machine.sessionActions`, `machine.runAction`,
+ * `machine.setupRerun` and `machine.setupStop`, a session's Setup and Run on the machine.
+ * `machine/8` (PRO-405): every `fs.*` call may name a `sessionId` instead of
+ * a project, and is served at that session's worktree ({@link WorkspaceRpcClient.forSession}).
+ * `machine/9` (PRO-404): `git.prMerge` honours `head`, the commit the person saw.
+ * `machine/10` (PRO-408): `session.usage`, `session.prepareContinuation` and
+ * `session.checkFailures`, and each agent tab's `accountLabel`.
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8", "machine/9", "machine/10"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -104,6 +113,13 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.cloneProject": "machine/6",
   "machine.cloneStatus": "machine/6",
   "machine.cloneCancel": "machine/6",
+  "machine.sessionActions": "machine/7",
+  "machine.runAction": "machine/7",
+  "machine.setupRerun": "machine/7",
+  "machine.setupStop": "machine/7",
+  "session.usage": "machine/10",
+  "session.prepareContinuation": "machine/10",
+  "session.checkFailures": "machine/10",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -151,6 +167,8 @@ export function agentPtyId(tabId: string): string {
 
 /** Methods a machine serves per project: they name the project (docs/MACHINES.md "Project scoping"). */
 const PROJECT_SCOPED = /^(fs|git)\./;
+/** `fs.*` calls a session's view names the session in (`machine/8`); a cancel or unwatch names its search or watch. */
+const SESSION_SCOPED = /^fs\.(?!cancel$|unwatch$)/;
 
 /** How much a caller may cost: only an interactive action may wake compute. */
 export type Activation = "cache-only" | "sync" | "connect" | "wake";
@@ -194,6 +212,7 @@ export const MUTATING_METHODS = new Set([
   "git.prReady",
   "git.prMerge",
   "notes.post",
+  "session.checkFailures",
 ]);
 
 /** A person's collaboration role on a shared workspace (saas contract §21.1). */
@@ -410,6 +429,59 @@ export interface RuntimeSessionTab {
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
   hasMessages?: boolean;
+  /** Tokens and estimated cost by model as of its last turn end (PRO-273); absent until one is read. */
+  usage?: RuntimeTabUsage | null;
+  /** On a machine (`machine/10`): the account the tab runs on there, only when its agent has several there. */
+  accountLabel?: string | null;
+}
+
+/** One model's tokens in a tab or session. `costUsd` is the API list price; `null` when the model has no price. */
+export interface RuntimeModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number | null;
+}
+
+export interface RuntimeTabUsage {
+  models: RuntimeModelUsage[];
+  updated: string;
+}
+
+/** A usage window of an agent's login, as the machine reads it. */
+export interface RuntimeUsageWindow {
+  agent: "claude" | "codex";
+  key: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+  windowMinutes: number | null;
+  updatedAt: number;
+  stale: boolean;
+  source?: string;
+}
+
+/** `session.usage` (`machine/10`): what `terminalx sessions usage` reports there, how each agent signs in there, and its usage windows. */
+export interface RuntimeSessionUsage {
+  usage: {
+    sessionId: string;
+    title: string;
+    tabs: { tabId: string; title?: string | null; agent: string; models: RuntimeModelUsage[]; updated: string }[];
+    models: RuntimeModelUsage[];
+    total: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null };
+    estimate: true;
+  };
+  /** By agent: "Claude account", "ChatGPT account", "API key", or `null` when not known or mixed. */
+  loginMethods: Record<string, string | null>;
+  windows: RuntimeUsageWindow[];
+}
+
+/** `session.checkFailures` (`machine/10`): the failed check logs, saved in the session's attachments folder on the machine. `path` is the machine's, for its agent to read; never opened here. */
+export interface RuntimeCheckFailures {
+  path: string;
+  truncated: boolean;
 }
 
 /** `workspace.remove`: the sessions that went with the worktree, and what became of its branch. */
@@ -626,6 +698,10 @@ export interface RuntimeSession {
   projectPath: string;
   cwd: string;
   worktreeName?: string | null;
+  /** The branch it was cut from, as `session.create` recorded it; absent on older runtimes. */
+  baseRef?: string | null;
+  /** Its worktree is gone; the session's record stays. */
+  worktreeRemoved?: boolean;
   branch?: string | null;
   title: string;
   created: string;
@@ -810,6 +886,55 @@ export interface PtyInfo {
   running?: boolean;
   /** An agent's install or sign-in (`machine/4`); such a terminal is never in `pty.list`. */
   setup?: { harness: string; step: MachineAgentSetupStep };
+  /** One of its session's script runs on a machine (`machine/7`): a saved action, or the workspace's setup. */
+  run?: PtyRun;
+}
+
+/** What a session's script-run terminal is (`machine/7`). */
+export type PtyRun = { kind: "action"; actionId: string; name: string } | { kind: "setup" };
+
+/** A saved action as a machine's project has it (`machine/7`). */
+export interface MachineAction {
+  id: string;
+  name: string;
+  icon: string;
+  command: string;
+  runAfterSetup: boolean;
+  concurrent: boolean;
+  hidden: boolean;
+}
+
+/** A workspace setup attempt on a machine (`machine/7`); its pane is the terminal `pty.list` lists with `run.kind` "setup" while it is kept. */
+export interface MachineSetupRun {
+  paneId: string;
+  command: string;
+  status: "pending" | "running" | "stopping" | "stopped" | "succeeded" | "failed";
+  exitCode: number | null;
+  error: string | null;
+  hasPane: boolean;
+}
+
+/** `machine.sessionActions`: what a machine session's Run menu, Open button and Setup and Run tabs show, read on the machine. */
+export interface MachineSessionActions {
+  actions: MachineAction[];
+  previewUrls: { id: string; name: string; url: string }[];
+  /** The setup script the machine would run now; null when none is saved there. */
+  setupScript: string | null;
+  /** The session has a workspace checkout of its own, where setup runs. */
+  setupApplies: boolean;
+  /** False once its worktree is removed: nothing can run in it. */
+  available: boolean;
+  /** What $PORT and $PORT_1..$PORT_9 are on the machine; null when not known. */
+  ports: number[] | null;
+  setup: MachineSetupRun | null;
+}
+
+/** `machine.runAction`: the run started, or (`started` false) the running one of a non-concurrent action. */
+export interface MachineActionOutcome {
+  started: boolean;
+  run: { actionId: string; name: string; ptyId: string; state: "running" | "exited"; exitCode: number | null };
+  /** The run's terminal as `pty.list` lists it. */
+  terminal: PtyInfo | null;
 }
 
 /** Where a terminal view left off, to resume without replaying what it shows. */
@@ -956,6 +1081,52 @@ export class WorkspaceRpcClient {
       },
     });
     this.projectViews.set(projectId, view);
+    return view;
+  }
+
+  /**
+   * This connection as one session of a machine sees its files
+   * (`machine/8`, PRO-405): every `fs.*` call and a file watch name the
+   * session, and the machine serves them at the session's own worktree,
+   * wherever it is, by paths relative to it. The client never names a path
+   * of the machine. Refused before sending unless `machine/8` was granted.
+   * The same object for the same session.
+   */
+  forSession(sessionId: string): WorkspaceRpcClient {
+    const key = `session:${sessionId}`;
+    const known = this.projectViews.get(key);
+    if (known) return known;
+    /** A refusal before sending is a rejected call, as one from the runtime is. */
+    const refused = <T>(send: () => Promise<T>): Promise<T> => {
+      try {
+        return send();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+    const scoped = (method: string, params: Record<string, unknown> = {}) => {
+      if (!SESSION_SCOPED.test(method)) return params;
+      this.assertCapability("machine/8", method);
+      const { projectId: _project, ...rest } = params;
+      return { ...rest, sessionId };
+    };
+    const view = new Proxy(this, {
+      get: (target, property) => {
+        if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => refused(() => target.call<T>(method, scoped(method, params)));
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => refused(() => target.mutate<T>(method, scoped(method, params), id));
+        if (property === "watchFiles")
+          return (path: string, onChange: (paths: string[] | null) => void) =>
+            refused(() => {
+              target.assertCapability("machine/8", "fs.watch");
+              return target.watchFiles(path, onChange, { sessionId });
+            });
+        if (property === "forProject") return (other: string) => target.forProject(other);
+        if (property === "forSession") return (other: string) => target.forSession(other);
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    this.projectViews.set(key, view);
     return view;
   }
 
@@ -1632,6 +1803,48 @@ export class WorkspaceRpcClient {
     return result.clone;
   }
 
+  /** `machine/7`: a session's saved actions, preview URLs, setup script, ports and setup run, as the machine has them. */
+  async sessionActions(sessionId: string): Promise<MachineSessionActions> {
+    return this.call<MachineSessionActions>("machine.sessionActions", { sessionId });
+  }
+
+  /**
+   * `machine/7`: run a saved action in a terminal of the session on the
+   * machine. A non-concurrent action already running is not started again
+   * (`started` false) unless `restart`, which replaces that run. Not resent
+   * after a drop: a resend of a concurrent action would start it twice.
+   */
+  async runAction(sessionId: string, actionId: string, restart = false): Promise<MachineActionOutcome> {
+    return this.call<MachineActionOutcome>("machine.runAction", { sessionId, actionId, restart });
+  }
+
+  /** `machine/7`: run the session's setup script again on the machine. */
+  async rerunSetup(sessionId: string): Promise<MachineSetupRun | null> {
+    const result = await this.call<{ setup: MachineSetupRun | null }>("machine.setupRerun", { sessionId });
+    return result.setup;
+  }
+
+  /** `machine/7`: stop the session's setup attempt `paneId` on the machine. */
+  async stopSetup(sessionId: string, paneId: string): Promise<MachineSetupRun | null> {
+    const result = await this.call<{ setup: MachineSetupRun | null }>("machine.setupStop", { sessionId, paneId });
+    return result.setup;
+  }
+
+  /** `session.usage` (`machine/10`): the session's usage, read again on the machine. */
+  sessionUsage(sessionId: string): Promise<RuntimeSessionUsage> {
+    return this.call<RuntimeSessionUsage>("session.usage", { sessionId });
+  }
+
+  /** `session.prepareContinuation` (`machine/10`): a tab's context for Continue in a new tab, with the machine's own paths. */
+  prepareContinuation(sessionId: string, tabId: string): Promise<ContinuationContext> {
+    return this.call<ContinuationContext>("session.prepareContinuation", { sessionId, tabId });
+  }
+
+  /** `session.checkFailures` (`machine/10`, manage only): a pull request's failed check logs, saved on the machine for the tab's agent to read. */
+  checkFailures(sessionId: string, tabId: string, prUrl: string): Promise<RuntimeCheckFailures> {
+    return this.mutate<RuntimeCheckFailures>("session.checkFailures", { sessionId, tabId, prUrl });
+  }
+
   /** `machine/4`: the setup step running there for `harness`, to follow it from another window or after a reload. */
   async agentSetupRunning(harness: string): Promise<MachineAgentSetupRun | null> {
     const result = await this.call<{ run?: MachineAgentSetupRun | null }>("machine.agentSetupRunning", { harness });
@@ -1750,11 +1963,11 @@ export class WorkspaceRpcClient {
    * be re-read: after a reconnect (changes made while away were not seen)
    * or a burst too large to name.
    */
-  watchFiles(path: string, onChange: (paths: string[] | null) => void, scope: { projectId?: string } = {}): Promise<() => void> {
+  watchFiles(path: string, onChange: (paths: string[] | null) => void, scope: { projectId?: string; sessionId?: string } = {}): Promise<() => void> {
     let resumed = false;
     return this.subscribe({
       method: "fs.watch",
-      params: scope.projectId ? { path, projectId: scope.projectId } : { path },
+      params: scope.sessionId ? { path, sessionId: scope.sessionId } : scope.projectId ? { path, projectId: scope.projectId } : { path },
       resumeParams: () => ({}),
       onReplay: () => {
         if (resumed) onChange(null);
@@ -1965,7 +2178,7 @@ export class WorkspaceRpcClient {
   }
 
   /** Refuse before sending when the connected runtime did not grant `capability`. */
-  private assertCapability(capability: WorkspaceCapability, method: string): void {
+  assertCapability(capability: WorkspaceCapability, method: string): void {
     if (this.state.state !== "connected") return;
     if (!this.state.capabilities.includes(capability)) {
       throw new WorkspaceRpcError("capability_not_granted", `${capability} is not available from this runtime`, method);

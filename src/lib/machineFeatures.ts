@@ -43,6 +43,10 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "updates", label: "Updating it from this Mac", capability: "machine/3", action: "update it from this Mac" },
   { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
   { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
+  { id: "scripts", label: "Setup and Run scripts", capability: "machine/7", action: "run a session's Setup and Run scripts" },
+  { id: "outsideWorktreeFiles", label: "Files of worktrees outside a project", capability: "machine/8", action: "open the files of a worktree outside its project's folder" },
+  { id: "mergePin", label: "Merging the head you saw", capability: "machine/9", action: "merge a pull request only at the commit shown" },
+  { id: "sessionAgents", label: "Cost, Continue and Fix check errors", capability: "machine/10", action: "see a session's cost, continue a tab in a new one and fix check errors" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {

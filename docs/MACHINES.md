@@ -761,7 +761,7 @@ the pull request that adds it.
 | `pty.kill` | `pty/1` | Served | |
 | `pty.attach` | `pty/1` | Served | |
 | `pty.detach` | `pty/1` | Served | |
-| `fs.list` | `fs/1` | Needs a project | |
+| `fs.list` | `fs/1` | Needs a project | Or, with `machine/8` (PRO-405), a `sessionId`: every `fs.*` call is then served at that session's worktree, which must be its project's folder, a folder inside it or one of the project's own worktrees |
 | `fs.stat` | `fs/1` | Needs a project | |
 | `fs.read` | `fs/1` | Needs a project | |
 | `fs.write` | `fs/1` | Needs a project | |
@@ -799,7 +799,7 @@ the pull request that adds it.
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |
-| `git.prMerge` | `git/1` | Needs a project | With the machine's `gh` |
+| `git.prMerge` | `git/1` | Needs a project | With the machine's `gh`; with `machine/9` (PRO-404) the desktop names `head`, the commit the person saw, and GitHub refuses the merge (`conflict`) once the head has moved |
 | `cleanup.scan` | `cleanup/1` | Served | Every project of the machine, as Settings → Storage scans every local project; each row names its project |
 | `cleanup.size` | `cleanup/1` | Served | Names what the scan listed |
 | `cleanup.cancel` | `cleanup/1` | Served | |
@@ -846,6 +846,13 @@ the pull request that adds it.
 | `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
 | `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
 | `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
+| `machine.sessionActions` | `machine/7` | Served | Names the session; its project's saved actions, preview URLs and setup script as the machine's store has them, its latest setup attempt and the ports `$PORT` stands for there (PRO-403, [As built (PRO-403 to PRO-408)](#as-built-pro-403-to-pro-408)) |
+| `machine.runAction` | `machine/7` | Served | Manage only; one saved action, run by the machine's own action runner in the session's folder there; a non-concurrent one already running is answered `started: false`, `restart` replaces it; not idempotent, so never resent after a drop |
+| `machine.setupRerun` | `machine/7` | Served | Manage only; the session's workspace setup, run again on the machine |
+| `machine.setupStop` | `machine/7` | Served | Manage only; names the setup attempt's pane |
+| `session.usage` | `machine/10` | Served | Names the session; its tokens and estimated cost by model, read again from its agents' transcripts on the machine, each agent's login method there and the machine's usage windows (PRO-408) |
+| `session.prepareContinuation` | `machine/10` | Served | Names the session and an agent tab; the context Continue in a new tab starts from, with the machine's own transcript path, which the new tab's agent there reads |
+| `session.checkFailures` | `machine/10` | Served | Manage only; a pull request's failed check logs, read with the machine's `gh` into a file of the session's attachments folder there, for Fix check errors to name; answered once per `clientRequestId` |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -2038,24 +2045,24 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
 | Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
 | Image attachments | Works; uploaded to the machine by session | PRO-347 |
-| Other file attachments | Follow-up | PRO-407 |
+| Other file attachments | Works: `session.attach` with `kind: "file"` uploads into the session's attachments folder on the machine (`composer/4`) | PRO-407 (PR #1197, on main) |
 | Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
 | Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
 | Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
 | Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
-| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); model `scripts` | PRO-403, [As built](#as-built-pro-403-to-pro-408) |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
-| Header branch button: diff size, Create PR | Follow-up | PRO-404 |
+| Header branch button: diff size, Create PR | Works through the machine's `git/1`; a merge is pinned to the head shown (`machine/9`); model `branch` | PRO-404, [As built](#as-built-pro-403-to-pro-408) |
 | Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
-| Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
-| Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
+| Files for a worktree outside the project folder | Works: `fs.*` named by the session (`machine/8`), served only for one of the project's own worktrees; Files and Changes name the same worktree | PRO-405, [As built](#as-built-pro-403-to-pro-408) |
+| Remove the session's worktree, merged cleanup | Works: `workspace.disposition`/`workspace.remove` on the machine, with the local checks (`session_ops::remove_workspace_fallible`); model `removableWorkspace` | PRO-406, [As built](#as-built-pro-403-to-pro-408) |
 | Rename, archive, pin | Works | PRO-346 |
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
 | Agent sign-in notice | Works; names the machine ("Sign in from its page") | 21.09, PRO-350 |
-| Cost chip, agent account label, Continue in a new tab, Fix check errors | Follow-up | PRO-408 |
+| Cost chip, agent account label, Continue in a new tab, Fix check errors | Works on the machine (`machine/10`); model `usage`, `TabEntry.usage`/`accountLabel`, `continueInNewTab`, `checks` | PRO-408, [As built](#as-built-pro-403-to-pro-408) |
 | Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
 | Computer use | Hidden | Decision 7 |
 | Dictation into a terminal | Hidden; dictation into the composer works | Decision 7 |
@@ -2066,6 +2073,44 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Dropping files into a terminal | Refused with a message: the path is this computer's | Decision 7 |
 | Forwarded ports and previews | Ports tab where the machine grants `ports/1`; forwarding and previews on this computer | PRO-355 |
 | New session on a machine | Works: the new-session form's "Where it runs" menu, issue start and handoff | PRO-348 |
+
+### As built (PRO-403 to PRO-408): a machine session's remaining parity
+
+Every action reads from and runs on the machine; nothing of the machine runs
+or opens on this computer, and no path of the machine reaches a local command.
+Each feature has its own namespace, so an older machine says which it lacks
+(`MACHINE_FEATURES` in `src/lib/machineFeatures.ts`). `machine/7` is PRO-403's
+contract as main ships it (PR #1198): the same four methods, the manager's, none
+idempotent.
+
+| Namespace | Ticket | What it adds | Runtime | Desktop model (`useMachineSession`) |
+| --- | --- | --- | --- | --- |
+| `machine/7` | PRO-403 | `machine.sessionActions`, `machine.runAction`, `machine.setupRerun`, `machine.setupStop`; `pty.list` names each run (`run`) | `remote/machine_runs.rs`, over `action_runner` and `workspace_setup` in the session's folder on the machine | `scripts` (`src/lib/machineSessionRuns.ts`) |
+| `machine/8` | PRO-405 | `sessionId` on every `fs.*` call, in place of `projectId` | `remote/machine_files.rs`: the session's `cwd` must be its project's folder, a folder inside it, or one of the project's worktrees (`machine::worktrees`); anything else is `path_forbidden`, a removed worktree `not_found` | `WorkspaceRpcClient.forSession`; `sessionFilesPlace` roots Files at a worktree outside the project through the session; `fileSource` |
+| `machine/9` | PRO-404 | `head` on `git.prMerge`: GitHub refuses the merge (`conflict`) once the head moved | `remote/git.rs` (`--match-head-commit`) | `branch` (`src/lib/machineSessionBranch.ts`) |
+| `machine/10` | PRO-408 | `session.usage`, `session.prepareContinuation`, `session.checkFailures`; each agent tab's `accountLabel` | `remote/machine_session.rs`, over `session_usage`, `continuation::prepare` and `github::checks::prepare_fix` | `usage`, `continueInNewTab`, `checks` (`src/lib/machineSessionAgents.ts`); `TabEntry.usage`, `TabEntry.accountLabel` |
+
+PRO-406 needs no namespace: `workspace.disposition` and `workspace.remove`
+(`workspace/1`) were already served by a machine and end in
+`session_ops::remove_workspace_fallible`, the one removal the window, the CLI
+and settling use. Uncommitted work and commits no other branch has keep the
+worktree unless the person confirmed exactly what was shown (`confirmedDigest`);
+the project's own folder is never removed. The model's `removableWorkspace`
+(`src/lib/machineSessionWorkspace.ts`) asks only the machine.
+
+PRO-407 is on main as `composer/4` (PR #1197).
+
+Reading check logs is idempotent by `clientRequestId`: a resend after a
+dropped answer is answered from the first. Starting a script is not, as main
+ships it, so the desktop never resends one. Running, rerunning, stopping and
+reading logs are a manager's; reading what can run, usage and a continuation's context are
+anyone's who may see the session.
+
+Tests: `cargo test --lib remote::machine` (`machine_files_tests.rs`,
+`machine_runs_tests.rs`, `machine_session_rpc_tests.rs`,
+`machine_session_tests.rs`), `remote::git::tests::a_merge_names_the_head_it_is_pinned_to`,
+`remote::protocol::tests::machine_7_to_10_are_a_machines_session_parity_only`;
+`vitest run src/lib/machineSession src/lib/machineFeatures`.
 
 ### As built (PRO-347)
 
@@ -2474,5 +2519,7 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   The agent control changed in PRO-360 (pairing instead of the switch) by the
   owner's decision.
 - **Still open in the epic:** PRO-368 (relay registration for a signed-in
-  machine) and PRO-359 (the phone), both in review; session follow-ups
-  PRO-403 to PRO-408, in Backlog.
+  machine) and PRO-359 (the phone), both in review. The session follow-ups
+  PRO-403 to PRO-408 have their runtime methods and session model
+  ([As built (PRO-403 to PRO-408)](#as-built-pro-403-to-pro-408)); their
+  rendering is separate work.
