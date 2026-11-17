@@ -254,7 +254,7 @@ it.each([
   expect(document.activeElement).toBe(editor);
   fireEvent.keyDown(editor, { key: "Escape" });
   expect(screen.queryByText("Reopen Settings")).toBeNull();
-  expect(screen.getByRole("alert").textContent).toContain("Save your script changes");
+  expect(screen.getByRole("alert").textContent).toContain("Save your changes");
   expect(state.update).not.toHaveBeenCalled();
   expect(state.write).not.toHaveBeenCalled();
   fireEvent.click(button(`Save ${kind} script`));
@@ -335,5 +335,5 @@ it("keeps the local draft and close guard when removing an override fails", asyn
   expect(button("Save setup script").disabled).toBe(false);
   fireEvent.keyDown(textarea("Setup script"), { key: "Escape" });
   expect(screen.queryByText("Reopen Settings")).toBeNull();
-  expect(screen.getByText(/Save your script changes before leaving Settings/)).toBeTruthy();
+  expect(screen.getByText(/Save your changes before leaving Settings/)).toBeTruthy();
 });

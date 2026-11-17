@@ -1,3 +1,4 @@
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { useEffect, useState, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ChevronDown, CircleCheck, Copy, FileJson, FileTerminal, Folder, FolderOpen, KeyRound, RefreshCw, Settings2, TriangleAlert, Trash2, Zap } from "@/icons";
@@ -157,6 +158,10 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
   const valid = !loading && !!preview && !preview.error && !preview.fromIncludeFile && previewed === text && !patterns.some((item) => item.error);
   const [commit, setCommit] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Keep this editor mounted through validation and persistence, including a failed
+  // save. The shared boundary covers project/page navigation and leaving Settings.
+  const dirty = !preview?.fromIncludeFile && lines(text).join("\n") !== lines(stored).join("\n");
+  useSettingsLeaveGuard(dirty || saving);
   useEffect(() => {
     if (!valid || commit === null || commit !== text || saving) return;
     setCommit(null);
