@@ -4,7 +4,7 @@
 use super::{Binding, Observation, Operation, Owner, Request, TaskTarget};
 use anyhow::{ensure, Context, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ fn write_new(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-impl<S: Read + Write> RetainedOwner<S> {
+impl<S: super::DeadlineIo> RetainedOwner<S> {
     pub fn connect(io: S, binding: Binding, root: &Path) -> Result<Self> {
         binding.validate()?;
         #[cfg(not(test))]
@@ -151,6 +151,7 @@ impl<S: Read + Write> RetainedOwner<S> {
 mod tests {
     use super::super::{Worker, VERSION};
     use super::*;
+    use std::io::Read;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 

@@ -17,6 +17,7 @@ pub(super) struct Channel {
     stream: OwnedFd,
     lifetime: OwnedFd,
     fenced: bool,
+    frame_deadline: Option<Instant>,
 }
 
 /// Independent of request dispatch: owner loss must revoke admission even
@@ -233,6 +234,7 @@ impl Channel {
             stream,
             lifetime,
             fenced: false,
+            frame_deadline: None,
         })
     }
 
@@ -295,7 +297,9 @@ impl Read for Channel {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let deadline = Instant::now() + STALL;
+        let deadline = self
+            .frame_deadline
+            .unwrap_or_else(|| Instant::now() + STALL);
         loop {
             self.ready(libc::POLLIN, deadline)?;
             let count = unsafe {
@@ -328,7 +332,9 @@ impl Write for Channel {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let deadline = Instant::now() + STALL;
+        let deadline = self
+            .frame_deadline
+            .unwrap_or_else(|| Instant::now() + STALL);
         loop {
             self.ready(libc::POLLOUT, deadline)?;
             // MSG_NOSIGNAL avoids killing the runtime before it can initiate
@@ -446,5 +452,13 @@ mod tests {
         drop(peer);
         assert!(channel.read(&mut [0; 1]).is_err());
         assert!(channel.fenced);
+    }
+}
+
+impl super::DeadlineIo for Channel {
+    fn set_deadline(&mut self, deadline: Instant) -> io::Result<()> {
+        super::time_left(deadline)?;
+        self.frame_deadline = Some(deadline);
+        Ok(())
     }
 }

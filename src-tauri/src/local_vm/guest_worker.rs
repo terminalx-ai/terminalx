@@ -398,6 +398,162 @@ pub(super) struct Reply {
     pub result: Observation,
 }
 
+/// Only transports that can bound each blocking operation may carry frames.
+/// This trait is private: an arbitrary Read/Write cannot silently bypass timeouts.
+pub(super) trait DeadlineIo: Read + Write {
+    fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()>;
+    fn read_before(
+        &mut self,
+        bytes: &mut [u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        self.set_deadline(deadline)?;
+        self.read(bytes)
+    }
+    fn write_before(
+        &mut self,
+        bytes: &[u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        self.set_deadline(deadline)?;
+        self.write(bytes)
+    }
+}
+fn time_left(deadline: std::time::Instant) -> std::io::Result<std::time::Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "worker frame deadline"))
+}
+fn socket_ready(
+    stream: &std::os::unix::net::UnixStream,
+    events: i16,
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        let left = time_left(deadline)?;
+        let mut fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        let count = unsafe {
+            libc::poll(
+                &mut fd,
+                1,
+                left.as_millis().max(1).min(i32::MAX as u128) as i32,
+            )
+        };
+        if count > 0 {
+            time_left(deadline)?;
+            return Ok(());
+        }
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+impl DeadlineIo for std::os::unix::net::UnixStream {
+    fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+        time_left(deadline)?;
+        self.set_nonblocking(true)
+    }
+    fn read_before(
+        &mut self,
+        bytes: &mut [u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        self.set_deadline(deadline)?;
+        loop {
+            socket_ready(self, libc::POLLIN, deadline)?;
+            match self.read(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    ()
+                }
+                result => return result,
+            }
+        }
+    }
+    fn write_before(
+        &mut self,
+        bytes: &[u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        self.set_deadline(deadline)?;
+        loop {
+            socket_ready(self, libc::POLLOUT, deadline)?;
+            match self.write(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    ()
+                }
+                result => return result,
+            }
+        }
+    }
+}
+impl<T: DeadlineIo + ?Sized> DeadlineIo for &mut T {
+    fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+        (**self).set_deadline(deadline)
+    }
+    fn read_before(
+        &mut self,
+        bytes: &mut [u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        (**self).read_before(bytes, deadline)
+    }
+    fn write_before(
+        &mut self,
+        bytes: &[u8],
+        deadline: std::time::Instant,
+    ) -> std::io::Result<usize> {
+        (**self).write_before(bytes, deadline)
+    }
+}
+#[cfg(test)]
+impl DeadlineIo for std::io::Cursor<Vec<u8>> {
+    fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+        time_left(deadline).map(|_| ())
+    }
+}
+struct FrameIo<'a, S> {
+    io: &'a mut S,
+    deadline: std::time::Instant,
+}
+impl<S: DeadlineIo> Read for FrameIo<'_, S> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.io.read_before(bytes, self.deadline)?;
+        time_left(self.deadline)?;
+        Ok(count)
+    }
+}
+impl<S: DeadlineIo> Write for FrameIo<'_, S> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.io.write_before(bytes, self.deadline)?;
+        time_left(self.deadline)?;
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.io.set_deadline(self.deadline)?;
+        self.io.flush()?;
+        time_left(self.deadline).map(|_| ())
+    }
+}
+
 /// Four-byte unsigned big endian JSON length, followed by exactly that many
 /// bytes. Length checked before allocation; aggregate budget checked before
 /// every read/write. Errors permanently poison the channel, including EOF.
@@ -405,13 +561,15 @@ struct Wire<S> {
     io: S,
     remaining: usize,
     poisoned: bool,
+    frame_timeout: std::time::Duration,
 }
-impl<S: Read + Write> Wire<S> {
+impl<S: DeadlineIo> Wire<S> {
     fn new(io: S) -> Self {
         Self {
             io,
             remaining: MAX_CHANNEL_BYTES,
             poisoned: false,
+            frame_timeout: std::time::Duration::from_secs(30),
         }
     }
     fn budget(&mut self, len: usize) -> Result<()> {
@@ -426,13 +584,24 @@ impl<S: Read + Write> Wire<S> {
     fn receive<T: DeserializeOwned>(&mut self) -> Result<T> {
         let result = (|| {
             ensure!(!self.poisoned, "worker channel fenced");
+            let deadline = std::time::Instant::now() + self.frame_timeout;
             let mut header = [0; 4];
-            self.io.read_exact(&mut header)?;
+            FrameIo {
+                io: &mut self.io,
+                deadline,
+            }
+            .read_exact(&mut header)?;
             let len = u32::from_be_bytes(header) as usize;
             self.budget(len)?;
             let mut bytes = vec![0; len];
-            self.io.read_exact(&mut bytes)?;
-            Ok(serde_json::from_slice(&bytes)?)
+            FrameIo {
+                io: &mut self.io,
+                deadline,
+            }
+            .read_exact(&mut bytes)?;
+            let value = serde_json::from_slice(&bytes)?;
+            time_left(deadline)?;
+            Ok(value)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -459,9 +628,13 @@ impl<S: Read + Write> Wire<S> {
             let mut bytes = Buffer(Vec::new());
             serde_json::to_writer(&mut bytes, value)?;
             self.budget(bytes.0.len())?;
-            self.io.write_all(&(bytes.0.len() as u32).to_be_bytes())?;
-            self.io.write_all(&bytes.0)?;
-            self.io.flush()?;
+            let mut frame = FrameIo {
+                io: &mut self.io,
+                deadline: std::time::Instant::now() + self.frame_timeout,
+            };
+            frame.write_all(&(bytes.0.len() as u32).to_be_bytes())?;
+            frame.write_all(&bytes.0)?;
+            frame.flush()?;
             Ok(())
         })();
         if result.is_err() {
@@ -479,7 +652,7 @@ pub(super) struct Owner<S> {
     binding: Binding,
     next: u64,
 }
-impl<S: Read + Write> Owner<S> {
+impl<S: DeadlineIo> Owner<S> {
     pub fn connect(io: S, binding: Binding) -> Result<Self> {
         #[cfg(all(target_os = "linux", not(test)))]
         super::guest_account::check_linux_owner()?;
@@ -554,7 +727,7 @@ pub(super) struct Worker<S> {
     binding: Binding,
     next: u64,
 }
-impl<S: Read + Write> Worker<S> {
+impl<S: DeadlineIo> Worker<S> {
     pub fn accept(io: S) -> Result<Self> {
         #[cfg(all(target_os = "linux", not(test)))]
         super::guest_account::check_linux_worker()?;
