@@ -462,4 +462,3 @@ mod tests {
         assert!(channel.fenced);
     }
 }
-

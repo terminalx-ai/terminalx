@@ -2,6 +2,7 @@ import { configureCloudReadMarkers, reconcileCloudReadMarker } from "./cloudRead
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { CLOUD_FILES_REFUSED } from "@/lib/cloudComposer";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -900,6 +901,29 @@ describe("cloud agent tabs store", () => {
     await sendToCloudAgent(machine, "t-1", "hello", client);
     expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello", model: "opus" });
     expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
+  });
+
+  it("PRO-407: uploads a machine message's files first, then names them in session.send; a cloud agent never gets one", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m3" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1", "composer/3", "composer/4"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+    await sendToCloudAgent(machine, "t-1", "read this", client, [], { files: [{ name: "plan.md", data: "IyBQbGFu", mediaType: "text/markdown" }] });
+    const [attach, send] = client.mutate.mock.calls;
+    expect(attach![0]).toBe("session.attach");
+    expect(attach![1]).toEqual({ sessionId: "s-1", tabId: "t-1", attachmentId: expect.stringMatching(/^att-/), kind: "file", name: "plan.md", mediaType: "text/markdown", offset: 0, data: "IyBQbGFu", last: true });
+    const id = (attach![1] as { attachmentId: string }).attachmentId;
+    expect(send![0]).toBe("session.send");
+    expect(send![1]).toEqual({ sessionId: "s-1", tabId: "t-1", text: "read this", files: [{ id, name: "plan.md", mediaType: "text/markdown" }] });
+    // The file itself never rides in the message.
+    expect(JSON.stringify(send![1])).not.toContain("IyBQbGFu");
+
+    // A cloud workspace's agent takes images only: nothing is uploaded or enqueued.
+    applyLiveTabs(scope, [tabInfo()]);
+    const cloud = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: () => true });
+    await expect(sendToCloudAgent(scope, "t-1", "read this", cloud, [], { files: [{ name: "plan.md", data: "IyBQbGFu" }] })).rejects.toThrow(CLOUD_FILES_REFUSED);
+    expect(cloud.mutate).not.toHaveBeenCalled();
+    expect(backend.calls.some((call) => call.cmd === "cloud_agent_enqueue")).toBe(false);
   });
 
   // Found in a live two-user test: a pane kept "chunk 98 of 150 / Working" long after the turn had finished.
