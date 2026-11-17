@@ -43,13 +43,17 @@ try {
     extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));`,
   });
   const start = first.getByTestId("start-screen");
-  await start.getByRole("heading", { name: "TerminalX Legacy" }).waitFor();
+  await start.getByRole("heading", { name: "Welcome to TerminalX Legacy" }).waitFor();
+  for (const name of ["Agents ready", "Open a project", "Choose how much the agent may do alone"]) {
+    await start.getByRole("heading", { name, exact: true }).waitFor();
+  }
   for (const name of ["Open local project", "Open GitHub project", "Quick start"]) {
     await start.getByRole("button", { name, exact: true }).waitFor();
   }
+  await start.getByRole("button", { name: "Permissions: Ask every time" }).waitFor();
   assert.equal(await start.evaluate((element) => element.scrollWidth <= element.clientWidth), true);
   await first.close();
-  console.log("ok first-run: shared branding and all three project actions");
+  console.log("ok first-run: the build's name, the three steps and all three project actions");
 } finally {
   await browser.close();
   server.close();
