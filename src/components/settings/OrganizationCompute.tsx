@@ -22,7 +22,7 @@ import {
   type LimitsText,
 } from "@/lib/organizationCompute";
 import { api } from "@/lib/api";
-import { cloudProviderLabel as providerLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
+import { cloudProviderDescriptor, cloudProviderIsPlatform, cloudProviderLabel as providerLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 
 const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 
@@ -220,6 +220,8 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     setDraft(next);
     setDirty(true);
   };
+  // The providers TerminalX itself provides (PRO-452): no account of the organization's, so the billing note says so.
+  const platformProviders = [...described.values()].filter((item) => item.listed && cloudProviderIsPlatform(item)).sort((left, right) => left.order - right.order);
 
   const saveLimits = () =>
     void mutate("limits", (current) =>
@@ -268,6 +270,12 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         Cloud workspaces run on the provider account this organization connected. That provider bills the account directly for compute and storage,
         separately from agent usage and from any TerminalX plan. These limits stop new workspaces from starting; they are not a spending cap. Provider
         billing can arrive late, and stopped disks, archives and snapshots keep charging until they are deleted.
+        {platformProviders.map((item) => (
+          <span key={item.id} data-testid="compute-platform-billing">
+            {" "}
+            {item.label} is provided by TerminalX, with no provider account to connect{item.billing ? `: ${item.billing}` : ""}.
+          </span>
+        ))}
       </p>
 
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" aria-label="Compute status">
@@ -529,7 +537,12 @@ function ProviderUsage({ usage }: { usage: ComputeProviderUsage }) {
         <dt className="text-muted-foreground">Provider billing</dt>
         <dd>
           {reported.status === "unavailable" || reported.totalMicros === undefined ? (
-            <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            cloudProviderIsPlatform(usage.provider) ? (
+              // TerminalX provides it (PRO-452): there is no provider console or invoice of the organization's own.
+              <span className="text-faint">{cloudProviderDescriptor(usage.provider)?.billing || "Provided by TerminalX"}. There is no provider invoice for it.</span>
+            ) : (
+              <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            )
           ) : (
             <>
               {formatMicros(reported.totalMicros, reported.currency ?? usage.currency)}{" "}

@@ -6,7 +6,7 @@ import { api, errorMessage, type CloudProviderConnection, type CloudProviderSumm
 import { refreshAccount } from "@/lib/account";
 import { COMPUTER_COLORS, COMPUTER_NAME, computerColorCss, computerNameOf, saveComputerIdentity, type ComputerColor } from "@/lib/computerIdentity";
 import { listedProviders, pausedProviders } from "@/lib/hiddenProviders";
-import { cloudProviderBilled, cloudProviderIcon, cloudProviderLabel } from "@/lib/cloudProviders";
+import { PLATFORM_PROVIDER_NOTE, cloudProviderBilled, cloudProviderIcon, cloudProviderInPlace, cloudProviderIsPlatform, cloudProviderLabel, cloudProviderReady } from "@/lib/cloudProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { cn } from "@/lib/cn";
 import { providerActionMessage } from "@/components/settings/ProviderControls";
@@ -47,9 +47,12 @@ function storedColor(color: string | null | undefined): ComputerColor {
 /**
  * Step 3 (12.03): the compute provider, its region and machine size, and
  * the name and colour the organization's cloud computer shows with. The key
- * is never typed here: the app asks for it in a native secure dialog. The
- * provider, region and size are kept on the setup record for the setup
- * check; the name and colour are saved on Continue. Compute can wait.
+ * is never typed here: the app asks for it in a native secure dialog. A
+ * provider TerminalX itself provides (PRO-452) has no key and no connection
+ * to read: it shows as ready, with its regions and sizes, and nothing to
+ * connect or replace. The provider, region and size are kept on the setup
+ * record for the setup check; the name and colour are saved on Continue.
+ * Compute can wait.
  */
 export function ComputeStep({ organization, record, onRecord, contextRevision, onContinue }: StepProps) {
   const [providers, setProviders] = useState<CloudProviderSummary[] | null>(null);
@@ -97,10 +100,12 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
       setSelected((shown) => {
         if (shown && listed.some((provider) => provider.id === shown)) return shown;
         const chosen = latest.current.record.machine?.provider;
+        // What the organization connected itself comes before a provider that was ready without it.
         return (
           listed.find((provider) => provider.id === chosen) ??
           listed.find((provider) => provider.connection?.state === "connected") ??
-          listed.find((provider) => provider.connection) ??
+          listed.find(cloudProviderReady) ??
+          listed.find(cloudProviderInPlace) ??
           listed.find((provider) => provider.availability !== "disabled-for-create") ??
           listed[0]
         )?.id ?? null;
@@ -116,6 +121,11 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
     void loadProviders();
   }, [loadProviders]);
 
+  const provider = providers?.find((item) => item.id === selected) ?? null;
+  // TerminalX provides this one (PRO-452): the list says whether it is ready, and there is no connection to read.
+  const platform = cloudProviderIsPlatform(provider);
+  const platformReady = platform && provider !== null && cloudProviderReady(provider);
+
   // The chosen provider's connection, and once it is connected, the regions and sizes it offers.
   useEffect(() => {
     if (!selected) return;
@@ -126,12 +136,20 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
     setSetup((shown) => (shown?.provider === selected ? shown : null));
     void (async () => {
       try {
-        const detail = await api.cloudProvider(selected);
-        if (!fresh()) return;
-        setConnection(detail);
-        if (detail.state !== "connected") {
-          setSetup(null);
-          return;
+        if (platform) {
+          setConnection(null);
+          if (!platformReady) {
+            setSetup(null);
+            return;
+          }
+        } else {
+          const detail = await api.cloudProvider(selected);
+          if (!fresh()) return;
+          setConnection(detail);
+          if (detail.state !== "connected") {
+            setSetup(null);
+            return;
+          }
         }
         try {
           const offered = await api.cloudWorkspaceSetup(selected, organization.id);
@@ -152,9 +170,8 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         if (fresh()) setDetailLoading(false);
       }
     })();
-  }, [selected, reload, organization.id]);
+  }, [selected, reload, organization.id, platform, platformReady]);
 
-  const provider = providers?.find((item) => item.id === selected) ?? null;
   const offered = setup && setup.provider === selected ? setup : null;
   const machine = record.machine?.provider === selected ? record.machine : undefined;
   const locationId = offered ? (offered.locations.some((location) => location.id === machine?.locationId) ? machine!.locationId! : offered.defaults.locationId) : undefined;
@@ -185,15 +202,16 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
     setNotice(null);
   };
 
-  const manage = Boolean(provider?.canManage && connection?.canManage);
-  const connected = connection?.state === "connected";
+  // A platform provider has no connection to manage: what is left to an owner or admin is allowing its new machines.
+  const manage = platform ? Boolean(provider?.canManage) : Boolean(provider?.canManage && connection?.canManage);
+  const connected = platform ? platformReady : connection?.state === "connected";
   const paused = provider?.availability === "disabled-for-create";
   const disconnecting = Boolean(connection?.disconnectDisposition || connection?.disconnectRetention === "archive");
-  const entering = manage && !disconnecting && (!connection || connection.state === "not-connected" || replacing);
+  const entering = !platform && manage && !disconnecting && (!connection || connection.state === "not-connected" || replacing);
   const copy = provider?.descriptor ?? null;
 
   const connect = async () => {
-    if (!provider || busy || !consented) return;
+    if (!provider || platform || busy || !consented) return;
     setBusy("connect");
     setError(null);
     setNotice(null);
@@ -270,7 +288,11 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
   return (
     <StepPage
       title="Choose compute"
-      description="Cloud workspaces run on machines in your own provider account. TerminalX starts, sleeps and removes them; the provider bills you directly."
+      description={
+        platform && provider
+          ? `${cloudProviderLabel(provider)} runs cloud workspaces on machines TerminalX provides: there is no provider account to connect. TerminalX starts, sleeps and removes them.`
+          : "Cloud workspaces run on machines in your own provider account. TerminalX starts, sleeps and removes them; the provider bills you directly."
+      }
     >
       {providers === null ? (
         providersError ? (
@@ -300,7 +322,9 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                   ? { label: "Needs attention", tone: "text-warning" }
                   : item.connection?.state === "connected"
                     ? { label: "Connected", tone: "text-add" }
-                    : null;
+                    : cloudProviderIsPlatform(item)
+                      ? { label: "Ready to use", tone: "text-add" }
+                      : null;
             return (
               <label
                 key={item.id}
@@ -338,16 +362,31 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         <>
           <div className="mt-4 grid grid-cols-[1fr_200px] gap-3 max-sm:grid-cols-1">
             <div className="min-w-0">
-              <FieldLabel>{copy?.credentialFields.map((field) => field.label).join(" · ") || `${cloudProviderLabel(provider)} API token`}</FieldLabel>
-              {copy?.credentialFields
-                .filter((field) => field.helpUrl?.startsWith("https://"))
-                .map((field) => (
-                  <button key={field.name} type="button" className="mb-1 text-[12px] text-accent hover:underline" onClick={() => void openUrl(field.helpUrl!).catch(() => undefined)}>
-                    Where to get the {field.label}
-                  </button>
-                ))}
+              <FieldLabel>{platform ? "Connection" : copy?.credentialFields.map((field) => field.label).join(" · ") || `${cloudProviderLabel(provider)} API token`}</FieldLabel>
+              {!platform &&
+                copy?.credentialFields
+                  .filter((field) => field.helpUrl?.startsWith("https://"))
+                  .map((field) => (
+                    <button key={field.name} type="button" className="mb-1 text-[12px] text-accent hover:underline" onClick={() => void openUrl(field.helpUrl!).catch(() => undefined)}>
+                      Where to get the {field.label}
+                    </button>
+                  ))}
               <div className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-hairline bg-card px-3 text-[12.5px]" data-testid="cloud-setup-provider-connection">
-                {detailLoading && !connection ? (
+                {platform ? (
+                  // The connected row without a key: there is none to show, replace or remove.
+                  <>
+                    <span className="truncate text-muted-foreground">{PLATFORM_PROVIDER_NOTE} · no key to connect</span>
+                    {connected ? (
+                      <span className="ml-auto flex shrink-0 items-center gap-1 text-[12px] text-add">
+                        <CircleCheck className="size-3.5" /> Ready
+                      </span>
+                    ) : (
+                      <span className="ml-auto flex shrink-0 items-center gap-1 text-[12px] text-warning">
+                        <TriangleAlert className="size-3.5" /> Needs attention
+                      </span>
+                    )}
+                  </>
+                ) : detailLoading && !connection ? (
                   <span className="flex items-center gap-2 text-muted-foreground">
                     <Loader2 className="size-3.5 animate-spin" /> Checking the connection…
                   </span>
@@ -382,7 +421,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 value={locationId ?? ""}
                 onChange={(event) => onRecord({ ...record, machine: { ...(machine ?? { provider: provider.id }), provider: provider.id, locationId: event.target.value, ...(machineClassId ? { machineClassId } : {}) } })}
               >
-                {!offered && <option value="">{connected ? "Loading…" : "After connecting"}</option>}
+                {!offered && <option value="">{connected ? "Loading…" : platform ? "Unavailable" : "After connecting"}</option>}
                 {offered?.locations.map((location) => (
                   <option key={location.id} value={location.id}>
                     {location.label.toLowerCase().includes(location.id.toLowerCase()) ? location.label : `${location.label} · ${location.id}`}
@@ -395,6 +434,11 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
           {disconnecting && (
             <p className="mt-2 text-[12.5px] text-warning" role="status">
               A disconnect of {provider.displayName} is under way, so no new machine can start on it. Manage it in Settings.
+            </p>
+          )}
+          {platform && !connected && (
+            <p className="mt-2 text-[12.5px] text-warning" role="status" data-testid="cloud-setup-provider-platform-attention">
+              {provider.displayName} isn't available to {organization.name} right now. TerminalX provides it, so there is no key to replace here. Check again later, or contact TerminalX support.
             </p>
           )}
           {paused && (
@@ -522,6 +566,8 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 <span className="flex items-center gap-2">
                   <Loader2 className="size-3.5 animate-spin" /> Loading {provider.displayName}'s regions and machine sizes…
                 </span>
+              ) : platform ? (
+                `Regions, machine sizes and prices show here once ${provider.displayName} is available again.`
               ) : (
                 `Regions, machine sizes and ${provider.displayName}'s prices show here once it is connected.`
               )}
@@ -600,7 +646,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         {billed ? "Stopped disks and snapshots keep charging until they're deleted, and provider bills can arrive late." : ""}
       </p>
 
-      <StepActions note="Connecting a token doesn't create a machine">
+      <StepActions note={platform ? "Choosing compute doesn't create a machine" : "Connecting a token doesn't create a machine"}>
         <PrimaryButton busy={busy === "save"} disabled={Boolean(busy) || (identityChanged && !nameValid)} onClick={() => void goOn(true)}>
           Continue
         </PrimaryButton>

@@ -3,6 +3,7 @@ import { Check, Circle, CircleAlert, CircleCheck, Link, Loader2, PartyPopper, X 
 import { Button } from "@/components/ui/button";
 import { api, type CloudWorkspaceProviderId } from "@/lib/api";
 import { listedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderIsPlatform } from "@/lib/cloudProviders";
 import { providerLabel } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import { isBuilding, organizationEnvironment, stageLabel } from "@/lib/organizationEnvironment";
@@ -159,8 +160,9 @@ function AlmostSet({
         if (!alive.current) return;
         const listed = listedProviders(response.providers);
         const chosen = wanted.current?.provider;
-        const summary = (chosen ? listed.find((option) => option.id === chosen) : undefined) ?? listed.find((option) => option.connection !== null);
-        if (!summary || !summary.connection) {
+        // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
+        const summary = (chosen ? listed.find((option) => option.id === chosen) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
+        if (!summary || (!summary.connection && !cloudProviderIsPlatform(summary))) {
           setProvider(chosen ? { id: chosen, name: providerLabel(chosen) } : null);
           setCompute({ mark: "todo", detail: "No provider connected" });
           if (!chosen) setEnvironment({ mark: "todo", detail: "Needs a compute provider" });
@@ -173,7 +175,9 @@ function AlmostSet({
             : summary.availability === "disabled-for-create"
               ? "new machines paused"
               : summary.availability === "attention-required"
-                ? "connection needs attention"
+                ? cloudProviderIsPlatform(summary)
+                  ? "not available right now"
+                  : "connection needs attention"
                 : "not connected";
         const parts = [summary.displayName];
         try {

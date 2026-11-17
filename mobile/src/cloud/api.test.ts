@@ -32,6 +32,20 @@ describe("the phone's cloud API client", () => {
     });
   });
 
+  // PRO-452: the provider that runs on TerminalX's own credential has nothing to connect, on the phone or
+  // anywhere else. Naming it is all the phone does for it; the providers it named before are named as before.
+  it("asks for the workspaces of the platform provider beside the providers an organization connects", async () => {
+    const platform = workspace({ id: "ws-2", provider: "terminalx-cloud", state: "suspended" });
+    const { client, calls } = api((call) => (call.url.endsWith("/resume") ? { status: 202, body: { workspace: platform.workspace, operation: { id: "op-1", state: "queued", action: "resume" } } } : { body: { workspaces: [workspace(), platform] } }));
+    const list = await client.workspaces("org-1");
+    expect(list.workspaces.map((item) => [item.workspace.id, item.workspace.provider])).toEqual([["ws-1", "box"], ["ws-2", "terminalx-cloud"]]);
+    expect(calls[0].headers["X-TerminalX-Cloud-Workspace-Providers"].split(",")).toEqual(["machine0", "box", "terminalx-cloud"]);
+    // It is started like any other: the same route, and nothing about a credential in the request.
+    await client.resume("org-1", "ws-2");
+    expect(calls[1]).toMatchObject({ method: "POST", url: "https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-2/resume", body: {} });
+    expect(calls[1].headers["X-TerminalX-Cloud-Workspace-Providers"]).toBe(calls[0].headers["X-TerminalX-Cloud-Workspace-Providers"]);
+  });
+
   it("refuses a list that names another organization's workspace", async () => {
     const { client } = api(() => ({ body: { workspaces: [workspace({ orgId: "org-2" })] } }));
     await expect(client.workspaces("org-1")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response" });

@@ -23,9 +23,20 @@ export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
 /** The capability flag of a server that knows `wake: false`; an older one rejects the key. */
 const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
 
+/**
+ * The providers whose workspaces the phone asks to be listed and opened. The
+ * phone connects no provider and holds no credential for one, so a provider
+ * that runs on TerminalX's own credential (`terminalx-cloud`, PRO-452:
+ * `credentialSource: "platform"` in its descriptor, nothing for anybody to
+ * connect) needs nothing more here than being named: its workspaces are then
+ * listed, opened, started and sent to like the others'. A server that does
+ * not have a provider skips its name.
+ */
+const SUPPORTED_PROVIDERS = "machine0,box,terminalx-cloud";
+
 const CONTRACT_HEADERS = {
   "X-TerminalX-Cloud-Workspace-Contract": "providers-v1",
-  "X-TerminalX-Cloud-Workspace-Providers": "machine0,box",
+  "X-TerminalX-Cloud-Workspace-Providers": SUPPORTED_PROVIDERS,
   "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
 } as const;
 

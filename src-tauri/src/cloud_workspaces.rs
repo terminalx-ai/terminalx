@@ -101,6 +101,27 @@ impl CloudProviderCredentialField {
     }
 }
 
+/// Whose credential a provider's machines run on (PRO-452). `Organization`:
+/// a key the organization connects. `Platform`: TerminalX's own, so there is
+/// nothing for anybody to connect, replace, check or disconnect.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudProviderCredentialSource {
+    #[default]
+    Organization,
+    Platform,
+}
+
+impl<'de> Deserialize<'de> for CloudProviderCredentialSource {
+    /// Only `platform` is a platform provider. A value this client does not
+    /// know, of any type, is an organization's: the only kind there was, and
+    /// the one that asks before it uses anything.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(if value.as_str() == Some("platform") { Self::Platform } else { Self::Organization })
+    }
+}
+
 /// How a provider is presented, as the server's registry describes it
 /// (PRO-415). The fields this client acts on are typed; the rest
 /// (capabilities, offering, allowed values, copy) pass to the webview as the
@@ -115,6 +136,10 @@ pub struct CloudProviderDescriptor {
     /// False: hidden, listed only while the organization is still connected to it.
     #[serde(default = "listed_by_default")]
     pub listed: bool,
+    /// Absent from a server older than platform providers: an organization's.
+    #[serde(default)]
+    pub credential_source: CloudProviderCredentialSource,
+    /// Empty for a platform provider: nobody is asked for a credential.
     pub credential_fields: Vec<CloudProviderCredentialField>,
     #[serde(flatten)]
     pub rest: serde_json::Map<String, serde_json::Value>,
@@ -376,10 +401,19 @@ impl CloudProviderSummary {
             .to_owned()
     }
 
+    /// True for a provider that runs on TerminalX's own credential
+    /// (PRO-452): it has no key, so no dialog ever asks for one and nothing
+    /// is sent to connect it.
+    pub(crate) fn platform_credential(&self) -> bool {
+        self.descriptor.as_ref().is_some_and(|descriptor| descriptor.credential_source == CloudProviderCredentialSource::Platform)
+    }
+
     /// What the connect dialog asks for: the descriptor's credential fields,
     /// else (a server older than described providers) one secret key.
+    /// Nothing for a platform provider, whatever its descriptor lists.
     pub(crate) fn credential_fields(&self) -> Vec<CloudProviderCredentialField> {
         match &self.descriptor {
+            Some(_) if self.platform_credential() => Vec::new(),
             Some(descriptor) if !descriptor.credential_fields.is_empty() => descriptor.credential_fields.clone(),
             _ => vec![CloudProviderCredentialField { name: "credential".into(), kind: "secret".into(), label: "provider key".into(), help_url: None }],
         }
@@ -2088,6 +2122,18 @@ impl CloudWorkspaceService {
             .request::<CloudProviderSummaryResponse>(&authorization.context, &["cloud-providers"], None, None, None, RequestRisk::Read)
             .ok()?;
         list.providers.into_iter().find(|summary| summary.id == authorization.provider)
+    }
+
+    /// `provider_summary` for a provider an organization connects. A
+    /// platform provider (PRO-452) is refused here, before any dialog: it
+    /// has no key to ask for, and the server answers its connect route the
+    /// same way.
+    pub(crate) fn connectable_provider_summary(&self, authorization: &ProviderConnectAuthorization) -> Result<Option<CloudProviderSummary>, CloudWorkspaceClientError> {
+        let summary = self.provider_summary(authorization);
+        if summary.as_ref().is_some_and(CloudProviderSummary::platform_credential) {
+            return Err(CloudWorkspaceClientError::local("cloud_provider_disabled", false));
+        }
+        Ok(summary)
     }
 
     pub(crate) fn connect_authorized(
@@ -4108,6 +4154,9 @@ mod tests {
         assert_eq!(projected["descriptor"]["somethingNew"], json!({ "kept": true }));
         assert_eq!(projected["descriptor"]["allowedRetentionDays"], json!([7, 30]));
         assert_eq!(projected["descriptor"]["credentialFields"][0]["helpUrl"], json!("https://acme.example/tokens"));
+        // A descriptor that does not say whose credential it is (a server older than platform providers) is an organization's.
+        assert!(!described.platform_credential());
+        assert_eq!(projected["descriptor"]["credentialSource"], json!("organization"));
 
         let older: CloudProviderSummary = serde_json::from_value(json!({
             "id": "box", "displayName": "Boat", "availability": "available", "canManage": true, "connection": null,
@@ -4118,7 +4167,59 @@ mod tests {
         assert_eq!(older.label(), "Boat");
         assert_eq!(older.credential_fields().len(), 1);
         assert!(older.credential_fields()[0].secret());
+        assert!(!older.platform_credential());
         assert_eq!(serde_json::to_value(&older).unwrap()["descriptor"], Value::Null);
+    }
+
+    // PRO-452: a provider that runs on TerminalX's own credential says so in
+    // its descriptor and lists no credential fields. It reads beside the
+    // organization ones, reaches the webview as `platform`, and asks for
+    // nothing; anything but `platform` is an organization's.
+    #[test]
+    fn a_platform_provider_reads_with_no_credential_fields_and_asks_for_none() {
+        let summary = |id: &str, descriptor: Value| json!({
+            "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "required", "sourceSelection": "optional", "pricing": "provider-rate" },
+            "descriptor": descriptor
+        });
+        let descriptor = |id: &str, label: &str, source: Value, fields: Value| {
+            let mut described = json!({ "id": id, "label": label, "icon": "cloud", "order": 5, "listed": true, "billing": "Billed by TerminalX", "billedByProvider": false, "credentialFields": fields });
+            if !source.is_null() {
+                described["credentialSource"] = source;
+            }
+            described
+        };
+        let key = json!([{ "name": "credential", "kind": "secret", "label": "Acme token", "helpUrl": null }]);
+        let list: CloudProviderSummaryResponse = serde_json::from_value(json!({ "providers": [
+            summary("terminalx-cloud", descriptor("terminalx-cloud", "TerminalX Cloud", json!("platform"), json!([]))),
+            summary("acme-cloud", descriptor("acme-cloud", "Acme Cloud", json!("organization"), key.clone())),
+            summary("older-cloud", descriptor("older-cloud", "Older Cloud", Value::Null, key.clone())),
+            summary("newer-cloud", descriptor("newer-cloud", "Newer Cloud", json!("something-new"), key.clone())),
+            summary("odd-cloud", descriptor("odd-cloud", "Odd Cloud", json!(7), key.clone())),
+        ] }))
+        .unwrap();
+        let [platform, organization, older, newer, odd] = list.providers.as_slice() else { panic!("five providers") };
+
+        assert!(platform.platform_credential());
+        assert_eq!(platform.label(), "TerminalX Cloud");
+        // Not the one-key fallback of a descriptor without fields: there is nothing to ask for.
+        assert!(platform.credential_fields().is_empty());
+        let projected = serde_json::to_value(platform).unwrap();
+        assert_eq!(projected["descriptor"]["credentialSource"], json!("platform"));
+        assert_eq!(projected["descriptor"]["credentialFields"], json!([]));
+        assert_eq!(projected["descriptor"]["billing"], json!("Billed by TerminalX"));
+        assert_eq!(projected["availability"], json!("available"));
+        assert_eq!(projected["connection"], Value::Null);
+
+        for provider in [organization, older, newer, odd] {
+            assert!(!provider.platform_credential(), "{}", provider.id);
+            assert_eq!(provider.credential_fields().len(), 1, "{}", provider.id);
+            assert_eq!(serde_json::to_value(provider).unwrap()["descriptor"]["credentialSource"], json!("organization"), "{}", provider.id);
+        }
+
+        // Even a platform descriptor that listed fields asks for none.
+        let listed: CloudProviderSummary = serde_json::from_value(summary("terminalx-cloud", descriptor("terminalx-cloud", "TerminalX Cloud", json!("platform"), key))).unwrap();
+        assert!(listed.credential_fields().is_empty());
     }
 
     #[test]
@@ -4197,6 +4298,34 @@ mod tests {
         let (_, service) = test_service(&base);
         assert!(service.provider_summary(&authorization).is_none());
         request.join().unwrap();
+    }
+
+    // PRO-452: connecting a provider TerminalX itself provides is refused
+    // from the organization's list, before a dialog could ask for a key; an
+    // organization's provider, and one the list does not name, go on.
+    #[test]
+    fn a_platform_provider_is_never_connected() {
+        let summary = |id: &str, source: &str, fields: Value| json!({ "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": { "id": id, "label": id, "icon": "cloud", "order": 5, "credentialSource": source, "credentialFields": fields } });
+        let body = json!({ "providers": [
+            summary("terminalx-cloud", "platform", json!([])),
+            summary("acme-cloud", "organization", json!([{ "name": "credential", "kind": "secret", "label": "Acme token" }])),
+        ] })
+        .to_string();
+        let connectable = |provider: &str| {
+            let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id(provider) };
+            let result = service.connectable_provider_summary(&authorization);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-providers HTTP/1.1"));
+            // Reading the list is all that happened: nothing was sent to connect.
+            assert!(!captured.extra_request);
+            result
+        };
+        let refused = connectable("terminalx-cloud").unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.status, refused.retryable), ("cloud_provider_disabled", None, false));
+        assert_eq!(connectable("acme-cloud").unwrap().unwrap().credential_fields().len(), 1);
+        assert!(connectable("hetzner").unwrap().is_none());
     }
 
     #[test]

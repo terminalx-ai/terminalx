@@ -14,6 +14,23 @@ const base = {
 };
 
 export const DESCRIPTORS: Record<string, CloudProviderDescriptor> = {
+  // A provider TerminalX itself provides (PRO-452): `credentialSource` says
+  // `platform` and nobody is asked for a credential. The others are an
+  // organization's; a server older than platform providers leaves the field
+  // out, which `describedAs(id, { credentialSource: undefined })` stands for.
+  "terminalx-cloud": {
+    ...base,
+    id: "terminalx-cloud",
+    label: "TerminalX Cloud",
+    icon: "cloud",
+    order: 5,
+    description: "Machines on TerminalX Cloud. Nothing to connect: they are ready to use.",
+    billing: "Billed by TerminalX",
+    billedByProvider: false,
+    listed: true,
+    credentialSource: "platform",
+    credentialFields: [],
+  },
   box: {
     ...base,
     id: "box",
@@ -24,6 +41,7 @@ export const DESCRIPTORS: Record<string, CloudProviderDescriptor> = {
     billing: "Per second, billed by Boat",
     billedByProvider: true,
     listed: true,
+    credentialSource: "organization",
     credentialFields: [{ name: "credential", kind: "secret", label: "Boat API token", helpUrl: null }],
     capabilities: { ...base.capabilities, computeRunsUntilStopped: true },
   },
@@ -37,6 +55,7 @@ export const DESCRIPTORS: Record<string, CloudProviderDescriptor> = {
     billing: "Hourly, billed by Hetzner",
     billedByProvider: true,
     listed: true,
+    credentialSource: "organization",
     credentialFields: [{ name: "credential", kind: "secret", label: "Hetzner API token", helpUrl: "https://docs.hetzner.com/cloud/api/getting-started/generating-api-token" }],
     offering: { ...base.offering, suspendedBilling: "full-rate" },
   },
@@ -50,6 +69,7 @@ export const DESCRIPTORS: Record<string, CloudProviderDescriptor> = {
     billing: "Billed by Machine0",
     billedByProvider: true,
     listed: true,
+    credentialSource: "organization",
     credentialFields: [{ name: "credential", kind: "secret", label: "Machine0 API token", helpUrl: null }],
     offering: { ...base.offering, suspendedBilling: "unknown" },
   },
@@ -63,6 +83,7 @@ export const DESCRIPTORS: Record<string, CloudProviderDescriptor> = {
     billing: "Your own hardware",
     billedByProvider: false,
     listed: true,
+    credentialSource: "organization",
     credentialFields: [{ name: "credential", kind: "text", label: "Connection marker: local-docker: then 16 to 64 letters, digits, - or _", helpUrl: null }],
   },
 };

@@ -2,6 +2,7 @@ import type { RuntimeSession, WorkspaceConnectionState } from "@terminalx/portab
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { agentLoginFailure, createErrorMessage, failureMessage, launchFailed, PROVISIONING_TIMEOUT_CODE } from "@/lib/cloudCreate";
 import { archiving, deleteFailure, deletion, operationFailureStands, provisioningFailureKey, workspaceFailureText } from "@/lib/cloudLifecycle";
+import { cloudProviderIsPlatform, cloudProviderLabel } from "@/lib/cloudProviders";
 import type { TabStatus } from "@/types/session";
 
 export interface CloudAttentionInput {
@@ -224,6 +225,8 @@ export function resolveCloudAttention(item: CloudWorkspaceListItem, input: Cloud
     else if (operation.action === "delete" && !deleteFailure(operation, workspace.provider).retry) next = recovery("contact-provider", "Contact provider support", workspaceFailureText(item, operation));
     else if (code === "provider_permanent_delete_unavailable") next = recovery("contact-provider", "Contact provider support", "This provider connection cannot delete the workspace permanently. Check the resource in the provider's console or contact its support to finish removing it; retrying this unsupported action will not help.");
     else if (agentLoginFailure(code)) next = launchRecovery(code, input);
+    // A provider TerminalX provides (PRO-452) has no connection of the organization's to repair.
+    else if ((code === "cloud_provider_credential_invalid" || code === "cloud_provider_connection_attention_required") && cloudProviderIsPlatform(workspace.provider)) next = recovery("contact-provider", "Contact TerminalX support", `${cloudProviderLabel(workspace.provider)} is provided by TerminalX, so there is no provider key for the organization to repair. Retry the failed action later; if it keeps failing, contact TerminalX support.`);
     else if (code === "cloud_provider_credential_invalid" || code === "cloud_provider_connection_attention_required") next = recovery("open-provider-settings", "Check provider connection", "An owner or admin can repair this organization's provider connection in Settings, then retry the failed action.");
     else if (operation.action) next = { ...recovery("retry-operation", operation.action === "delete" ? "Retry delete" : `Retry ${operation.action}`, "Review the failure and retry through the workspace's lifecycle action, including its permission checks and confirmations."), operationAction: operation.action };
     else next = recovery("create-workspace", "Create workspace again", "Review the provisioning failure and provider connection before creating a workspace again. Check the provider for any resources left by the failed attempt.");

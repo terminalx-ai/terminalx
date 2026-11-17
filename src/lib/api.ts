@@ -982,6 +982,13 @@ export interface CloudProviderCredentialField {
   helpUrl: string | null;
 }
 
+/**
+ * Whose credential a provider's machines run on. `organization`: a key the
+ * organization connects. `platform`: TerminalX's own (PRO-452), so there is
+ * nothing to connect, replace, check or disconnect.
+ */
+export type CloudProviderCredentialSource = "organization" | "platform";
+
 /** Everything the app shows about a provider, as the server describes it (PRO-415). */
 export interface CloudProviderDescriptor {
   id: CloudWorkspaceProviderId;
@@ -994,6 +1001,13 @@ export interface CloudProviderDescriptor {
   billedByProvider: boolean;
   /** False: hidden, listed only while the organization is still connected to it. */
   listed: boolean;
+  /**
+   * Absent from a server older than platform providers, and then
+   * `organization`. Read it with `cloudProviderCredentialSource`, which also
+   * takes a value this app does not know for `organization`.
+   */
+  credentialSource?: CloudProviderCredentialSource;
+  /** Empty for a platform provider: nobody is asked for a credential. */
   credentialFields: CloudProviderCredentialField[];
   capabilities: {
     pauseResumeWithMemory: boolean;

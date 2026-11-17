@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CloudProviderDescriptor, CloudProviderSummary } from "@/lib/api";
 
 const { creatableProviders, listedProviders, noProviderRefusal, pausedProviders } = await import("@/lib/hiddenProviders");
+const cloudProviders = await import("@/lib/cloudProviders");
 
 // Which provider is hidden, and in what order they come, is the server's to
 // say through each provider's descriptor (PRO-415): the ids here are made up
@@ -37,6 +38,66 @@ const summary = (id: string, order: number, overrides: Partial<CloudProviderSumm
 };
 
 const connected = { state: "connected" as const, connectedAt: 1, lastValidatedAt: null, credentialFingerprint: null };
+
+/**
+ * A provider that runs on the platform's own credential (PRO-452), as the
+ * server lists it: no credential fields, never "not connected", and no
+ * connection of the organization's.
+ */
+const platform = (id: string, order: number, overrides: Partial<CloudProviderSummary> = {}): CloudProviderSummary =>
+  summary(id, order, { descriptor: { ...descriptor(id, order), credentialSource: "platform", credentialFields: [] }, ...overrides });
+
+// PRO-452: a platform provider has no connection, and none is asked for.
+describe("platform providers", () => {
+  const { cloudProviderCredentialSource, cloudProviderInPlace, cloudProviderIsPlatform, cloudProviderReady } = cloudProviders;
+
+  it("reads whose credential a provider runs on, taking anything but `platform` for the organization's", () => {
+    expect(cloudProviderCredentialSource(platform("plat", 1))).toBe("platform");
+    expect(cloudProviderIsPlatform(platform("plat", 1))).toBe(true);
+    // The descriptor by itself, as the app keeps it.
+    expect(cloudProviderIsPlatform(platform("plat", 1).descriptor)).toBe(true);
+    // An older server sends no field; a newer one may send a value this app does not know.
+    expect(cloudProviderCredentialSource(summary("alpha", 2))).toBe("organization");
+    expect(cloudProviderCredentialSource(summary("alpha", 2, { descriptor: { ...descriptor("alpha", 2), credentialSource: "organization" } }))).toBe("organization");
+    expect(cloudProviderCredentialSource(summary("alpha", 2, { descriptor: { ...descriptor("alpha", 2), credentialSource: "something-new" as never } }))).toBe("organization");
+    // A provider from a server older than descriptors, and no provider at all.
+    expect(cloudProviderCredentialSource({ ...summary("old", 0), descriptor: null })).toBe("organization");
+    expect(cloudProviderCredentialSource(null)).toBe("organization");
+    // An id the app has read no descriptor for.
+    expect(cloudProviderIsPlatform("never-described")).toBe(false);
+  });
+
+  it("is in place and ready without a connection, unless it needs attention", () => {
+    expect(cloudProviderInPlace(platform("plat", 1))).toBe(true);
+    expect(cloudProviderReady(platform("plat", 1))).toBe(true);
+    // Paused for new machines, it is still in place and working.
+    expect(cloudProviderReady(platform("plat", 1, { availability: "disabled-for-create" }))).toBe(true);
+    expect(cloudProviderInPlace(platform("plat", 1, { availability: "attention-required" }))).toBe(true);
+    expect(cloudProviderReady(platform("plat", 1, { availability: "attention-required" }))).toBe(false);
+    // An organization's provider is in place once connected, as before.
+    expect(cloudProviderInPlace(summary("alpha", 2, { availability: "not-connected" }))).toBe(false);
+    expect(cloudProviderReady(summary("alpha", 2))).toBe(false);
+    expect(cloudProviderInPlace(summary("alpha", 2, { connection: connected }))).toBe(true);
+    expect(cloudProviderReady(summary("alpha", 2, { connection: connected }))).toBe(true);
+    expect(cloudProviderReady(summary("alpha", 2, { connection: { ...connected, state: "attention-required" } }))).toBe(false);
+  });
+
+  it("is offered to a new workspace and listed in settings beside the organization's providers", () => {
+    const providers = [summary("alpha", 2, { connection: connected }), platform("plat", 1), summary("beta", 3, { availability: "not-connected" })];
+    expect(creatableProviders(providers).map((provider) => provider.id)).toEqual(["plat", "alpha"]);
+    expect(listedProviders(providers).map((provider) => provider.id)).toEqual(["plat", "alpha", "beta"]);
+    // By itself it is all a new workspace needs: nothing is "not connected".
+    expect(creatableProviders([platform("plat", 1)]).map((provider) => provider.id)).toEqual(["plat"]);
+  });
+
+  it("can have its new machines paused and allowed like any other, and says so when it is the reason", () => {
+    const paused = platform("plat", 1, { availability: "disabled-for-create" });
+    expect(creatableProviders([paused])).toEqual([]);
+    expect(pausedProviders([paused]).map((provider) => provider.id)).toEqual(["plat"]);
+    const refusal = noProviderRefusal([paused, summary("beta", 2, { availability: "not-connected" })]);
+    expect([refusal.code, refusal.detail]).toEqual(["cloud_provider_creation_paused", "PLAT"]);
+  });
+});
 
 describe("hidden providers", () => {
   it("never offers a hidden provider to a new workspace, even an available one", () => {

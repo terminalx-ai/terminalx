@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
-import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
+import { cloudProviderIsPlatform, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { ago, formatDuration } from "@/lib/time";
 import {
   cleanDefinition,
@@ -266,7 +266,8 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
       .cloudProviders()
       .then((response) => {
         if (context !== contextEpoch.current) return;
-        const options = listedProviders(response.providers).map((summary) => ({ id: summary.id as string, connected: summary.connection !== null }));
+        // A provider TerminalX provides (PRO-452) is in place without a connection.
+        const options = listedProviders(response.providers).map((summary) => ({ id: summary.id as string, connected: summary.connection !== null || cloudProviderIsPlatform(summary) }));
         setProviders(options);
         const first = options.find((option) => option.connected) ?? options[0];
         if (first) setProvider(first.id);

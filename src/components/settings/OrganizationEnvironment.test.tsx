@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import { organizationEnvironment, type EnvironmentRecipe, type EnvironmentStatus, type EnvironmentVersion } from "@/lib/organizationEnvironment";
 import { OrganizationEnvironment } from "./OrganizationEnvironment";
-import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+import { describedAs, learnDescriptors } from "@/test/cloudProviderDescriptors";
 
 // Provider names come from the descriptors the server publishes (PRO-415).
 learnDescriptors();
@@ -455,6 +455,22 @@ it("picks a connected provider and loads another when chosen", async () => {
   fireEvent.change(screen.getByLabelText("Environment provider"), { target: { value: "hetzner" } });
   expect((await screen.findByRole("status")).textContent).toMatch(/Hetzner Cloud cannot build environment images yet/);
   expect(environment.status).toHaveBeenLastCalledWith("hetzner");
+});
+
+// PRO-452: a provider TerminalX itself provides is in place without a connection.
+it("picks a platform provider though it has no connection, and does not call it not connected", async () => {
+  providers.mockResolvedValue({
+    providers: [
+      { ...provider("box", false), descriptor: describedAs("box", { order: 1 }) },
+      { ...provider("terminalx-cloud", false), descriptor: describedAs("terminalx-cloud") },
+    ],
+  } as never);
+  mount();
+  await settled();
+  expect(environment.status).toHaveBeenCalledWith("terminalx-cloud");
+  const picker = screen.getByLabelText("Environment provider") as HTMLSelectElement;
+  expect(picker.value).toBe("terminalx-cloud");
+  expect([...picker.options].map((option) => option.textContent)).toEqual(["Boat (not connected)", "TerminalX Cloud"]);
 });
 
 it("offers a retry when the environment cannot be loaded", async () => {
