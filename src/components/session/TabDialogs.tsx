@@ -24,7 +24,7 @@ export function TabDialogs() {
   const closing = sessions.find((session) => session.id === dialogs.closeTabs?.sessionId);
   return (
     <>
-      {dialogs.agentHandoff && <ContinuationDialog session={dialogs.agentHandoff.session} source={dialogs.agentHandoff.source} initialHarness={dialogs.agentHandoff.harness} reviewPrompt={dialogs.agentHandoff.reviewPrompt} onClose={closeAgentHandoff} />}
+      {dialogs.agentHandoff && <ContinuationDialog session={dialogs.agentHandoff.session} source={dialogs.agentHandoff.source} initialHarness={dialogs.agentHandoff.harness} reviewPrompt={dialogs.agentHandoff.reviewPrompt} retry={dialogs.agentHandoff.retry} attachments={dialogs.agentHandoff.attachments} onClose={closeAgentHandoff} />}
       {renaming && dialogs.renameTab && <RenameTabDialog key={dialogs.renameTab.tab} session={renaming} request={dialogs.renameTab} onClose={closeRenameTab} />}
       {closing && dialogs.closeTabs && <CloseTabsDialog session={closing} request={dialogs.closeTabs} onClose={closeCloseTabs} />}
     </>

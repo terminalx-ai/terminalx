@@ -189,3 +189,48 @@ describe("labels", () => {
     expect(environmentErrorMessage({ code: "something-new" })).toMatch(/could not reach/);
   });
 });
+
+describe("failed build summary (PRO-389)", () => {
+  const base = { state: "failed", stage: "install", failurePhase: "install", exitCode: null, failureLine: null, logs: null } as const;
+
+  it("names the exit status and line the server reports", async () => {
+    const { failureSummary, failureOutcome } = await import("./organizationEnvironment");
+    const version = { ...base, exitCode: 100, failureLine: 9 };
+    expect(failureSummary(version)).toBe("exit 100 in the install script, line 9");
+    expect(failureOutcome(version, { number: 7 })).toBe("install script exited with 100 · environment v7 stays active");
+    expect(failureOutcome(version, null)).toBe("install script exited with 100 · workspaces keep the provider's base image");
+  });
+
+  it("reads the line and status from the step's log when the server sends neither", async () => {
+    const { failureSummary } = await import("./organizationEnvironment");
+    const logs = [
+      { phase: "toolchain", content: "exited with 3", occurredAt: 1 },
+      { phase: "install", content: "Reading package lists...\n/build/install.sh: line 9: nope: command not found\nexited with code 127", occurredAt: 2 },
+    ];
+    expect(failureSummary({ ...base, logs })).toBe("exit 127 in the install script, line 9");
+  });
+
+  it("falls back to the stage, and never shows the internal code", async () => {
+    const { failureSummary } = await import("./organizationEnvironment");
+    expect(failureSummary({ ...base, logs: [{ phase: "install", content: "E: Unable to locate package", occurredAt: 1 }] })).toBe("failed while running the machine install script");
+  });
+});
+
+describe("buildTimeLeft (PRO-389)", () => {
+  it("counts down from the last successful build's length", async () => {
+    const { buildTimeLeft } = await import("./organizationEnvironment");
+    const versions = [
+      { state: "succeeded", startedAt: 0, finishedAt: 240_000 },
+      { state: "succeeded", startedAt: 1_000_000, finishedAt: 1_300_000 },
+      { state: "failed", startedAt: 2_000_000, finishedAt: 2_010_000 },
+    ];
+    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_120_000)).toBe("about 3 minutes left");
+    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_250_000)).toBe("about a minute left");
+    expect(buildTimeLeft({ stage: "install", startedAt: 5_000_000, createdAt: 4_990_000 }, versions, 5_400_000)).toBe("taking longer than the last build");
+  });
+
+  it("says the step when no build has finished before", async () => {
+    const { buildTimeLeft } = await import("./organizationEnvironment");
+    expect(buildTimeLeft({ stage: "install", startedAt: 1, createdAt: 0 }, [], 10)).toBe("step 3 of 10");
+  });
+});

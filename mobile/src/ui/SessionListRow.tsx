@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { statusTooltip } from "@terminalx/portable/sessionStatus";
 import { shortTime, spokenTime, type ChatRow } from "@mobile/data/session-list";
+import { MutedMark, useSessionOverride } from "./notifications/SessionNotifications";
 import { markColor, RowStatusMark } from "./RowStatusMark";
 import { useTheme } from "./theme";
 
@@ -15,14 +16,16 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
  *
  * `first` and `last` round the card the row sits in, one card per section.
  */
-export function SessionListRow({ row, first, last, onOpen }: { row: ChatRow; first: boolean; last: boolean; onOpen(tabId: string): void }) {
+export function SessionListRow({ row, hostId, first, last, onOpen }: { row: ChatRow; hostId: string; first: boolean; last: boolean; onOpen(tabId: string): void }) {
   const { palette } = useTheme();
   const [open, setOpen] = useState(false);
   const many = row.tabs.length > 1;
   const color = markColor(row.status.mark, palette);
   const words = row.status.mark === "idle" ? palette.muted : color;
   const tabs = many ? `${row.tabs.length} tabs` : "";
-  const label = [row.title, row.status.words, tabs, row.branch ? `branch ${row.branch}` : "", spokenTime(row.time)].filter(Boolean).join(", ");
+  // Muted on this phone (#990): a small mark, and said.
+  const muted = useSessionOverride(hostId, row.session.id) === "mute" ? "notifications muted" : "";
+  const label = [row.title, row.status.words, tabs, muted, row.branch ? `branch ${row.branch}` : "", spokenTime(row.time)].filter(Boolean).join(", ");
   return <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }, first && styles.top, last && styles.bottom]}>
     {first ? null : <View style={[styles.divider, { backgroundColor: palette.border }]} />}
     <Pressable
@@ -42,7 +45,10 @@ export function SessionListRow({ row, first, last, onOpen }: { row: ChatRow; fir
         </Text>
         {row.branch ? <Text numberOfLines={1} style={[styles.branch, { color: palette.faint }]}>{row.branch}</Text> : null}
       </View>
-      <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>
+      <View style={styles.trailing}>
+        <Text style={[styles.time, { color: palette.faint }]}>{shortTime(row.time)}</Text>
+        <MutedMark hostId={hostId} sessionId={row.session.id} />
+      </View>
     </Pressable>
     {many && open ? row.tabs.map((tab, index) => <View key={tab.id}>
       <View style={[styles.divider, { backgroundColor: palette.border }]} />
@@ -64,6 +70,7 @@ export function SessionListRow({ row, first, last, onOpen }: { row: ChatRow; fir
 const RADIUS = 16;
 // After 22.04: rows in a card per section, a 20pt mark at the edge, three lines, the time at the end.
 const styles = StyleSheet.create({
+  trailing: { alignItems: "flex-end", gap: 6 },
   card: { marginHorizontal: 16, borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   top: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: RADIUS, borderTopRightRadius: RADIUS },
   bottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: RADIUS, borderBottomRightRadius: RADIUS },

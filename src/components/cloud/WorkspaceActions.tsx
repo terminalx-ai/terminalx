@@ -2,17 +2,27 @@ import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog 
 import { useAccount } from "@/lib/account";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
+import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CloudWorkspaceDetailsCard } from "./CloudWorkspaceDetails";
 import { canRestartWorkspace, detailsScope, restartCloudWorkspace, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
+import {
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+} from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { openSchedulesDialog } from "@/components/cloud/CloudSchedulesDialog";
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
-import type { CloudWorkspaceListItem } from "@/lib/api";
-import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { api, type CloudWorkspaceIdleSuspend, type CloudWorkspaceListItem } from "@/lib/api";
+import { applyCloudSnapshot, cloudOrgArg, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { idleSuspendCapNote, idleSuspendChoices, idleSuspendLabel } from "@/lib/idleSuspend";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
@@ -125,6 +135,10 @@ export function WorkspaceActionItems({
           <CalendarClock /> Scheduled tasks…
         </DropdownMenuItem>
       )}
+      {/* How long it may sit idle (PRO-410): whoever manages it, on a server that reports the window. A preparation workspace keeps its own. */}
+      {lifecycle && present && !workspace.preparation && typeof workspace.idleSuspendMinutes === "number" && (
+        <IdleSuspendItems item={item} run={run} />
+      )}
       {lifecycle && workspace.state === "suspended" && !archived && (
         <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
           <Play /> Resume
@@ -161,6 +175,74 @@ export function WorkspaceActionItems({
         </DropdownMenuItem>
       )}
     </>
+  );
+}
+
+/**
+ * "Stop when idle" for an existing workspace (PRO-410). The choices are read
+ * when the submenu opens: the server's, under the organization's cap, so
+ * Never is missing exactly when the cap forbids it, and the note says why.
+ * Choosing one changes it at once; the list then shows the new window.
+ */
+function IdleSuspendItems({ item, run }: { item: CloudWorkspaceListItem; run: (work: () => Promise<void>) => void }) {
+  const { workspace } = item;
+  const [view, setView] = useState<CloudWorkspaceIdleSuspend | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = () => {
+    setFailed(null);
+    api
+      .cloudWorkspaceIdleSuspend(workspace.id, cloudOrgArg(workspace.orgId))
+      .then(setView)
+      .catch((e: unknown) => setFailed(lifecycleErrorMessage(errorCode(e))));
+  };
+  const current = view?.idleSuspendMinutes ?? workspace.idleSuspendMinutes ?? null;
+  const choices = idleSuspendChoices(view?.allowedIdleSuspendMinutes ?? []);
+  const note = view ? idleSuspendCapNote(view.maxIdleSuspendMinutes, choices) : null;
+  const change = (minutes: number) =>
+    run(async () => {
+      try {
+        await api.cloudWorkspaceSetIdleSuspend(workspace.id, minutes, cloudOrgArg(workspace.orgId));
+      } finally {
+        // A change with no answer may still have landed: the list is read again either way.
+        void refreshCloudCatalog(workspace.orgId);
+      }
+    });
+  return (
+    <DropdownMenuSub onOpenChange={(open) => open && load()}>
+      <DropdownMenuSubTrigger data-testid="cloud-idle-menu">
+        <Clock /> Stop when idle
+        {current !== null && <span className="ml-auto pl-3 text-[10px] text-faint">{idleSuspendLabel(current)}</span>}
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-w-64">
+        {!view && !failed && (
+          <DropdownMenuItem disabled>
+            <Loader2 className="animate-spin" /> Loading…
+          </DropdownMenuItem>
+        )}
+        {failed && (
+          <DropdownMenuItem disabled className="whitespace-normal text-[11px]">
+            {failed}
+          </DropdownMenuItem>
+        )}
+        {view && (
+          <DropdownMenuRadioGroup value={current === null ? "" : String(current)} onValueChange={(value) => change(Number(value))}>
+            {choices.map((minutes) => (
+              <DropdownMenuRadioItem key={minutes} value={String(minutes)} data-testid={`cloud-idle-choice-${minutes}`}>
+                {idleSuspendLabel(minutes)}
+              </DropdownMenuRadioItem>
+            ))}
+            {/* A window the cap no longer admits (set before the cap): shown as it is, not offered again. */}
+            {current !== null && !choices.includes(current) && (
+              <DropdownMenuRadioItem value={String(current)} disabled>
+                {idleSuspendLabel(current)} (not allowed any more)
+              </DropdownMenuRadioItem>
+            )}
+          </DropdownMenuRadioGroup>
+        )}
+        {note && <DropdownMenuLabel className="whitespace-normal text-[11px] font-normal">{note}</DropdownMenuLabel>}
+        {view && <DropdownMenuLabel className="whitespace-normal text-[11px] font-normal">An agent at work or waiting for an approval counts as activity.</DropdownMenuLabel>}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }
 

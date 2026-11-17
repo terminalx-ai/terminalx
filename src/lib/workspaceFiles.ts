@@ -129,7 +129,8 @@ export function localFileSource(root: string): FileSource {
       const file = await fs.readText(abs(rel));
       return { ...file, version: String(file.mtimeMs) };
     },
-    writeText: async (rel, text) => ({ version: String(await fs.writeText(abs(rel), text)) }),
+    // A null base means the file must not exist: an exclusive create, so a file made in the meantime is never emptied.
+    writeText: async (rel, text, baseEtag) => ({ version: String(await (baseEtag === null ? fs.createText(abs(rel), text) : fs.writeText(abs(rel), text))) }),
     stat: async (rel) => {
       const mtime = await fs.mtime(abs(rel));
       return mtime == null ? null : { version: String(mtime) };
@@ -193,8 +194,22 @@ export interface CloudFileSource extends FileSource {
 
 const PORCELAIN: Record<string, ChangeStatus> = { "?": "added", A: "added", M: "modified", D: "deleted", R: "renamed", C: "added" };
 
-/** A cloud workspace's files over one connection. */
-export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnly: boolean): CloudFileSource {
+/**
+ * A cloud workspace's files over one connection. `base` roots it at a
+ * folder of the workspace (a machine session's worktree inside its project,
+ * PRO-347): every path it takes and gives is relative to that folder, as a
+ * local session's are to its `cwd`. Empty for the workspace's own root.
+ */
+export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnly: boolean, base = ""): CloudFileSource {
+  const root = base ? remotePath(base) : "";
+  /** The runtime's path for one of ours. */
+  const inside = (rel: string) => (root ? (rel ? `${root}/${remotePath(rel)}` : root) : rel);
+  /** Ours for one of the runtime's; one outside the base is not ours (null). */
+  const outside = (path: string): string | null => {
+    if (!root) return path;
+    if (path === root) return "";
+    return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : null;
+  };
   let disposed = false;
   const controllers = new Set<AbortController>();
   const listeners = new Set<(paths: string[] | null) => void>();
@@ -215,8 +230,9 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
   const ensureWatch = () => {
     if (watching || disposed) return;
     watching = client
-      .watchFiles("", (paths) => {
-        for (const listener of listeners) listener(paths);
+      .watchFiles(root, (paths) => {
+        const ours = paths === null ? null : paths.flatMap((path) => outside(path) ?? []);
+        for (const listener of listeners) listener(ours);
       })
       .then((stop) => {
         if (disposed) stop();
@@ -233,12 +249,12 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
     kind: "cloud",
     readOnly,
     listDir: (rel) =>
-      live(listRemoteDir(client, rel)).then((listing) =>
+      live(listRemoteDir(client, inside(rel))).then((listing) =>
         listing.entries
           .filter((entry) => entry.name !== ".git" && entry.name !== ".DS_Store")
           .map((entry) => ({
             name: entry.name,
-            path: entry.path,
+            path: outside(entry.path) ?? entry.name,
             isDir: entry.kind === "directory",
             symlink: entry.symlink,
             escapes: entry.escapes,
@@ -246,7 +262,7 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
           .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase())),
       ),
     readText: async (rel) => {
-      const file = await live(readRemoteFile(client, rel, { maxBytes: CLOUD_TEXT_LIMIT }));
+      const file = await live(readRemoteFile(client, inside(rel), { maxBytes: CLOUD_TEXT_LIMIT }));
       return {
         content: file.text ?? "",
         size: file.size,
@@ -257,12 +273,12 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       };
     },
     writeText: async (rel, text, baseEtag) => {
-      const written = await live(writeRemoteFile(client, rel, text, baseEtag));
+      const written = await live(writeRemoteFile(client, inside(rel), text, baseEtag));
       return { version: written.version ?? "", etag: written.etag };
     },
     stat: async (rel, options) => {
       try {
-        const stat = await live(statRemote(client, rel, options));
+        const stat = await live(statRemote(client, inside(rel), options));
         return { version: stat.version ?? String(stat.modifiedMs), etag: stat.etag };
       } catch (error) {
         if (error instanceof Error && "code" in error && (error as { code: string }).code === "not_found") return null;
@@ -283,6 +299,11 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
           const change = PORCELAIN[code];
           return change ? [{ path: prefix + file.path, status: change }] : [];
         });
+      // Rooted at a worktree: that worktree is the repository, and its paths are already ours.
+      if (root) {
+        const status = await live(client.call<Status>("git.status", { repo: root }));
+        return status.repository ? badges(status, "") : [];
+      }
       try {
         const status = await live(client.call<Status>("git.status"));
         // Paths are the repository's; a lone clone below the root is prefixed too.
@@ -308,8 +329,9 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       signal.addEventListener("abort", forward, { once: true });
       try {
         const remote = query.wholeWord ? wholeWordRemoteQuery(query) : query;
-        const result = await live(searchRemote(client, { query: remote.query, regex: remote.regex, caseSensitive: query.caseSensitive, maxResults: query.limit ?? 500 }, controller.signal));
-        const hits = query.wholeWord && query.regex ? keepWholeWords(result.hits) : result.hits;
+        const result = await live(searchRemote(client, { query: remote.query, regex: remote.regex, caseSensitive: query.caseSensitive, maxResults: query.limit ?? 500, ...(root ? { path: root } : {}) }, controller.signal));
+        const found = root ? result.hits.flatMap((hit) => { const path = outside(hit.path); return path === null ? [] : [{ ...hit, path }]; }) : result.hits;
+        const hits = query.wholeWord && query.regex ? keepWholeWords(found) : found;
         const fileCount = hits === result.hits ? result.files : new Set(hits.map((h) => h.path)).size;
         return { hits, files: fileCount, capped: result.capped || result.cancelled };
       } finally {
@@ -318,7 +340,7 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       }
     },
     readMedia: async (rel) => {
-      const file = await live(readRemoteFile(client, rel, { maxBytes: CLOUD_MEDIA_LIMIT }));
+      const file = await live(readRemoteFile(client, inside(rel), { maxBytes: CLOUD_MEDIA_LIMIT }));
       const blob = new Blob([file.bytes as BlobPart], { type: file.mediaType ?? "application/octet-stream" });
       const url = URL.createObjectURL(blob);
       return { url, state: { version: file.version, etag: file.etag }, release: () => URL.revokeObjectURL(url) };

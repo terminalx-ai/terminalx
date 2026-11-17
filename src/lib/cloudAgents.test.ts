@@ -167,6 +167,8 @@ function fakeClient(connected = true, connection: Record<string, unknown> = {}) 
     configureAgentTab: vi.fn(async (params: Record<string, unknown>) => tabInfo({ model: String(params.model ?? "") })),
     listAgentTabs: vi.fn(async () => [] as AgentTabInfo[]),
     onNotification: vi.fn(() => () => undefined),
+    // What the runtime granted: `connection.capabilities`, none unless a test says so.
+    hasCapability: (capability: string) => ((client.connection as { capabilities?: string[] }).capabilities ?? []).includes(capability),
     // As the workspace client does: the state now, then every change.
     onState: vi.fn((listener: (state: WorkspaceConnectionState) => void): (() => void) => {
       states.add(listener);
@@ -852,6 +854,52 @@ describe("cloud agent tabs store", () => {
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await flushCloudAgentCache(dev);
     expect(backend.calls).toEqual([]);
+  });
+
+  it("steers, stops and answers on a machine live, with one request id per decision (PRO-347)", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m1" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+    expect((await steerCloudAgent(machine, "t-1", "use the cursor", client)).state).toBe("applied");
+    expect(client.mutate).toHaveBeenLastCalledWith("session.steer", { sessionId: "s-1", tabId: "t-1", text: "use the cursor" });
+    expect((await stopCloudAgent(machine, "t-1", client)).state).toBe("applied");
+    expect(client.mutate).toHaveBeenLastCalledWith("session.stop", { sessionId: "s-1", tabId: "t-1" });
+
+    // A decision that may have landed before the link dropped is sent again with the same id, so the machine applies it once.
+    client.mutate.mockRejectedValueOnce(new Error("connection lost"));
+    await expect(decideCloudAgent(machine, "t-1", { requestId: "r-1", optionId: "allow" }, client)).rejects.toThrow();
+    await decideCloudAgent(machine, "t-1", { requestId: "r-1", optionId: "allow" }, client);
+    const decides = client.mutate.mock.calls.filter(([method]) => method === "session.decide");
+    expect(decides).toHaveLength(2);
+    expect(decides[0]![1]).toEqual({ sessionId: "s-1", tabId: "t-1", requestId: "r-1", optionId: "allow" });
+    expect(typeof decides[0]![2]).toBe("string");
+    expect(decides[1]![2]).toBe(decides[0]![2]);
+    // Another request gets its own.
+    await decideCloudAgent(machine, "t-1", { requestId: "r-2", answers: { q: "yes" } }, client);
+    expect(client.mutate.mock.calls.at(-1)![2]).not.toBe(decides[0]![2]);
+
+    // Already answered elsewhere: said in words, not as a code.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("conflict", "conflict", "session.decide", { reason: "request-not-pending" }));
+    expect(await decideCloudAgent(machine, "t-1", { requestId: "r-3", optionId: "allow" }, client).catch((error: unknown) => errorText(error))).toMatch(/already answered/);
+
+    // Away: nothing is queued on this computer.
+    client.moveTo("reconnecting");
+    await expect(steerCloudAgent(machine, "t-1", "x", client)).rejects.toThrow(/Not connected/);
+    await flushCloudAgentCache(machine);
+    expect(backend.calls).toEqual([]);
+  });
+
+  it("sends the settings chosen while away with a machine's next prompt", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m2" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn(async () => ({ settingsIgnored: false })) });
+    await configureCloudAgentTab(machine, "t-1", { model: "opus" }, Object.assign(fakeClient(false, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn() })).catch(() => undefined);
+    expect(getCloudAgents(machine).tabs[0]!.pendingConfig).toEqual({ model: "opus" });
+    await sendToCloudAgent(machine, "t-1", "hello", client);
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello", model: "opus" });
+    expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
   });
 
   // Found in a live two-user test: a pane kept "chunk 98 of 150 / Working" long after the turn had finished.

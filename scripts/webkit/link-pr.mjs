@@ -68,6 +68,8 @@ try {
     await conversation.click();
     await conversation.hover();
     await page.getByRole("button", { name: "Menu for Approval cards show a diff", exact: true }).click();
+    // PRO-386: under the menu's "Issue and pull request" submenu.
+    await page.getByRole("menuitem", { name: "Issue and pull request" }).click();
     const item = page.getByRole("menuitem", { name: "Link pull request…" });
     await item.waitFor();
     await item.click();

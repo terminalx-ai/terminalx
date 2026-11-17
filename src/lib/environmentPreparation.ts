@@ -4,7 +4,7 @@ import { listRepositories } from "@terminalx/portable/workspaceGit";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
 import { isOpen } from "@/lib/cloudLifecycle";
-import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, ProposalError, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
+import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, ProposalError, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type BuildFailureContext, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
 import { SCRATCH_DIRECTORY, cleanupScript, verifyProposal, type RunScript, type ScriptRun, type VerifiedSource } from "@/lib/environmentVerification";
 import { effectiveRunningLimit, organizationCompute } from "@/lib/organizationCompute";
 import type { RecipeObservations } from "@/lib/organizationEnvironment";
@@ -35,7 +35,8 @@ export interface PreparationOffer {
   quote: CloudWorkspaceQuote;
   idleSuspendMinutes: number;
   running: number;
-  runningLimit: number;
+  /** The running limit in force; null where the organization has none (PRO-371). */
+  runningLimit: number | null;
   /** Agents the organization has a login for; the task needs one. */
   agents: AgentLoginProvider[];
   contextRevision: string;
@@ -61,14 +62,14 @@ const serverCode = (failure: unknown): string => {
 
 /**
  * What starting would cost and whether it may start at all. It prices a
- * machine; it starts none. At the organization's running limit it refuses
- * here, before a quote is asked for.
+ * machine; it starts none. At the organization's running limit, where it has
+ * one, it refuses here, before a quote is asked for.
  */
 export async function offerPreparation(provider: CloudWorkspaceProviderId): Promise<PreparationOffer> {
   const [view, setup, logins] = await Promise.all([organizationCompute.policy(), api.cloudWorkspaceSetup(provider), api.cloudAgentLogins()]);
   const runningLimit = effectiveRunningLimit(view);
   if (view.policy.provisioningPaused) throw new PreparationError("provisioning-paused", "New cloud machines are paused for this organization.");
-  if (view.counts.running >= runningLimit)
+  if (runningLimit !== null && view.counts.running >= runningLimit)
     throw new PreparationError("running-limit", `The organization is at its running limit (${view.counts.running} of ${runningLimit} running). Stop a workspace first.`);
   // A login that was revoked or has stopped working would only fail on the machine, after it was paid for.
   const agents = logins.credentials.filter((login) => (login.state ?? "connected") === "connected").map((login) => login.provider);
@@ -94,6 +95,8 @@ export interface PreparationRequest {
   idempotencyKey: string;
   /** Marks the proposal file as written in this run; the agent is told to copy it. */
   token: string;
+  /** A failed build the agent is asked to fix ("Fix with an agent"), when it was started from one. */
+  failure?: BuildFailureContext | null;
 }
 
 export interface PreparationResult {
@@ -280,7 +283,7 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
       confirmProviderSpend: true,
       idempotencyKey: request.idempotencyKey,
       repositories: repositories.map((repository) => ({ cloneUrl: `https://github.com/${repository.owner}/${repository.name}`, ref: repository.defaultBranch })),
-      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories, request.token) },
+      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories, request.token, request.failure) },
       preparation: true,
     });
   } catch (failure) {

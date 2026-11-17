@@ -306,6 +306,29 @@ struct PtyState {
     /// never listed, killed or evicted as a shell is, and it stays through
     /// every CLI the tab starts in it.
     agent: Option<AgentPty>,
+    /// Set for an agent's install or sign-in on a machine (`machine/4`,
+    /// PRO-350): never listed as a shell, and its exit makes the agents'
+    /// logins be read again.
+    setup: Option<SetupPty>,
+}
+
+struct SetupPty {
+    harness: String,
+    step: crate::harness::setup::Step,
+}
+
+/// A shell-like terminal to start: where it runs and what it belongs to.
+struct NewPty<'a> {
+    /// Relative to its project, as `pty.list` shows it.
+    cwd: String,
+    /// Where the program starts.
+    start_in: &'a str,
+    command: Option<&'a str>,
+    session_id: Option<String>,
+    project_id: Option<String>,
+    cols: u16,
+    rows: u16,
+    setup: Option<SetupPty>,
 }
 
 struct AgentPty {
@@ -367,6 +390,10 @@ enum Scope {
 /// the events that say so at once.
 const MACHINE_CHANGE_POLL: Duration = Duration::from_secs(5);
 
+/// How often a machine reads its update record and status again, besides
+/// the changes it makes itself (`machine/3`).
+const UPDATE_STATUS_POLL: Duration = Duration::from_secs(2);
+
 pub struct WorkspaceRpc {
     scope: Scope,
     /// The generation the relay host registered with; offsets and cursors
@@ -413,9 +440,28 @@ pub struct WorkspaceRpc {
     /// Raised when a machine's projects or settings may have changed; a
     /// change goes out as `machine.changed` to `machine/1` connections.
     machine_changed: Arc<tokio::sync::Notify>,
+    /// The machine host's direct endpoints and relay access (`machine/2`).
+    machine_access: OnceLock<Arc<dyn machine::MachineAccess>>,
+    /// The machine's version and updates (`machine/3`, PRO-354); absent on
+    /// a workspace runtime, or one whose data directory cannot be named.
+    machine_updates: Mutex<Option<Arc<super::machine_update::MachineUpdates>>>,
+    /// The status as the served updates stood when they started being
+    /// served (which updates, and what): the watcher's first compare.
+    update_baseline: Mutex<Option<(usize, String)>>,
+    /// Clones started from another computer (`machine/6`, PRO-351).
+    machine_clones: Arc<super::machine_projects::Clones>,
+    /// Stands in for the runtime user's home directory in tests (`machine/6`).
+    #[cfg(test)]
+    home_for_tests: Mutex<Option<std::path::PathBuf>>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    /// Stands in for the agents' login probes in tests (PRO-350).
+    #[cfg(test)]
+    sign_ins_for_tests: Mutex<Option<HashMap<String, super::machine_agents::Probed>>>,
+    /// Stands in for a setup step's installer or sign-in in tests (PRO-350).
+    #[cfg(test)]
+    setup_command_for_tests: Mutex<Option<String>>,
     #[cfg(test)]
     commands_for_tests: Mutex<Option<Option<Vec<SlashCommand>>>>,
     /// Terminal input this runtime counted as use of the workspace (the
@@ -449,7 +495,12 @@ impl WorkspaceRpc {
         terminals: Arc<Terminals>,
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
+        let has_window = identity.has_window;
         let rpc = Self::serving(Scope::Machine { projects: machine::Projects::default(), identity }, generation, sink.clone(), terminals, sessions);
+        match super::machine_update::Environment::of_this_runtime(has_window) {
+            Ok(environment) => rpc.serve_updates(super::machine_update::MachineUpdates::new(environment, sink.clone())),
+            Err(error) => log::warn!("machine/3: this runtime cannot report its updates: {error:#}"),
+        }
         // A project added or removed here, and Settings (which holds the name).
         for event in ["projects_changed", "settings_file_changed"] {
             let notify = rpc.machine_changed.clone();
@@ -459,14 +510,16 @@ impl WorkspaceRpc {
             let weak = Arc::downgrade(&rpc);
             let notify = rpc.machine_changed.clone();
             runtime.spawn(async move {
-                let mut last = tokio::task::spawn_blocking(machine::fingerprint).await.ok().flatten();
+                // The name, the project set and (`machine/2`) the direct addresses.
+                let look = |rpc: Option<Arc<WorkspaceRpc>>| move || machine::fingerprint().map(|known| format!("{known}\u{0}{:?}", rpc.map(|rpc| rpc.direct_endpoints()).unwrap_or_default()));
+                let mut last = tokio::task::spawn_blocking(look(weak.upgrade())).await.ok().flatten();
                 loop {
                     tokio::select! {
                         _ = notify.notified() => {}
                         _ = tokio::time::sleep(MACHINE_CHANGE_POLL) => {}
                     }
                     let Some(rpc) = weak.upgrade() else { return };
-                    let Ok(Some(now)) = tokio::task::spawn_blocking(machine::fingerprint).await else { continue };
+                    let Ok(Some(now)) = tokio::task::spawn_blocking(look(Some(rpc.clone()))).await else { continue };
                     if last.as_ref() != Some(&now) {
                         last = Some(now);
                         let _ = tokio::task::spawn_blocking(move || rpc.broadcast_machine()).await;
@@ -501,8 +554,18 @@ impl WorkspaceRpc {
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             machine_changed: Arc::new(tokio::sync::Notify::new()),
+            machine_access: OnceLock::new(),
+            machine_updates: Mutex::new(None),
+            update_baseline: Mutex::new(None),
+            machine_clones: Arc::new(super::machine_projects::Clones::default()),
+            #[cfg(test)]
+            home_for_tests: Mutex::new(None),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            sign_ins_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            setup_command_for_tests: Mutex::new(None),
             #[cfg(test)]
             commands_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -733,7 +796,122 @@ impl WorkspaceRpc {
                 return;
             }
         };
-        self.notify_granted(machine::MACHINE, "machine.changed", json!({ "machine": machine::describe(identity), "projects": projects["projects"] }));
+        self.notify_granted(machine::MACHINE, "machine.changed", json!({ "machine": self.describe_machine(identity), "projects": projects["projects"] }));
+    }
+
+    /// The machine host's direct endpoints and relay access (`machine/2`,
+    /// PRO-345). Set once, by the runtime that hosts the machine.
+    pub fn set_machine_access(&self, access: Arc<dyn machine::MachineAccess>) {
+        if self.machine_access.set(access).is_err() {
+            log::warn!("machine access was already set");
+        }
+        self.machine_changed.notify_one();
+    }
+
+    fn direct_endpoints(&self) -> Vec<String> {
+        self.machine_access.get().map(|access| access.direct_endpoints()).unwrap_or_default()
+    }
+
+    /// Serve `machine/3` from `updates`, and send `machine.updateChanged`
+    /// to `machine/3` connections whenever the status changes: the helper's
+    /// record (read every [`UPDATE_STATUS_POLL`]), a release check, the
+    /// blockers and the connected computers.
+    fn serve_updates(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        let updates = Arc::new(updates);
+        let previous = self.machine_updates.lock().unwrap().replace(updates);
+        // What the status is as these updates start being served, taken
+        // now: a change made after this returns is sent, however late the
+        // watcher's first look at them comes on a busy machine.
+        *self.update_baseline.lock().unwrap() = self.update_fingerprint();
+        // One watcher, whichever updates it serves (a test replaces them):
+        // woken to take its first look at the new ones now.
+        if let Some(previous) = previous {
+            previous.changed.notify_one();
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let weak = Arc::downgrade(self);
+        runtime.spawn(async move {
+            // What was sent last, and from which updates.
+            let mut last: Option<(usize, String)> = None;
+            loop {
+                // Held only while it looks: the runtime may drop meanwhile.
+                let Some(rpc) = weak.upgrade() else { return };
+                let looked = tokio::task::spawn_blocking(move || {
+                    let fingerprint = rpc.update_fingerprint();
+                    (fingerprint, rpc.update_baseline.lock().unwrap().clone())
+                })
+                .await
+                .ok();
+                if let Some((Some(now), baseline)) = looked {
+                    // New updates are compared with how they stood when served.
+                    if last.as_ref().is_none_or(|last| last.0 != now.0) {
+                        last = baseline.filter(|baseline| baseline.0 == now.0).or_else(|| Some(now.clone()));
+                    }
+                    if last.as_ref() != Some(&now) {
+                        let Some(rpc) = weak.upgrade() else { return };
+                        let _ = tokio::task::spawn_blocking(move || rpc.broadcast_update_status()).await;
+                        last = Some(now);
+                    }
+                }
+                let Some(notify) = weak.upgrade().and_then(|rpc| rpc.updates()).map(|updates| updates.changed.clone()) else { return };
+                tokio::select! {
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(UPDATE_STATUS_POLL) => {}
+                }
+            }
+        });
+    }
+
+    /// The status as nobody in particular sees it, and which updates said it.
+    fn update_fingerprint(&self) -> Option<(usize, String)> {
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        self.updates().map(|updates| (Arc::as_ptr(&updates) as usize, updates.fingerprint(access)))
+    }
+
+    fn updates(&self) -> Option<Arc<super::machine_update::MachineUpdates>> {
+        self.machine_updates.lock().unwrap().clone()
+    }
+
+    /// `machine.updateChanged`: each `machine/3` connection gets the status
+    /// as it sees it (the other computers are everyone but itself).
+    fn broadcast_update_status(&self) {
+        let Some(updates) = self.updates() else { return };
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        for peer in self.live_peers().into_iter().filter(|peer| peer.granted(machine::MACHINE_3)) {
+            let status = updates.status(Some(&peer.device_id), access);
+            peer.notify(super::machine_update::CHANGED, json!({ "status": status }));
+        }
+    }
+
+    /// `machine.updateStatus` and `machine.update` (`machine/3`). Blocking.
+    fn machine_update_call(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        if !self.is_machine() {
+            return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+        }
+        let updates = self.updates().ok_or_else(|| RpcError::new("update_unavailable", "this runtime cannot tell how it was installed"))?;
+        let access = self.machine_access.get().map(|access| access.as_ref() as &dyn machine::MachineAccess);
+        match method {
+            "machine.updateStatus" => updates.update_status(params, &peer.device_id, access),
+            _ => updates.update(params, &peer.device_id, access),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_machine_updates_for_tests(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        self.serve_updates(updates);
+    }
+
+    #[cfg(test)]
+    pub(super) fn machine_updates_for_tests(&self) -> Arc<super::machine_update::MachineUpdates> {
+        self.updates().expect("machine/3 is served")
+    }
+
+    /// `machine.describe`, with `directEndpoints` (`machine/2`).
+    fn describe_machine(&self, identity: &machine::Identity) -> Value {
+        let mut described = machine::describe(identity);
+        described["directEndpoints"] = json!(self.direct_endpoints());
+        described
     }
 
     pub fn generation(&self) -> u64 {
@@ -1326,7 +1504,22 @@ impl WorkspaceRpc {
         }
     }
 
+    /// Run an admitted call. On a machine, a session made, a terminal opened
+    /// or an update asked for goes in the machine's activity log (PRO-357),
+    /// with the project's name or the version and nothing else.
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        let noted = self.is_machine() && matches!(method, "session.create" | "pty.create" | "machine.update");
+        let asked_project = params["projectId"].as_str().map(str::to_string);
+        let asked_version = params["version"].as_str().filter(|_| method == "machine.update").map(str::to_string);
+        let result = self.run_method(peer, method, params, ticket).await;
+        if let (true, Ok(value), Some(access)) = (noted, &result, self.machine_access.get()) {
+            let project = value["projectId"].as_str().or(value["session"]["projectId"].as_str()).map(str::to_string).or(asked_project);
+            access.note(&peer.device_id, method, project.as_deref(), asked_version.as_deref());
+        }
+        result
+    }
+
+    async fn run_method(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
         // Native stamp, captured before handing work to the blocking pool.
         // Never read a stamp or generation supplied in request params.
         let policy_stamp = peer.user_id.as_deref().and_then(|user| self.collab.runtime_policy.stamp_for_peer(user, peer));
@@ -1349,6 +1542,26 @@ impl WorkspaceRpc {
             }
             let permit = collab::v2::Permit::new(self.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp, collab::v2::Action::Configure).for_peer(peer);
             return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket, Some(permit)).await;
+        }
+        // A fresh device token for the paired computer that asks (`machine/5`, PRO-357).
+        if method == "machine.rotateCredential" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.rotate_credential(&peer.device_id).await,
+                None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
+            };
+        }
+        // A round trip to the relay, for a paired computer only (`machine/2`).
+        if method == "machine.relayAccess" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.relay_access(&peer.device_id).await,
+                None => Ok(json!({ "relay": null })),
+            };
         }
         let rpc = self.clone();
         let peer = peer.clone();
@@ -1421,11 +1634,24 @@ impl WorkspaceRpc {
                 Scope::Machine { .. } => crate::cloud_resources::observe(&crate::store::root().map_err(RpcError::internal)?),
             }),
             "machine.describe" => match &self.scope {
-                Scope::Machine { identity, .. } => Ok(machine::describe(identity)),
+                Scope::Machine { identity, .. } => Ok(self.describe_machine(identity)),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "machine.projects" => match &self.scope {
                 Scope::Machine { .. } => machine::projects(),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.updateStatus" | "machine.update" => self.machine_update_call(peer, method, &params),
+            "machine.agentSetup" => match &self.scope {
+                Scope::Machine { .. } => self.machine_agent_setup(peer, params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.agentSetupRunning" => match &self.scope {
+                Scope::Machine { .. } => self.machine_agent_setup_running(&params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.browse" | "machine.addProject" | "machine.removeProject" | "machine.cloneProject" | "machine.cloneStatus" | "machine.cloneCancel" => match &self.scope {
+                Scope::Machine { .. } => self.machine_projects_call(method, &params),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "cleanup.scan" => self.cleanup_scan(),
@@ -1459,6 +1685,9 @@ impl WorkspaceRpc {
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
                 }
+                if params.get("baseRef").is_some_and(|base| !base.is_null()) && !peer.granted("session-base/1") {
+                    return Err(RpcError::new("capability_not_granted", "Choosing the branch a session starts from was not negotiated."));
+                }
                 // On a machine, refused here without `machine/1` or a project.
                 if self.is_machine() {
                     project()?;
@@ -1490,7 +1719,7 @@ impl WorkspaceRpc {
             "session.update" => self.session_update(peer, params),
             "session.addTab" => self.session_add_tab(peer, params),
             "session.delete" => self.session_delete(peer, params),
-            "runtime.agents" => self.runtime_agents(),
+            "runtime.agents" => self.runtime_agents(peer, &params),
             "session.nudge" => {
                 self.agents()?.poll.raise();
                 Ok(json!({}))
@@ -1806,6 +2035,7 @@ impl WorkspaceRpc {
                     input_pending,
                     subscribers: HashMap::new(),
                     agent: Some(AgentPty { tab_id: tab_id.to_string(), session_id: None }),
+                    setup: None,
                 },
             );
         }
@@ -1936,6 +2166,9 @@ impl WorkspaceRpc {
             described["tabId"] = json!(agent.tab_id);
             described["running"] = json!(self.terminals.is_running(pty_id));
         }
+        if let Some(setup) = &pty.setup {
+            described["setup"] = json!({ "harness": setup.harness, "step": setup.step.name() });
+        }
         // `pty/2`, and only a session this peer may see; absent for a
         // terminal that belongs to no session.
         if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
@@ -1989,28 +2222,49 @@ impl WorkspaceRpc {
         if !cwd.is_dir() {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
+        let start_in = cwd.to_string_lossy().into_owned();
+        self.start_pty(
+            peer,
+            NewPty {
+                cwd: project.files.relative(&cwd),
+                start_in: &start_in,
+                command: None,
+                session_id: session.map(|session| session.id),
+                project_id: project.id.clone(),
+                cols: p.cols,
+                rows: p.rows,
+                setup: None,
+            },
+        )
+        .map(|(_, described)| described)
+    }
+
+    /// Start a terminal this runtime's peers attach to, as `pty.create`
+    /// does: its id and how `pty.list` describes it.
+    fn start_pty(&self, peer: &Peer, new: NewPty<'_>) -> Result<(String, Value), RpcError> {
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
-            if ptys.values().filter(|pty| pty.agent.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
+            // A setup step is not one of the shells this limit is for.
+            if new.setup.is_none() && ptys.values().filter(|pty| pty.agent.is_none() && pty.setup.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
                 return Err(RpcError::new("unavailable", format!("at most {MAX_PTYS} terminals may run at once")));
             }
             ptys.insert(
                 pty_id.clone(),
                 PtyState {
                     number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
-                    cwd: project.files.relative(&cwd),
-                    session_id: session.map(|session| session.id),
-                    project_id: project.id.clone(),
+                    cwd: new.cwd,
+                    session_id: new.session_id,
+                    project_id: new.project_id,
                     created_at_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|elapsed| elapsed.as_millis() as u64)
                         .unwrap_or(0),
                     pid: None,
-                    cols: p.cols,
-                    rows: p.rows,
+                    cols: new.cols,
+                    rows: new.rows,
                     controller: Some(peer.device_id.clone()),
                     controller_user: Some((peer.user_id.clone(), peer.authority)),
                     controller_installation: peer.installation_key.clone(),
@@ -2025,12 +2279,13 @@ impl WorkspaceRpc {
                     input_pending: input_pending.clone(),
                     subscribers: HashMap::new(),
                     agent: None,
+                    setup: new.setup,
                 },
             );
         }
         let scope = self.pty_session_scope(peer);
-        let cwd = cwd.to_string_lossy().into_owned();
-        let spec = PaneSpec { cwd: &cwd, cols: p.cols, rows: p.rows, command: None, env: &[] };
+        // The machine's own environment: nothing of the caller's is passed.
+        let spec = PaneSpec { cwd: new.start_in, cols: new.cols, rows: new.rows, command: new.command, env: &[] };
         if let Err(error) = self.terminals.spawn(self.sink.clone(), &pty_id, spec) {
             self.ptys.lock().unwrap().remove(&pty_id);
             return Err(RpcError::internal(error));
@@ -2059,7 +2314,8 @@ impl WorkspaceRpc {
         let mut ptys = self.ptys.lock().unwrap();
         let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::internal("the terminal exited while starting"))?;
         pty.pid = self.terminals.pid(&pty_id);
-        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
+        let described = self.describe_pty(&pty_id, pty, peer, scope.as_ref());
+        Ok((pty_id, described))
     }
 
     /// Terminals of this runtime, oldest first; closed ones are gone.
@@ -2073,7 +2329,8 @@ impl WorkspaceRpc {
         let mut listed: Vec<(u64, Value)> = ptys
             .iter()
             // An agent tab's terminal is reached from its tab, never listed as a shell.
-            .filter(|(_, pty)| !pty.closed && pty.agent.is_none())
+            // Nor is an agent's setup step: the machine's page shows it (PRO-350).
+            .filter(|(_, pty)| !pty.closed && pty.agent.is_none() && pty.setup.is_none())
             .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
             .collect();
         listed.sort_by_key(|(number, _)| *number);
@@ -2147,6 +2404,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_write(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let seq = params.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0).ok_or_else(|| RpcError::invalid("seq must be a positive integer"))?;
         let data = required_str(&params, "data")?;
         if data.len() > MAX_WRITE_BYTES {
@@ -2263,6 +2521,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_resize(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let (cols, rows) = Self::size_params(&params)?.ok_or_else(|| RpcError::invalid("cols and rows must be between 1 and 1000"))?;
         if let Some((session_id, tab_id)) = self.agent_pty(peer, &params)? {
             if let Some(refusal) = self.agent_input_refusal(peer, &session_id, &tab_id) {
@@ -2284,6 +2543,7 @@ impl WorkspaceRpc {
 
     /// Take over a terminal's input and size, optionally at this client's size.
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let size = Self::size_params(&params)?;
         let scope = self.pty_session_scope(peer);
         let agent = self.agent_pty(peer, &params)?;
@@ -2416,6 +2676,9 @@ impl WorkspaceRpc {
     /// is gone. Returns their subscriptions, to forget once unlocked.
     fn remove_pty(ptys: &mut HashMap<String, PtyState>, pty_id: &str) -> Vec<String> {
         let Some(pty) = ptys.remove(pty_id) else { return Vec::new() };
+        if pty.setup.is_some() {
+            crate::harness::setup::ended_elsewhere(pty_id);
+        }
         for (subscription_id, peer) in &pty.subscribers {
             peer.notify("pty.closed", json!({ "subscriptionId": subscription_id, "ptyId": pty_id }));
         }
@@ -2433,6 +2696,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let since = params.get("sinceOffset").and_then(Value::as_u64);
         if since.is_some() {
             let generation = params.get("runtimeGeneration").and_then(Value::as_u64);
@@ -2568,6 +2832,11 @@ impl WorkspaceRpc {
         let evicted = {
             let mut ptys = self.ptys.lock().unwrap();
             let Some(pty) = ptys.get_mut(&exit.id) else { return };
+            if pty.setup.is_some() {
+                // Installed or signed in, or not: what the agents' logins say now is read again.
+                crate::harness::setup::ended_elsewhere(&exit.id);
+                super::machine_agents::forget();
+            }
             pty.exit = Some(exit.code);
             pty.exited_at = Some(Instant::now());
             for (subscription_id, peer) in &pty.subscribers {
@@ -2890,8 +3159,13 @@ impl WorkspaceRpc {
             /// `machine/1`: the project the session runs in.
             #[serde(default)]
             project_id: Option<String>,
+            /// `session-base/1` (PRO-348): the branch the new worktree is cut
+            /// from, as `git.branches` lists it; the default branch without it.
+            #[serde(default)]
+            base_ref: Option<String>,
         }
         let mut p: Params = parse(params)?;
+        let base_ref = p.base_ref.take().filter(|_| p.use_worktree).map(|base| check_base_ref(&base)).transpose()?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
@@ -2956,7 +3230,7 @@ impl WorkspaceRpc {
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
-                base_ref: None,
+                base_ref,
                 checkout_branch: None,
                 checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
@@ -3174,8 +3448,23 @@ impl WorkspaceRpc {
 
     /// `agents/1`: the installed agents, each with its models (and their
     /// efforts) and the launch modes it takes. Paths on the VM stay here.
-    fn runtime_agents(&self) -> Result<Value, RpcError> {
-        let installed: Vec<crate::harness::HarnessInfo> = self.offered_agents().into_iter().filter(|agent| agent.available).collect();
+    fn runtime_agents(&self, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+        let offered = self.offered_agents();
+        // PRO-350: on a machine, each agent's version and login there, and
+        // the agents it has no CLI for. A cloud workspace's agents sign in
+        // through its own flows, so it starts no probe.
+        let machine = matches!(self.scope, Scope::Machine { .. });
+        // Each probe starts a process there: only a manager makes them run
+        // now; anyone else is answered from the kept check.
+        let refresh = params["refresh"].as_bool().unwrap_or(false) && peer.authority == Authority::Manage;
+        let missing = machine.then(|| super::machine_agents::missing(&offered));
+        let installed: Vec<crate::harness::HarnessInfo> = offered.into_iter().filter(|agent| agent.available).collect();
+        let sign_ins: HashMap<String, super::machine_agents::SignIn> = if machine {
+            let probe = self.sign_in_probe();
+            installed.iter().map(|agent| (agent.id.clone(), super::machine_agents::sign_in(agent, refresh, &*probe))).collect()
+        } else {
+            HashMap::new()
+        };
         // Codex's list depends on the signed-in account; ask only when it can run.
         let codex = if installed.iter().any(|agent| agent.id == "codex") {
             match &self.sessions {
@@ -3212,17 +3501,201 @@ impl WorkspaceRpc {
                     })
                     .collect();
                 let modes: &[&str] = if agent.caps.permission_modes { &PERMISSION_MODES } else { &[] };
-                json!({
+                let mut described = json!({
                     "id": agent.id,
                     "name": agent.name,
                     "caps": agent.caps,
                     "models": own,
                     "modes": modes,
                     "defaultMode": index::DEFAULT_PERMISSION_MODE,
-                })
+                });
+                if let Some(sign_in) = sign_ins.get(&agent.id) {
+                    described["version"] = json!(sign_in.version);
+                    described["signIn"] = json!(sign_in.state);
+                    described["signInCheckedAt"] = json!(sign_in.checked_at);
+                }
+                described
             })
             .collect();
-        Ok(json!({ "agents": agents }))
+        let mut listed = json!({ "agents": agents });
+        if let Some(missing) = missing {
+            listed["missing"] = missing;
+        }
+        Ok(listed)
+    }
+
+    /// How an agent's login is read: its CLI, or a stand-in under test.
+    fn sign_in_probe(&self) -> Box<dyn Fn(&crate::harness::HarnessInfo) -> super::machine_agents::Probed> {
+        #[cfg(test)]
+        if let Some(states) = self.sign_ins_for_tests.lock().unwrap().clone() {
+            return Box::new(move |agent| states.get(&agent.id).cloned().unwrap_or((crate::harness::readiness::State::Unknown, None)));
+        }
+        Box::new(super::machine_agents::probe)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_sign_ins_for_tests(&self, states: HashMap<String, super::machine_agents::Probed>) {
+        *self.sign_ins_for_tests.lock().unwrap() = Some(states);
+    }
+
+    /// `machine/4`: an agent's install or sign-in in a terminal on the
+    /// machine (PRO-350). The command is the registry's, made here; the
+    /// caller names only the agent and the step. One step at a time per
+    /// agent, whoever asks: the machine's own window included.
+    fn machine_agent_setup(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        #[derive(Deserialize)]
+        struct Params {
+            harness: String,
+            step: String,
+            #[serde(default = "default_cols")]
+            cols: u16,
+            #[serde(default = "default_rows")]
+            rows: u16,
+        }
+        let p: Params = parse(params)?;
+        if p.cols == 0 || p.rows == 0 || p.cols > 1000 || p.rows > 1000 {
+            return Err(RpcError::invalid("cols and rows must be between 1 and 1000"));
+        }
+        let step = crate::harness::setup::Step::parse(&p.step).map_err(|error| RpcError::invalid(error.to_string()))?;
+        let command = self.setup_command(&p.harness, step)?;
+        let home = dirs::home_dir().ok_or_else(|| RpcError::internal("no home directory"))?;
+        let home = home.to_string_lossy().into_owned();
+        let mut started: Option<(String, Value)> = None;
+        let mut failed: Option<RpcError> = None;
+        // Its terminal id is made as it starts: noted as a step for another
+        // computer, which the window's own setup counts too.
+        let begun = crate::harness::setup::begin(
+            &p.harness,
+            None,
+            step,
+            || self.setup_running(&p.harness),
+            || {
+                match self.start_pty(
+                    peer,
+                    NewPty { cwd: "~".into(), start_in: &home, command: Some(&command), session_id: None, project_id: None, cols: p.cols, rows: p.rows, setup: Some(SetupPty { harness: p.harness.clone(), step }) },
+                ) {
+                    Ok(pty) => {
+                        crate::harness::setup::began_elsewhere(&p.harness, &pty.0);
+                        started = Some(pty);
+                    }
+                    Err(error) => {
+                        failed = Some(error);
+                        anyhow::bail!("not started");
+                    }
+                }
+                Ok(())
+            },
+        );
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        if let Err(error) = begun {
+            // Someone else's step of this agent runs: the caller follows it.
+            let run = self.setup_run(&p.harness);
+            let refused = RpcError::new("setup_busy", error.to_string());
+            return Err(match run {
+                Some(run) => refused.with_data(run),
+                None => refused,
+            });
+        }
+        let (_, described) = started.ok_or_else(|| RpcError::internal("the setup step did not start"))?;
+        Ok(described)
+    }
+
+    /// An agent's setup terminal is the manager's alone (PRO-350): a sign-in
+    /// shows a device code or a login address, and whoever completes it
+    /// decides whose account the machine's CLI signs in to.
+    fn setup_pty_refusal(&self, peer: &Peer, params: &Value) -> Result<(), RpcError> {
+        let Some(pty_id) = params["ptyId"].as_str() else { return Ok(()) };
+        let setup = self.ptys.lock().unwrap().get(pty_id).is_some_and(|pty| pty.setup.is_some());
+        if setup && peer.authority != Authority::Manage {
+            return Err(RpcError::new("forbidden", "only a manager may follow an agent's sign-in or install"));
+        }
+        Ok(())
+    }
+
+    /// `machine.agentSetupRunning`: the step of `harness` running in a
+    /// terminal a peer can attach to.
+    /// `machine/6` (PRO-351): a machine's projects from another computer.
+    /// Adding or removing one emits `projects_changed`, as `projects.add`
+    /// on the control socket does, so `machine.changed` goes out.
+    fn machine_projects_call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use super::machine_projects as projects;
+        match method {
+            "machine.browse" => projects::browse(&self.machine_home()?, params),
+            "machine.addProject" => {
+                let added = projects::add(&self.machine_home()?, params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(added)
+            }
+            "machine.removeProject" => {
+                let removed = projects::remove(params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(removed)
+            }
+            "machine.cloneProject" => self.machine_clones.start(&self.machine_home()?, params, self.sink.clone()),
+            "machine.cloneStatus" => self.machine_clones.status(params),
+            "machine.cloneCancel" => self.machine_clones.cancel(params),
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/6 method"))),
+        }
+    }
+
+    /// The home directory `machine/6` stays under: the runtime user's.
+    fn machine_home(&self) -> Result<std::path::PathBuf, RpcError> {
+        #[cfg(test)]
+        if let Some(home) = self.home_for_tests.lock().unwrap().clone() {
+            return Ok(home);
+        }
+        super::machine_projects::home()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_home_for_tests(&self, home: &Path) {
+        *self.home_for_tests.lock().unwrap() = Some(std::fs::canonicalize(home).unwrap());
+    }
+
+    fn machine_agent_setup_running(&self, params: &Value) -> Result<Value, RpcError> {
+        let harness = required_str(params, "harness")?;
+        Ok(json!({ "run": self.setup_run(harness) }))
+    }
+
+    /// The command for a step started from another computer.
+    fn setup_command(&self, harness: &str, step: crate::harness::setup::Step) -> Result<String, RpcError> {
+        #[cfg(test)]
+        if let Some(command) = self.setup_command_for_tests.lock().unwrap().clone() {
+            return Ok(command);
+        }
+        crate::harness::setup::command_elsewhere(harness, step).map_err(|error| RpcError::invalid(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_setup_command_for_tests(&self, command: &str) {
+        *self.setup_command_for_tests.lock().unwrap() = Some(command.to_string());
+    }
+
+    /// Every running setup step of `harness`: this runtime's peers' terminals
+    /// and its own window's setup panes.
+    fn setup_running(&self, harness: &str) -> Vec<String> {
+        let mut running: Vec<String> = self
+            .ptys
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, pty)| pty.setup.as_ref().is_some_and(|setup| setup.harness == harness) && pty.exit.is_none() && !pty.closed)
+            .map(|(id, _)| id.clone())
+            .collect();
+        running.extend(
+            self.terminals.panes().into_iter().filter(|pane| pane.running && crate::harness::setup::is_pane(harness, &pane.id)).map(|pane| pane.id),
+        );
+        running
+    }
+
+    /// `{ ptyId, step }` of the setup step of `harness` a peer can attach to, if one runs.
+    fn setup_run(&self, harness: &str) -> Option<Value> {
+        let ptys = self.ptys.lock().unwrap();
+        ptys.iter()
+            .filter(|(_, pty)| pty.exit.is_none() && !pty.closed)
+            .find_map(|(id, pty)| pty.setup.as_ref().filter(|setup| setup.harness == harness).map(|setup| json!({ "ptyId": id, "step": setup.step.name() })))
     }
 
     /// `session/2`: rename, pin or archive a session. Archiving only hides it.
@@ -4088,6 +4561,29 @@ fn default_cols() -> u16 {
 
 fn default_rows() -> u16 {
     24
+}
+
+/// A base branch for `session.create` (`session-base/1`): a branch name as
+/// `git.branches` lists it, never something git could read as an option or a
+/// revision expression. Whether it exists is git's to say when the worktree
+/// is cut.
+fn check_base_ref(base: &str) -> Result<String, RpcError> {
+    let base = base.trim();
+    let valid = !base.is_empty()
+        && base.len() <= 255
+        && !base.starts_with('-')
+        && !base.starts_with('/')
+        && !base.ends_with('/')
+        && !base.ends_with(".lock")
+        && !base.contains("..")
+        && !base.contains("@{")
+        && !base.contains("//")
+        && base.chars().all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+    if valid {
+        Ok(base.to_string())
+    } else {
+        Err(RpcError::invalid("baseRef is not a branch name"))
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {

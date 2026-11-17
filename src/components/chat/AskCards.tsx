@@ -1,8 +1,9 @@
-import { forwardRef, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ShieldAlert, MessageCircleQuestion } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
+import { hasEscapeOverlay, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { askAgentNote, questionAnswers, questionsLabel, toggleQuestionChoice, type PendingAsk, type QuestionChoices } from "@/lib/transcript";
@@ -12,7 +13,8 @@ import { LinkedText } from "./LinkedText";
 
 /**
  * A held tool call. The buttons are the harness's own options; the app only
- * ever answers with an option id. The first option answers to Enter.
+ * ever answers with an option id. The first option answers to Enter, and
+ * sits last in the bar; the first deny answers to Escape.
  */
 function field(input: unknown, ...names: string[]): string | null {
   if (!input || typeof input !== "object") return null;
@@ -45,18 +47,39 @@ export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">)
   return text;
 }
 
-/** The one look both requests share: a labelled card, its body, and a bar of actions. */
-const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; tone: "warning" | "info"; children: ReactNode; actions: ReactNode; aside?: ReactNode; note?: ReactNode }>(
-  function AskShell({ icon, label, tone, children, actions, aside, note }, ref) {
+/**
+ * The one look both requests share: a labelled card, its body, and a bar of
+ * actions. `heading` puts what is asked on the label's own line, with
+ * `meta` at its end; its body is then flush, each part divided by a rule.
+ */
+const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; tone: "warning" | "info"; children: ReactNode; actions: ReactNode; aside?: ReactNode; note?: ReactNode; heading?: ReactNode; meta?: string | null }>(
+  function AskShell({ icon, label, tone, children, actions, aside, note, heading, meta }, ref) {
+    const labelText = (
+      <span className={cn("flex shrink-0 items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide", tone === "warning" ? "text-warning" : "text-info")}>
+        {icon}
+        {label}
+      </span>
+    );
     return (
-      <div ref={ref} className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-card">
-        <div className={cn("flex items-center gap-1.5 px-4 pt-3 text-[11px] font-medium uppercase tracking-wide", tone === "warning" ? "text-warning" : "text-info")}>
-          {icon}
-          {label}
-        </div>
-        <div className="px-4 pb-3.5 pt-1.5">{children}</div>
+      // A toast rising off the composer rises past this card too, never onto its Allow and Deny (PRO-386).
+      <div ref={ref} data-ask-card data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-card">
+        {heading ? (
+          <>
+            <div className="flex min-w-0 items-center gap-2.5 px-4 py-2.5" data-testid="ask-header">
+              {labelText}
+              <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13.5px] font-medium leading-snug text-foreground">{heading}</div>
+              {meta && <span className="ml-auto min-w-0 shrink truncate pl-2 text-[12px] text-faint" title={meta} data-testid="ask-meta">{meta}</span>}
+            </div>
+            <div className="divide-y divide-hairline border-t border-hairline empty:hidden">{children}</div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-1.5 px-4 pt-3">{labelText}</div>
+            <div className="px-4 pb-3.5 pt-1.5">{children}</div>
+          </>
+        )}
         <div className="flex flex-wrap items-center gap-1.5 border-t border-hairline bg-veil-card px-3 py-2">
-          {aside && <div className="mr-auto flex items-center gap-1.5">{aside}</div>}
+          {aside && <div className="mr-auto flex items-center gap-1.5 pl-1">{aside}</div>}
           <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5" data-ask-actions>{actions}</div>
         </div>
         {note && <p className="border-t border-hairline px-4 py-2 text-xs text-muted-foreground" data-testid="answer-blocked">{note}</p>}
@@ -70,6 +93,25 @@ function EnterKey() {
   return <Kbd className="ml-1.5 h-4 min-w-4 bg-black/15 text-[10px] text-current">⏎</Kbd>;
 }
 
+/** The option a request's Escape answers: its first deny. */
+export function denyOption(ask: Pick<PendingAsk, "options">) {
+  return ask.options?.find((o) => o.kind === "deny") ?? null;
+}
+
+/**
+ * The options in the order the bar shows them, the primary last where the
+ * eye ends: Deny first, then the rest as the harness lists them, then the
+ * first option (the one Return answers).
+ */
+function barOrder<T extends { kind: string }>(options: T[]): { option: T; primary: boolean }[] {
+  const tagged = options.map((option, i) => ({ option, primary: i === 0 }));
+  return [
+    ...tagged.filter((t) => t.option.kind === "deny" && !t.primary),
+    ...tagged.filter((t) => t.option.kind !== "deny" && !t.primary),
+    ...tagged.filter((t) => t.primary),
+  ];
+}
+
 export function PermissionCard({
   ask,
   onAnswer,
@@ -77,6 +119,8 @@ export function PermissionCard({
   blockedReason = null,
   showDetail = true,
   aside,
+  meta = null,
+  takesKeys = false,
 }: {
   ask: PendingAsk;
   onAnswer: (optionId: string) => void;
@@ -87,71 +131,97 @@ export function PermissionCard({
    * me", and the reason is written under them.
    */
   blockedReason?: string | null;
-  /** Quote what is asked for (the command, file or tool) under the heading. */
+  /** Show what is asked for: an edit as its diff, anything else quoted (the command, file or tool). */
   showDetail?: boolean;
-  /** At the start of the action bar, such as stopping the session. */
+  /** At the start of the action bar, such as stopping the session; by default, that the agent waits. */
   aside?: ReactNode;
+  /** At the end of the header: the session's permission mode and project, as "Ask every time · tx-review-lab". */
+  meta?: string | null;
+  /** The card's view has the keys: the chat's Escape (the interrupt) denies the request instead. */
+  takesKeys?: boolean;
 }) {
   // An edit is shown as what it changes; anything else, or an edit that cannot be read exactly, as asked.
   const files = useMemo(() => (showDetail ? approvalFiles(ask.toolName, ask.input) : null), [showDetail, ask.toolName, ask.input]);
   const detail = showDetail && !files ? askDetail(ask) : null;
+  // A command's own working directory, where it says one: the session's is the project the header names.
   const workdir = showDetail ? field(ask.input, "workdir", "cwd") : null;
-  const directory = showDetail ? workdir ?? ask.cwd : null;
   // Why the card is up, in the app's words: in bypass mode, Claude Code's own safety check (#775). Never the agent's.
   const why = ask.reason?.trim() || null;
   // What the agent says of the call: what the command does, or why it wants it. Labelled as the agent's, so it is not read as why the card is up.
   const agentNote = showDetail ? askAgentNote(ask) : null;
   const note = showDetail && !agentNote ? ask.description?.trim() || null : null;
   const blocked = !!blockedReason;
+  const deny = denyOption(ask);
+  const escKeys = useShortcutKeys("session.interrupt");
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     // The card is shown by its own scroller; focus alone would scroll every box above it too, the window included.
-    // The first answer, not a control in the diff above it: Return still answers.
-    const first = ref.current?.querySelector<HTMLButtonElement>("[data-ask-actions] button");
-    first?.focus({ preventScroll: true });
-    if (first) revealInOwnScroller(first);
+    // The primary answer, not Deny before it nor a control in the diff above it: Return still answers.
+    const primary = ref.current?.querySelector<HTMLButtonElement>("[data-ask-actions] button[data-primary]");
+    primary?.focus({ preventScroll: true });
+    if (primary) revealInOwnScroller(primary);
   }, []);
+  // Escape denies, ahead of the interrupt it otherwise is: the turn is held on this card anyway.
+  const denyKey = useCallback(() => {
+    if (!deny || busy || blocked || hasEscapeOverlay() || document.activeElement?.closest(".editor-pane")) return false;
+    onAnswer(deny.id);
+    return true;
+  }, [deny, busy, blocked, onAnswer]);
+  useShortcut("session.interrupt", denyKey, { enabled: takesKeys && !!deny && !blocked, priority: 1 });
+  const verb = verbFor(ask.toolName ?? "", files?.length);
+  const what = verb.charAt(0).toUpperCase() + verb.slice(1);
   return (
     <AskShell
       ref={ref}
       icon={<ShieldAlert className="size-3.5" />}
-      label="Permission"
+      label="Approval"
       tone="warning"
-      aside={aside}
+      heading={
+        <>
+          <span data-testid="permission-title">{what}</span>
+          {files && files.length > 1 && <Counts added={files.reduce((n, f) => n + f.added, 0)} removed={files.reduce((n, f) => n + f.removed, 0)} className="font-normal" />}
+        </>
+      }
+      meta={meta}
+      aside={aside ?? <span className="text-[12px] text-muted-foreground">The agent waits until you decide.</span>}
       note={blocked ? blockedReason : null}
-      actions={ask.options?.map((o, i) => (
+      actions={barOrder(ask.options ?? []).map(({ option: o, primary }) => (
         <Button
           key={o.id}
           size="sm"
           // Blocked: the same quiet outline for every option, so Allow reads as off as Deny does.
-          variant={blocked || o.kind === "deny" ? "outline" : i === 0 ? "accent" : "secondary"}
+          variant={blocked || o.kind === "deny" ? "outline" : primary ? "accent" : "outline"}
           disabled={busy || blocked}
           title={blockedReason ?? undefined}
           onClick={() => onAnswer(o.id)}
+          data-primary={primary || undefined}
           className={cn((blocked || o.kind === "deny") && "text-muted-foreground")}
         >
           {o.kind === "deny" ? "Deny" : o.kind === "allow_once" ? "Allow" : o.kind === "allow_always" ? "Always allow" : o.kind === "allow_session" ? o.label : "Change permission mode"}
           {/* Return answers nothing for someone who may not answer. */}
-          {i === 0 && !blocked && <EnterKey />}
+          {primary && !blocked && <EnterKey />}
+          {o.kind === "deny" && !primary && !blocked && takesKeys && o.id === deny?.id && escKeys.length > 0 && (
+            <Kbd className="ml-1.5 h-4 min-w-4 px-1 text-[10px] lowercase text-current">{escKeys.join("")}</Kbd>
+          )}
         </Button>
       ))}
     >
-      <div className="flex flex-wrap items-baseline gap-x-2 text-[14px] font-medium leading-snug text-foreground">
-        <span>Waiting for permission to {verbFor(ask.toolName ?? "", files?.length)}</span>
-        {files && files.length > 1 && <Counts added={files.reduce((n, f) => n + f.added, 0)} removed={files.reduce((n, f) => n + f.removed, 0)} className="font-normal" />}
-      </div>
-      {why && <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/80" data-testid="permission-reason">{why}</p>}
-      {files && <ApprovalDiff files={files} cwd={directory ?? undefined} />}
-      {detail && (
-        <pre className="mt-2 max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
+      {why && <p className="whitespace-pre-wrap break-words px-4 py-2.5 text-xs leading-relaxed text-foreground/80" data-testid="permission-reason">{why}</p>}
+      {files && <ApprovalDiff files={files} cwd={workdir ?? ask.cwd ?? undefined} />}
+      {(detail || workdir || agentNote || note) && (
+        <div className="space-y-2 px-4 py-2.5">
+          {detail && (
+            <pre className="max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
+          )}
+          {workdir && <p className="break-words text-xs text-muted-foreground">Working directory: <code>{workdir}</code></p>}
+          {agentNote && (
+            <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground" data-testid="permission-agent-note">
+              <span className="font-medium text-foreground/70">Agent:</span> <span>{agentNote}</span>
+            </p>
+          )}
+          {note && <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{note}</p>}
+        </div>
       )}
-      {directory && <p className="mt-2 break-words text-xs text-muted-foreground">{workdir ? "Working directory" : "Session directory"}: <code>{directory}</code></p>}
-      {agentNote && (
-        <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground" data-testid="permission-agent-note">
-          <span className="font-medium text-foreground/70">Agent:</span> <span>{agentNote}</span>
-        </p>
-      )}
-      {note && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{note}</p>}
     </AskShell>
   );
 }
@@ -180,7 +250,7 @@ function verbFor(tool: string, files?: number): string {
     case "WebSearch":
       return "search the web";
     default:
-      return tool.startsWith("mcp__") ? "use an MCP tool" : "run";
+      return tool.startsWith("mcp__") ? "use an MCP tool" : tool ? `use ${tool}` : "run a tool";
   }
 }
 

@@ -701,31 +701,33 @@ impl WorkspaceGit {
         if !valid_object_id(base) || head.is_some_and(|head| !valid_object_id(head)) {
             return Err(RpcError::invalid("base and head are tree ids"));
         }
-        let bound = |text: Option<String>| text.map(|text| if text.len() > MAX_CONTENT_BYTES { TOO_LARGE.to_string() } else { text });
-        let before = bound(crate::git::blob_at(&repo.dir, base, &path).map_err(git_error)?);
-        let after = match head {
-            Some(head) => bound(crate::git::blob_at(&repo.dir, head, &path).map_err(git_error)?),
+        let (before, before_size) = crate::git::blob_text_at(&repo.dir, base, &path, MAX_CONTENT_BYTES).map_err(git_error)?;
+        let (after, after_size) = match head {
+            Some(head) => crate::git::blob_text_at(&repo.dir, head, &path, MAX_CONTENT_BYTES).map_err(git_error)?,
             None => self.working_file(&repo, &path)?,
         };
-        Ok(json!({ "before": before, "after": after }))
+        Ok(json!({ "before": before, "after": after, "beforeSize": before_size, "afterSize": after_size }))
     }
 
     /// A working-tree file, never through a link that leaves the workspace.
-    fn working_file(&self, repo: &Repo, path: &str) -> Result<Option<String>, RpcError> {
+    fn working_file(&self, repo: &Repo, path: &str) -> Result<(Option<String>, Option<u64>), RpcError> {
         let relative = if repo.name == "." { path.to_string() } else { format!("{}/{path}", repo.name) };
         let resolved = match self.files.existing_path(&relative) {
             Ok(resolved) => resolved,
-            Err(error) if error.code == "not_found" => return Ok(None),
+            Err(error) if error.code == "not_found" => return Ok((None, None)),
             Err(error) => return Err(error),
         };
-        let Ok(meta) = std::fs::metadata(&resolved) else { return Ok(None) };
+        let Ok(meta) = std::fs::metadata(&resolved) else { return Ok((None, None)) };
         if !meta.is_file() {
-            return Ok(None);
+            return Ok((None, None));
         }
         if meta.len() > MAX_CONTENT_BYTES as u64 {
-            return Ok(Some(TOO_LARGE.into()));
+            return Ok((Some(TOO_LARGE.into()), Some(meta.len())));
         }
-        Ok(std::fs::read(&resolved).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        Ok(match std::fs::read(&resolved) {
+            Ok(bytes) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
+            Err(_) => (None, None),
+        })
     }
 
     fn log(&self, params: &Value) -> Result<Value, RpcError> {

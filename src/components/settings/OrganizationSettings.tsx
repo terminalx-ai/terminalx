@@ -9,6 +9,7 @@ import { isMultiOrg } from "@/lib/multiOrg";
 import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
+import { OrganizationCloudCompute } from "./OrganizationCloudCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDelete } from "./OrganizationDelete";
 import { OrganizationConsoleLink } from "./OrganizationConsoleLink";
@@ -18,6 +19,7 @@ import { OrganizationEnvironment } from "./OrganizationEnvironment";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
+import { ProviderControls } from "./ProviderControls";
 import { managesWorkStatus, OrganizationWorkStatusSettings } from "./WorkStatusSettings";
 
 const ROLE: Record<string, string> = { owner: "an owner", admin: "an administrator", member: "a member" };
@@ -25,8 +27,9 @@ const ROLE: Record<string, string> = { owner: "an owner", admin: "an administrat
 /**
  * One organization's settings (PRO-107), chosen explicitly in Settings →
  * Organizations: its agent logins and work status, and while it is the
- * active organization its members, compute, GitHub, workspace settings,
- * environment, diagnostics and teardown. The page names the organization it
+ * active organization its members, cloud compute (providers, environment,
+ * limits and agent logins as tabs, PRO-391), GitHub, workspace settings,
+ * diagnostics and teardown. The page names the organization it
  * changes everywhere.
  *
  * Agent logins, work status (#441) and the console link to API keys and
@@ -84,14 +87,17 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
       {active ? (
         <>
           <RegisteredSetting setting="organizations.members" instance={organization.id}><div className="contents"><OrganizationMembers accountEmail={accountEmail} contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>
-          <RegisteredSetting setting="organizations.compute" instance={organization.id}><div className="contents"><OrganizationCompute contextRevision={contextRevision} /></div></RegisteredSetting>
-          {logins}
+          <OrganizationCloudCompute key={organization.id} organizationName={name} panels={{
+            providers: <RegisteredSetting setting="organizations.providers" instance={organization.id}><div className="contents"><ProviderControls contextRevision={contextRevision} /></div></RegisteredSetting>,
+            environment: <RegisteredSetting setting="organizations.environment" instance={organization.id}><div className="contents"><OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>,
+            limits: <RegisteredSetting setting="organizations.compute" instance={organization.id}><div className="contents"><OrganizationCompute contextRevision={contextRevision} /></div></RegisteredSetting>,
+            agentLogins: logins,
+          }} />
           {routes}
           {consoleLink}
           <RegisteredSetting setting="organizations.github" instance={organization.id}><div className="contents"><OrganizationGithubApp contextRevision={contextRevision} /></div></RegisteredSetting>
           {workStatus}
           <RegisteredSetting setting="organizations.workspace" instance={organization.id}><div className="contents"><OrganizationWorkspaceConfig contextRevision={contextRevision} /></div></RegisteredSetting>
-          <RegisteredSetting setting="organizations.environment" instance={organization.id}><div className="contents"><OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} /></div></RegisteredSetting>
           <RegisteredSetting setting="organizations.diagnostics" instance={organization.id}><div className="contents"><OrganizationDiagnostics contextRevision={contextRevision} member={member} /></div></RegisteredSetting>
           <RegisteredSetting setting="organizations.teardown" instance={organization.id}><div className="contents"><OrganizationCloudTeardown contextRevision={contextRevision} organizationId={organization.id} organizationName={name} member={member} /></div></RegisteredSetting>
         </>

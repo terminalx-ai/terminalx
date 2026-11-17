@@ -1,13 +1,15 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
 import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
 import { isTabMuted } from "@/lib/tabLayouts";
-import { isUnread, sessionColumn } from "@/lib/dashboard";
+import { isUnread, sessionColumn, type DashboardSession } from "@/lib/dashboard";
 import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subscribeCloudDashboard, type CloudAttention } from "@/lib/cloudDashboard";
-import { isCloudKey } from "@/types/target";
+import { createMachineAttentionTracker, getMachineDashboard, openMachineSession, subscribeMachineDashboard, type MachineAttention } from "@/lib/machineDashboard";
+import { isCloudKey, isMachineKey } from "@/types/target";
 import { appWindow, type AppWindow } from "@/lib/appWindow";
 import { getFloating, showFloatingWindow, subscribeFloating } from "@/lib/floating";
 import { bootLocalSharing, onJoinRequest, openSessionShare, shownShareDialog, type JoinRequest } from "@/lib/localSharing";
@@ -40,13 +42,15 @@ export interface Notice {
   sessionId: string;
   tabId: string;
   kind: NoticeKind;
-  /** The agent, for a session the local store does not hold (a cloud one). */
+  /** The agent, for a session the local store does not hold (a cloud or machine one). */
   harness?: string;
   title: string;
   body: string;
   at: number;
   /** Opened, it also opens this on the session: Share, for someone waiting to be admitted. */
   opens?: "share";
+  /** Drawn with an Open button under its text (21.09's "Mac mini needs you"), not as one clickable card. */
+  action?: "open";
 }
 
 let notices: Notice[] = [];
@@ -98,6 +102,8 @@ export function dismissNotice(id: string) {
 export function openNotice(n: Notice) {
   // A cloud session opens on the tab that asked, and only looks: nothing wakes its workspace.
   if (isCloudKey(n.sessionId)) openCloudSession(n.sessionId, n.tabId);
+  // A session on a paired machine opens in its machine's view (PRO-346).
+  else if (isMachineKey(n.sessionId)) openMachineSession(n.sessionId);
   else selectSession(n.sessionId);
   if (n.opens === "share") openSessionShare(n.sessionId);
   dismissNotice(n.id);
@@ -347,6 +353,45 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   expireNotice(id);
 }
 
+/** What the runtime says when automatic account switching (#981) moved a tab, or found no account with room. */
+export interface AccountSwitchNotice {
+  sessionId: string;
+  tabId: string;
+  agent: string;
+  outcome: "switched" | "started" | "noneAvailable" | "failed";
+  /** The line the tab's conversation shows. */
+  text: string;
+  /** The setting asks for a notification of this. */
+  notify: boolean;
+}
+
+/**
+ * One notification per automatic switch, and one when no account has room,
+ * for a tab that is not in view; none when the setting is off for it or the
+ * tab is muted. The conversation line says it in the tab itself.
+ */
+export function noteAccountSwitch(notice: AccountSwitchNotice) {
+  if (!notice.notify || (notice.outcome !== "switched" && notice.outcome !== "noneAvailable")) return;
+  const session = getSessions().sessions.find((candidate) => candidate.id === notice.sessionId);
+  if (!session || session.parent) return;
+  if (isTabMuted(session, notice.tabId, getSessions().chatsPath)) return;
+  const onScreen = looking() && getSessions().selectedSessionId === session.id;
+  if (onScreen) return;
+  const title = notice.outcome === "switched" ? `${session.title?.trim() || "A session"} switched accounts` : `${session.title?.trim() || "A session"} is out of usage`;
+  const body = notice.text;
+  if (!looking()) {
+    if (!sendsBanner()) return;
+    raised = { sessionId: session.id, tabId: notice.tabId };
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  const kind: NoticeKind = notice.outcome === "switched" ? "done" : "waiting";
+  const id = `account-switch:${session.id}:${notice.tabId}:${Date.now()}`;
+  notices = [...notices.filter((n) => !(n.sessionId === session.id && n.tabId === notice.tabId)), { id, sessionId: session.id, tabId: notice.tabId, kind, title, body, at: Date.now() }];
+  emit();
+  expireNotice(id);
+}
+
 /** Automation failures use the same focus-aware path as agent attention. */
 export function noteAutomationFailure(name: string, run: AutomationRun) {
   const title = `${name} failed`;
@@ -454,6 +499,50 @@ function onCloudSessions() {
   for (const event of observeCloud(getCloudDashboard())) raiseCloudAttention(event);
 }
 
+// ---- sessions on paired machines (PRO-346)
+
+let observeMachines: ReturnType<typeof createMachineAttentionTracker> | null = null;
+
+/** Raise a machine session's wait or finish: the same focus-aware path as a local tab's. */
+export function raiseMachineAttention({ kind, session, tab }: MachineAttention) {
+  const agent = agentLabel(tab.harness);
+  const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : `${agent} finished`}`;
+  const where = `${session.title} · ${session.machineName}`;
+  const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : `${where}. Open the session to review the conversation.`;
+  if (kind === "waiting") noteNeedsReader(session.key, session.title);
+  if (!looking()) {
+    if (!sendsBanner()) return;
+    raised = { sessionId: session.key, tabId: tab.tabId };
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound(kind);
+  if (getSessions().selectedSessionId === session.key) return;
+  const id = `${session.key}:${tab.tabId}:${Date.now()}`;
+  // In the app, a wait names the machine (21.09): "Mac mini needs you", with Open.
+  const notice: Notice =
+    kind === "waiting"
+      ? { id, sessionId: session.key, tabId: tab.tabId, kind, title: `${session.machineName} needs you`, body: machineWaitText(session.title, tab.pendingApprovals), at: Date.now(), action: "open" }
+      : { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() };
+  notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), notice];
+  emit();
+  expireNotice(id);
+}
+
+/** "Bisect the flaky relay e2e is waiting for an approval." (21.09). */
+export function machineWaitText(sessionTitle: string, pendingApprovals: number): string {
+  return `${sessionTitle} is waiting for ${pendingApprovals > 0 ? "an approval" : "you"}.`;
+}
+
+function onMachineSessions() {
+  observeMachines ??= createMachineAttentionTracker();
+  // Off, the list is empty: the tracker forgets every tab, and turning it on again starts from what is known then.
+  for (const event of observeMachines(getMachineDashboard())) raiseMachineAttention(event);
+}
+
+/** Sessions that want the reader back: waiting, or finished and unread. */
+const wantsReader = (s: DashboardSession) => !s.archived && s.tabs.length > 0 && (sessionColumn(s) === "needs" || isUnread(s));
+
 // ---- dock badge
 
 let lastBadge = -1;
@@ -463,8 +552,10 @@ function refreshBadge() {
   if (appWindow() !== "main") return;
   const local = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
   // Cloud sessions that want the reader back: waiting, or finished and unread.
-  const cloud = getCloudDashboard().filter((s) => !s.archived && s.tabs.length > 0 && (sessionColumn(s) === "needs" || isUnread(s))).length;
-  const n = local + cloud;
+  const cloud = getCloudDashboard().filter(wantsReader).length;
+  // Sessions on paired machines count the same way; none while no machine is paired.
+  const machines = getMachineDashboard().filter(wantsReader).length;
+  const n = local + cloud + machines;
   if (n === lastBadge) return;
   lastBadge = n;
   try {
@@ -490,7 +581,9 @@ export function startNotifications() {
     publishPresence();
   });
   subscribeFloating(publishPresence);
-  // Cloud sessions and the badge are the main window's: the floating window shows neither.
+  // Each window hears each switch and decides for itself, as for a status change.
+  void Promise.resolve().then(() => listen<AccountSwitchNotice>("account_switch", ({ payload }) => noteAccountSwitch(payload))).catch(() => {});
+  // Cloud and machine sessions and the badge are the main window's: the floating window shows none of them.
   if (appWindow() !== "main") return;
   // Secondary windows are made by this run. Discard presence from a previous
   // run before any can be created.
@@ -511,6 +604,11 @@ export function startNotifications() {
     refreshBadge();
   });
   onCloudSessions();
+  subscribeMachineDashboard(() => {
+    onMachineSessions();
+    refreshBadge();
+  });
+  onMachineSessions();
   refreshBadge();
 }
 

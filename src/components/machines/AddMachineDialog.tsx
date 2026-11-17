@@ -1,14 +1,17 @@
-import { useRef, useState } from "react";
-import { CheckCircle2, Check, Loader2, Monitor, X } from "@/icons";
+import { useLayoutEffect, useRef, useState } from "react";
+import { CheckCircle2, Check, LoaderCircle, Monitor, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { minutesSeconds, useSecondsLeft } from "@/components/pairing/pairingText";
-import { errorMessage } from "@/lib/api";
+import { minutesSeconds } from "@/components/pairing/pairingText";
 import { cn } from "@/lib/cn";
-import { machinesApi } from "@/lib/machines";
-import { MACHINE_CODE_PREFIX, type InspectedMachineCode, type MachinePairingFailure, type MachineRoute, type PairedMachine } from "@/types/machines";
+import { MACHINE_CODE_PREFIX, type MachineRoute, type PairedMachine } from "@/types/machines";
+import { AccountTab } from "./AccountTab";
+import { HeadlessServerTab } from "./HeadlessServerTab";
 import { FingerprintBox, PlatformIcon, machineSummary, sectionLabel, soft } from "./machineText";
+import { failureCopy, useMachinePairing, type MachinePairing } from "./useMachinePairing";
+
+export { failureCopy };
 
 const ROUTE_OPTIONS = [
   { value: "relayAndNearby" as const, label: "Relay and nearby" },
@@ -22,118 +25,52 @@ export function routeHint(route: MachineRoute, name: string): string {
     : `Reaches ${name} only on this network or through Tailscale. The connection is end-to-end encrypted.`;
 }
 
-/** What went wrong, and whether the same code may be tried again. */
-export function failureCopy(reason: MachinePairingFailure, name: string): { title: string; detail: string; retry: boolean } {
-  switch (reason) {
-    case "not-approved":
-      return { title: `${name} did not allow this Mac`, detail: `Don’t allow was chosen there, or no one answered within two minutes. Create a new code on ${name} to try again.`, retry: false };
-    case "code-inactive":
-      return { title: "This code no longer works", detail: `It expired, was used, or a newer code replaced it. Create a new code on ${name} and paste it here.`, retry: false };
-    case "another-computer":
-      return { title: `Another computer is waiting on ${name}`, detail: "Only one computer can ask at a time. Try again once it has been answered.", retry: true };
-    case "pairing-paused":
-      return { title: `Pairing is paused on ${name}`, detail: "Too many wrong codes were tried there. Try again in a minute.", retry: true };
-    case "unreachable":
-      return { title: `This Mac could not reach ${name}`, detail: `Check that ${name} is awake and on this network or Tailscale, then try again.`, retry: true };
-    case "invalid-code":
-      return { title: "This is not a machine pairing code", detail: "Copy it again from Settings → Machines on the other computer.", retry: false };
-    case "cancelled":
-      return { title: "Pairing was cancelled", detail: "Paste the code again to pair.", retry: true };
-  }
-}
-
-type Step =
-  | { kind: "empty" }
-  | { kind: "inspecting" }
-  | { kind: "invalid"; detail: string | null }
-  | { kind: "waiting"; inspected: InspectedMachineCode }
-  | { kind: "paired"; inspected: InspectedMachineCode; machine: PairedMachine }
-  | { kind: "failed"; inspected: InspectedMachineCode; reason: MachinePairingFailure }
-  | { kind: "fault"; inspected: InspectedMachineCode; message: string };
-
-/** Screen 21.04 with the pairing code only (owner decision 4): paste a code, compare the fingerprint, wait for Allow. */
+/** Screens 21.03 (On your account), 21.04 (Pairing code) and 21.06 (Headless server). */
 export function AddMachineDialog({ open, onOpenChange, onPaired }: { open: boolean; onOpenChange: (open: boolean) => void; onPaired?: (machine: PairedMachine) => void }) {
   if (!open) return null;
   return <AddMachine onClose={() => onOpenChange(false)} onPaired={onPaired} />;
 }
 
+type AddTab = "account" | "pairingCode" | "headless";
+const TABS: { value: AddTab; label: string }[] = [
+  { value: "account", label: "On your account" },
+  { value: "pairingCode", label: "Pairing code" },
+  { value: "headless", label: "Headless server" },
+];
+
 function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (machine: PairedMachine) => void }) {
-  const [code, setCode] = useState("");
-  const [step, setStep] = useState<Step>({ kind: "empty" });
-  const [route, setRoute] = useState<MachineRoute>("relayAndNearby");
-  const [routeError, setRouteError] = useState<string | null>(null);
-  // The route chosen when Allow arrives wins, so it stays live while waiting.
-  const routeNow = useRef(route);
-  routeNow.current = route;
-  // Each paste or attempt outdates the ones before: a late answer to an old one is dropped.
-  const attempt = useRef(0);
+  const [tab, setTab] = useState<AddTab>("account");
+  // Each tab keeps its own code; leaving a tab cancels a pairing it is waiting on.
+  const byAccount = useMachinePairing({ askOnRead: true, onPaired });
+  const byCode = useMachinePairing({ askOnRead: true, onPaired });
+  const headless = useMachinePairing({ askOnRead: false, onPaired });
+  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ account: null, pairingCode: null, headless: null });
+  const pairingOf = (which: AddTab) => (which === "account" ? byAccount : which === "pairingCode" ? byCode : headless);
 
-  const inspected = "inspected" in step ? step.inspected : null;
-  const name = inspected?.machine.name ?? "the machine";
-  const remaining = useSecondsLeft(inspected?.expiresAt ?? null);
-
-  const pair = async (text: string, found: InspectedMachineCode) => {
-    const mine = ++attempt.current;
-    setStep({ kind: "waiting", inspected: found });
-    try {
-      const result = await machinesApi.pair(text, routeNow.current);
-      if (attempt.current !== mine) return;
-      if (!result.paired) {
-        if (result.reason === "cancelled") return;
-        setStep({ kind: "failed", inspected: found, reason: result.reason });
-        return;
-      }
-      let machine = result.machine;
-      if (machine.route !== routeNow.current) {
-        try {
-          await machinesApi.setRoute(machine.machineId, routeNow.current);
-          machine = { ...machine, route: routeNow.current };
-        } catch (error) {
-          setRouteError(errorMessage(error));
-        }
-      }
-      if (attempt.current !== mine) return;
-      setStep({ kind: "paired", inspected: found, machine });
-      onPaired?.(machine);
-    } catch (error) {
-      if (attempt.current === mine) setStep({ kind: "fault", inspected: found, message: errorMessage(error) });
-    }
+  const choose = (next: AddTab) => {
+    if (next === tab) return;
+    pairingOf(tab).cancel();
+    setTab(next);
   };
-
-  const changeCode = async (value: string) => {
-    setCode(value);
-    setRouteError(null);
-    const text = value.trim();
-    const mine = ++attempt.current;
-    if (!text) return setStep({ kind: "empty" });
-    if (!text.startsWith(MACHINE_CODE_PREFIX)) return setStep({ kind: "invalid", detail: null });
-    setStep({ kind: "inspecting" });
-    try {
-      const found = await machinesApi.inspectCode(text);
-      if (attempt.current !== mine) return;
-      // The code names the machine and the fingerprint: ask at once, the person compares while it waits.
-      void pair(text, found);
-    } catch (error) {
-      if (attempt.current === mine) setStep({ kind: "invalid", detail: errorMessage(error) });
-    }
+  const onTabKey = (event: React.KeyboardEvent) => {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+    event.preventDefault();
+    const at = TABS.findIndex((t) => t.value === tab);
+    const next = TABS[(at + (event.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length].value;
+    choose(next);
+    tabRefs.current[next]?.focus();
   };
 
   const close = () => {
-    if (step.kind === "waiting") {
-      attempt.current++;
-      void machinesApi.cancelPairing().catch(() => undefined);
-    }
+    byAccount.cancel();
+    byCode.cancel();
+    headless.cancel();
     onClose();
   };
 
-  const waiting = step.kind === "waiting";
-  const failure = step.kind === "failed" ? failureCopy(step.reason, name) : null;
-  // A code that was refused for good is spent: paste a new one. One that may work again stays.
-  const codeLocked = waiting || step.kind === "inspecting" || step.kind === "paired";
-
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[720px]" showClose={false} className="gap-0 p-0" data-testid="add-machine">
+      <DialogContent width={tab === "headless" ? "max-w-[820px]" : tab === "account" ? "max-w-[640px]" : "max-w-[720px]"} showClose={false} className="gap-0 p-0" data-testid="add-machine">
         <header className="flex h-14 items-center gap-2.5 border-b border-hairline px-5">
           <Monitor className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 leading-4">
@@ -146,6 +83,69 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
             </Button>
           </DialogClose>
         </header>
+        <div className="px-5 pt-4">
+          <div role="tablist" aria-label="How to add the machine" className="inline-flex max-w-full rounded-md border border-hairline bg-raised p-0.5" onKeyDown={onTabKey}>
+            {TABS.map((t) => (
+              <button
+                key={t.value}
+                ref={(el) => {
+                  tabRefs.current[t.value] = el;
+                }}
+                type="button"
+                role="tab"
+                id={`add-machine-tab-${t.value}`}
+                aria-selected={tab === t.value}
+                aria-controls={`add-machine-panel-${t.value}`}
+                tabIndex={tab === t.value ? 0 : -1}
+                onClick={() => choose(t.value)}
+                className={cn(
+                  "flex h-7 items-center whitespace-nowrap rounded-[5px] px-3 text-[12.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  tab === t.value ? "bg-selected text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div role="tabpanel" id={`add-machine-panel-${tab}`}>
+          {tab === "account" ? (
+            <AccountTab pairing={byAccount} onClose={close} onDone={onClose} onUseCode={() => choose("pairingCode")} />
+          ) : tab === "pairingCode" ? (
+            <PairingCodeTab pairing={byCode} onClose={close} onDone={onClose} />
+          ) : (
+            <HeadlessServerTab pairing={headless} onClose={close} onDone={onClose} />
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Screen 21.04: paste a code, compare the fingerprint, wait for Allow. */
+function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing; onClose: () => void; onDone: () => void }) {
+  const { code, step, inspected, remaining, route, setRoute, routeError, changeCode, ask } = pairing;
+  const name = inspected?.machine.name ?? "the machine";
+  const waiting = step.kind === "waiting";
+  const failure = step.kind === "failed" ? failureCopy(step.reason, name) : null;
+  // A code that was refused for good is spent: paste a new one. One that may work again stays.
+  const codeLocked = waiting || step.kind === "inspecting" || step.kind === "paired";
+  // The field grows to show the whole code: a pasted one wraps past the three rows it starts with.
+  const codeField = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    const fit = () => {
+      const field = codeField.current;
+      if (!field) return;
+      field.style.height = "auto";
+      if (field.scrollHeight > 0) field.style.height = `${field.scrollHeight + field.offsetHeight - field.clientHeight}px`;
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [code]);
+
+  return (
+    <>
         <div className="grid grid-cols-[minmax(0,1fr)_260px] max-[699px]:grid-cols-1">
           <div className="grid min-w-0 content-start gap-3 p-5">
             <div className="grid gap-1">
@@ -153,6 +153,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
               <p className={soft}>On the other computer, open Settings → Machines and choose Create pairing code.</p>
             </div>
             <textarea
+              ref={codeField}
               id="machine-code"
               value={code}
               readOnly={codeLocked}
@@ -163,8 +164,9 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
               aria-invalid={step.kind === "invalid" || (step.kind === "failed" && step.reason === "invalid-code") ? true : undefined}
               onChange={(event) => void changeCode(event.target.value)}
               className={cn(
-                "w-full resize-none break-all rounded-lg border border-hairline-strong bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring",
-                codeLocked && "text-muted-foreground",
+                "w-full resize-none overflow-hidden break-all rounded-lg border bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px] outline-none placeholder:text-faint",
+                // Read-only while it waits: a plain hairline, and no focus ring on a field that takes no typing.
+                codeLocked ? "border-hairline text-muted-foreground" : "border-hairline-strong focus-visible:ring-2 focus-visible:ring-ring",
               )}
             />
             {step.kind === "invalid" && (
@@ -174,7 +176,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
               </div>
             )}
             {step.kind === "inspecting" && (
-              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden /> Reading the code…</div>
+              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><LoaderCircle className="size-4 animate-spin" aria-hidden /> Reading the code…</div>
             )}
             {inspected && (
               <div className="flex items-center gap-3 rounded-lg border border-hairline px-3 py-2.5" data-testid="machine-card">
@@ -217,7 +219,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
                 )}
                 {waiting && (
                   <div className="flex items-center gap-2 text-[12.5px] text-info" role="status">
-                    <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
+                    <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
                   </div>
                 )}
                 {failure && (
@@ -247,17 +249,16 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
                   : "A code works once and lasts five minutes."}
           </span>
           {step.kind === "paired" ? (
-            <Button size="sm" onClick={onClose}>Done</Button>
+            <Button size="sm" onClick={onDone}>Done</Button>
           ) : (
             <>
               {inspected && (failure?.retry || step.kind === "fault") && remaining > 0 && (
-                <Button variant="outline" size="sm" onClick={() => void pair(code.trim(), inspected)}>Try again</Button>
+                <Button variant="outline" size="sm" onClick={ask}>Try again</Button>
               )}
-              <Button variant="outline" size="sm" onClick={close}>Cancel</Button>
+              <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
             </>
           )}
         </footer>
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

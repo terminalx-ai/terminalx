@@ -24,7 +24,7 @@
 //
 // Since the chat-first sidebar (#484) a local session is opened from its
 // conversation row and its tabs from the title bar's strip; a cloud session is
-// not listed in the sidebar, so it is opened from the Dashboard destination.
+// not listed in the sidebar, so it is opened from the Overview destination.
 //
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-dictation-edits
 import { launch, open, openConversation, report, serve, sidebar, tab } from "./harness.mjs";
@@ -84,8 +84,8 @@ const SURFACES = {
   "a cloud tab's composer": async () => {
     const page = await app({ cloud: true, localProjects: 0, session: { role: "manager", lines: 2 } });
     const title = await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle);
-    // The Dashboard lists the finished cloud session under Done, as "<title>, <agent>, in <org> cloud".
-    await (await sidebar(page)).getByRole("button", { name: /^Dashboard, / }).click();
+    // The Overview lists the finished cloud session under Done, as "<title>, <agent>, in <org> cloud".
+    await (await sidebar(page)).getByRole("button", { name: /^Overview, / }).click();
     await page.getByRole("region", { name: "Done" }).getByRole("button", { name: new RegExp(`^${title}, `) }).click();
     await page.locator('[data-testid="cloud-agent-lease"]').waitFor();
     return { page, field: await composer(page, "main textarea[data-composer]") };

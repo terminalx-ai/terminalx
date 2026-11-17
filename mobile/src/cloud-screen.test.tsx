@@ -36,7 +36,7 @@ vi.mock("react-native", () => {
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style, hitSlop }: any) => <button disabled={disabled} aria-label={accessibilityLabel} data-hitslop={hitSlop} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, ...rest }: any) => (mocks.listProps = { data, ...rest }) && <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
@@ -146,6 +146,7 @@ describe("the Cloud tab", () => {
       organization("org-1", "Acme", [
         item("fix-login", { runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
         item("old-work", { state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+        item("warm-up", { state: "suspended", lastActivityAt: minutesAgo(2 * 24 * 60 + 5) }),
       ]),
       organization("org-2", "Beta", [], "cloud_provider_unavailable"),
     ]);
@@ -154,6 +155,8 @@ describe("the Cloud tab", () => {
     const row = button("fix-login, Needs your answer, Can send");
     expect(row.textContent).toBe("fix-loginNeeds your answer · 6macme/web · tx/fix-login");
     expect(button("old-work, Stopped, View only, Shared with 3").textContent).toBe("old-workStopped");
+    // Days, where the status has room for them, as 22.06 says them.
+    expect(button("warm-up, Stopped, Can send").textContent).toBe("warm-upStopped · 2 days ago");
     expect(text()).toContain("The cloud provider is not answering right now.");
     // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
     const leave = mocks.focus.at(-1)!();
@@ -423,13 +426,16 @@ describe("a cloud workspace screen", () => {
     expect(container.querySelector("input")).toBeNull();
   });
 
-  it("puts Sharing in the header as an icon button with a 44 pt target, and the role as plain text (#988)", async () => {
+  it("puts Sharing in the session's own bar as a glass icon button with a 44 pt target, and the role as plain text (#988, 22.06)", async () => {
     world({ role: "manager" });
     await show(<CloudWorkspaceScreen />);
-    const sharing = container.querySelector('[data-testid="header-right"] button')!;
-    expect(sharing.getAttribute("aria-label")).toBe("Sharing");
+    // The screen draws its own bar, as a session does: nothing is left to the navigator's.
+    expect(container.querySelector('[data-testid="header-right"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Back"]')).not.toBeNull();
+    const sharing = container.querySelector('button[aria-label="Sharing"]')!;
     expect(sharing.textContent).toBe("");
-    expect(JSON.parse(sharing.getAttribute("data-style")!)).toMatchObject({ width: 44, height: 44 });
+    // A 40 pt glass circle with 6 pt more to tap on each side: 52 pt.
+    expect(Number(sharing.getAttribute("data-hitslop"))).toBeGreaterThanOrEqual(2);
     expect([...container.querySelectorAll("button")].some((entry) => /manager/i.test(entry.textContent ?? ""))).toBe(false);
   });
 

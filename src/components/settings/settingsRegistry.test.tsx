@@ -58,14 +58,17 @@ describe("settings registry", () => {
   });
 
   it("resolves row links and safely defaults unknown legacy targets", () => {
-    expect(resolveSetting("appearance.textSize").section).toBe("appearance");
-    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("account.identity");
+    expect(resolveSetting("general.textSize").section).toBe("general");
+    // PRO-377 moved these rows from Appearance: a link copied before still opens the row.
+    expect(resolveSetting("appearance.textSize").id).toBe("general.textSize");
+    expect(resolveSetting("appearance.statusBar").id).toBe("general.statusBar");
+    for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("general.websiteLinks");
   });
 
   it("keeps the linkable allowlist to reversible, local display and sound switches", () => {
     // A link from another app can turn these on, and nothing else. Review any change here as a security boundary.
     expect(SETTINGS_ROWS.filter((row) => "linkable" in row && row.linkable).map((row) => row.id)).toEqual(["general.sounds", "general.turnChanges", "general.promptMap"]);
-    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "general.dataPrivacy", "general.websiteLinks", "general.linkActions", "general.useWorktree", "account.workStatus", "account.sharing", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex", "experimental.sessionCost", "transcription.remoteContext"]) {
+    for (const id of ["agents.readOnlyCommands", "orchestrator.workerMode", "orchestrator.requireApproval", "general.cloudControl", "general.computerUse", "account.dataPrivacy", "general.websiteLinks", "general.linkActions", "general.useWorktree", "account.workStatus", "account.sharing", "integrations.linear", "experimental.orchestratorRuns", "experimental.nativeCodex", "experimental.sessionCost", "transcription.remoteContext"]) {
       // resolveSetting falls back to account.identity for an unknown id, so check the row is the one named.
       expect(resolveSetting(id).id).toBe(id);
       expect("linkable" in resolveSetting(id) && resolveSetting(id).linkable, id).toBeFalsy();
@@ -94,7 +97,8 @@ describe("settings registry", () => {
     for (const row of SETTINGS_ROWS) {
       const view = render(<>{row.render(row.layout === "content" ? { children: <section>Editor</section> } : { control: <span>Control</span> })}</>);
       const actions = screen.queryByRole("button", { name: `Actions for ${row.title}` });
-      if (row.layout === "content") expect(actions, row.id).toBeNull();
+      // The theme cards are the whole Theme row: no menu beside its title (design 09.08, PRO-377).
+      if (row.layout === "content" || row.id === "appearance.theme") expect(actions, row.id).toBeNull();
       else expect(actions, row.id).toBeTruthy();
       view.unmount();
     }
@@ -111,6 +115,9 @@ it("keeps global settings rows in the registry", () => {
   // PRO-155's action editor is mounted as one registered row (repositories.actions),
   // but its dialog switches edit an unsaved action draft; registering them would
   // advertise row links that cannot open.
-  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx"], { query: "?raw", import: "default", eager: true });
+  // #981's automatic account switching is one agent's editor inside its accounts
+  // card, shown only with two or more subscription accounts: row links to it
+  // would usually lead nowhere, for the same reason.
+  const adapters = import.meta.glob(["./*.tsx", "!./*.test.tsx", "!./settingsRegistry.tsx", "!./WorkStatusSettings.tsx", "!./RepositoryActionsSettings.tsx", "!./AgentAutoSwitch.tsx"], { query: "?raw", import: "default", eager: true });
   for (const [path, source] of Object.entries(adapters)) expect(source, path).not.toMatch(/<SettingRow\b/);
 });

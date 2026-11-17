@@ -1,4 +1,8 @@
 import { PresenceFaces } from "@/components/dashboard/TeamOverview";
+import { MemberProfile, memberName } from "@/components/people/MemberProfile";
+import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
+import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { UserRound } from "@/icons";
 import { CloudWorkspaceAttention } from "@/components/cloud/CloudWorkspaceAttention";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { ManualStatusMenu } from "@/components/session/ManualStatus";
@@ -64,8 +68,8 @@ import { useFold } from "../useFold";
 
 /**
  * A cloud project's rows in the chat-first sidebar, drawn as the local
- * projects are: the project, then its sessions along a guide line; a project
- * with several workspaces names each over its sessions. Every row keeps its
+ * projects are: the project, then one row per session. Workspace rows remain
+ * only for empty or unloaded workspaces. Every row keeps its
  * menu: the project's (new session, pin, its section, the workspace
  * lifecycle), a workspace's (its lifecycle) and a session's (rename, pin,
  * archive, delete). Looking costs nothing: rows read the catalog and this
@@ -162,7 +166,7 @@ function startNewCloudSession(projectKey: string) {
 
 // ---- projects --------------------------------------------------------------
 
-/** A cloud project, then its sessions along a guide line, like a local project's branches. */
+/** A cloud project, then its sessions under it, as a local project's are (02.04). */
 export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProject; onLifecycle: OnLifecycle }) {
   const store = useSessionStore();
   const { cloudProjects } = usePrefs();
@@ -202,9 +206,9 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const extra = only ? extraRepositories(only.item) : null;
 
   return (
-    <div role="group" aria-label={project.fullName} className="mb-1" data-testid="cloud-project-group" data-project={project.key}>
+    <div role="group" aria-label={project.fullName} className="mb-2" data-testid="cloud-project-group" data-project={project.key}>
       <div
-        className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md px-2", drafting ? "bg-selected" : "hover:bg-selected/50")}
+        className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-2 rounded-md pl-2.5 pr-1", drafting ? "bg-selected" : "hover:bg-selected/50")}
         title={[project.blank ? `${project.fullName} · no repository` : project.identity, extra?.card].filter(Boolean).join("\n")}
         {...menu.surface}
       >
@@ -215,24 +219,14 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
           aria-label={open ? `Collapse ${project.fullName}` : `Expand ${project.fullName}`}
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
-          <span className="relative size-4 shrink-0">
-            <span className={cn("absolute inset-0 transition-opacity duration-150", open ? "group-hover/row:opacity-0 group-focus-within/row:opacity-0" : "opacity-0")} aria-hidden>
-              {project.blank ? <Folder className="size-4 text-faint" /> : <FolderGit2 className="size-4 text-faint" />}
-            </span>
-            <ChevronDown
-              className={cn(
-                "absolute inset-0 size-4 text-muted-foreground transition-[opacity,transform] duration-200",
-                open ? "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100" : "-rotate-90 opacity-100",
-              )}
-            />
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[13px]">{project.fullName}</span>
+          {/* The project's picture stays (PRO-373); its fold is the chevron at the row's end. A project with no repository says so in its tooltip. */}
+          <span aria-hidden className="flex shrink-0">{project.blank ? <Folder className="size-3.5 text-muted-foreground" /> : <FolderGit2 className="size-3.5 text-muted-foreground" />}</span>
+          <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-muted-foreground">{project.fullName}</span>
           {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
-          {project.blank && <Chip>no repo</Chip>}
           {!project.selected && <Chip>not accessible</Chip>}
           {onlyState && NAMED_TONES.has(onlyState.tone) && (
-            <span className={cn("flex shrink-0 items-center gap-1 text-[10px] text-faint", onlyState.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
+            <span className={cn("flex shrink-0 items-center gap-1 text-[11px] text-faint", onlyState.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
               <span aria-hidden className={cn("size-1.5 rounded-full", DOT[onlyState.tone])} />
               {onlyState.label}
             </span>
@@ -319,6 +313,9 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
             </DropdownMenuContent>
           </DropdownMenu>
         </RowActions>
+        <span aria-hidden className={cn("flex size-5 shrink-0 items-center justify-center text-faint transition-opacity", open && "opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100")}>
+          <ChevronDown className={cn("size-3 transition-transform duration-200", !open && "-rotate-90")} />
+        </span>
       </div>
       {only && <CloudWorkspaceAttention item={only.item} input={{ agentRan: onlyAgentRan, connection: onlyConnection.state }} compact />}
       {error && <p className="ml-8 text-[10px] text-destructive">{error}</p>}
@@ -331,8 +328,8 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
         data-testid="cloud-project-sessions"
       >
         <div className="min-h-0 overflow-hidden">
-          <ul className="ml-[15px] flex flex-col gap-px border-l border-hairline pl-1.5">
-            {project.workspaces.length === 0 && <li className="px-2 py-1 text-[12px] text-faint">{project.blank ? "No sessions yet. + starts one." : "No workspace yet."}</li>}
+          <ul className="flex flex-col [--indent:10px]">
+            {project.workspaces.length === 0 && <li className="py-1 pl-[26px] pr-2 text-[12px] text-faint">{project.blank ? "No sessions yet. + starts one." : "No workspace yet."}</li>}
             {project.workspaces.map((node) => (
               <WorkspaceRows key={node.key} node={node} named={grouped} open={open} onLifecycle={onLifecycle} />
             ))}
@@ -438,12 +435,12 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
   const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
-  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
+  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} node={node} activity={activity} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
   const rows = (
     <>
       {sidebarLayout === "status" ? <StatusGroups sessions={sessions} scope={node.key}>{sessionRow}</StatusGroups> : sessions.map(sessionRow)}
       {sessions.length === 0 && (
-        <li className="truncate px-2 py-1 text-[12px] text-faint" data-testid="cloud-workspace-empty" data-workspace={workspace.id} title={workspaceCard(node.item, activity)}>
+        <li className="truncate py-1 pl-[calc(1rem+var(--indent,0px))] pr-2 text-[12px] text-faint" data-testid="cloud-workspace-empty" data-workspace={workspace.id} title={workspaceCard(node.item, activity)}>
           {known ? (
             "No sessions yet."
           ) : !openable ? (
@@ -457,13 +454,14 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
       )}
     </>
   );
+  const attentionInput = { tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state };
   if (!named) return rows;
   const selected = store.selectedCloudWorkspace === node.key;
   const extra = extraRepositories(node.item);
   return (
     <li data-testid="cloud-workspace-group" data-workspace={workspace.id}>
       <div
-        className={cn(actionRow, "relative flex h-8 min-w-0 items-center gap-2 rounded-md pl-2 pr-1 text-foreground/85", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
+        className={cn(actionRow, "relative flex h-[30px] min-w-0 items-center gap-2 rounded-md pl-[26px] pr-1 text-foreground/85", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
         title={[workspaceCard(node.item, activity), extra?.card].filter(Boolean).join("\n")}
         {...menu.surface}
       >
@@ -474,10 +472,10 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <GitBranch className="size-3.5 shrink-0 text-faint" />
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspace.name}</span>
+          <span className="min-w-0 flex-1 truncate text-[13px]">{workspace.name}</span>
           <PresenceFaces orgId={workspace.orgId} workspaceId={workspace.id} othersOnly compact />
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
-          <span className={cn("flex shrink-0 items-center gap-1 text-[10px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
+          <span className={cn("flex shrink-0 items-center gap-1 text-[11px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
             <span aria-hidden className={cn("size-1.5 rounded-full", DOT[activity.tone])} />
             {NAMED_TONES.has(activity.tone) ? activity.label : every.length > 0 && <span className="tabular-nums">{every.length}</span>}
           </span>
@@ -497,15 +495,31 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
           </DropdownMenu>
         </RowActions>
       </div>
-      <CloudWorkspaceAttention item={node.item} input={{ tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state }} compact />
+      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
       {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
       {deletionLine(node.item) && (
         <p className={cn("ml-6 text-[10px]", deletion(node.item) === "failed" ? "whitespace-normal break-words text-destructive" : "text-faint")} data-testid="cloud-workspace-row-deletion">
           {deletionLine(node.item)}
         </p>
       )}
-      <ul className="ml-[13px] flex flex-col gap-px border-l border-hairline pl-1.5">{rows}</ul>
+      <ul className="flex flex-col [--indent:24px]">{rows}</ul>
     </li>
+  );
+}
+
+/** Resolve only the catalog creator against this organization's authorized roster.
+ * Never consult session caches or the cross-organization people-name cache. */
+function CloudSessionOwner({ node }: { node: CloudWorkspaceNode }) {
+  const { workspace } = node.item;
+  const profiles = useFeatureFlag(featureFlags.teamRoster, workspace.orgId);
+  const enabled = profiles && workspace.you?.role !== "none" && !!workspace.createdBy;
+  const { roster, error } = useOrganizationRoster(workspace.orgId, enabled);
+  useEffect(() => {
+    if (enabled) void readOrganizationRoster(workspace.orgId).catch(() => {});
+  }, [enabled, workspace.orgId]);
+  const owner = enabled && !error ? roster?.members.find((member) => member.userId === workspace.createdBy) : null;
+  return owner ? <MemberProfile member={owner} title={`Workspace owner: ${memberName(owner)}`} aria-label={`Workspace owner: ${memberName(owner)}`} className="size-5" /> : (
+    <span role="img" aria-label="Workspace owner unavailable" title="Workspace owner unavailable" className="flex size-5 shrink-0 items-center justify-center rounded-full bg-well text-faint"><UserRound className="size-3" /></span>
   );
 }
 
@@ -517,7 +531,7 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
+function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, selected }: { row: CloudSessionRow; node: CloudWorkspaceNode; activity: CloudActivity; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
   const statusDescriptionId = useId();
   const rowStatus = detailedStatus(row.rowStatus ?? { tabs: [{ status }] });
   const menu = useRowMenu();
@@ -569,8 +583,8 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
   return (
     <li>
       <div
-        className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md pl-2 pr-1", selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50")}
-        title={row.branch ? `${row.branch} · ${row.title}` : row.title}
+        className={cn(actionRow, "relative flex h-[30px] items-center gap-2 rounded-md pl-[calc(1rem+var(--indent,0px))] pr-1", selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50")}
+        title={[row.branch ? `${row.branch} · ${row.title}` : row.title, workspaceCard(node.item, activity)].join("\n")}
         data-testid="cloud-session-row"
         data-session={row.key}
         {...(manage ? menu.surface : {})}
@@ -605,12 +619,13 @@ function CloudSessionItem({ row, status, manage, canSetStatus, selected }: { row
             {row.pinned && <Pin className="size-3 shrink-0 text-faint" />}
             <span className={cn("min-w-0 flex-1 truncate text-[13px]", row.archived && "text-faint")}>{row.title}</span>
             {rowStatus.pr ? (
-              <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{rowStatus.pr}</span>
+              <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{rowStatus.pr}</span>
             ) : (
-              <span data-row-meta="time" className="font-mono text-[11px]"><RowTime at={row.modified} /></span>
+              <span data-row-meta="time" className="font-mono text-[12px]"><RowTime at={row.modified} className="text-[12px]" /></span>
             )}
           </button>
         )}
+        <CloudSessionOwner node={node} />
         {manage && !renaming && (
           <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
             <AsyncDropdownMenu {...menu.root}>
@@ -731,7 +746,7 @@ function ArchivedWorkspaceRow({ node, onLifecycle }: { node: CloudWorkspaceNode;
         >
           <span className="flex min-w-0 items-center gap-2">
             <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", DOT[state.tone])} />
-            <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{workspace.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[13px]">{workspace.name}</span>
             <span className={cn("shrink-0 text-[10px] text-faint", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
               {state.label}
             </span>

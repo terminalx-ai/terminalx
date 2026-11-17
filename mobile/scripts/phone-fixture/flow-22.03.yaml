@@ -1,0 +1,30 @@
+# 22.03 Session screen: one chat per state, in the session the fixture gives four tabs.
+appId: com.terminalx.phone.fixture
+name: Session screen (22.03)
+---
+- launchApp:
+    arguments: { fixtureScenario: connected, fixtureTabs: states }
+- tapOn:
+    id: sessions-tab
+- tapOn: "Review and merge,.*"
+- tapOn: "Review and merge, Working.*"
+- waitForAnimationToEnd
+- assertVisible: "Ran 2 commands"
+- takeScreenshot: 22.03-1-working
+- tapOn: "Open Mobile question card"
+- waitForAnimationToEnd
+- takeScreenshot: 22.03-2-needs-your-answer
+- tapOn: "Open Merge report"
+- waitForAnimationToEnd
+- takeScreenshot: 22.03-3-done
+- tapOn: "Open Status table"
+- waitForAnimationToEnd
+- takeScreenshot: 22.03-4-wide-table
+- tapOn: "Expand table"
+- waitForAnimationToEnd
+- takeScreenshot: 22.03-5-table-opened
+- tapOn: "Close table"
+- tapOn:
+    id: work-group-header
+- waitForAnimationToEnd
+- takeScreenshot: 22.03-6-commands-opened

@@ -1,26 +1,31 @@
+import { localCommands } from "@/lib/localCommands";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
+import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
-import { setDraft, useDraft } from "@/lib/drafts";
+import { getDraft, setDraft, useDraft } from "@/lib/drafts";
+import { showError } from "@/lib/errorToasts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, SignInNotice, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer, type Handoff } from "@/components/chat/Composer";
+import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -30,6 +35,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { getTerminalState, openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
+import { MachineMessage } from "@/components/machines/MachineMessage";
 import { cancelTerminalView, clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
@@ -39,9 +45,10 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
-import { useModels } from "@/lib/models";
+import { modeLabel, modelLabel, useModels } from "@/lib/models";
 import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -52,6 +59,7 @@ import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { useWorkspaceSetup } from "@/lib/workspaceSetup";
 import { useProjectForge } from "@/lib/projectForge";
 import { checkAgentReadiness, useSignInReadiness } from "@/lib/agentReadiness";
+import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/components/session/AccountSwitch";
 
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
@@ -164,7 +172,7 @@ export function TabView({
   const sendNotice = local && sendState.error != null ? requestRefusalNotice(sendState.error) : null;
   const sendBusy = sendNotice !== null;
   const [busyRefused, setBusyRefused] = useState<string | null>(null);
-  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null } | null>(null);
+  const [resetTarget, setResetTarget] = useState<{ endSeq: number | null; target?: ResetTarget } | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -317,6 +325,8 @@ export function TabView({
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
+  const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
   const busyNotice = live ? sendNotice ?? busyRefused : null;
   useEffect(() => {
@@ -373,10 +383,16 @@ export function TabView({
   const changeHeldQueue = useCallback(async (change: HeldQueueChange) => {
     if (blockedRef.current) throw new Error(blockedRef.current);
     if (!backend.changeHeldQueue) throw new Error("This session does not support held follow-ups.");
+    if (change.type === "edit") {
+      const item = heldQueue.items.find(item => item.id === change.id);
+      const problem = goalCommandProblem(change.text, tab.harness, !!(item?.images.length || item?.files?.length), (backend.commands?.(tab) ?? (local ? localCommands(session.cwd, tab.harness) : null))?.known()?.commands ?? []);
+      if (problem === "unsupported") throw new Error("Goals work in Codex chats only. Open a Codex tab to set a goal, or change this held message's text.");
+      if (problem === "empty") throw new Error("Type a goal after /goal, like “/goal ship saved views with tests”.");
+    }
     const out = await backend.changeHeldQueue(tab.id, change);
     for (const event of out.events) applyEvent(event);
     if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
-  }, [backend, tab.id]);
+  }, [backend, tab, heldQueue, local, session.cwd]);
   const send = useCallback(
     async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
@@ -612,7 +628,8 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
-  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
+  // So does an edit open in the chat (a held follow-up's, PRO-380): `data-owns-escape` on it says so.
+  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane, [data-owns-escape]");
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
   // there the key is typed into the agent's own screen, like every other key.
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
@@ -651,9 +668,45 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // The goal card's Pause and Resume are Codex's own `/goal pause` and `/goal resume`, sent now rather than held
+  // behind the turn; Edit puts the goal in the composer to change (PRO-380).
+  const sendGoalCommand = useCallback((command: string) => {
+    if (blockedRef.current) return;
+    setError(null);
+    void backend.send(tab.id, command, []).then((out) => {
+      for (const ev of out.events) applyEvent(ev);
+    }, (e) => setError(local ? safeError(e) : commandError(e)));
+  }, [backend, local, tab.id]);
+  const editGoal = useCallback((objective: string) => {
+    const put = () => {
+      setDraft(tab.id, `/goal ${objective}`);
+      focusDraftEnd();
+    };
+    // A message half written in the composer is not lost to the goal: the reader says whether it goes.
+    const current = getDraft(tab.id).trim();
+    if (!current || goalCommand(current) !== null) return put();
+    showError("Edit puts the goal in the composer, which holds a message you haven't sent", undefined, {
+      title: "Replace your draft with the goal?",
+      key: `goal-edit:${tab.id}`,
+      tone: "warning",
+      icon: "target",
+      copy: false,
+      actions: [{ label: "Replace the draft", primary: true, run: put }],
+    });
+  }, [tab.id]);
+  const focusDraftEnd = useCallback(() => {
+    requestAnimationFrame(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(`[data-tab-composer="${CSS.escape(tab.id)}"] textarea[data-composer]`);
+      composer?.focus({ preventScroll: true });
+      composer?.setSelectionRange(composer.value.length, composer.value.length);
+    });
+  }, [tab.id]);
+  // A /goal is checked as it is sent (PRO-380): it never goes as a steer, which would pass it to the agent as words.
+  const steerable = goalCommand(draft) === null;
+  const chatAgent = useMemo(() => ({ id: tab.harness, name: agentLabel }), [tab.harness, agentLabel]);
   const steer = useCallback(async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || goalCommand(text) !== null) return;
     setError(null);
     try {
       await backend.steer(tab.id, text);
@@ -775,10 +828,18 @@ export function TabView({
 
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
-  const banner = (placement: "top" | "composer") => (
+  // A request on its own is part of the turn: the chat draws it inline, at the
+  // messages' width, after what the agent said (PRO-382).
+  // Only while the tab waits on it, as the banner did: once the turn moves on, an answer on its way is no request.
+  const asksInChat = !recovery && tab.status === "waiting" && transcript.pendingAsks.length > 0;
+  // A quick chat (`isQuickChat`) has no project: its path is a scratch directory that names nothing.
+  const projectName = session.kind === "quick" ? null : session.projectPath.split("/").filter(Boolean).pop() ?? null;
+  const askMeta = [tab.permissionMode ? modeLabel(tab.permissionMode) : null, projectName].filter(Boolean).join(" · ") || null;
+  const banner = (placement: "top" | "composer") => (placement === "composer" && asksInChat ? null :
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}
+        accounts={tab.providerSessionId ? { choices: recovery === "signed_out" ? accountSwitch.targets : accountSwitch.withRoom, switching: accountSwitch.switching, error: accountSwitch.error, onSwitch: (account) => void accountSwitch.switchTo(account) } : null}
         onRetry={(model) => void retry(model)} onStop={() => stop("banner")} onSendContinue={() => void sendContinue()} onResend={backend.resendUnsent && !gate?.blocked ? () => void resend() : undefined}
         signInPending={loginPending === loginIncident && !loginIncident.cancelled}
         onSignIn={signInAgent ? () => void requestSignIn() : undefined}
@@ -820,21 +881,31 @@ export function TabView({
     <Chat
       sessionId={backend.logSessionId}
       checkpointTabId={local && !readOnly ? tab.id : undefined}
-      transcript={{ ...transcript, pendingAsks: [] }}
+      transcript={asksInChat ? transcript : { ...transcript, pendingAsks: [] }}
+      active={active}
+      takesKeys={focused && active && !continuationOpen && !terminalMode}
+      askDetail
+      askMeta={askMeta}
+      answerBlockedReason={backend.approveBlockedReason ?? null}
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
       live={live}
       // Until the saved conversation is read, an empty chat is one still loading, not one with nothing in it.
       loading={!readOnly && (!!tab.loadingHistory || (local && !log.loaded))}
       progressing={live && tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
-      answering={answering || deciding}
+      answering={answering || deciding || recovering || !backend.caps.write}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
-      onReset={canReset ? (endSeq) => setResetTarget({ endSeq }) : undefined}
+      onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
+      onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
+      onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
+      agent={chatAgent}
+      onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}
+      onEditGoal={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? editGoal : undefined}
       footer={
         <>
         {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
@@ -861,8 +932,10 @@ export function TabView({
           </div>
         ) : (
         <>
+        <AccountSwitchNote tabId={tab.id} reportedModel={transcript.model} modelName={(id) => modelLabel(tab.harness, id)} />
+        {recovery !== "signed_out" && <AccountGoneNotice gone={accountSwitch.gone} targets={tab.providerSessionId ? accountSwitch.targets : []} switching={accountSwitch.switching} error={accountSwitch.error} onSwitch={(account) => void accountSwitch.switchTo(account)} />}
         {banner("composer")}
-        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
+        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && steerable && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>
@@ -870,7 +943,7 @@ export function TabView({
             </Button>
           </div>
         )}
-        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
+        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
         <Composer
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}
@@ -888,6 +961,8 @@ export function TabView({
             if (viewError) clearTabViewError(tab.id);
             setDraft(tab.id, v);
             if (collabLive && v) presenceTyping(shared!.key);
+            // Not switched to another account while the person types here (#981).
+            if (local && v) noteComposerTyping(session.id, tab.id);
           }}
           onSend={send}
           sentAfter={sentAfter}
@@ -928,8 +1003,10 @@ export function TabView({
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
-          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? backend.readOnlyReason}
+          disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
+          heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
+          onOpenCodexTab={counterpart?.id === "codex" ? () => openAgentHandoff(session, tab, "codex") : undefined}
         />
         </>
         )
@@ -1037,7 +1114,14 @@ export function TabView({
         </Button>
       </div>
     )}
-    {signIn && <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />}
+    {signIn && (signIn.machine ? (
+      // A machine's agent signs in there, from its page (21.09), not through an organization's logins.
+      <div className="shrink-0 border-b border-hairline px-3 py-2" data-testid="machine-agent-sign-in">
+        <MachineMessage kind="signIn" name={signIn.machine} agent={cloudAgentLabel(tab.harness)} />
+      </div>
+    ) : (
+      <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />
+    ))}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
     {earlier.length > 0 && (
       // The tab held other conversations before this one: another agent was run in its terminal, or the same one on something else.
@@ -1087,7 +1171,7 @@ export function TabView({
       <span>{resetNotice(tab)}</span>
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
-    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq}
+    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {

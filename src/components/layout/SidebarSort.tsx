@@ -10,14 +10,23 @@ import { GripVertical } from "@/icons";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { editLocalSection, useLocalSections } from "@/lib/localSections";
-import { reportError } from "@/lib/errorToasts";
+import { reportError, showError } from "@/lib/errorToasts";
+import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
-export interface SidebarSortItem { id: string; name: string; members?: string[] }
+export interface SidebarSortItem {
+  id: string;
+  name: string;
+  members?: string[];
+  /** Override the containing list for collections spanning sections, such as Pinned. */
+  section?: string | null;
+  /** A pinned row accepts reordering within its list, but no incoming section moves. */
+  pinned?: boolean;
+}
 type Kind = "sessions" | "projects";
 type ListProps = { items: SidebarSortItem[]; kind?: Kind; children: ReactNode };
 /** What dnd-kit carries for each draggable or droppable in a sidebar drag scope. */
-type RowData = { type: "row"; kind: Kind; list: string; section: string | null; name: string; members: string[] };
+type RowData = { type: "row"; kind: Kind; list: string; section: string | null; name: string; members: string[]; pinned?: boolean };
 type ZoneData = { type: "zone"; section: string | null; name: string };
 type SectionData = { type: "section"; id: string; name: string };
 type DragData = RowData | ZoneData | SectionData;
@@ -70,8 +79,8 @@ export const useInSidebarDragScope = () => useContext(ScopeContext) !== null;
 /** Status groups retain the shared header/count/fold, each with an isolated drag scope.
  * Cloud callers use StatusGroups directly and never acquire local drag handles.
  */
-export function SortableStatusGroups({ sessions, children, scope }: { sessions: SessionEntry[]; children: (session: SessionEntry) => ReactNode; scope?: string }) {
-  return <StatusGroups sessions={sessions} scope={scope} renderGroup={(rows, content) =>
+export function SortableStatusGroups({ sessions, children, scope, onAdd }: { sessions: SessionEntry[]; children: (session: SessionEntry) => ReactNode; scope?: string; onAdd?: () => void }) {
+  return <StatusGroups sessions={sessions} scope={scope} onAdd={onAdd} renderGroup={(rows, content) =>
     <SidebarSortList items={rows.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{content}</SidebarSortList>
   }>{children}</StatusGroups>;
 }
@@ -87,7 +96,7 @@ export function SortableStatusGroups({ sessions, children, scope }: { sessions: 
  */
 export function SidebarDragScope({ children, main = true, mainTarget = false, moves: allowMoves = true }: {
   children: ReactNode;
-  /** The whole scope is the main list's drop zone (ChatListSidebar). */
+  /** The whole scope is the main list's drop zone (the flat and status layouts). */
   main?: boolean;
   /** Only the sections are inside: a "Drop here to move to the main list" target follows them while a sectioned session is held. */
   mainTarget?: boolean;
@@ -111,7 +120,8 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
   const moveTarget = (from: DragData | undefined, over: Over | null): string | null | undefined => {
     const to = dataOf(over);
     if (!moves || from?.type !== "row" || from.kind !== "sessions" || !to || to.type === "section") return undefined;
-    if (to.type === "row" && (to.kind !== "sessions" || to.list === from.list)) return undefined;
+    // Pinned is a collection across sections, not a section destination. Its own rows can still reorder.
+    if (to.type === "row" && (to.kind !== "sessions" || to.list === from.list || to.pinned)) return undefined;
     return to.section === from.section ? undefined : to.section;
   };
   const unchanged = (data: RowData) => {
@@ -187,10 +197,16 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
   const movedTo = useRef<string | null>(null);
   const moveTo = (data: RowData, target: string | null, order: string[] | null) => {
     movedTo.current = target;
-    void (async () => {
+    // Where it was, said when the move fails: the row is back there (02.20).
+    const from = latestSections.current.find((section) => data.members.some((id) => section.sessions.includes(id)))?.id ?? null;
+    const attempt = async () => {
       await editLocalSection({ kind: "move", sessionIds: data.members, sectionId: target });
       if (order) await saveSidebarOrder({ sessions: order });
-    })().catch(reportError(`Couldn't move “${data.name}” to ${sectionName(target)}`));
+    };
+    const failed = (cause: unknown) => {
+      showMoveFailed(data.name, sectionName(target), sectionName(from), cause, () => attempt().then(() => true, (again: unknown) => { failed(again); return false; }));
+    };
+    void attempt().catch(failed);
   };
   const dropSession = (data: RowData, activeId: string | number, over: Over) => {
     const target = moveTarget(data, over);
@@ -338,7 +354,7 @@ export function useSidebarSortable(id: string) {
   const list = useContext(Items);
   const item = list.byId.get(id);
   const reduced = useReducedMotion();
-  const data = useMemo<RowData | undefined>(() => item && { type: "row", kind: list.kind, list: list.list, section: list.section, name: item.name, members: item.members ?? [item.id] }, [item, list]);
+  const data = useMemo<RowData | undefined>(() => item && { type: "row", kind: list.kind, list: list.list, section: item.section === undefined ? list.section : item.section, name: item.name, members: item.members ?? [item.id], pinned: item.pinned }, [item, list]);
   const sortable = useSortable({ id, disabled: !item, data, transition: !reduced ? undefined : null });
   const ref = usePointerDrag(!!item && list.rowDrag, sortable.listeners, sortable.setNodeRef);
   const overlaid = list.rowDrag && sortable.isDragging;
@@ -374,7 +390,7 @@ export function useSidebarSectionDrag(section: { id: string; name: string }, sor
   const to = dataOf(over);
   const held = from?.type === "row" && from.kind === "sessions" && from.section !== section.id;
   const bridgedOver = useSyncExternalStore(subscribeBridged, () => bridged === section.id);
-  const isOver = bridgedOver || (held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && to.list === from.list));
+  const isOver = bridgedOver || (held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && (to.list === from.list || to.pinned)));
   const node = useRef<HTMLElement | null>(null);
   const ref = useCallback((element: HTMLElement | null) => { node.current = element; sort.setNodeRef(element); zone.setNodeRef(element); }, [sort.setNodeRef, zone.setNodeRef]);
   useLayoutEffect(() => {
@@ -390,7 +406,7 @@ export function useSidebarSectionDrag(section: { id: string; name: string }, sor
     <button type="button" ref={sort.setActivatorNodeRef} {...sort.attributes} {...sort.listeners}
       aria-label={`Reorder section ${section.name}`} title="Drag to reorder sections, or press Space"
       onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-      className="flex size-5 shrink-0 touch-none cursor-grab items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing group-hover/section:opacity-100">
+      className="flex size-5 shrink-0 touch-none cursor-grab items-center justify-center rounded-sm text-faint opacity-0 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing group-hover/row:opacity-100">
       <GripVertical className="size-3" />
     </button>
   ) : null;
@@ -408,4 +424,25 @@ export function SidebarSortGroup({ id, children }: { id: string; children: React
 export function SidebarOrderError() {
   const { error } = useSidebarOrder();
   return error ? <div role="alert" className="px-2 py-1 text-xs text-destructive">{error}</div> : null;
+}
+
+/**
+ * A drag into a section that did not save (02.20): titled with what was not done, a plain sentence on why and where
+ * the row is now, and Try again. The raw error goes to the console, not the card.
+ */
+export function showMoveFailed(name: string, to: string, from: string, cause: unknown, retry: () => Promise<boolean>) {
+  console.error("sidebar move failed", cause);
+  const text = errorMessage(cause);
+  const why = /revision|conflict|changed|stale/i.test(text)
+    ? "The sidebar changed on another device while you were dragging"
+    : /locked|busy/i.test(text)
+      ? "The sidebar was busy saving something else"
+      : "The move wasn't saved";
+  showError(`${why}. It's back in ${from}`, undefined, {
+    title: `Couldn't move ${name} to ${to}`,
+    key: `sidebar-move:${name}`,
+    tone: "error",
+    copy: false,
+    actions: [{ label: "Try again", icon: "retry", primary: true, run: retry }],
+  });
 }

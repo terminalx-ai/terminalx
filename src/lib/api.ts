@@ -1,8 +1,10 @@
 import { privacyBlocksCommand, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
+import { rememberCloudProviders } from "@/lib/cloudProviders";
 import type { OrchestratorLimits, OrchestratorPatch, OrchestratorSettings, Run, RunLimits, RunPlan, RunStart, RunStop, TierModels } from "@/types/orchestration";
 import type { PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AgentAccountUsage } from "@/lib/agentAccounts";
 import {
   WorkspaceRpcClient,
   type Activation,
@@ -136,6 +138,34 @@ export interface NewTab {
   permissionMode?: string | null;
 }
 
+/**
+ * What a tab entry says of its agent account (#980, docs/AGENT-ACCOUNTS.md).
+ * The native side keeps these on the tab entry beside its other fields; with
+ * This Mac's login alone none of them is there.
+ */
+export interface TabAccount {
+  /** The account the tab asked for: every start and restart of its agent uses it. */
+  account?: string | null;
+  /** The account its agent last started on, as the launch resolved it (absent while that is This Mac's login). */
+  launchedAccount?: string | null;
+  /**
+   * In a create or add-tab reply only: the tab asked for an account and the background runtime
+   * is older than accounts, so it starts on This Mac's login. The window says so.
+   */
+  accountFallback?: "olderRuntime";
+}
+
+/** The account `tab` runs on, or last ran on; `null` for This Mac's login or the defaults. */
+export function tabAccount(tab: TabEntry): string | null {
+  const fields = tab as TabEntry & TabAccount;
+  return fields.launchedAccount ?? fields.account ?? null;
+}
+
+/** Whether `tab` asked for an account its runtime could not start it on. */
+export function tabAccountFellBack(tab: TabEntry): boolean {
+  return (tab as TabEntry & TabAccount).accountFallback === "olderRuntime";
+}
+
 /** The tail of one session's active tab, as the dashboard cards need it. */
 export interface SessionSummary {
   sessionId: string;
@@ -227,6 +257,8 @@ export interface NewSession {
   tab?: NewTab;
   /** Started with Orchestrate (PRO-337): any run the session leads waits for the person's Approve. */
   orchestrate?: boolean;
+  /** The agent account the first tab starts on (#980). Absent: the project's default, then the agent's. */
+  account?: string | null;
 }
 
 export interface WorkspaceRename {
@@ -241,6 +273,8 @@ export interface NewQuickChat {
   title?: string | null;
   cwd?: string | null;
   tab?: NewTab | null;
+  /** The agent account the first tab starts on (#980). Absent: the agent's default. */
+  account?: string | null;
 }
 
 export interface QuickChatScratch {
@@ -392,7 +426,11 @@ export const api = {
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.
-  cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
+  cloudProviders: async () => {
+    const response = await invoke<CloudProviderSummaryResponse>("cloud_providers");
+    rememberCloudProviders(response.providers);
+    return response;
+  },
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
   cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
@@ -547,6 +585,12 @@ export const api = {
    */
   cloudWorkspaceSetAccess: (workspaceId: string, accessMode: "private" | "organization", orgId?: string | null) =>
     invoke<CloudWorkspace>("cloud_workspace_set_access", { workspaceId, accessMode, orgId: orgId ?? null }),
+  /** The workspace's idle window and its choices (PRO-410), for whoever may manage it. */
+  cloudWorkspaceIdleSuspend: (workspaceId: string, orgId?: string | null) =>
+    invoke<CloudWorkspaceIdleSuspend>("cloud_workspace_idle_suspend", { workspaceId, orgId: orgId ?? null }),
+  /** Change how long the workspace may sit idle before it is stopped; 0 is never (PRO-410). */
+  cloudWorkspaceSetIdleSuspend: (workspaceId: string, idleSuspendMinutes: number, orgId?: string | null) =>
+    invoke<CloudWorkspace>("cloud_workspace_set_idle_suspend", { workspaceId, idleSuspendMinutes, orgId: orgId ?? null }),
   /** The saved cloud catalog (PRO-57) of the signed-in user; refused once `revision` is not the current account. */
   cloudCatalogLoad: (revision: string) => invoke<unknown>("cloud_catalog_load", { revision }),
   cloudCatalogSave: (revision: string, catalog: unknown) => invoke<void>("cloud_catalog_save", { revision, catalog }),
@@ -563,7 +607,13 @@ export const api = {
   // Remote runtime connections (PRO-13); relay credentials and E2EE keys stay native.
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
-  cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * A paired machine's connection (PRO-345, docs/MACHINES.md "As built
+   * (PRO-345)"): one per machine, so a second call returns the same id. It is
+   * used like a cloud one (`cloudRemoteSend`, `cloudRemoteDetach`, `cloud_remote_event`).
+   * Refused with `machine_unknown` or `machine_token_missing`.
+   */
+  machineRemoteAttach: (machineId: string) => invoke<string>("machine_remote_attach", { machineId }),
   /**
    * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
    * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
@@ -576,6 +626,11 @@ export const api = {
     invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
   cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
   cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
+  /** The connection's forwarding switches (PRO-355). */
+  cloudPortSettings: (connectionId: string) => invoke<CloudPortSettings>("cloud_port_settings", { connectionId }),
+  /** Change either switch; answers the switches as they now are. */
+  cloudPortSetSettings: (connectionId: string, settings: Partial<CloudPortSettings>) =>
+    invoke<CloudPortSettings>("cloud_port_set_settings", { connectionId, enabled: settings.enabled ?? null, auto: settings.auto ?? null }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -658,8 +713,8 @@ export const api = {
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   previewWorkspaceRestore: (sessionId: string) => invoke<WorkspaceRestorePreview>("preview_workspace_restore", { sessionId }),
-  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) =>
-    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch }),
+  restoreWorkspace: (sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null, detached = false) =>
+    invoke<SessionEntry[]>("restore_workspace", { sessionId, expected, newBranch, detached }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -678,7 +733,9 @@ export const api = {
   moveQuickChatToProject: (sessionId: string, projectPath: string) => invoke<SessionEntry>("move_quick_chat_to_project", { sessionId, projectPath }),
   /** What a session's scratch directory holds, for the delete confirmation. */
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
-  addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
+  /** `account` (#980): the agent account it starts on; absent, the one its agent's tabs in the session asked for. */
+  addTab: (sessionId: string, tab: NewTab, account?: string | null) =>
+    invoke<TabEntry>("add_tab", account ? { sessionId, tab, account } : { sessionId, tab }),
   /** Close an agent tab. One that holds a conversation stays reopenable (`reopenTab`); nothing of it is deleted. */
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
   /** Bring a closed tab back into its session, with its conversation. */
@@ -797,7 +854,7 @@ export const api = {
   diffMediaContent: (cwd: string, path: string, tree: string | null) =>
     invoke<{ data: string; mime: string } | null>("diff_media_content", { cwd, path, tree }),
   fileContentsAt: (cwd: string, path: string, base: string, head: string | null) =>
-    invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
+    invoke<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };
@@ -810,6 +867,9 @@ export interface OrganizationSummary {
   isPersonal?: boolean;
   /** What the cloud offers in this organization (PRO-69); absent from older servers. */
   cloud?: { enabled: boolean; flags: Record<string, boolean> } | null;
+  /** The organization's cloud computer name and colour (PRO-370); null or absent when not chosen. */
+  computerName?: string | null;
+  computerColor?: string | null;
 }
 
 export interface AccountIdentity {
@@ -874,7 +934,6 @@ export interface CloudCatalogFeed {
   deletedWorkspaceIds: string[];
 }
 
-/** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
 export interface CloudMirrorRepository {
   repo: string;
   branch: string | null;
@@ -932,7 +991,11 @@ export interface CloudMirrorPublished {
   takenBack: number;
 }
 
-export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
+/**
+ * A cloud provider's id. Which ones exist is the server's to say (PRO-415):
+ * the app lists, names, draws and asks for them from their descriptors.
+ */
+export type CloudWorkspaceProviderId = string;
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -943,6 +1006,46 @@ export interface CloudProviderCapabilities {
   locationSelection: "required" | "automatic";
   sourceSelection: "required" | "optional" | "none";
   pricing: "provider-rate" | "estimate" | "unavailable";
+}
+
+/** One input of a provider's credential, asked for in the app's secure dialog. */
+export interface CloudProviderCredentialField {
+  name: string;
+  /** `secret` is never shown; `text` may be. */
+  kind: "secret" | "text" | string;
+  label: string;
+  helpUrl: string | null;
+}
+
+/** Everything the app shows about a provider, as the server describes it (PRO-415). */
+export interface CloudProviderDescriptor {
+  id: CloudWorkspaceProviderId;
+  label: string;
+  /** A generic glyph word (`ship`, `server`, `cloud`, `container`); see `cloudProviderIcon`. */
+  icon: string;
+  order: number;
+  description: string;
+  billing: string;
+  billedByProvider: boolean;
+  /** False: hidden, listed only while the organization is still connected to it. */
+  listed: boolean;
+  credentialFields: CloudProviderCredentialField[];
+  capabilities: {
+    pauseResumeWithMemory: boolean;
+    stopStart: boolean;
+    snapshots: boolean;
+    exec: boolean;
+    computeRunsUntilStopped: boolean;
+  };
+  offering: {
+    locations: string;
+    sources: string;
+    machineClasses: string;
+    pricingSource: string;
+    suspendedBilling: string;
+  };
+  allowedIdleSuspendMinutes: number[];
+  allowedRetentionDays: number[];
 }
 
 export interface CloudProviderSummary {
@@ -957,6 +1060,8 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+  /** Null from a server older than described providers. */
+  descriptor: CloudProviderDescriptor | null;
 }
 
 export type AgentLoginProvider = "codex" | "claude" | "cursor";
@@ -1203,8 +1308,20 @@ export interface CloudWorkspaceSetup {
     activeHourlyMicros: number | null;
   }[];
   defaults: CloudWorkspaceProviderSelection;
+  /** Already limited to the organization's idle cap; 0 is never. */
   allowedIdleSuspendMinutes: number[];
   allowedRetentionDays: number[];
+  /** The organization's idle cap (PRO-410); null or absent with none, or from an older server. */
+  maxIdleSuspendMinutes?: number | null;
+}
+
+/** A workspace's idle window and what it may be changed to (PRO-410). */
+export interface CloudWorkspaceIdleSuspend {
+  workspaceId: string;
+  /** Minutes without activity before it is stopped, 0 for never. */
+  idleSuspendMinutes: number | null;
+  allowedIdleSuspendMinutes: number[];
+  maxIdleSuspendMinutes: number | null;
 }
 
 export interface CloudWorkspaceQuoteInput extends CloudWorkspaceProviderSelection {
@@ -1258,6 +1375,8 @@ export interface CloudWorkspace {
   createdBy?: string | null;
   creator?: PresencePerson | null;
   lastActivityAt?: number | null;
+  /** Minutes without activity before TerminalX stops it, 0 for never (PRO-410); absent from older servers. */
+  idleSuspendMinutes?: number | null;
   /** The runtime's own activity report (S1; named so it is not the runtime build). */
   runtimeActivity?: { online: boolean; reporting?: boolean; reportedAt: number | null; stale?: boolean; activeTurns: number; pendingApprovals: number } | null;
   /** Monotonic per workspace (S1). */
@@ -1668,12 +1787,21 @@ export interface CloudWorkspaceList {
   quota?: CloudWorkspaceQuota | null;
 }
 
-/** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
-export interface CloudWorkspaceQuota {
+/**
+ * A count against a limit. The organization has no limit where `limit` is
+ * absent (PRO-371): the server leaves the key out, and a null means the same.
+ * Read it with `limitOf` (runningLimit.ts), never by comparing: in JavaScript
+ * `used >= null` is true.
+ */
+export interface CloudLimitUsage {
   used: number;
-  limit: number;
-  running?: { used: number; limit: number };
-  total?: { used: number; limit: number };
+  limit?: number | null;
+}
+
+/** The organization's workspace slots (§20.1); `used`/`limit` mirror `running` since PRO-76. */
+export interface CloudWorkspaceQuota extends CloudLimitUsage {
+  running?: CloudLimitUsage;
+  total?: CloudLimitUsage;
 }
 
 /** Retain this exact key when reconciling an ambiguous create response. */
@@ -1711,7 +1839,44 @@ export interface CloudPortForward {
   port: number;
   localPort: number;
   reassigned: boolean;
+  /**
+   * `open`: listening on this Mac now. `waiting`: kept while the connection is
+   * away or Forwarding is off, and opened again (same local port when free)
+   * once it is back: a paired machine's forwards return when it reconnects,
+   * a cloud workspace's do not (PRO-355). Absent from an older desktop: `open`.
+   */
+  state?: "open" | "waiting";
+  /** Opened by "Forward new ports automatically", not by the person. */
+  auto?: boolean;
 }
+
+/**
+ * A connection's forwarding switches (14.10, 14.11), kept by the desktop for
+ * as long as the connection is held. `enabled` is the master "Forwarding":
+ * off closes every listener and keeps them as `waiting`; on opens them again.
+ * `auto` forwards each port that starts listening after it was turned on,
+ * outside 32768–60999 (`AUTO_FORWARD_SKIPPED`).
+ */
+export interface CloudPortSettings {
+  enabled: boolean;
+  auto: boolean;
+}
+
+/** Ports auto-forwarding leaves alone: the ephemeral range, where clients bind, not servers. */
+export const AUTO_FORWARD_SKIPPED = { from: 32768, to: 60999 } as const;
+
+/**
+ * `cloud_port_forwards_changed`: a connection's forwards or switches changed,
+ * whoever changed them. `opened` lists forwards that opened without a click
+ * here (auto-forwarded, or returned after a reconnect), for the toast.
+ */
+export interface CloudPortForwardsChanged {
+  connectionId: string;
+  forwards: CloudPortForward[];
+  settings: CloudPortSettings;
+  opened: CloudPortForward[];
+}
+export const CLOUD_PORT_FORWARDS_CHANGED = "cloud_port_forwards_changed";
 
 export interface CloudWorkspacePreflight {
   ready: boolean;
@@ -1791,6 +1956,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_provider_disabled"
   | "cloud_provider_connection_required"
   | "cloud_provider_connection_attention_required"
+  | "cloud_provider_creation_disabled"
   | "cloud_provider_operation_in_progress"
   | "cloud_provider_credential_invalid"
   | "cloud_provider_permission_denied"
@@ -2013,6 +2179,11 @@ export interface UsageSnapshot {
     liveRefused?: LiveUsageRefused | null;
   };
   codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null; skipped?: UsageRefreshSkip | null };
+  /**
+   * Each agent account's usage windows (#980), under its label, for the usage popover and Stats. Absent from a
+   * runtime older than accounts, and with This Mac's login alone.
+   */
+  accounts?: AgentAccountUsage[];
   windows: UsageWindow[];
   codex?: {
     credits?: {
@@ -2319,7 +2490,8 @@ export interface TabPtyEvent {
 }
 
 export const agent = {
-  prepareContinuation: (sessionId: string, tabId: string) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", { sessionId, tabId }),
+  /** `portable`: for a session on another computer (PRO-348): no path of this Mac, the bounded recent capture instead. */
+  prepareContinuation: (sessionId: string, tabId: string, portable = false) => invoke<import("@/lib/continuation").ContinuationContext>("prepare_continuation", portable ? { sessionId, tabId, portable } : { sessionId, tabId }),
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
   /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */
@@ -2351,6 +2523,15 @@ export const agent = {
   /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
   resumeConversation: (sessionId: string, tabId: string, harness: string, providerSessionId: string) =>
     invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
+  /**
+   * Switch account (#980): restart the tab's agent on `account` and resume its conversation; "Continue with …" at a
+   * usage limit too. An agent that is not running starts on it with `providerSessionId`. The account stays the tab's.
+   * Rejected while a turn runs, and by a background runtime older than accounts.
+   */
+  switchAccount: (sessionId: string, tabId: string, harness: string, providerSessionId: string, account: string) =>
+    invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId, account }),
+  /** The person is typing in the tab's composer: automatic account switching (#981) leaves the tab alone meanwhile. */
+  noteTyping: (sessionId: string, tabId: string) => invoke<void>("tab_note_typing", { sessionId, tabId }),
   /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   /** `confirm`: the token from an overlap refusal, to go ahead with exactly the plan that was shown. */
@@ -2506,6 +2687,8 @@ export interface PullRequest {
   checks: PrCheck[];
   body: string;
   author: string;
+  /** `owner/name` of the fork its head is on; only a pull request search reads it. */
+  headRepository?: string | null;
 }
 
 export const git = {
@@ -2613,6 +2796,8 @@ export const gh = {
   create: (cwd: string, title: string, body: string, base: string | null, draft: boolean, sessionId?: string) =>
     invoke<string>("pr_create", { cwd, title, body, base, draft, ...(sessionId ? { sessionId } : {}) }),
   merge: (cwd: string, number: number, method: "merge" | "squash" | "rebase" | "queue", url?: string) => invoke<void>("pr_merge", { cwd, number, method, ...(url ? { url } : {}) }),
+  /** After a merge: the head branch on GitHub, only when merged, in this repository and still at the merged head. */
+  deleteBranch: (cwd: string, number: number, url?: string) => invoke<void>("pr_delete_branch", { cwd, number, ...(url ? { url } : {}) }),
   ready: (cwd: string, number: number, url?: string) => invoke<void>("pr_ready", { cwd, number, ...(url ? { url } : {}) }),
 };
 
@@ -2845,6 +3030,8 @@ export const fs = {
   listDir: (root: string, rel: string) => invoke<DirEntry[]>("list_dir", { root, rel }),
   readText: (path: string) => invoke<TextFile>("read_text_file", { path }),
   writeText: (path: string, content: string) => invoke<number>("write_text_file", { path, content }),
+  /** Exclusive create: rejects when the path already exists, leaving that file as it is. */
+  createText: (path: string, content: string) => invoke<number>("create_text_file", { path, content }),
   /** A file's whole text, past the 4 MB the editor shows (the file tab's Copy file contents). */
   readWholeText: (path: string) => invoke<string>("read_whole_text_file", { path }),
   /** Save a copy at `to`: the exact bytes of the local file `from`, or `content`. */
@@ -3026,8 +3213,6 @@ export interface ExperimentalSettings {
   orchestratorRuns?: boolean;
   /** Show Local VM tasks and chosen computers: Settings → Local VMs, a tab's computer choice, its task cards (PRO-114). */
   localVmTasks?: boolean;
-  /** Show Settings → Machines: operate this Mac from other computers, and add machines (PRO-342). */
-  machines?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -3037,7 +3222,6 @@ export const experimental = {
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
-  setMachines: (machines: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { machines }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;
@@ -3253,10 +3437,11 @@ export interface CloudProviderResource {
 /**
  * Where a workspace's operations run. Local workspaces keep using the Tauri
  * commands above unchanged; a cloud workspace is reached through its remote
- * runtime over the relay (`terminalx-workspace-rpc/1`), never by forwarding
- * desktop IPC.
+ * runtime over the relay (`terminalx-workspace-rpc/1`), and a paired machine
+ * through its own connection (direct first, relay fallback), never by
+ * forwarding desktop IPC.
  */
-export type WorkspaceTarget = { kind: "local" } | CloudWorkspaceTarget;
+export type WorkspaceTarget = { kind: "local" } | CloudWorkspaceTarget | MachineWorkspaceTarget;
 
 export interface CloudWorkspaceTarget {
   kind: "cloud";
@@ -3266,10 +3451,28 @@ export interface CloudWorkspaceTarget {
   runtimeGeneration?: number;
 }
 
+/**
+ * A machine paired by code (docs/MACHINES.md decision 1). One connection per
+ * machine: `projectId` names a project there (PRO-346) but shares the
+ * machine's connection, so it is not part of the key.
+ */
+export interface MachineWorkspaceTarget {
+  kind: "machine";
+  machineId: string;
+  projectId?: string;
+}
+
 export const LOCAL_WORKSPACE: WorkspaceTarget = { kind: "local" };
 
 export function workspaceTargetKey(target: WorkspaceTarget): string {
-  return target.kind === "local" ? "local" : `cloud:${target.organizationId}:${target.workspaceId}`;
+  switch (target.kind) {
+    case "local":
+      return "local";
+    case "machine":
+      return `machine:${target.machineId}`;
+    default:
+      return `cloud:${target.organizationId}:${target.workspaceId}`;
+  }
 }
 
 type RemoteEvent =
@@ -3287,6 +3490,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   /** Events that arrive before the attach call returns our id. */
   private early: RemoteEvent[] = [];
   private current: WorkspaceConnectionState["state"] = "idle";
+
+  constructor(private readonly machine = false) {}
 
   /** Listen first, so nothing the native side emits right after attaching is missed. */
   async listen(): Promise<void> {
@@ -3325,6 +3530,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
   }
 
   activate(activation: Activation): Promise<void> {
+    // A machine has no compute to wake: its owner reconnects on its own.
+    if (this.machine) return Promise.resolve();
     return this.connectionId ? api.cloudRemoteActivate(this.connectionId, activation) : Promise.resolve();
   }
 
@@ -3369,9 +3576,9 @@ const connections = new Map<string, Promise<CloudWorkspaceConnection>>();
 
 /**
  * The transport for a workspace target: null for a local workspace (use the
- * Tauri commands), a supervised remote connection for a cloud one. One
- * connection per target, even for concurrent callers; `connect` never wakes
- * suspended compute.
+ * Tauri commands), a supervised remote connection for a cloud workspace or a
+ * paired machine. One connection per target (per machine, whatever its
+ * project), even for concurrent callers; `connect` never wakes suspended compute.
  */
 export async function workspaceConnection(target: WorkspaceTarget, activation: Activation = "connect"): Promise<CloudWorkspaceConnection | null> {
   if (target.kind === "local") return null;
@@ -3382,7 +3589,12 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
     if (activation === "wake") await connection.activate("wake");
     return connection;
   }
-  const pending = adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
+  // A machine's connection is the machine's, whatever project asked for it;
+  // it has no compute to wake, so `activation` means nothing to it.
+  const pending =
+    target.kind === "machine"
+      ? adopt(key, { kind: "machine", machineId: target.machineId }, (transport) => api.machineRemoteAttach(target.machineId).then((id) => (transport.bind(id), id)), true)
+      : adopt(key, target, (transport) => api.cloudRemoteAttach(target, activation).then((id) => (transport.bind(id), id)));
   connections.set(key, pending);
   pending.catch(() => {
     if (connections.get(key) === pending) connections.delete(key);
@@ -3390,23 +3602,13 @@ export async function workspaceConnection(target: WorkspaceTarget, activation: A
   return pending;
 }
 
-/** Debug builds: a cloud session from a local runtime's pairing code. */
-export async function devWorkspaceConnection(pairingCode: string): Promise<CloudWorkspaceConnection> {
-  const key = `dev:${crypto.randomUUID()}`;
-  const pending = adopt(key, { kind: "cloud", organizationId: "dev", workspaceId: key }, (transport) =>
-    api.cloudRemoteAttachDev(pairingCode).then((id) => (transport.bind(id), id)),
-  );
-  connections.set(key, pending);
-  pending.catch(() => connections.delete(key));
-  return pending;
-}
-
 async function adopt(
   key: string,
   target: WorkspaceTarget,
   attach: (transport: NativeWorkspaceTransport) => Promise<string>,
+  machine = false,
 ): Promise<CloudWorkspaceConnection> {
-  const transport = new NativeWorkspaceTransport();
+  const transport = new NativeWorkspaceTransport(machine);
   await transport.listen();
   const client = new WorkspaceRpcClient(transport);
   try {
@@ -3429,7 +3631,9 @@ async function adopt(
   self = connections.get(key);
   client.onState((state) => {
     // Stopped for an identity change: drop it so nothing reuses the old one.
-    if (state.state === "stopped") connection.close();
+    // A machine's stop is "access removed": its owner keeps the state and
+    // "Try again" (`machines_reconnect`) resumes the same connection.
+    if (state.state === "stopped" && !machine) connection.close();
   });
   return connection;
 }
@@ -3448,11 +3652,17 @@ export function closeWorkspaceConnection(target: WorkspaceTarget): void {
   void pending.then((connection) => connection.close()).catch(() => undefined);
 }
 
-/** Drop every cloud connection and what it cached, e.g. on sign-out or an organization switch. */
+/**
+ * Drop every cloud connection and what it cached, e.g. on sign-out or an
+ * organization switch. A machine's connection stays: it belongs to the
+ * pairing, not the account (the native side stops using the relay itself).
+ */
 export function closeWorkspaceConnections(): void {
-  const all = [...connections.values()];
-  connections.clear();
-  for (const pending of all) void pending.then((connection) => connection.close()).catch(() => undefined);
+  for (const [key, pending] of [...connections]) {
+    if (key.startsWith("machine:")) continue;
+    connections.delete(key);
+    void pending.then((connection) => connection.close()).catch(() => undefined);
+  }
 }
 
 /** Drop one Organization's cloud connections only: the user left it (CS-18). */

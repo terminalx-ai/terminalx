@@ -3,32 +3,49 @@ import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/lib/sessions";
 import { listen } from "@tauri-apps/api/event";
 import { configuration, layerLabels, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
-import { LAYER_TITLES } from "@/lib/settingSources";
+import { cn } from "@/lib/cn";
+import { useGithubIdentity } from "@/lib/githubIdentity";
+import { LAYER_ORDER, LAYER_TITLES, resetFor } from "@/lib/settingSources";
 import type { SettingsFileLayer } from "@/types/settingsSources";
 import { SettingsFiles } from "./SettingsFiles";
 import { ValueSource } from "./ValueSource";
 import { RegisteredSetting } from "./settingsRegistry";
-import { repositoryInputClass, useRepositoryMutation } from "./repositoryEditor";
+import { useRepositoryMutation } from "./repositoryEditor";
+import { BadgeLegend, LAYERED_BADGES } from "./SettingSources";
+import { SettingRowActions } from "./SettingRowActions";
+import { isLocalKey } from "@/types/target";
+
+/** Labels and fields at the size of the setting rows around them: 13px (PRO-374). */
+const fieldClass = "h-8 w-full rounded-md border border-border bg-well px-2.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50";
 
 export function LayeredConfiguration() {
   const { projects } = useSessionStore();
   const [project, setProject] = useState("");
   const repositoryId = useId();
-  return <RegisteredSetting setting="general.layeredConfiguration"><section className="my-4 flex flex-col gap-3" aria-label="Layered configuration">
-    <h3 className="text-sm font-medium">Layered configuration</h3>
-    <p className="text-xs text-muted-foreground">Managed settings take priority, followed by repository local, repository shared, user settings and defaults. Changes apply to new launches.</p>
-    <div className="flex flex-col gap-1 text-sm"><label htmlFor={repositoryId}>Repository</label>
-      <select id={repositoryId} className={repositoryInputClass} value={project} onChange={(e) => setProject(e.target.value)}>
+  const local = projects.filter((p) => p.kind !== "folder" && isLocalKey(p.path) && !p.archived);
+  return <RegisteredSetting setting="general.layeredConfiguration"><section className="flex flex-col gap-3 border-b border-hairline py-3.5" aria-label="Layered configuration">
+    {/* Its one “…” sits beside Branch prefix, the value it sets (design 09.23). */}
+    <h3 className="text-[13px] font-medium">Layered configuration</h3>
+    <p className="-mt-2 text-xs text-muted-foreground">Managed settings take priority, followed by repository local, repository shared, user settings and defaults. Changes apply to new launches.</p>
+    <div className="flex flex-col gap-1"><label htmlFor={repositoryId} className="text-[13px] font-medium">Repository</label>
+      <select id={repositoryId} className={fieldClass} value={project} onChange={(e) => setProject(e.target.value)}>
         <option value="">User settings</option>
-        {projects.filter((p) => p.kind !== "folder" && !p.path.startsWith("cloud:") && !p.archived).map((p) => <option value={p.path} key={p.path}>{p.name}</option>)}
+        {local.map((p) => <option value={p.path} key={p.path}>{p.name}</option>)}
       </select>
     </div>
-    <ConfigurationEditor key={project} project={project || null} />
+    {/* The GitHub username choice asks GitHub about the chosen repository, else the first one added. */}
+    <ConfigurationEditor key={project} project={project || null} identityPath={project || local[0]?.path || null} />
   </section></RegisteredSetting>;
 }
-function ConfigurationEditor({ project }: { project: string | null }) {
+
+type PrefixChoice = "default" | "github" | "custom" | "none";
+
+function ConfigurationEditor({ project, identityPath }: { project: string | null; identityPath: string | null }) {
   const layerId = useId();
   const prefixId = useId();
+  const groupId = useId();
+  const login = useGithubIdentity(identityPath)?.login;
+  const [picked, setPicked] = useState<PrefixChoice | null>(null);
   const [resolved, setResolved] = useState<Configuration | null>(null);
   const [files, setFiles] = useState<SettingsFileLayer[] | null>(null);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -98,11 +115,40 @@ function ConfigurationEditor({ project }: { project: string | null }) {
       setNotice(`Removed the ${LAYER_TITLES[from]} value.`);
     });
   };
-  const save = (reset: boolean) => void run(async () => {
-    await configuration.write(project, layer, "branchPrefix", reset ? null : prefix);
+  const save = (next: string | null) => void run(async () => {
+    await configuration.write(project, layer, "branchPrefix", next);
     install(await configuration.resolve(project));
-    setNotice(reset ? "Override removed." : `Saved to ${layerLabels[layer]}.`);
+    setNotice(next === null ? `Removed the ${LAYER_TITLES[layer]} value.` : `Saved to ${layerLabels[layer]}.`);
   });
+  // PRO-374 (design 09.23): the prefix is a choice. TerminalX default, GitHub username and None save at once;
+  // Custom saves its field on Enter or when it loses focus.
+  const locked = busy || !value || value.locked;
+  const current = String(value?.value ?? "");
+  const defaultPrefix = String(value?.layers?.find((entry) => entry.layer === "defaults")?.value ?? "");
+  const derived: PrefixChoice = current === defaultPrefix ? "default" : current === "" ? "none" : login && current === `${login}/` ? "github" : "custom";
+  const choice = picked ?? derived;
+  const resettable = value ? resetFor(value) : null;
+  // TerminalX default removes the chosen layer's value, so a later change to the built-in default still reaches
+  // the person. Only when a layer below would then win (your own prefix under a repository's) is the default
+  // written, as the one way to put it back over that layer.
+  const lowerValue = value?.layers?.some((entry) => entry.layer !== "defaults" && LAYER_ORDER.indexOf(entry.layer) > LAYER_ORDER.indexOf(layer));
+  const choose = (option: PrefixChoice) => {
+    setPicked(option === "custom" ? "custom" : null);
+    if (option === "custom") { if (derived !== "custom") { dirty.current = true; setPrefix(""); } return; }
+    if (option === "default") {
+      const layerHasValue = value?.layers?.some((entry) => entry.layer === layer);
+      if (lowerValue) save(defaultPrefix);
+      else if (layerHasValue) save(null);
+      return;
+    }
+    const next = option === "github" ? `${login}/` : "";
+    if (next !== current || value?.source !== layer) save(next);
+  };
+  const saveCustom = () => {
+    const next = prefix.trim();
+    if (!next || locked || (next === current && value?.source === layer)) return;
+    save(next);
+  };
   return <div className="flex flex-col gap-3">
     {(error || loadError) && <p role="alert" className="text-sm text-destructive">{error || loadError}</p>}
     {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
@@ -116,26 +162,46 @@ function ConfigurationEditor({ project }: { project: string | null }) {
         setNotice(trusted ? "Shared configuration trusted." : "Not trusted. Nothing was started.");
       })}>Review repository trust</Button>
     </div>}
-    <div className="flex flex-col gap-1 text-sm">
+    <div role="radiogroup" aria-labelledby={groupId} className="group/setting flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor={prefixId}>Branch prefix</label>
+        <span id={groupId} className="text-[13px] font-medium">Branch prefix</span>
         {value && <ValueSource value={value} label="Branch prefix" repository={!!project} files={files ?? []} onReset={resetLayer} />}
+        <SettingRowActions id="general.layeredConfiguration" title="Layered configuration" label="Branch prefix"
+          reset={{ value: defaultPrefix ? defaultPrefix : "none", disabled: busy || !value || !resettable, onReset: () => { if (resettable) void resetLayer(resettable.layer); } }} />
       </div>
-      <input id={prefixId} className={repositoryInputClass} value={prefix} disabled={busy || !value || value.locked} onChange={(e) => { dirty.current = true; setPrefix(e.target.value); }} placeholder="team/" />
+      <p className="-mt-1 text-xs text-muted-foreground">Put in front of every new workspace branch.</p>
+      {([
+        ["default", "TerminalX default", defaultPrefix],
+        ["github", "GitHub username", login ? `${login}/` : null],
+        ["custom", "Custom", null],
+        ["none", "None", null],
+      ] as const).map(([option, title, shown]) => <div key={option} className="flex flex-col gap-1.5">
+        <label className={cn("flex w-fit items-center gap-2.5 text-[13px]", (locked || (option === "github" && !login)) && "opacity-60")}>
+          <input type="radio" name={groupId} value={option} checked={choice === option} disabled={locked || (option === "github" && !login)}
+            className="size-3.5 accent-accent" onChange={() => choose(option)} />
+          <span>{title}</span>
+          {shown && <span className="font-mono text-xs text-faint">{shown}</span>}
+          {option === "github" && !login && <span className="text-xs text-faint">not signed in</span>}
+        </label>
+        {option === "custom" && choice === "custom" && <div className="ml-6 flex flex-wrap items-center gap-3">
+          <input id={prefixId} aria-label="Custom prefix" className={cn(fieldClass, "w-48 font-mono")} value={prefix} disabled={locked}
+            onChange={(e) => { dirty.current = true; setPrefix(e.target.value); }}
+            onBlur={() => saveCustom()} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveCustom(); } }} placeholder="team/" />
+        </div>}
+      </div>)}
+      {/* What the next branch gets: the saved prefix, not an unsaved draft in the Custom field. */}
+      <p className="font-mono text-xs text-faint" aria-live="polite">Next branch: {current}fix-login-bug</p>
     </div>
-    {value && <p className="text-xs text-muted-foreground">Source: {layerLabels[value.source]}{value.locked ? " · Locked by managed configuration" : ""}</p>}
+    {value?.locked && <p className="text-xs text-muted-foreground">Locked by managed configuration</p>}
     {project && value && (value.source === "repositoryShared" || value.source === "repositoryLocal") && <p className="text-xs text-muted-foreground">This repository overrides the user prefix. Saving to User affects repositories that inherit it.</p>}
-    <div className="flex flex-col gap-1 text-sm"><label htmlFor={layerId}>Save to</label>
-      <select id={layerId} className={repositoryInputClass} value={layer} disabled={busy || value?.locked} onChange={(e) => setLayer(e.target.value as ConfigurationLayer)}>
+    {project && repositoryAllowed && <div className="flex flex-col gap-1"><label htmlFor={layerId} className="text-[13px] font-medium">Save to</label>
+      <select id={layerId} className={fieldClass} value={layer} disabled={busy || value?.locked} onChange={(e) => setLayer(e.target.value as ConfigurationLayer)}>
         <option value="user">User</option>
-        {project && repositoryAllowed && <><option value="repositoryLocal">Save for this repository (local)</option><option value="repositoryShared">Repository shared (committed)</option></>}
+        <option value="repositoryLocal">Save for this repository (local)</option><option value="repositoryShared">Repository shared (committed)</option>
       </select>
-    </div>
-    <div className="flex flex-wrap gap-2">
-      <Button size="sm" disabled={busy || !value || value.locked || !prefix.trim()} onClick={() => save(false)}>Save prefix</Button>
-      <Button size="sm" variant="outline" disabled={busy || !value || value.locked} onClick={() => save(true)}>Reset selected layer</Button>
-      <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(async () => { install(await configuration.resolve(project)); setLoadError(null); })}>Refresh configuration</Button>
-    </div>
+    </div>}
+    {notice?.startsWith("Automatic refresh") && <div><Button size="sm" variant="ghost" disabled={busy} onClick={() => void run(async () => { install(await configuration.resolve(project)); setLoadError(null); })}>Refresh configuration</Button></div>}
+    <BadgeLegend kinds={LAYERED_BADGES} />
     {resolved && Object.keys(resolved.values).some((key) => key.startsWith("environment.")) && <table className="w-full text-left text-xs" aria-label="Resolved environment sources">
       <thead><tr><th className="py-2">Variable</th><th>Source</th><th>Status</th></tr></thead>
       <tbody>{Object.entries(resolved.values).filter(([key]) => key.startsWith("environment.")).map(([key, entry]) => <tr key={key}><td className="break-all py-1 font-mono">{key.slice(12)}</td><td>{layerLabels[entry.source]}</td><td>{entry.locked ? "Locked" : "Value hidden"}</td></tr>)}</tbody>

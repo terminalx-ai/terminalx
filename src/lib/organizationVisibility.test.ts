@@ -91,5 +91,7 @@ describe("running workspace counts", () => {
     expect(organizationRunningCount("a", { ...catalog, orgs: { a: orgCatalog } })).toBe(3);
     const quota = { used: 9, limit: 10, running: { used: 5, limit: 10 } };
     expect(organizationRunningCount("a", { ...catalog, orgs: { a: { ...orgCatalog, quota } } })).toBe(5);
+    // With no running limit (PRO-371) the server still says how many run.
+    expect(organizationRunningCount("a", { ...catalog, orgs: { a: { ...orgCatalog, quota: { used: 5, running: { used: 5 }, total: { used: 9 } } } } })).toBe(5);
   });
 });

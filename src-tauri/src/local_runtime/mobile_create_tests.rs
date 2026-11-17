@@ -126,6 +126,18 @@ fn phone_create_child() {
             assert_eq!(tab_of(&asks).1.transport, store::index::AgentTransport::Pty);
             let claude = call("phone", "create", json!({"quick":true,"agent":"claude","prompt":"Hi"})).unwrap();
             assert_eq!(tab_of(&claude).1.transport, store::index::AgentTransport::Pty);
+
+            // The account the phone chose (#980) is the one the first tab asks for,
+            // in a quick chat and in a project; none chosen names none, as before accounts.
+            assert_eq!(features()["sessionAccounts"], 1);
+            let work = "0123456789abcdef";
+            let on_work = call("phone", "create", json!({"quick":true,"agent":"claude","account":work,"prompt":"Hi"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&on_work).1), Some(work));
+            let project_on_work = call("phone", "create", json!({"projectId":store::projects::public_id(&repo.path),"agent":"claude","account":work,"prompt":"Look around"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&project_on_work).1), Some(work));
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&claude).1), None);
+            let blank = call("phone", "create", json!({"quick":true,"agent":"claude","account":"","prompt":"Hi"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&blank).1), None);
         }
         "settings" => {
             // A desktop-only switch the phone neither shows nor changes (PRO-273).
@@ -157,6 +169,7 @@ fn phone_create_child() {
             assert!(refused(json!({"quick":true,"projectId":store::projects::public_id(&repo.path),"agent":"claude","prompt":"Hi"})).contains("Choose a project or a quick chat"));
             assert!(refused(json!({"quick":true,"agent":"nobody","prompt":"Hi"})).contains("not an agent this Mac offers"));
             assert!(refused(json!({"quick":true,"agent":"claude","mode":"yolo","prompt":"Hi"})).contains("Unknown permission mode"));
+            assert!(refused(json!({"quick":true,"agent":"claude","account":"../../elsewhere","prompt":"Hi"})).contains("not an agent account id"));
             // An archived project is not offered, so it cannot be named.
             let archived = store::projects::update(&folder.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
             assert!(archived.archived);

@@ -176,6 +176,55 @@ async fn one_connection_lists_three_projects_and_starts_a_session_in_each() {
     assert!(call(&m.rpc, &peer, "lifecycle.resources", json!({})).await.is_ok());
 }
 
+/// `git` in `dir`, which must succeed.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// New session on a machine (PRO-348): `session.create` cuts a worktree of the
+/// named project from the chosen branch (`session-base/1`), and a resend of
+/// the same request is the same session, never a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_is_cut_from_the_chosen_branch_once() {
+    let m = machine_rpc();
+    let (path, id) = project(&m.path("code"), "api");
+    git(&path, &["add", "README.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "readme"]);
+    git(&path, &["checkout", "-qb", "feature"]);
+    std::fs::write(path.join("FEATURE.md"), "only on feature\n").unwrap();
+    git(&path, &["add", "FEATURE.md"]);
+    git(&path, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "feature"]);
+    git(&path, &["checkout", "-q", "main"]);
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|granted| granted == "session-base/1"), "{hello}");
+    let request = json!({ "agent": "claude", "model": "opus", "title": "From feature", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-from-feature" });
+    let made = call(&m.rpc, &peer, "session.create", request.clone()).await.unwrap();
+    let cwd = PathBuf::from(made["session"]["cwd"].as_str().unwrap());
+    assert_ne!(cwd, path, "a worktree of its own: {made}");
+    assert!(cwd.join("FEATURE.md").is_file(), "cut from feature: {made}");
+    assert!(!path.join("FEATURE.md").exists(), "the project's own checkout stays on main");
+    // The same request again (a resend after a dropped connection) is answered with the same session.
+    let again = call(&m.rpc, &peer, "session.create", request).await.unwrap();
+    assert_eq!(again["sessionId"], made["sessionId"]);
+    let sessions = call(&m.rpc, &peer, "session.list", json!({})).await.unwrap();
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1, "{sessions}");
+    // Without a worktree there is nothing to cut, and the base is not used.
+    let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
+    assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);
+    // Never something git could read as an option or a revision expression.
+    for bad in ["-x", "main..feature", "feature@{1}", "a b", "", "HEAD~1"] {
+        let refused = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": bad, "clientRequestId": format!("create-bad-{}", bad.len()) })).await;
+        assert_eq!(code(refused), "invalid_params", "{bad:?}");
+    }
+    // A client that did not ask for `session-base/1` cannot name a base.
+    let (older, _) = Peer::new("computer-2".into(), Authority::Manage);
+    let want: Vec<&str> = protocol::served(true).into_iter().filter(|name| *name != "session-base/1").collect();
+    call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
+    let refused = call(&m.rpc, &older, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": "feature", "clientRequestId": "create-older" })).await;
+    assert_eq!(code(refused), "capability_not_granted");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let m = machine_rpc();
@@ -321,4 +370,477 @@ async fn a_new_project_or_name_is_announced_to_machine_connections() {
     .await
     .is_err(), "a connection without machine/1 is not told");
     drop(web);
+}
+
+// ------------------------------------------------- machine/3 (PRO-354)
+
+use crate::remote::machine_update::{self as updates, Blocker, Environment, MachineUpdates, OtherComputer, Progress, Record};
+
+/// The host side of `machine/3` a test controls: who else is connected and
+/// whether a window is attached, as `machine_host`'s `HostAccess` reports.
+struct Host {
+    others: Vec<OtherComputer>,
+    window: bool,
+}
+
+impl machine::MachineAccess for Host {
+    fn direct_endpoints(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn relay_access(&self, _device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
+        Box::pin(async { Ok(json!({ "relay": null })) })
+    }
+    fn other_computers(&self, caller: Option<&str>) -> Vec<OtherComputer> {
+        self.others.iter().filter(|computer| Some(computer.id.as_str()) != caller).cloned().collect()
+    }
+    fn window_available(&self) -> bool {
+        self.window
+    }
+}
+
+fn no_blockers() -> Vec<Blocker> {
+    Vec::new()
+}
+
+/// What `runtime.handover.plan` names for an agent mid-turn.
+fn an_agent_mid_turn() -> Vec<Blocker> {
+    vec![Blocker::of(&json!({ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "claude" }))]
+}
+
+fn no_network(_: &semver::Version) -> anyhow::Result<Option<semver::Version>> {
+    anyhow::bail!("this test checks no releases")
+}
+
+/// A headless install of 0.0.1 (`~/.terminalx/current -> versions/0.0.1`).
+fn installer(m: &Machine) -> PathBuf {
+    let root = m.path("install");
+    std::fs::create_dir_all(root.join("versions/0.0.1")).unwrap();
+    std::fs::write(root.join("versions/0.0.1/terminalx-serve"), "old").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("versions/0.0.1", root.join("current")).unwrap();
+    root
+}
+
+fn environment(m: &Machine, install_root: Option<PathBuf>, has_window: bool, blockers: fn() -> Vec<Blocker>) -> Environment {
+    let data_dir = m.path("data");
+    std::fs::create_dir_all(data_dir.join("run")).unwrap();
+    Environment { data_dir, install_root, has_window, helper: None, blockers, check: no_network }
+}
+
+/// `m` serving `machine/3` from `env`, with `host` as its machine host.
+fn serving(m: &Machine, env: Environment, host: Host) -> Arc<MachineUpdates> {
+    m.rpc.set_machine_updates_for_tests(MachineUpdates::new(env, m.sink.clone()));
+    m.rpc.set_machine_access(Arc::new(host));
+    m.rpc.machine_updates_for_tests()
+}
+
+fn refused(result: Result<Value, (String, String)>) -> (String, String) {
+    result.expect_err("expected a refusal")
+}
+
+/// The whole error, with its data.
+async fn failure(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params: Value) -> Value {
+    let response = rpc.handle(peer, &json!({ "id": "1", "method": method, "params": params })).await;
+    assert_eq!(response["ok"], false, "{response}");
+    response["error"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_status_has_the_contract_s_shape() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let served = serving(&m, environment(&m, Some(root.clone()), false, no_blockers), Host { others: Vec::new(), window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/3")), "{hello}");
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    let fields: std::collections::BTreeSet<&str> = status.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(fields, ["available", "blockers", "checkedAt", "current", "kept", "method", "otherComputers", "progress"].into_iter().collect());
+    assert_eq!(status["method"], "installer");
+    assert_eq!(status["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["available"], json!({ "version": "9.9.9" }));
+    assert!(status["checkedAt"].is_i64());
+    assert_eq!(status["blockers"], json!([]));
+    assert_eq!(status["otherComputers"], json!([]));
+    assert_eq!(status["kept"], json!(["0.0.1"]));
+    assert_eq!(status["progress"], json!({ "phase": "idle" }));
+
+    // Not installed by the installer: unmanaged, and no update from here.
+    // The first machine holds the test home's lock: end it before the next.
+    drop((served, peer, m));
+    let m2 = machine_rpc();
+    serving(&m2, environment(&m2, Some(m2.path("no-install")), false, no_blockers), Host { others: Vec::new(), window: false });
+    let (peer2, _events2, _) = computer(&m2.rpc).await;
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!((status["method"].as_str(), status["available"].is_null(), status["checkedAt"].is_null()), (Some("unmanaged"), true, true));
+    assert_eq!(status["kept"], json!([env!("CARGO_PKG_VERSION")]));
+    let error = failure(&m2.rpc, &peer2, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_unavailable", "{error}");
+    assert_eq!(error["data"]["method"], "unmanaged", "the refusal carries the status");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn machine_3_is_granted_only_when_asked_for() {
+    let m = machine_rpc();
+    let (older, _events) = Peer::new("computer-old".into(), Authority::Manage);
+    let hello = call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/2", "session/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["session/1", "machine/1", "machine/2"]), "a machine/2 desktop is served exactly as before");
+    assert_eq!(code(call(&m.rpc, &older, "machine.updateStatus", json!({})).await), "capability_not_granted");
+    // A newer desktop asking for a namespace this runtime does not have
+    // learns its version and what it offers.
+    let (newer, _events) = Peer::new("computer-new".into(), Authority::Manage);
+    let error = failure(&m.rpc, &newer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/9"] })).await;
+    assert_eq!(error["code"], "update_required");
+    assert_eq!(error["data"]["runtimeVersion"], env!("CARGO_PKG_VERSION"));
+    assert!(error["data"]["offered"].as_array().unwrap().contains(&json!("machine/3")), "{error}");
+    // A participant reads the status but does not update.
+    let (viewer, _events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/3"] })).await.unwrap();
+    assert_eq!(code(call(&m.rpc, &viewer, "machine.update", json!({ "version": "9.9.9" })).await), "forbidden");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_asks_first_about_work_it_stops_and_other_computers() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let others = vec![OtherComputer { id: "studio".into(), label: "Studio's MacBook".into() }];
+    let served = serving(&m, environment(&m, Some(root), false, an_agent_mid_turn), Host { others, window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["blockers"], json!([{ "id": "tab:s1/t1", "kind": "turn", "title": "claude in tab t1" }]));
+    assert_eq!(status["otherComputers"], json!([{ "id": "studio", "label": "Studio's MacBook" }]), "every connected computer but the caller");
+
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_confirm");
+    assert!(error["message"].as_str().unwrap().contains("claude in tab t1"), "{error}");
+    assert_eq!(error["data"]["blockers"][0]["id"], "tab:s1/t1", "the refusal carries the status");
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"] })).await;
+    assert_eq!(error["code"], "update_confirm", "the other computers are asked about too");
+    assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
+    // Confirmed before Studio connected: the computers shown then were others, so it asks again.
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["air"] })).await;
+    assert_eq!(error["code"], "update_confirm", "a computer not shown before is named first");
+    assert!(error["message"].as_str().unwrap().contains("Studio's MacBook"), "{error}");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "confirmedOthers": "studio" })).await), "invalid_params");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.8.0", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await), "update_unavailable", "only the release on offer");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "stop": "tab:s1/t1" })).await), "invalid_params");
+    assert!(read_update_record(&m).progress == Progress::Idle, "nothing was started");
+
+    // Agreed to both: it starts. This runtime has no binary of its own to
+    // run the helper from, so it says the update could not start.
+    let (code, message) = refused(call(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9", "stop": ["tab:s1/t1"], "confirmedOthers": ["studio"] })).await);
+    assert_eq!(code, "internal", "{message}");
+    match read_update_record(&m).progress {
+        Progress::Failed { version, running, rolled_back, .. } => assert_eq!((version.as_str(), running.as_str(), rolled_back), ("9.9.9", env!("CARGO_PKG_VERSION"), false)),
+        other => panic!("expected failed, got {other:?}"),
+    }
+}
+
+fn read_update_record(m: &Machine) -> Record {
+    updates::read_record(&updates::status_path(&m.path("data")))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_update_at_a_time() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let served = serving(&m, environment(&m, Some(root), false, no_blockers), Host { others: Vec::new(), window: false });
+    served.offer_for_tests(Some("9.9.9"));
+    // A helper of this machine's runs (this process stands in for its pid).
+    let running = Record { progress: Progress::Trial { version: "9.9.9".into(), since: updates::now_ms() }, from: Some("0.0.1".into()), helper_pid: Some(std::process::id()), ..Record::default() };
+    updates::write_record(&updates::status_path(&m.path("data")), &running).unwrap();
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let error = failure(&m.rpc, &peer, "machine.update", json!({ "version": "9.9.9" })).await;
+    assert_eq!(error["code"], "update_busy");
+    assert_eq!(error["data"]["progress"], json!({ "phase": "trial", "version": "9.9.9", "since": running_since(&running) }));
+}
+
+fn running_since(record: &Record) -> i64 {
+    match record.progress {
+        Progress::Trial { since, .. } => since,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_desktop_machine_asks_its_window_to_update_the_app() {
+    let m = machine_rpc();
+    serving(&m, environment(&m, None, true, no_blockers), Host { others: Vec::new(), window: false });
+    let (peer, mut events, _) = computer(&m.rpc).await;
+    let status = call(&m.rpc, &peer, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!((status["method"].as_str(), status["available"].is_null()), (Some("app"), true), "nothing offered until the window has checked");
+    // Let the watcher read what is there before anything changes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The window checked: nothing newer.
+    updates::report(&m.path("data"), &json!({ "phase": "upToDate" })).unwrap();
+    let changed = next_event(&mut events, "machine.updateChanged").await;
+    assert!(changed["status"]["checkedAt"].is_i64(), "{changed}");
+    assert_eq!(changed["status"]["available"], Value::Null);
+
+    // No window attached: the app cannot update itself now.
+    assert_eq!(code(call(&m.rpc, &peer, "machine.update", json!({ "version": "0.9.0" })).await), "update_unavailable");
+
+    // The first machine holds the test home's lock: end it before the next.
+    drop((events, peer, m));
+    let m2 = machine_rpc();
+    let mut published2 = m2.sink.subscribe();
+    serving(&m2, environment(&m2, None, true, no_blockers), Host { others: Vec::new(), window: true });
+    let (peer2, _events2, _) = computer(&m2.rpc).await;
+    let started = call(&m2.rpc, &peer2, "machine.update", json!({ "version": "0.9.0" })).await.unwrap();
+    assert_eq!(started["progress"]["phase"], "appUpdating");
+    assert_eq!(started["progress"]["version"], "0.9.0");
+    let requested = loop {
+        match published2.recv().await {
+            Ok(event) if &*event.event == updates::REQUESTED_EVENT => break event.payload.to_string(),
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(error) => panic!("the event stream ended: {error}"),
+        }
+    };
+    assert_eq!(requested, r#"{"version":"0.9.0"}"#);
+    assert_eq!(code(call(&m2.rpc, &peer2, "machine.update", json!({ "version": "0.9.0" })).await), "update_busy");
+    // The window reports each step; a failure is said, with what runs.
+    updates::report(&m2.path("data"), &json!({ "phase": "installing" })).unwrap();
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["progress"]["step"], "installing");
+    updates::report(&m2.path("data"), &json!({ "phase": "failed", "message": "The download was interrupted." })).unwrap();
+    let status = call(&m2.rpc, &peer2, "machine.updateStatus", json!({})).await.unwrap();
+    assert_eq!(status["progress"], json!({ "phase": "failed", "version": "0.9.0", "at": status["progress"]["at"], "message": "The download was interrupted.", "running": env!("CARGO_PKG_VERSION"), "rolledBack": false }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_connection_is_told_of_changes_without_itself_as_another_computer() {
+    let m = machine_rpc();
+    let root = installer(&m);
+    let others = vec![OtherComputer { id: "computer-1".into(), label: "This one".into() }, OtherComputer { id: "studio".into(), label: "Studio".into() }];
+    serving(&m, environment(&m, Some(root), false, no_blockers), Host { others, window: false });
+    let (_peer, mut events, _) = computer(&m.rpc).await;
+    let (older, mut older_events) = Peer::new("computer-old".into(), Authority::Manage);
+    call(&m.rpc, &older, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/2"] })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let failed = Record {
+        progress: Progress::Failed { version: "9.9.9".into(), at: 1, message: "TerminalX 9.9.9 did not come up after the handover.".into(), running: "0.0.1".into(), rolled_back: true },
+        ..Record::default()
+    };
+    updates::write_record(&updates::status_path(&m.path("data")), &failed).unwrap();
+    let changed = next_event(&mut events, "machine.updateChanged").await;
+    assert_eq!(changed["status"]["progress"]["rolledBack"], true);
+    assert_eq!(changed["status"]["otherComputers"], json!([{ "id": "studio", "label": "Studio" }]), "{changed}");
+    assert!(tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match older_events.recv().await {
+                Some(value) if value["event"] == "machine.updateChanged" => return,
+                Some(_) => continue,
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .is_err(), "a connection without machine/3 is not told");
+}
+
+/// PRO-350: the machine's page reads each agent's version and login there,
+/// and the agents with no CLI there, from `runtime.agents`.
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
+    use crate::harness::readiness::State;
+    let m = machine_rpc();
+    // A path of this test's own: kept logins are per agent and path.
+    m.rpc.set_offered_for_tests(
+        crate::harness::catalog()
+            .into_iter()
+            .map(|mut agent| {
+                agent.available = agent.id == "claude";
+                agent.path = agent.available.then(|| format!("/opt/pro-350/{}", agent.binary));
+                agent
+            })
+            .collect(),
+    );
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::Ready, Some("2.4.1".to_string())))]));
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let listed = call(&m.rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    let claude = &listed["agents"][0];
+    assert_eq!(claude["id"], "claude");
+    assert_eq!(claude["signIn"], "signedIn");
+    assert_eq!(claude["version"], "2.4.1");
+    assert!(claude["signInCheckedAt"].as_u64().unwrap() > 0);
+    let missing = listed["missing"].as_array().unwrap();
+    let codex = missing.iter().find(|agent| agent["id"] == "codex").expect("codex has no CLI there");
+    assert_eq!(codex["name"], "Codex");
+    assert_eq!(codex["installable"], cfg!(unix));
+    assert!(missing.iter().all(|agent| agent["id"] != "claude"), "an installed agent is not missing");
+
+    // Signed out since: a kept answer is used for a minute, `refresh` asks again.
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::SignedOut, Some("2.4.1".to_string())))]));
+    let kept = call(&m.rpc, &peer, "runtime.agents", json!({})).await.unwrap();
+    assert_eq!(kept["agents"][0]["signIn"], "signedIn");
+    // A participant's refresh starts no probe: it is answered from the kept
+    // check. A participant is served only once the members are listed
+    // (#475), and then a manage connection names its person too.
+    m.rpc.set_collaboration(Some(
+        serde_json::from_value(json!({ "v": 1, "members": [{ "userId": "admin", "role": "manager" }, { "userId": "viewer", "role": "viewer" }] })).unwrap(),
+    ));
+    let (manager, _manager_events) = Peer::for_user("manager-350".into(), Authority::Manage, Some("admin".into()));
+    call(&m.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": protocol::served(true) })).await.unwrap();
+    let (viewer, _viewer_events) = Peer::for_user("viewer-350".into(), Authority::Participate, Some("viewer".into()));
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["agents/1"] })).await.unwrap();
+    let viewed = call(&m.rpc, &viewer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(viewed["agents"][0]["signIn"], "signedIn");
+    let asked = call(&m.rpc, &manager, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(asked["agents"][0]["signIn"], "signedOut");
+
+    // A probe that cannot tell is unknown, never signed out.
+    m.rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (State::Unknown, None))]));
+    let unknown = call(&m.rpc, &manager, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(unknown["agents"][0]["signIn"], "unknown");
+    assert_eq!(unknown["agents"][0]["version"], Value::Null);
+}
+
+/// A runtime serving one workspace starts no login probe and lists nothing
+/// missing: its agents are shown as an older runtime's are, without a state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_root_runtime_reports_agents_without_sign_in() {
+    let _home = crate::store::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
+    rpc.set_offered_for_tests(crate::harness::catalog().into_iter().map(|mut agent| { agent.available = agent.id == "claude"; agent }).collect());
+    rpc.set_sign_ins_for_tests(HashMap::from([("claude".to_string(), (crate::harness::readiness::State::Ready, None))]));
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["agents/1"] })).await.unwrap();
+    let listed = call(&rpc, &peer, "runtime.agents", json!({ "refresh": true })).await.unwrap();
+    assert_eq!(listed["agents"][0]["id"], "claude");
+    assert!(listed["agents"][0].get("signIn").is_none() && listed["agents"][0].get("version").is_none());
+    assert!(listed.get("missing").is_none());
+    terminals.kill_all();
+}
+
+/// PRO-350: Sign in and Install run in a terminal on the machine, one step at
+/// a time per agent; the terminal is not a shell of `pty.list`, and its exit
+/// code is the setup wrapper's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_setup_runs_in_a_terminal_on_the_machine_one_at_a_time() {
+    let m = machine_rpc();
+    // Stands in for `codex login --device-auth`, which would wait for a person.
+    m.rpc.set_setup_command_for_tests("sh -c 'sleep 2; exit 74'");
+    let (peer, mut events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/4")), "{hello}");
+
+    let started = call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "login", "cols": 90, "rows": 20 })).await.unwrap();
+    let pty_id = started["ptyId"].as_str().unwrap().to_string();
+    assert_eq!(started["setup"], json!({ "harness": "codex", "step": "login" }));
+    assert_eq!(started["cols"], 90);
+
+    // Another start of the same agent follows the one that runs.
+    let busy = call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "install", "cols": 90, "rows": 20 })).await;
+    assert_eq!(code(busy), "setup_busy");
+    let running = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.unwrap();
+    assert_eq!(running["run"], json!({ "ptyId": pty_id, "step": "login" }));
+    let other = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "claude" })).await.unwrap();
+    assert_eq!(other["run"], Value::Null);
+
+    // Not one of the machine's shells.
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"].as_array().unwrap().iter().all(|pty| pty["ptyId"] != pty_id.as_str()));
+
+    // Attached as any terminal; its exit says how the step ended.
+    call(&m.rpc, &peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
+    let exit = next_event(&mut events, "pty.exit").await;
+    assert_eq!(exit["ptyId"], pty_id.as_str());
+    assert_eq!(exit["code"], 74);
+    let after = call(&m.rpc, &peer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.unwrap();
+    assert_eq!(after["run"], Value::Null);
+
+    // Bad input is refused before anything runs; a viewer cannot start one.
+    assert_eq!(code(call(&m.rpc, &peer, "machine.agentSetup", json!({ "harness": "codex", "step": "uninstall", "cols": 90, "rows": 20 })).await), "invalid_params");
+    let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/4", "pty/1"] })).await.unwrap();
+    assert!(call(&m.rpc, &viewer, "machine.agentSetup", json!({ "harness": "codex", "step": "login", "cols": 90, "rows": 20 })).await.is_err());
+    // Nor follow one: a sign-in's device code chooses whose account the CLI uses.
+    assert!(call(&m.rpc, &viewer, "machine.agentSetupRunning", json!({ "harness": "codex" })).await.is_err());
+    assert_eq!(code(call(&m.rpc, &viewer, "pty.attach", json!({ "ptyId": pty_id })).await), "forbidden");
+    assert_eq!(code(call(&m.rpc, &viewer, "pty.write", json!({ "ptyId": pty_id, "data": "eA==", "seq": 1 })).await), "forbidden");
+}
+
+/// The command a machine's page runs: the registry's, and for Codex the
+/// sign-in that needs no browser on the machine.
+#[test]
+fn a_sign_in_started_from_another_computer_uses_the_device_code_where_there_is_one() {
+    if cfg!(windows) || crate::binpath::resolve("codex").is_none() {
+        return;
+    }
+    let step = crate::harness::setup::Step::Login;
+    let here = crate::harness::setup::command("codex", step).unwrap();
+    let elsewhere = crate::harness::setup::command_elsewhere("codex", step).unwrap();
+    assert!(!here.contains("--device-auth"));
+    assert!(elsewhere.ends_with("'login' '--device-auth'"), "{elsewhere}");
+}
+
+// ------------------------------------------------- machine/6 (PRO-351)
+
+/// PRO-351: a paired computer browses the machine's home, adds a folder as
+/// a project and removes it again; each change reaches `machine.changed`,
+/// and the folder stays. A session-scoped participant can do none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paired_computer_adds_and_removes_a_machines_projects() {
+    let m = machine_rpc();
+    let home = m.path("home");
+    let api = home.join("code/api");
+    std::fs::create_dir_all(&api).unwrap();
+    std::fs::write(api.join("README.md"), "api\n").unwrap();
+    m.rpc.set_home_for_tests(&home);
+    let (peer, mut events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/6")), "{hello}");
+    // Let the watcher read what is there before anything changes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let listing = call(&m.rpc, &peer, "machine.browse", json!({})).await.unwrap();
+    assert_eq!(listing["home"], home.to_string_lossy().as_ref());
+    assert_eq!(listing["entries"][0]["name"], "code");
+    let code_dir = call(&m.rpc, &peer, "machine.browse", json!({ "path": home.join("code") })).await.unwrap();
+    assert_eq!(code_dir["entries"][0]["path"], api.to_string_lossy().as_ref());
+    assert_eq!(code(call(&m.rpc, &peer, "machine.browse", json!({ "path": m.path("") })).await), "path_forbidden");
+
+    let added = call(&m.rpc, &peer, "machine.addProject", json!({ "path": api })).await.unwrap();
+    let id = added["project"]["projectId"].as_str().unwrap().to_string();
+    let changed = next_event(&mut events, "machine.changed").await;
+    assert!(changed["projects"].as_array().unwrap().iter().any(|project| project["projectId"] == id.as_str()), "{changed}");
+    let again = call(&m.rpc, &peer, "machine.browse", json!({ "path": home.join("code") })).await.unwrap();
+    assert_eq!(again["entries"][0]["projectId"], id.as_str());
+
+    assert_eq!(call(&m.rpc, &peer, "machine.removeProject", json!({ "projectId": id })).await.unwrap(), json!({ "removed": true }));
+    let changed = next_event(&mut events, "machine.changed").await;
+    assert!(!changed["projects"].as_array().unwrap().iter().any(|project| project["projectId"] == id.as_str()), "{changed}");
+    assert!(api.join("README.md").exists(), "the folder stays");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.removeProject", json!({ "projectId": id })).await), "not_found");
+    assert_eq!(code(call(&m.rpc, &peer, "machine.cloneStatus", json!({ "cloneId": "clone-unknown" })).await), "not_found");
+
+    let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/6"] })).await.unwrap();
+    for (method, params) in [
+        ("machine.browse", json!({})),
+        ("machine.addProject", json!({ "path": api })),
+        ("machine.removeProject", json!({ "projectId": id })),
+        ("machine.cloneProject", json!({ "repository": "acme/api", "parent": home })),
+        ("machine.cloneStatus", json!({ "cloneId": "clone-unknown" })),
+        ("machine.cloneCancel", json!({ "cloneId": "clone-unknown" })),
+    ] {
+        assert!(call(&m.rpc, &viewer, method, params).await.is_err(), "{method} is the manager's");
+    }
+    assert!(crate::store::projects::list().unwrap().0.is_empty(), "the viewer added nothing");
+}
+
+/// A one-root runtime has no machine/6: it never lists folders outside its root.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_root_runtime_has_no_machine_6() {
+    let _home = crate::store::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    let hello = call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/6", "fs/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["fs/1"]));
+    assert_eq!(code(call(&rpc, &peer, "machine.browse", json!({})).await), "capability_not_granted");
+    terminals.kill_all();
 }

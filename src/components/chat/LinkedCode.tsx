@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { CodeBlockContainer, CodeBlockCopyButton, CodeBlockDownloadButton, CodeBlockHeader } from "streamdown";
+import { CodeBlockContainer, CodeBlockCopyButton, CodeBlockHeader } from "streamdown";
 import type { CodeHighlighterPlugin, HighlightResult } from "@streamdown/code";
 import { textLinks } from "@terminalx/portable/textLinks";
 import type { ChatLinkContext } from "@/lib/chatLinks";
 import { ChatLink } from "./ChatLink";
 
 /** Keep syntax colours while making URLs clickable even when the highlighter
- * splits a URL across several tokens. Copy/download still use the raw code. */
+ * splits a URL across several tokens. Copy still uses the raw code. */
 export function LinkedCode({ code, language, mode, plugin, context }: { code: string; language: string; mode: string; plugin: CodeHighlighterPlugin; context?: ChatLinkContext }) {
   const [highlight, setHighlight] = useState<{ code: string; language: string; result: HighlightResult } | null>(null);
   useEffect(() => {
@@ -21,7 +21,7 @@ export function LinkedCode({ code, language, mode, plugin, context }: { code: st
   }, [code, language, plugin]);
   const lines = useMemo(() => highlight?.code === code && highlight.language === language ? highlight.result.tokens : code.replace(/\n+$/, "").split("\n").map((content) => [{ content, color: "inherit" }]), [code, language, highlight]);
   return <CodeBlockContainer language={language}>
-    <div className="flex items-center justify-between"><CodeBlockHeader language={language} /><div className="flex gap-1 pr-2"><CodeBlockCopyButton code={code} /><CodeBlockDownloadButton code={code} language={language} /></div></div>
+    <div className="flex items-center justify-between"><CodeBlockHeader language={language} /><div className="flex gap-1 pr-2"><CodeBlockCopyButton code={code} /></div></div>
     <pre className="max-h-96 overflow-auto px-4 py-3 font-mono text-[13px] leading-relaxed select-text"><code>{lines.map((tokens, lineIndex) => {
       let offset = 0;
       const spans = tokens.map((token) => {

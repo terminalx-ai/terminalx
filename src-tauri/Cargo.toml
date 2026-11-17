@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.32"
+version = "0.2.34"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -110,6 +110,8 @@ ureq = { version = "2", features = ["json"] }
 tauri-plugin-updater = { version = "2.11.0", optional = true }
 cpal = { version = "0.17", optional = true }
 sha2 = "0.10"
+# P-256 ECDSA for the account installation key (PRO-349), already in the tree.
+ring = "0.17"
 subtle = "2.6"
 zeroize = "1.8"
 toml = "0.9"

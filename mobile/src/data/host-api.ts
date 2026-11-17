@@ -4,6 +4,7 @@ import type { ContinuationContext } from "@terminalx/portable/continuation";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
+import { recordStartedSessionOn } from "../notifications/store";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
@@ -84,7 +85,17 @@ export type ContinueResult = { started: true; tabId: string; delivered: boolean;
 /** A project on the Mac, named by an id that is not its path. */
 export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean; repositorySettings?: { filesToCopy: string[] } }
 export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
-export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
+/** One of an agent's accounts on the Mac (#980): its id, label and agent, never a token. */
+export interface NewSessionAccount { id: string; label: string; agent: string }
+export interface NewSessionAgent {
+  id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[];
+  /** Only when the agent has more than one account on the Mac: the person chooses one. */
+  accounts?: NewSessionAccount[];
+  /** The agent's default account; with `accounts` only. */
+  defaultAccount?: string;
+  /** Project id → that project's default account; with `accounts` only. */
+  projectDefaults?: Record<string, string>;
+}
 /** What the Mac's new-session view lets a person choose. */
 export interface NewSessionOptions { projects: NewSessionProject[]; agents: NewSessionAgent[]; modes: { id: string; label: string }[]; defaultMode: string; nativeCodex: boolean }
 export interface NewSessionRequest {
@@ -94,6 +105,8 @@ export interface NewSessionRequest {
   model: string;
   effort?: string | null;
   mode?: string | null;
+  /** The agent account it starts on (#980), one the options listed. Absent: the project's default, then the agent's. */
+  account?: string | null;
   title?: string;
   text: string;
   attachments?: AttachmentInput[];
@@ -426,6 +439,8 @@ export class HostApi {
       model: request.model,
       ...(request.effort ? { effort: request.effort } : {}),
       ...(request.mode ? { mode: request.mode } : {}),
+      // Only a chosen account is named: a Mac without accounts refuses a field it does not know.
+      ...(request.account ? { account: request.account } : {}),
       ...(request.title?.trim() ? { title: request.title.trim() } : {}),
       text: request.text,
       ...(request.attachments?.length ? { attachments: request.attachments } : {}),
@@ -434,6 +449,8 @@ export class HostApi {
     if (!result.ok) return { created: false, message: result.refusal.message };
     const value = result.value;
     if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    // A session started here is one of "Sessions I started or follow" for notifications (#990).
+    await recordStartedSessionOn(this.connection, value.sessionId).catch(() => undefined);
     const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
     return {
       created: true,
@@ -476,9 +493,18 @@ function isNewSessionOptions(value: unknown): value is NewSessionOptions {
   const strings = (item: unknown, ...keys: string[]) => !!item && typeof item === "object" && keys.every((key) => typeof (item as Record<string, unknown>)[key] === "string");
   return Array.isArray(record.projects) && record.projects.every((project) => strings(project, "id", "name") && typeof (project as NewSessionProject).git === "boolean")
     && Array.isArray(record.agents) && record.agents.every((agent) => strings(agent, "id", "name") && typeof (agent as NewSessionAgent).available === "boolean"
-      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts)))
+      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts))
+      && accountsReadable(agent as NewSessionAgent, strings))
     && Array.isArray(record.modes) && record.modes.every((mode) => strings(mode, "id", "label"))
     && typeof record.defaultMode === "string" && typeof record.nativeCodex === "boolean";
+}
+
+/** An agent's accounts, when listed: ids, labels and agents, a default among them, and project defaults that are ids. */
+function accountsReadable(agent: NewSessionAgent, strings: (item: unknown, ...keys: string[]) => boolean): boolean {
+  if (agent.accounts === undefined) return true;
+  return Array.isArray(agent.accounts) && agent.accounts.every((account) => strings(account, "id", "label", "agent"))
+    && (agent.defaultAccount === undefined || typeof agent.defaultAccount === "string")
+    && (agent.projectDefaults === undefined || (!!agent.projectDefaults && typeof agent.projectDefaults === "object" && Object.values(agent.projectDefaults).every((id) => typeof id === "string")));
 }
 
 function isMacSettings(value: unknown): value is MacSettings {

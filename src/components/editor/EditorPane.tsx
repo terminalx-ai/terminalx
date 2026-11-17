@@ -31,6 +31,7 @@ import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer
 import { useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { EditorToolbar } from "./EditorToolbar";
+import { useFileChange } from "./FileCrumb";
 import { AttachmentToolbar } from "./AttachmentToolbar";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
 
@@ -139,6 +140,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const [docText, setDocText] = useState("");
   // Copy and Download say how they went, a moment, under the toolbar.
   const [notice, setNotice] = useState<string | null>(null);
+  // Counts each read and save of the file, so its status badge is asked for again.
+  const [revision, setRevision] = useState(0);
   const wrapSlot = useRef(new Compartment()).current;
   const whitespaceSlot = useRef(new Compartment()).current;
   const { editorWrap, editorShowWhitespace } = usePrefs();
@@ -152,6 +155,8 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
   const markdown = isMarkdown(entry.rel);
   const preview = markdown && entry.viewMode === "preview";
   const linkContext = useMemo(() => editorLinkContext(entry), [entry]);
+  // A local checkout's file says how it differs from HEAD; a cloud file and a sent attachment have no badge.
+  const change = useFileChange(!entry.source && !attachment ? entry.root : undefined, entry.rel, visible, revision);
   const describeError = useCallback((e: unknown) => (cloud ? fileErrorText(e) : String(e)), [cloud]);
 
   const updateMarks = useCallback(() => {
@@ -164,6 +169,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
     (text: string, state: FileState) => {
       fileState.current = state;
       savedDoc.current = text;
+      setRevision((n) => n + 1);
       setDirty(false);
       setEditorDirty(entry.id, false);
       setChangedOnDisk(false);
@@ -491,6 +497,7 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       ) : <EditorToolbar
         path={abs}
         relativePath={entry.rel}
+        change={change}
         markdown={markdown && !embedded}
         viewMode={entry.viewMode}
         onViewModeChange={(mode) => setViewMode(entry.id, mode)}

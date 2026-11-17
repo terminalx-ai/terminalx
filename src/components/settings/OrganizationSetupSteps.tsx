@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type AgentLogin, type AgentLoginProvider, type CloudProviderSummary, type CloudWorkspaceQuote } from "@/lib/api";
-import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
-import { creatableProviders, pausedProviders } from "@/lib/hiddenProviders";
+import { createErrorMessage, createWorkspace, listedNames, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
+import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import { openAgentLogins, openOrganizationSettings } from "@/lib/settingsLinks";
@@ -42,10 +42,6 @@ function usableAgents(logins: readonly AgentLogin[]): AgentLoginProvider[] {
   return LOGIN_AGENTS.filter((agent) => agentLoginUsable(logins.find((login) => login.provider === agent.id))).map((agent) => agent.id);
 }
 
-/** "Codex", "Codex and Cursor", "Claude Code, Codex and Cursor". */
-function listed(names: readonly string[]): string {
-  return names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
 
 type Prepared = { form: CreateForm; pending: PendingCreate; quote: CloudWorkspaceQuote };
 
@@ -160,7 +156,7 @@ export function OrganizationSetupSteps({
     setChecking(false);
     const reconciled = reconcileSetup(current.current, next);
     if (reconciled !== current.current) store(reconciled);
-    return { providers, paused, github };
+    return { summaries, providers, paused, github };
   }, [organizationId, store]);
 
   useEffect(() => {
@@ -197,7 +193,8 @@ export function OrganizationSetupSteps({
       if (unsettledRequest(current.current)) throw new Error(UNSETTLED);
       const provider = found?.providers?.[0];
       const repository = found?.github?.[0];
-      if (!provider || !repository?.cloneUrl) throw new CreateRefused(provider ? "cloud_workspace_repository_credential_required" : "cloud_provider_connection_required");
+      if (!provider) throw found?.summaries ? noProviderRefusal(found.summaries) : new CreateRefused("cloud_provider_connection_required");
+      if (!repository?.cloneUrl) throw new CreateRefused("cloud_workspace_repository_credential_required");
       const form: CreateForm = {
         name: "Setup check",
         provider: provider.id,
@@ -275,7 +272,7 @@ export function OrganizationSetupSteps({
   const missingLogins = missing.length > 0 && record.logins === "later" && (step === "done" || reached("logins")) && (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-missing-logins">
       <span>
-        No agent login yet for {listed(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
+        No agent login yet for {listedNames(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
         is connected.
       </span>
       <Button size="xs" variant="outline" onClick={() => openAgentLogins(organizationId)}>
@@ -323,7 +320,7 @@ export function OrganizationSetupSteps({
       {step === "compute" && paused.length > 0 && (
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-compute-paused">
           <p>
-            New machines are paused for {organizationName} on {listed(paused.map((provider) => provider.displayName))}. The connection is done; setup goes on once
+            New machines are paused for {organizationName} on {listedNames(paused.map((provider) => provider.displayName))}. The connection is done; setup goes on once
             new machines are allowed.
           </p>
           {paused.some((provider) => provider.canManage) ? (

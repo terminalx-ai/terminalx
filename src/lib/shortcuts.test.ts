@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "./prefs";
 import {
   SHORTCUT_ACTIONS,
+  ariaKeyShortcut,
   bindingKind,
   bindingProblem,
   bindingsOf,
@@ -72,6 +73,16 @@ describe("the shortcut registry", () => {
     }
     expect(isTerminalReserved("mod+r", false)).toBe(true);
     expect(keycaps("mod+r", true)).toEqual(["⌘", "R"]);
+  });
+
+  it("gives Home a default on both platforms while respecting custom or disabled bindings", () => {
+    for (const mac of [true, false]) {
+      expect(resolveKeymap({}, mac)["app.home"]).toEqual(["mod+alt+0"]);
+      expect(bindingProblem("app.home", "mod+alt+0", mac)).toBeNull();
+      expect(isTerminalReserved("mod+alt+0", mac)).toBe(false);
+      expect(resolveKeymap({ "app.home": [] }, mac)["app.home"]).toEqual([]);
+      expect(resolveKeymap({ "app.home": ["mod+alt+g"] }, mac)["app.home"]).toEqual(["mod+alt+g"]);
+    }
   });
 
   it("covers the three kinds of binding", () => {
@@ -154,11 +165,11 @@ describe("the mapping store", () => {
   });
 
   it("saves a custom chord in the preferences and resolves it at once", () => {
-    expect(saveShortcut("app.toggleSidebar", ["mod+shift+b"])).toEqual({ ok: true });
-    expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
-    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+shift+b"]);
+    expect(saveShortcut("app.toggleSidebar", ["mod+alt+b"])).toEqual({ ok: true });
+    expect(getPrefs().shortcuts).toEqual({ "app.toggleSidebar": ["mod+alt+b"] });
+    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+alt+b"]);
     expect(isCustomized("app.toggleSidebar")).toBe(true);
-    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).shortcuts).toEqual({ "app.toggleSidebar": ["mod+alt+b"] });
   });
 
   it("unbinds an action with an empty list", () => {
@@ -168,7 +179,7 @@ describe("the mapping store", () => {
   });
 
   it("resets one action, and all of them", () => {
-    saveShortcut("app.toggleSidebar", ["mod+shift+b"]);
+    saveShortcut("app.toggleSidebar", ["mod+alt+b"]);
     saveShortcut("app.issues", []);
     expect(resetShortcut("app.toggleSidebar")).toEqual({ ok: true });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+b"]);
@@ -196,10 +207,10 @@ describe("the mapping store", () => {
   });
 
   it("asks before a reset takes back a default another action uses now", () => {
-    saveShortcut("app.toggleSidebar", ["mod+shift+b"]);
+    saveShortcut("app.toggleSidebar", ["mod+alt+b"]);
     saveShortcut("app.issues", ["mod+b"]);
     expect(resetShortcut("app.toggleSidebar")).toMatchObject({ ok: false, binding: "mod+b", conflict: { id: "app.issues" } });
-    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+shift+b"]);
+    expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+alt+b"]);
     expect(resetShortcut("app.toggleSidebar", { replace: true })).toEqual({ ok: true });
     expect(bindingsOf("app.toggleSidebar")).toEqual(["mod+b"]);
     expect(bindingsOf("app.issues")).toEqual([]);
@@ -332,5 +343,21 @@ describe("matching a key event to an action", () => {
     target.addEventListener("keydown", (e) => seen.push(matchesShortcut(e, "composer.send"), matchesShortcut(e, "composer.newLine")));
     sendShortcut("composer.send", target);
     expect(seen).toEqual([true, false]);
+  });
+});
+
+
+describe("Overview navigation defaults", () => {
+  it.each([true, false])("reserves mod+1 for Overview and preserves explicit choices (mac=%s)", (mac) => {
+    const defaults = resolveKeymap({}, mac);
+    expect(defaults["app.agentDashboard"]).toEqual(["mod+1"]);
+    expect(defaults["session.tab1"]).toEqual(["mod+shift+1"]);
+    expect(conflictOf("mod+1", "session.tab1", defaults)?.id).toBe("app.agentDashboard");
+    expect(ariaKeyShortcut("mod+1", mac)).toBe(mac ? "Meta+1" : "Control+1");
+    expect(resolveKeymap({ "session.tab1": ["mod+1"] }, mac)["app.agentDashboard"]).toEqual([]);
+    const custom = resolveKeymap({ "app.agentDashboard": ["mod+shift+a"], "session.tab1": ["mod+1"] }, mac);
+    expect(custom["app.agentDashboard"]).toEqual(["mod+shift+a"]);
+    expect(custom["session.tab1"]).toEqual(["mod+1"]);
+    expect(resolveKeymap({ "app.agentDashboard": [] }, mac)["app.agentDashboard"]).toEqual([]);
   });
 });

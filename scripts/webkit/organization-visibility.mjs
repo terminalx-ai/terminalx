@@ -38,7 +38,7 @@ try {
     await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
   };
   const closeSettings = async () => {
-    await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
+    await page.getByRole("button", { name: "Back to app", exact: true }).click(); // Settings leaves by its one Back.
     await sidebar(page);
   };
   const shown = (org) => page.getByRole("switch", { name: `Show ${org} in sidebar` }).getAttribute("aria-checked");

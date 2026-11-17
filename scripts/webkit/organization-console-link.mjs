@@ -19,6 +19,7 @@ try {
       };
     });
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Account", exact: true }).click(); // Settings opens on General (PRO-374).
     await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
     const row = page.getByTestId("organization-console-link");
     await row.waitFor();

@@ -41,9 +41,12 @@ pub fn pair(data: &Path, id: &str, token: &str, relay_device_id: Option<&str>) {
             platform: Some("macos".into()),
             client_public_key_b64: None,
             fingerprint: None,
-            approved_at: 1,
+            // Now: a credential unused for 90 days would expire (PRO-357).
+            approved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
             last_seen_at: None,
             relay_device_id: relay_device_id.map(str::to_string),
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         })
         .unwrap();
@@ -131,6 +134,24 @@ impl Computer {
             let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
             if message["id"] == id.as_str() {
                 return message;
+            }
+        }
+    }
+
+    /// The params of the next `event` notification within `within`; `None`
+    /// when none came or the connection closed first.
+    pub async fn notification(&mut self, event: &str, within: Duration) -> Option<Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match tokio::time::timeout_at(deadline, self.socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
+                    if message["event"] == event {
+                        return Some(message["params"].clone());
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Err(_) | Ok(None) | Ok(Some(Err(_))) => return None,
             }
         }
     }

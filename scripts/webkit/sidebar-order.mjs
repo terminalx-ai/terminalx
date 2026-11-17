@@ -23,11 +23,10 @@ const drag = async (page, from, to) => {
   // Let it detach before the next interaction so a fast CI click is not swallowed.
   await page.waitForTimeout(100);
 };
+// View → Custom order is a checkbox beside Sort by (02.18): on, it wins; off, Updated or Created again.
 const toggle = async (page) => {
   await page.getByTestId("sidebar-filter").click();
-  const current = await page.getByRole("menuitem", { name: /^Sort by:/ }).textContent();
-  await page.getByRole("menuitem", { name: /^Sort by:/ }).hover();
-  await page.getByRole("menuitemradio", { name: current.includes("Custom") ? "Updated" : "Custom", exact: true }).click();
+  await page.getByRole("menuitemcheckbox", { name: "Custom order", exact: true }).click();
 };
 const projectNames = (page) => page.locator('[data-testid="conversation-list"] [role="group"][aria-label^="local-"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
 const rows = (page, name) => page.getByRole("group", { name, exact: true }).locator("[data-row-sessions]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-row-sessions")));
@@ -151,18 +150,15 @@ try {
     window.__PW_STUB__.answers.sidebar_order = { custom: true, sessions: [], projects: [], revision: 1 };` });
   await sidebar(folded);
   const group = folded.getByRole("group", { name: "local-0", exact: true });
-  await group.getByRole("button", { name: "View all", exact: true }).waitFor();
-  assert.equal((await rows(folded, "local-0")).length, 3);
-  await group.getByRole("button", { name: "View all", exact: true }).click();
-  assert.equal((await rows(folded, "local-0")).length, 5);
-  await group.getByRole("button", { name: "Show less", exact: true }).click();
-  assert.equal((await rows(folded, "local-0")).length, 3);
+  // A project lists all its sessions: there is no "View all" (PRO-384).
+  await folded.waitForFunction(() => document.querySelectorAll('[role="group"][aria-label="local-0"] [data-row-sessions]').length === 5);
+  assert.equal(await group.getByRole("button", { name: "View all", exact: true }).count(), 0);
   await folded.getByRole("button", { name: "Settings", exact: true }).click();
   const settings = folded.getByRole("main", { name: "Settings", exact: true });
-  await settings.getByRole("button", { name: "Appearance", exact: true }).click();
+  await settings.getByRole("button", { name: "General", exact: true }).click();
   const custom = settings.getByRole("switch", { name: "Custom order" });
   assert.equal(await custom.getAttribute("aria-checked"), "true");
-  assert.equal(await settings.locator('[data-setting-id="appearance.customOrder"]').count(), 1);
+  assert.equal(await settings.locator('[data-setting-id="general.customOrder"]').count(), 1);
   await custom.click();
   await folded.waitForFunction(() => window.__PW_STUB__.answers.sidebar_order.custom === false);
   await custom.click();

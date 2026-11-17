@@ -188,7 +188,8 @@ afterEach(async () => {
 
 describe("cloud context menus (PRO-187)", () => {
   it.each(["project", "workspace", "session"])("opens a cloud %s menu with Shift+F10", async (surface) => {
-    await standard();
+    if (surface === "workspace") await load([item("fix-login", { repositories: [acmeApi] }), item("perf-sweep", { repositories: [acmeApi] })]);
+    else await standard();
     mount();
     const target = surface === "project"
       ? within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" })
@@ -404,7 +405,7 @@ describe("the Unread / Needs you filter", () => {
     expect(within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" }).getAttribute("aria-expanded")).toBe("true");
     // The other project has nothing waiting; the sibling workspace has no row.
     expect(screen.queryByRole("group", { name: "acme/web" })).toBeNull();
-    expect(screen.queryAllByTestId("cloud-workspace-group").map((group) => group.getAttribute("data-workspace"))).toEqual(["asks"]);
+    expect(screen.queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
     expectNoAttachOrResume();
   });
 
@@ -453,8 +454,8 @@ describe("workspace lifecycle menus", () => {
     expectNoAttachOrResume();
   });
 
-  it("names each workspace of a project with several, with its state and its own menu; Resume runs only when chosen", async () => {
-    await standard();
+  it("keeps empty workspaces actionable; Resume runs only when chosen", async () => {
+    await load([item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }), item("perf-sweep", { state: "suspended", repositories: [acmeApi], lastActivityAt: 40 })]);
     mount();
     const groups = within(project("acme/api")).getAllByTestId("cloud-workspace-group");
     expect(groups.map((group) => group.getAttribute("data-workspace"))).toEqual(["fix-login", "perf-sweep"]);

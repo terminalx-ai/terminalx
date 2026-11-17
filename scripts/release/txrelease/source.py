@@ -9,7 +9,8 @@ from .proc import Runner, now, read_record, require, write_json
 
 # The serve integration tests a release runs (the CI headless-serve job runs a subset of these).
 SERVE_TESTS = ['owner_pretool', 'local_platform', 'local_lifetime', 'local_sharing_owner', 'local_mobile',
-               'local_legacy', 'local_handover', 'local_issue_start', 'agent_setup', 'session_parent']
+               'local_legacy', 'local_handover', 'local_issue_start', 'agent_setup', 'session_parent',
+               'headless_pair', 'headless_update']
 
 
 def check_steps(release: Release) -> list[tuple[str, list[str], Path]]:

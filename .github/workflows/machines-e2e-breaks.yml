@@ -1,0 +1,54 @@
+name: Machines e2e break check
+
+# PRO-358: the two-machine scenarios (src-tauri/serve/tests/machines_e2e.rs,
+# run on every relevant pull request by CI's machines-e2e job) must still
+# catch what they guard. Each patch in scripts/machine-e2e/breaks/ removes one
+# check on purpose: pairing-check.patch admits a paired token with any client
+# key (MachineHost::paired_with_key), project-scoping.patch serves a projectId
+# the machine does not have (remote::machine::Projects::get). For each, the
+# patch must apply, the scenarios must then fail, and fail with the marker in
+# its .expect file. This workflow fails when a patch no longer applies or
+# builds, or the scenarios pass with it (scripts/machine-e2e/run.py breaks).
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: machines-e2e-breaks-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  breaks:
+    runs-on: ubuntu-latest
+    # Two patches, each an incremental build and a run of the scenarios.
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      TERMINALX_E2E_REQUIRE_LINUX: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Restore only, from CI's machines-e2e cache on main; nothing is saved.
+      - name: Restore the cargo cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ci-v3-machines-e2e-breaks-${{ github.run_id }}
+          restore-keys: |
+            ci-v3-machines-e2e-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+      - name: Each deliberate break fails the scenarios
+        run: python3 -I scripts/machine-e2e/run.py breaks

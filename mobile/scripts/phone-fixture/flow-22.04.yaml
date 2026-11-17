@@ -1,0 +1,34 @@
+# Drives the Sessions list fixture (#986) with real taps and saves a screenshot
+# of each built state, named after the 22.04 design screen it matches.
+appId: com.terminalx.phone.fixture
+name: Sessions list states (22.04)
+---
+- launchApp:
+    arguments: { fixtureScenario: connected }
+- tapOn:
+    id: sessions-tab
+- assertVisible: "Mobile question card,.*"
+- takeScreenshot: 22.04-1-all-sessions
+- tapOn: "Needs you, 2"
+- assertVisible: "2 sessions are waiting for you."
+- assertNotVisible: "Runtime handover,.*"
+- takeScreenshot: 22.04-2-needs-you
+- tapOn: "Working, 3"
+- assertNotVisible: "Mobile question card,.*"
+- takeScreenshot: 22.04-2b-working
+- tapOn: "All, 9"
+- tapOn: "Review and merge.*"
+- assertVisible: "Chief of staff,.*"
+- assertVisible: "File the mobile issues,.*"
+- takeScreenshot: 22.04-3-session-with-tabs
+- scrollUntilVisible:
+    element: "Explain the relay cells,.*"
+    direction: DOWN
+- swipe:
+    direction: UP
+- takeScreenshot: 22.04-4-last-row-clear-of-tab-bar
+- tapOn: "Search sessions"
+- inputText: "roster"
+- assertVisible: "Roster and presence,.*"
+- assertNotVisible: "Mobile question card,.*"
+- takeScreenshot: 22.04-5-search
