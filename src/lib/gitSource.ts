@@ -36,7 +36,7 @@ export interface GitSource {
   generateCommitMessage?(agent: "claude" | "codex"): Promise<string>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
   changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
-  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
+  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>;
   mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;

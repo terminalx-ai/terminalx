@@ -113,6 +113,7 @@ try {
       { status, recipes },
     );
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Account", exact: true }).click(); // Settings opens on General (PRO-374).
     // The section is on the active organization's page (PRO-107), reached from Settings → Account.
     await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
     // PRO-391: the environment is the Environment tab of Cloud compute.

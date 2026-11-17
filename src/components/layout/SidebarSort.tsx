@@ -14,11 +14,19 @@ import { reportError, showError } from "@/lib/errorToasts";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
-export interface SidebarSortItem { id: string; name: string; members?: string[] }
+export interface SidebarSortItem {
+  id: string;
+  name: string;
+  members?: string[];
+  /** Override the containing list for collections spanning sections, such as Pinned. */
+  section?: string | null;
+  /** A pinned row accepts reordering within its list, but no incoming section moves. */
+  pinned?: boolean;
+}
 type Kind = "sessions" | "projects";
 type ListProps = { items: SidebarSortItem[]; kind?: Kind; children: ReactNode };
 /** What dnd-kit carries for each draggable or droppable in a sidebar drag scope. */
-type RowData = { type: "row"; kind: Kind; list: string; section: string | null; name: string; members: string[] };
+type RowData = { type: "row"; kind: Kind; list: string; section: string | null; name: string; members: string[]; pinned?: boolean };
 type ZoneData = { type: "zone"; section: string | null; name: string };
 type SectionData = { type: "section"; id: string; name: string };
 type DragData = RowData | ZoneData | SectionData;
@@ -112,7 +120,8 @@ export function SidebarDragScope({ children, main = true, mainTarget = false, mo
   const moveTarget = (from: DragData | undefined, over: Over | null): string | null | undefined => {
     const to = dataOf(over);
     if (!moves || from?.type !== "row" || from.kind !== "sessions" || !to || to.type === "section") return undefined;
-    if (to.type === "row" && (to.kind !== "sessions" || to.list === from.list)) return undefined;
+    // Pinned is a collection across sections, not a section destination. Its own rows can still reorder.
+    if (to.type === "row" && (to.kind !== "sessions" || to.list === from.list || to.pinned)) return undefined;
     return to.section === from.section ? undefined : to.section;
   };
   const unchanged = (data: RowData) => {
@@ -345,7 +354,7 @@ export function useSidebarSortable(id: string) {
   const list = useContext(Items);
   const item = list.byId.get(id);
   const reduced = useReducedMotion();
-  const data = useMemo<RowData | undefined>(() => item && { type: "row", kind: list.kind, list: list.list, section: list.section, name: item.name, members: item.members ?? [item.id] }, [item, list]);
+  const data = useMemo<RowData | undefined>(() => item && { type: "row", kind: list.kind, list: list.list, section: item.section === undefined ? list.section : item.section, name: item.name, members: item.members ?? [item.id], pinned: item.pinned }, [item, list]);
   const sortable = useSortable({ id, disabled: !item, data, transition: !reduced ? undefined : null });
   const ref = usePointerDrag(!!item && list.rowDrag, sortable.listeners, sortable.setNodeRef);
   const overlaid = list.rowDrag && sortable.isDragging;
@@ -381,7 +390,7 @@ export function useSidebarSectionDrag(section: { id: string; name: string }, sor
   const to = dataOf(over);
   const held = from?.type === "row" && from.kind === "sessions" && from.section !== section.id;
   const bridgedOver = useSyncExternalStore(subscribeBridged, () => bridged === section.id);
-  const isOver = bridgedOver || (held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && to.list === from.list));
+  const isOver = bridgedOver || (held && !!to && to.type !== "section" && to.section === section.id && !(to.type === "row" && (to.list === from.list || to.pinned)));
   const node = useRef<HTMLElement | null>(null);
   const ref = useCallback((element: HTMLElement | null) => { node.current = element; sort.setNodeRef(element); zone.setNodeRef(element); }, [sort.setNodeRef, zone.setNodeRef]);
   useLayoutEffect(() => {

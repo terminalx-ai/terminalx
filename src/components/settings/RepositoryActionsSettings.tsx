@@ -21,7 +21,7 @@ const chipClass = "inline-flex h-[18px] shrink-0 items-center gap-1 whitespace-n
 export function RepositoryActionsSettings({ actions, onChange, onReset, sourceFile }: {
   actions: readonly RepositoryAction[];
   onChange: (actions: RepositoryAction[]) => Promise<void>;
-  /** Clear local overrides, then reread the repository file. Absent until that source is available. */
+  /** Replace the entire local action list with repository-file actions. Absent until that source is available. */
   onReset?: () => Promise<void>;
   /** The repository file the actions were read from, for the chips and the dialog; absent while they are kept on this computer. */
   sourceFile?: string;
@@ -71,6 +71,12 @@ export function RepositoryActionsSettings({ actions, onChange, onReset, sourceFi
           </SortableContext>
         </DndContext>
       )}
+      {onReset && <div className="flex flex-col items-start gap-1">
+        <Button variant="outline" size="sm" disabled={mutation.busy || !!editing} onClick={() => void mutation.run(onReset)}>
+          <RotateCcw />Reset all actions to {sourceFile ?? "terminalx.json"}
+        </Button>
+        <p className="text-xs text-muted-foreground">Replaces the entire action list with the repository file's actions, discarding local changes.</p>
+      </div>}
       {!editing && <RepositoryFieldError id={errorId} error={mutation.error} />}
       {editing && <ActionDialog
         key={editing.action.id}
@@ -81,7 +87,6 @@ export function RepositoryActionsSettings({ actions, onChange, onReset, sourceFi
         error={mutation.error}
         sourceFile={sourceFile}
         onClose={() => setEditing(null)}
-        onReset={onReset && (() => mutation.run(onReset))}
         onDelete={() => change(actions.filter((entry) => entry.id !== editing.action.id))}
         onToggleHidden={() => change(actions.map((entry) => entry.id === editing.action.id ? { ...entry, hidden: !entry.hidden } : entry))}
         onSave={async (action) => {
@@ -139,7 +144,7 @@ function ActionRow({ action, keys, sourceFile, disabled, onMove, onEdit }: {
   );
 }
 
-function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose, onSave, onDelete, onToggleHidden, onReset }: {
+function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose, onSave, onDelete, onToggleHidden }: {
   action: RepositoryAction;
   actions: readonly RepositoryAction[];
   isNew: boolean;
@@ -150,7 +155,6 @@ function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose
   onSave: (action: RepositoryAction) => Promise<boolean>;
   onDelete: () => Promise<boolean>;
   onToggleHidden: () => Promise<boolean>;
-  onReset?: () => Promise<boolean>;
 }) {
   const [draft, setDraft] = useState(action);
   const [attempted, setAttempted] = useState(false);
@@ -223,7 +227,6 @@ function ActionDialog({ action, actions, isNew, busy, error, sourceFile, onClose
           <DialogFooter className="mt-0 items-center justify-between border-t border-hairline px-4 py-3">
             {!isNew && <div className="flex flex-wrap items-center gap-1">
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => void then(onToggleHidden)()}>{hidden ? <Eye /> : <EyeOff />}{hidden ? "Show action" : "Hide action"}</Button>
-              {onReset && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void then(onReset)()}><RotateCcw />Reset to {sourceFile ?? "terminalx.json"}</Button>}
               <Button variant="ghost" size="sm" disabled={busy} aria-label={`Delete ${action.name}`} className="text-muted-foreground hover:text-destructive" onClick={() => void then(onDelete)()}><Trash2 />Delete</Button>
             </div>}
             <div className="ml-auto flex items-center gap-2">

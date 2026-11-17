@@ -198,7 +198,7 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
     let files: Vec<(&str, &str)> = changes["files"].as_array().unwrap().iter().map(|file| (file["path"].as_str().unwrap(), file["status"].as_str().unwrap())).collect();
     assert_eq!(files, [("README.md", "modified"), ("new.txt", "added")]);
     let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "README.md", "base": head })).unwrap();
-    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n" }));
+    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n", "beforeSize": 6, "afterSize": 12 }));
 
     // A commit's changes, by the trees `git.log` reports.
     f.call("git.commit", json!({ "repo": "app", "message": "second", "author": me() })).unwrap();
@@ -727,4 +727,30 @@ fn log_limits_commits_to_the_selected_base_branch() {
     for from in ["--all..HEAD", "main...HEAD", "main~1..HEAD", "main..HEAD~1"] {
         assert_eq!(f.code("git.log", json!({ "repo": "app", "from": from })), "invalid_params");
     }
+}
+
+#[test]
+fn oversized_file_contents_keep_actual_revision_byte_sizes() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    // Beyond both the desktop and relay preview limits; count bytes, not characters.
+    let text = "é".repeat(3 * 1024 * 1024);
+    std::fs::write(repo.join("large.txt"), &text).unwrap();
+    f.call("git.commit", json!({ "repo": "app", "message": "large", "author": me() })).unwrap();
+    let log = f.call("git.log", json!({ "repo": "app", "limit": 1 })).unwrap();
+    let tree = &log["commits"][0]["tree"];
+    let working = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(working["after"], "<file too large to show>");
+    assert_eq!(working["afterSize"], text.len());
+    std::fs::write(repo.join("large.txt"), "small").unwrap();
+    let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(pair["before"], "<file too large to show>");
+    assert_eq!(pair["beforeSize"], text.len());
+    assert_eq!(pair["afterSize"], 5);
+    let snapshot = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree, "head": tree })).unwrap();
+    assert_eq!(snapshot["afterSize"], text.len());
+    std::fs::remove_file(repo.join("large.txt")).unwrap();
+    let deleted = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert!(deleted["afterSize"].is_null());
 }
