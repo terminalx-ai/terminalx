@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Circle, CircleCheck, CircleDot, CircleX, Clock, ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, ListChecks, Loader2, Maximize2, MessageSquare, RefreshCw, Unplug, Users, X } from "@/icons";
+import type { PrConversation as Conversation } from "@terminalx/portable/workspaceGit";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { api, fs, type GitHubConnectionStatus, type PullRequest, type PrAssociation } from "@/lib/api";
@@ -16,20 +17,19 @@ import { onPrLinksChanged, unlinkPr } from "@/lib/prLinks";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
-import { requestMergedSweep } from "@/lib/mergedCleanup";
+import { getMergedCleanup, holdMergedWorkspace, LOCAL_HOST, mergedCleanupOn, requestMergedSweep, useMergedCleanup } from "@/lib/mergedCleanup";
+import { noteMerge } from "@/lib/mergeMethods";
+import { useSessionStore } from "@/lib/sessions";
+import { pipelineSettings } from "@/lib/issuePipeline";
 import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/menu";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { Deployments, PrChecks, webUrl } from "./PrChecks";
 import { actionsRuns, checkCounts, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
 import type { PrCheck } from "@/lib/api";
 import { NextLine } from "./NextStep";
 import { PrConversation, useDocumentVisible } from "./PrConversation";
+import { MergeMenu, type MergeChoices } from "./MergeMenu";
+import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
 import { ReviewThreads } from "./ReviewThreads";
 import { noteSessionPrs } from "@/lib/reviewThreads";
 
@@ -39,12 +39,18 @@ type WorkspaceCleanup = {
 };
 
 /**
- * Where a pull request stands for merging, in a few words. GitHub's lifecycle
- * and queue take precedence over head-branch checks; checks still running are
- * said as a wait ("Waiting for 2 checks", PRO-394), not as "Blocked", when
- * they are all that holds the PR (GitHub's BLOCKED included); a review still
- * needed or a branch behind its base is said first. `waiting` counts them.
+ * What "Archive this session after merge" asks of this session's workspace once the merge is through: where clean-up
+ * archives merged sessions, unticking it keeps this one; where it does not, ticking it opens the archive dialog. Only
+ * the session's own pull request offers the choice: merging a linked one says nothing about this workspace.
  */
+export function afterMerge(current: boolean, choices: MergeChoices | undefined, cleanupOn: boolean): "hold" | "archive" | null {
+  if (!current || !choices) return null;
+  if (!choices.archive && cleanupOn) return "hold";
+  if (choices.archive && !cleanupOn) return "archive";
+  return null;
+}
+
+/** GitHub's lifecycle and queue take precedence over head-branch checks. */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string; waiting?: number } {
   const blocked = (label: string) => ({ ok: false, label });
   if (pr.state === "MERGED") return blocked("Merged");
@@ -165,6 +171,12 @@ export function PrPanel({
   const shownTab = useVisibleSessionTab(sessionId ?? "");
   // Conversation pagination is independent of check/discovery polling.
   const [conversationRefresh, setConversationRefresh] = useState(0);
+  // What each conversation read said that the panel shows outside it: the merge menu's methods, who approved.
+  const [conversations, setConversations] = useState<Record<string, Conversation>>({});
+  const cleanup = useMergedCleanup();
+  const store = useSessionStore();
+  const project = store.projects.find((entry) => entry.path === store.sessions.find((entry) => entry.id === sessionId)?.projectPath);
+  const shortcutMethod = project ? pipelineSettings(project).mergeMethod : null;
   const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => { setLoginSource(null); }, [source]);
@@ -374,10 +386,33 @@ export function PrPanel({
   };
 
   /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
-  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue") =>
-    void act("merge", () => row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method)).then((done) => {
-      if (done) void requestMergedSweep();
+  const merge = (row: SessionPr, method: "merge" | "squash" | "rebase" | "queue", choices?: MergeChoices) =>
+    void act("merge", async () => {
+      await (row.association && source.prAccess ? source.prAccess(row.association).merge(method) : source.mergePr(row.pr!.number, method));
+      if (method === "queue") return;
+      noteMerge(row.pr!.url, method);
+      if (choices?.deleteBranch && source.deleteMergedBranch) {
+        try { await source.deleteMergedBranch(row.pr!.number, row.association?.url); }
+        catch (e) { return `Merged. Its branch on GitHub was kept: ${source.errorMessage(e)}.`; }
+      }
+    }).then(async (done) => {
+      if (!done) return;
+      await requestMergedSweep();
+      // "Archive this session after merge": where clean-up archives merged workspaces, unticking keeps this one;
+      // where it does not, ticking opens the archive dialog, which says what would be lost first.
+      if (!workspace || !cwd) return;
+      const next = afterMerge(row.current, choices, mergedCleanupOn(getMergedCleanup().settings, workspace.projectPath));
+      if (next === "hold") await holdMergedWorkspace(LOCAL_HOST, cwd, true).catch(() => {});
+      else if (next === "archive") workspace.onDelete();
     });
+  const archiveDefault = (row: SessionPr) => workspace && cwd && row.current ? mergedCleanupOn(cleanup.settings, workspace.projectPath) : null;
+  const mergeMenu = (row: SessionPr, size: "xs" | "sm", disabled: boolean) => {
+    const pr = row.pr!;
+    const read = conversations[row.identity];
+    return <MergeMenu url={pr.url} base={pr.base} methods={read?.mergeMethods} commits={read?.commits} size={size} disabled={disabled} working={working === "merge"}
+      archive={archiveDefault(row)} canDeleteBranch={!!source.deleteMergedBranch && !source.cloud} shortcutMethod={row.current ? shortcutMethod : null}
+      onMerge={(method, choices) => merge(row, method, choices)} />;
+  };
 
   if (connection && connection.state !== "connected") {
     return <GitHubSetup key={source.key} status={connection} onConnectingChange={(value) => setLoginSource(value ? source : null)} onRefresh={() => setTick((value) => value + 1)} />;
@@ -430,13 +465,14 @@ export function PrPanel({
         <p className="px-4 text-xs text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
-      {(workspace || onSettle) && merged && (
+      {/* In the Branch tab, the merged card's WHAT NEXT says this (design 05.12). */}
+      {!inline && (workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
           <span className="flex-1 text-foreground">This branch has been merged.</span>
           {canDelete ? (
-            <Button size="xs" className="text-xs" variant="outline" onClick={workspace?.onDelete}>
-              Delete workspace
+            <Button size="xs" variant="outline" onClick={workspace?.onDelete}>
+              Archive the session
             </Button>
           ) : onSettle && !workspace ? (
             <Button size="xs" className="text-xs" variant="outline" onClick={onSettle}>
@@ -445,6 +481,9 @@ export function PrPanel({
           ) : null}
         </div>
       )}
+      {/* Clean-up's word on a merged workspace goes under the merged pull request's WHAT NEXT; with no such row shown
+          (GitHub unreachable, say), it stands on its own here. */}
+      {inline && cwd && !source.cloud && !visibleRows.some((row) => row.current && row.pr?.state === "MERGED") && <div className="px-3"><MergedWorkspaceStep cwd={cwd} /></div>}
       {loading && prs.length === 0 && !inline && <div className="px-3 py-3 text-xs text-faint">Loading…</div>}
       {visibleRows.map((row) => {
         const pr = row.pr;
@@ -453,11 +492,6 @@ export function PrPanel({
           <div className="text-destructive">Could not refresh this pull request.</div>
           <CommandDetails details={row.error} />
         </div>;
-        // This owns the description as well as its editor, including in a PR tab.
-        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh} onEdited={(title, body) => {
-          if (selected.current.generation !== generation) return;
-          setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
-        }} onSummary={(summary) => setSummaries((old) => ({ ...old, [row.identity]: summary }))} />;
         const ready = mergeReadiness(pr);
         const reviews = <ReviewThreads source={source} url={pr.url} number={pr.number} sessionId={sessionId} active={active} prState={pr.state} />;
         // A check's log opens in a centre tab beside the chat (PRO-394, design 05.09); a cloud workspace's under the list.
@@ -474,6 +508,20 @@ export function PrPanel({
           onOpenLog={onOpenLog}
           viewing={shown?.kind === "checkLog" && shown.check.prUrl === pr.url ? shown.check.url : null}
           onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
+        const isMerged = pr.state === "MERGED";
+        // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
+        const whatNext = isMerged && inline && row.current && cwd && !source.cloud
+          ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+          : undefined;
+        // This owns the description as well as its editor, including in a PR tab.
+        const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh}
+          merged={isMerged} whatNext={whatNext}
+          onSummary={(summary) => { if (selected.current.generation === generation) setSummaries((old) => ({ ...old, [row.identity]: summary })); }}
+          onRead={(read) => { if (selected.current.generation === generation) setConversations((previous) => previous[row.identity] === read ? previous : { ...previous, [row.identity]: read }); }}
+          onEdited={(title, body) => {
+            if (selected.current.generation !== generation) return;
+            setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
+          }} />;
         const onUnlink = unlink(row);
         if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks}
           commits={row.current && status?.branch === pr.head ? status.aheadOfBase : null} summary={summaries[row.identity]} actions={pr.state === "OPEN" && source.canWrite && (pr.isDraft || canQueue(pr) || (ready.ok && !pr.mergeQueueEnabled)) && (
@@ -483,8 +531,8 @@ export function PrPanel({
                 {working === "ready" && <Loader2 className="animate-spin" />} Mark ready
               </Button>
             )}
-            {canQueue(pr) && <Button size="sm" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
-            {ready.ok && !pr.mergeQueueEnabled && <MergeMenu disabled={!!working || loading || !fresh} working={working === "merge"} onMerge={(method) => merge(row, method)} />}
+            {canQueue(pr) && <Button size="xs" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
+            {ready.ok && !pr.mergeQueueEnabled && mergeMenu(row, "xs", !!working || loading || !fresh)}
           </>
         )} /><div className="px-3 pb-3">{conversation}</div></div>;
         return (
@@ -528,23 +576,12 @@ export function PrPanel({
                     </Button>
                   )}
                   {source.canWrite && canQueue(pr) && <Button size="sm" disabled={!!working || loading || !fresh} onClick={() => merge(row, "queue")}>Add to merge queue</Button>}
-                  {source.canWrite && !pr.mergeQueueEnabled && <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button size="sm" className={cn("bg-merge text-merge-foreground hover:opacity-90", !ready.ok && "opacity-60")} disabled={!!working || loading || !fresh || !ready.ok}>
-                        {working === "merge" ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => merge(row, "merge")}>Merge commit</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => merge(row, "squash")}>Squash and merge</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => merge(row, "rebase")}>Rebase and merge</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>}
+                  {source.canWrite && !pr.mergeQueueEnabled && mergeMenu(row, "sm", !!working || loading || !fresh || !ready.ok)}
                 </div>
               </div>
             )}
-            {conversation}
-            {reviews}
+            <div className="mt-3">{conversation}</div>
+            {!isMerged && reviews}
           </div>
         );
       })}
@@ -846,22 +883,5 @@ function PrDraft({ cwd, head, base, bases, onBase, onOpenBases, ahead, pushed, t
       )}
       <p className="flex items-center gap-2 text-xs text-faint"><ListChecks className="size-3.5 shrink-0" aria-hidden />Checks show up here once the PR is open.</p>
     </form>
-  );
-}
-
-function MergeMenu({ disabled, working, onMerge }: { disabled: boolean; working: boolean; onMerge: (method: "merge" | "squash" | "rebase") => void }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button size="sm" className="bg-merge text-merge-foreground hover:opacity-90" disabled={disabled}>
-          {working ? <Loader2 className="animate-spin" /> : <GitMerge />} Merge
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuItem onSelect={() => onMerge("merge")}>Merge commit</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onMerge("squash")}>Squash and merge</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onMerge("rebase")}>Rebase and merge</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }

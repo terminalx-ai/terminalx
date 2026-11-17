@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowLeft,
@@ -158,10 +158,12 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
 
   const remove = async () => {
     if (!selected) return;
-    const yes = await ask(
-      `Delete “${selected.name}”? Its run history is removed, but its sessions and worktrees stay available for inspection.`,
-      { title: "Delete automation", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
-    ).catch(() => false);
+    const yes = await confirmInApp({
+      title: `Delete “${selected.name}”?`,
+      body: "Its run history is removed, but its sessions and worktrees stay available for inspection.",
+      action: "Delete",
+      destructive: true,
+    });
     if (!yes) return;
     try {
       await deleteAutomation(selected.id);

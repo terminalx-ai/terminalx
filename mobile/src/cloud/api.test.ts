@@ -1,11 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudApi, CloudApiError } from "./api";
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
+const sentHeaders: Headers[] = [];
+afterEach(() => {
+  for (const headers of sentHeaders.splice(0)) {
+    expect(headers.get("X-TerminalX-Cloud-Workspace-Contract")).toBe("providers-v1");
+    expect(headers.get("X-TerminalX-Cloud-Workspace-Providers")?.split(",")).toEqual(["described", "machine0", "box", "terminalx-cloud"]);
+  }
+});
+
 function api(answers: (call: Call) => { status?: number; body?: unknown } | Promise<never>, token: string | null = "access-token") {
   const calls: Call[] = [];
   const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+    sentHeaders.push(new Headers(init.headers));
     const call = { url, method: init.method ?? "GET", headers: init.headers as Record<string, string>, body: init.body ? JSON.parse(init.body as string) : undefined };
     calls.push(call);
     const answer = await answers(call);
@@ -30,6 +39,20 @@ describe("the phone's cloud API client", () => {
       "X-TerminalX-Cloud-Workspace-Contract": "providers-v1",
       "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
     });
+  });
+
+  it("lists and resumes a provider outside the fallback list and accepts its display label when supplied", async () => {
+    const unfamiliar = workspace({ id: "ws-2", provider: "new-compute", providerDescriptor: { label: "New Compute" }, state: "suspended" });
+    const unlabelled = workspace({ id: "ws-3", provider: "another-compute", providerDescriptor: { label: 42 } });
+    const { client, calls } = api((call) => (call.url.endsWith("/resume") ? { status: 202, body: { workspace: unfamiliar.workspace, operation: { id: "op-1", state: "queued", action: "resume" } } } : { body: { workspaces: [workspace(), unfamiliar, unlabelled] } }));
+    const list = await client.workspaces("org-1");
+    expect(list.workspaces.map(({ workspace }) => [workspace.id, workspace.provider, workspace.providerDescriptor?.label])).toEqual([
+      ["ws-1", "box", undefined],
+      ["ws-2", "new-compute", "New Compute"],
+      ["ws-3", "another-compute", undefined],
+    ]);
+    expect((await client.resume("org-1", "ws-2")).workspace.provider).toBe("new-compute");
+    expect(calls[1]).toMatchObject({ method: "POST", url: "https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-2/resume", body: {} });
   });
 
   it("refuses a list that names another organization's workspace", async () => {
@@ -94,12 +117,21 @@ describe("the phone's cloud API client", () => {
     expect(calls.map((call) => (call.body as { clientCommandIds: string[] }).clientCommandIds.length)).toEqual([100, 100, 30]);
   });
 
+  it("lists and cancels commands through the same workspace contract", async () => {
+    const command = { clientCommandId: "c1", tabId: "t1", kind: "send", state: "queued", keyId: "k1", createdAt: 1, updatedAt: 1 };
+    const canceled = { ...command, state: "canceled" };
+    const { client } = api(({ method }) => ({ body: method === "GET" ? { commands: [command] } : { command: canceled } }));
+    expect(await client.commands("org-1", "ws-1", "t1")).toEqual([command]);
+    expect(await client.cancelCommand("org-1", "ws-1", "c1")).toEqual(canceled);
+  });
+
   it("reads a tab's checkpoint after a cursor, and none is not an error", async () => {
     const checkpoint = { tabId: "t1", epoch: 2, version: 5, schemaVersion: 1, keyId: "k1", sha256: "ab", iv: "iv", ciphertext: "ct" };
-    const { client, calls } = api((call) => (call.url.includes("afterEpoch") ? { body: { checkpoint: null } } : call.url.endsWith("/missing") ? { status: 404, body: { error: "cloud_workspace_transcript_checkpoint_not_found" } } : { body: { checkpoint } }));
+    const { client, calls } = api((call) => (call.url.endsWith("/transcript-checkpoints") ? { body: { checkpoints: [checkpoint] } } : call.url.includes("afterEpoch") ? { body: { checkpoint: null } } : call.url.endsWith("/missing") ? { status: 404, body: { error: "cloud_workspace_transcript_checkpoint_not_found" } } : { body: { checkpoint } }));
     expect(await client.checkpoint("org-1", "ws-1", "t1")).toEqual(checkpoint);
     expect(await client.checkpoint("org-1", "ws-1", "t1", { epoch: 2, version: 5 })).toBeNull();
     expect(await client.checkpoint("org-1", "ws-1", "missing")).toBeNull();
+    expect(await client.checkpoints("org-1", "ws-1")).toMatchObject([{ tabId: "t1", epoch: 2, version: 5 }]);
     expect(calls[1].url).toBe("https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-1/transcript-checkpoints/t1?afterEpoch=2&afterVersion=5");
   });
 
@@ -140,7 +172,8 @@ describe("the phone's cloud API client", () => {
   it("reads the server's clock from its answers, for judging expiry on a phone whose clock is off", async () => {
     const calls: unknown[] = [];
     const serverTime = Date.now() - 90_000;
-    const fetcher = vi.fn(async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentHeaders.push(new Headers(init?.headers));
       calls.push(1);
       return { ok: true, status: 200, headers: { get: (name: string) => (name.toLowerCase() === "date" ? new Date(serverTime).toUTCString() : null) }, text: async () => JSON.stringify({ workspaces: [] }) } as unknown as Response;
     });

@@ -1,9 +1,10 @@
+import { cloudActivityRead, subscribeCloudReadMarkers, writeCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
-import type { ImageInput } from "@/lib/api";
-import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages, uploadMachineFiles, type MachineFileRef } from "@/lib/cloudComposer";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
 import {
   cloudAgentApi,
@@ -103,6 +104,7 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+const deniedWorkspaces = new Set<string>();
 /** Issued mutations outlive disposable stores. Do not clear this queue on
  * account changes: A -> B -> A must still wait for A's older native operation. */
 const cacheMutations = new Map<string, Promise<void>>();
@@ -111,7 +113,9 @@ let account = "";
 
 /** Told by `@/lib/account` whenever the status changes. Stores made from now on are this account's. */
 export function setCloudAgentAccount(next: string | null) {
+  if (account === (next ?? "")) return;
   account = next ?? "";
+  loadDeniedWorkspaces();
 }
 
 /** The account a store's cache belongs to; one made before anyone was known takes the first account it is used under. */
@@ -183,7 +187,15 @@ function store(scope: CloudAgentScope): Store {
   return s;
 }
 
+subscribeCloudReadMarkers(() => {
+  for (const s of stores.values()) publish(s);
+});
+
 function publish(s: Store) {
+  if (stores.get(cloudAgentsKey(s.scope)) !== s) return;
+  for (const tab of s.tabs.values()) {
+    if (cloudActivityRead(s.scope.organizationId, s.scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt)) tab.unread = false;
+  }
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
   s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
@@ -244,6 +256,57 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   clearDrafts((tabId) => ids.has(tabId));
   for (const id of ids) draftTabs.delete(id);
   return count;
+}
+
+function loadDeniedWorkspaces() {
+  deniedWorkspaces.clear();
+  if (!account) return;
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(`terminalx.denied-cloud.v1:${encodeURIComponent(account)}`) ?? "[]");
+    if (Array.isArray(saved)) for (const key of saved) if (typeof key === "string") deniedWorkspaces.add(key);
+  } catch { /* Native authorization remains authoritative if local storage is unavailable. */ }
+}
+function saveDeniedWorkspaces() {
+  if (!account) return;
+  localStorage.setItem(`terminalx.denied-cloud.v1:${encodeURIComponent(account)}`, JSON.stringify([...deniedWorkspaces]));
+}
+
+/** A revoke hint blocks cache/checkpoint/live reloads until a fresh authorized catalog answers. */
+export function setCloudAgentsAccess(scope: CloudAgentScope, allowed: boolean) {
+  const key = cloudAgentsKey(scope);
+  if (allowed) {
+    const wildcard = deniedWorkspaces.delete(`*:${scope.workspaceId}`);
+    if (deniedWorkspaces.delete(key) || wildcard) {
+      try { saveDeniedWorkspaces(); } catch { /* A stale durable denial can only hide data on relaunch. */ }
+    }
+    return;
+  }
+  deniedWorkspaces.add(key);
+  const previous = stores.get(key);
+  dropCloudAgents(scope);
+  if (previous) {
+    previous.snapshot = { ...EMPTY, version: previous.snapshot.version + 1 };
+    for (const listener of [...previous.listeners]) listener();
+  }
+  for (const listener of [...anyListeners]) listener();
+  // A failed durable write prevents the inbox checkpoint from committing and retries the invalidation.
+  saveDeniedWorkspaces();
+}
+
+/** A minimal removal may arrive before the catalog knows the workspace's organization. */
+export function denyCloudAgentsWorkspace(workspaceId: string) {
+  deniedWorkspaces.add(`*:${workspaceId}`);
+  for (const s of [...stores.values()]) {
+    if (s.scope.workspaceId !== workspaceId) continue;
+    dropCloudAgents(s.scope);
+    s.snapshot = { ...EMPTY, version: s.snapshot.version + 1 };
+    for (const listener of [...s.listeners]) listener();
+  }
+  for (const listener of [...anyListeners]) listener();
+  saveDeniedWorkspaces();
+}
+export function cloudAgentsAccessDenied(scope: CloudAgentScope) {
+  return deniedWorkspaces.has(cloudAgentsKey(scope)) || deniedWorkspaces.has(`*:${scope.workspaceId}`);
 }
 
 /** Forget one organization's tabs and polling: the user left it (CS-18). */
@@ -447,6 +510,7 @@ export async function flushCloudAgentCache(scope: CloudAgentScope) {
  * have a checkpoint. Idempotent; never connects and never wakes anything.
  */
 export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
+  if (cloudAgentsAccessDenied(scope)) return Promise.resolve();
   const s = store(scope);
   if (s.loaded) return Promise.resolve();
   if (s.loading) return s.loading;
@@ -458,6 +522,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
   s.loading = (async () => {
     try {
       const cached = await cloudAgentApi.cacheLoad(cacheAccount(s), scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
         if (!entry?.tab) continue;
         const info = withMessagePresence(entry.tab, entry.events ?? []);
@@ -489,13 +554,19 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
     } catch (error) {
       s.error = errorText(error);
     }
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     try {
-      s.outbox = await cloudAgentApi.outbox(scope);
+      const outbox = await cloudAgentApi.outbox(scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
+      s.outbox = outbox;
     } catch (error) {
       s.error = errorText(error);
     }
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     try {
-      for (const meta of await cloudAgentApi.checkpoints(scope)) {
+      const metas = await cloudAgentApi.checkpoints(scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
+      for (const meta of metas) {
         if (!s.tabs.has(meta.tabId)) s.tabs.set(meta.tabId, newTab(placeholderInfo(meta.tabId), "checkpoint", true));
       }
     } catch (error) {
@@ -517,8 +588,9 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
  * is read. A read of the API; never connects and never wakes anything.
  */
 export async function relistCloudCheckpoints(scope: CloudAgentScope): Promise<void> {
-  if (isDevScope(scope)) return;
+  if (isDevScope(scope) || cloudAgentsAccessDenied(scope)) return;
   await loadCloudAgents(scope);
+  if (cloudAgentsAccessDenied(scope)) return;
   const s = store(scope);
   const listed = await cloudAgentApi.checkpoints(scope);
   // Dropped meanwhile (another account, a deleted workspace): nothing is added to a store nobody holds.
@@ -538,10 +610,12 @@ export async function relistCloudCheckpoints(scope: CloudAgentScope): Promise<vo
  * stronger than a checkpoint.
  */
 export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: string): Promise<boolean> {
+  if (cloudAgentsAccessDenied(scope)) return false;
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   if (!tab || tab.live) return false;
   const checkpoint = await cloudAgentApi.checkpoint(scope, tabId, tab.checkpoint);
+  if (stores.get(cloudAgentsKey(scope)) !== s) return false;
   const current = s.tabs.get(tabId);
   if (!current) return false;
   if (!checkpoint && !current.historyRead) {
@@ -614,6 +688,7 @@ export function settledStatus(info: Pick<AgentTabInfo, "signIn">, status: AgentT
 
 /** The runtime's own tab list is authoritative: tabs it no longer has are gone. */
 export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
+  if (cloudAgentsAccessDenied(scope)) return;
   const s = store(scope);
   const seen = new Set<string>();
   for (const reported of tabs) {
@@ -654,7 +729,10 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {
-  applyLiveTabs(scope, await client.listAgentTabs());
+  const s = store(scope);
+  const tabs = await client.listAgentTabs();
+  if (stores.get(cloudAgentsKey(scope)) !== s) return;
+  applyLiveTabs(scope, tabs);
 }
 
 /** Tabs brought up to date from their checkpoints at one connect, at most. */
@@ -669,10 +747,11 @@ const RECONCILE_CHECKPOINTS = 20;
  * The tab being looked at streams live and replays from its cursor instead.
  */
 export async function reconcileCloudAgents(scope: CloudAgentScope, client: WorkspaceRpcClient) {
+  const s = store(scope);
   const tabs = await client.listAgentTabs();
+  if (stores.get(cloudAgentsKey(scope)) !== s || cloudAgentsAccessDenied(scope)) return;
   applyLiveTabs(scope, tabs);
   if (isDevScope(scope)) return;
-  const s = store(scope);
   const behind = tabs.filter((info) => {
     const tab = s.tabs.get(info.tabId);
     return !!tab && !tab.live && !!info.sessionId && knownSeq(tab) > lastSeq(info.sessionId, info.tabId);
@@ -725,6 +804,7 @@ function noteCaughtUp(sessionId: string, tabId: string, feed: object, on: boolea
  * merged by seq.
  */
 export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient): Promise<() => void> {
+  if (cloudAgentsAccessDenied(scope)) return () => {};
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   // Not known here yet (the runtime's tab list or a checkpoint has not named its session):
@@ -749,6 +829,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     caught(false);
   };
   const onEvent = (raw: unknown) => {
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     const ev = raw as AgentEvent;
     if (!ev || typeof ev !== "object" || !ev.payload) return;
     const current = s.tabs.get(tabId);
@@ -772,10 +853,12 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     stop = await client.subscribeSession(sessionId, tabId, onEvent, {
       sinceCursor: tab.cursor ?? undefined,
       onCursor: (cursor) => {
+        if (stores.get(cloudAgentsKey(scope)) !== s) return;
         const current = s.tabs.get(tabId);
         if (current) current.cursor = cursor ?? null;
       },
       onStatus: (change) => {
+        if (stores.get(cloudAgentsKey(scope)) !== s) return;
         const current = s.tabs.get(tabId);
         if (!current) return;
         const status = settledStatus(current.info, change.status);
@@ -786,7 +869,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         publish(s);
         scheduleSave(s, tabId);
       },
-      onReplayed: () => caught(client.connection.state === "connected"),
+      onReplayed: () => { if (stores.get(cloudAgentsKey(scope)) === s) caught(client.connection.state === "connected"); },
     });
   } catch (error) {
     end();
@@ -795,6 +878,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     publish(s);
     throw error;
   }
+  if (stores.get(cloudAgentsKey(scope)) !== s) { stop?.(); end(); return () => {}; }
   // The replay has been merged: the conversation is what is shown now.
   const replayed = s.tabs.get(tabId);
   if (replayed && !replayed.historyRead) {
@@ -848,6 +932,8 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
   const tab = s.tabs.get(tabId);
   if (!tab || (!tab.unread && tab.info.status !== "completed")) return;
   tab.unread = false;
+  // Use the runtime session row ID and the message actually rendered, never the desktop tab ID or wall clock.
+  if (!isDevScope(scope)) void writeCloudReadMarker(scope.organizationId, scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt);
   if (tab.info.status === "completed") tab.info = { ...tab.info, status: "idle" };
   publish(s);
   scheduleSave(s, tabId);
@@ -1039,9 +1125,17 @@ async function enqueue(
  * A prompt: now if the agent is idle, else queued as a follow-up by the runtime.
  * With `wake: false` it starts nothing: a workspace that is not running refuses it (`WORKSPACE_STOPPED`) and nothing is kept.
  */
-export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean } = {}) {
+export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean; files?: FileInput[] } = {}) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
+  const files = options.files ?? [];
+  // Files other than images go to a machine only (PRO-407), uploaded before the images so a refused file costs no image upload.
+  if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
+  let attachedFiles: MachineFileRef[] = [];
+  if (files.length) {
+    const target = liveTarget(scope, tabId, client);
+    attachedFiles = await uploadMachineFiles(target.client, { sessionId: target.sessionId, tabId }, files, images.length);
+  }
   // Images go to the runtime first (PRO-22); the message then names them. A
   // mailbox command is far too small to carry one.
   let attached: CloudImageRef[] = [];
@@ -1052,11 +1146,11 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
     attached = await uploadCloudImages(client!, { sessionId: tab.info.sessionId, tabId }, images);
   }
   const withImages = attached.length ? { images: attached } : {};
-  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached);
+  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached, attachedFiles);
   const sent = tab?.pendingConfig ?? null;
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
-  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, options);
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, { wake: options.wake });
   if (images.length) sentImages.set(entry.clientCommandId, images);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
@@ -1107,14 +1201,14 @@ function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, r
  * prompt during a turn waits in the tab's follow-up queue there. Settings
  * chosen while away ride with it, as they ride with a mailbox send.
  */
-async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = []): Promise<OutboxEntry> {
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = [], files: MachineFileRef[] = []): Promise<OutboxEntry> {
   const s = store(scope);
   const target = liveTarget(scope, tabId, client);
   const durable = takesLiveCommands(scope, target.client);
   const settings = durable ? (s.tabs.get(tabId)?.pendingConfig ?? null) : null;
   let receipt: { settingsIgnored?: boolean } | undefined;
   try {
-    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(settings ?? {}) });
+    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(settings ?? {}) });
   } catch (error) {
     throw liveCommandError(error);
   }

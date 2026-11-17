@@ -290,6 +290,8 @@ export function ReviewThreadList({ workspace, view }: { workspace: string; view:
   const counts = threadCounts(threads);
   const open = threads.filter((thread) => !thread.isResolved);
   const tabId = view.pr.tabId;
+  // None to show: the REVIEW summary already says "0 unresolved" (design 05.08), so no empty row here.
+  if (!view.error && !notice && threads.length === 0 && (view.snapshot || !view.loading)) return null;
   return <section aria-label="Review threads" data-testid="review-threads" className="mt-1 flex min-w-0 flex-col gap-1 text-xs">
     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <h4 className="shrink-0 text-xs font-medium text-muted-foreground">Review threads</h4>
@@ -309,7 +311,6 @@ export function ReviewThreadList({ workspace, view }: { workspace: string; view:
     {/* Said quietly, like an unreachable GitHub: the checks' own alerts and notices stay the ones read out. */}
     {view.loading && !view.snapshot && <p className="text-xs text-faint">Loading review threads…</p>}
     {view.error && <p data-testid="review-threads-error" className="break-words text-xs text-destructive">Could not refresh review threads: {view.error}</p>}
-    {!view.error && view.snapshot && threads.length === 0 && <p className="text-xs text-faint">No review threads.</p>}
     {threads.length > 0 && <ul className="flex min-w-0 flex-col" aria-label="Threads">
       {threads.map((thread) => <li key={thread.id} className="min-w-0">
         <button type="button" aria-label={`Go to review thread ${githubReviewLocation(thread)}`} title={thread.path}

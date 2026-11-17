@@ -46,7 +46,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 // The dialog has its own tests (CloudWorkspaceLifecycle.test.tsx); here only what the sidebar hands it.
 vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceLifecycle")>()),
@@ -181,15 +181,15 @@ describe("row states from the server's list", () => {
     expect(within(sessionRow(`cloud:${ORG}:perf:s1`)).queryByTestId("status-working")).toBeNull();
   });
 
-  it("with several workspaces, each names its own state: Stopped on the stopped one", async () => {
+  it("with several loaded workspaces, session tooltips retain workspace state", async () => {
     await load([item("fix", { repositories: [acmeApi], lastActivityAt: 50, ...online(1) }), item("perf", { state: "suspended", repositories: [acmeApi], lastActivityAt: 40 })], {
       fix: { sessions: [session("s1", "Fix")], capabilities: ["session/1"] },
       perf: { sessions: [session("s2", "Perf")], capabilities: ["session/1"] },
     });
     mount();
     await screen.findAllByTestId("cloud-session-row");
-    const states = screen.getAllByTestId("cloud-workspace-group").map((group) => [group.getAttribute("data-workspace"), within(group).getByTestId("cloud-workspace-row-state").textContent]);
-    expect(states).toEqual([["fix", "1"], ["perf", "Stopped"]]);
+    expect(screen.queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
+    expect(sessionRow(`cloud:${ORG}:perf:s2`).title).toContain("Stopped");
     expect(within(sessionRow(`cloud:${ORG}:fix:s1`)).getByTestId("status-working")).toBeTruthy();
   });
 });

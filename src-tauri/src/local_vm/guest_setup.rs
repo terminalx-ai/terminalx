@@ -378,8 +378,11 @@ touch "$HOME/running"
             .unwrap();
         wait(&actor, |v| !v.busy);
         let result = actor.receipts().pop().unwrap();
-        assert_eq!(result.receipt.status, Status::Complete);
-        assert!(result.helper_exit_confirmed);
+        assert_eq!(result.receipt.status, Status::Complete,
+            "driver-start receipt detail={:?}, helper_exit_confirmed={}",
+            result.receipt.detail, result.helper_exit_confirmed);
+        assert!(result.helper_exit_confirmed,
+            "driver-start helper exit unconfirmed, detail={:?}", result.receipt.detail);
         let args = std::fs::read_to_string(home.path().join("open-args")).unwrap();
         assert!(args.ends_with("--args serve --no-permissions-gate\n"));
         assert!(!args.contains("permissions grant"));

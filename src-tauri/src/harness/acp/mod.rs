@@ -21,6 +21,75 @@ use serde_json::{json, Value};
 use crate::events::*;
 use crate::harness::settings::{Setting, Signal};
 pub use crate::harness::Action;
+use crate::harness::ProviderAction;
+use crate::session::provider_authority::{Correlation, OperationContext};
+
+/// Native sidecars only: neither wire data nor callback TLS can create one.
+/// The session owner supplies contexts admitted at the ORIGINAL ingress.
+#[derive(Default)]
+struct Carriers {
+    requests: HashMap<u64, OperationContext>,
+    stashed: Option<OperationContext>,
+    settings: HashMap<String, OperationContext>,
+    answers: HashMap<String, PermissionAnswer>,
+    deferred: Vec<ProviderAction>,
+}
+
+// Semantic choice is native metadata, separate from physical delivery and
+// opaque provider IDs. Bind it to the exact original answer attempt.
+struct PermissionAnswer {
+    context: OperationContext,
+    allowed: bool,
+}
+
+struct PermissionRequest {
+    id: u64,
+    choices: HashMap<String, Option<bool>>,
+}
+
+/// A single nonblocking pipe attempt, performed inside the owner's short
+/// original-context admission. The owner must release every gate on return.
+pub(crate) enum Chunk { Written(usize), Capacity, Deferred, Withdrawn }
+
+/// Frame serialization belongs to this exact child, never a PID lookup. This
+/// support is deliberately NOT called by the legacy SessionManager writer.
+pub(crate) fn write_carried_frame(
+    context: &OperationContext, child: &std::sync::Arc<crate::harness::host::LiveChild>, line: &str,
+    mut chunk: impl FnMut(&OperationContext, &std::sync::Arc<crate::harness::host::LiveChild>, &[u8]) -> anyhow::Result<Chunk>,
+    mut wait: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    // Acquire this outside all policy/session/sender/runtime gates.
+    let _frame = match child.input_frame() {
+        Ok(frame) => frame,
+        Err(error) => { context.withdraw(); return Err(error); }
+    };
+    let mut bytes = line.as_bytes().to_vec();
+    bytes.push(b'\n');
+    let mut offset = 0;
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let result = (|| {
+        while offset < bytes.len() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "ACP carried frame stalled; never replay");
+            match chunk(context, child, &bytes[offset..])? {
+                Chunk::Written(n) => {
+                    anyhow::ensure!(n > 0 && n <= bytes.len() - offset, "ACP pipe closed or invalid chunk size");
+                    offset += n;
+                    deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                }
+                Chunk::Capacity | Chunk::Deferred => wait()?,
+                Chunk::Withdrawn => anyhow::bail!("original ACP operation withdrawn"),
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        context.withdraw();
+        // A partial JSON line must never be completed by another operation.
+        // Close ONLY the captured pipe, even if runtime now owns a successor.
+        if offset > 0 { child.close_stdin(); }
+    }
+    result
+}
 
 pub struct SpawnPlan {
     pub program: std::path::PathBuf,
@@ -68,6 +137,7 @@ struct Stashed { text: String, images: Vec<(String, String)>, delivery: Option<D
 
 #[derive(Default)]
 pub struct Acp {
+    carriers: Carriers,
     next_id: u64,
     pending: HashMap<u64, Pending>,
     pub session_id: Option<String>,
@@ -91,7 +161,7 @@ pub struct Acp {
     modes: Vec<(String, String)>,
     current_mode: Option<String>,
     /// Open permission requests: our request id → the agent's JSON-RPC id.
-    asks: HashMap<String, u64>,
+    asks: HashMap<String, PermissionRequest>,
     text_buf: String,
     thought_buf: String,
     block_seq: u64,
@@ -119,6 +189,238 @@ fn tool_type(kind: &str) -> ToolType {
 impl Acp {
     pub fn new(cwd: &str, resume: Option<String>, model: Option<String>, mode: &str) -> Self {
         Self { cwd: cwd.into(), resume, model, mode: mode.into(), ..Default::default() }
+    }
+
+    /// A carried opening may not be borrowed by a different queued sender.
+    /// If it is retired, the owner restarts the association for its successor.
+    pub(crate) fn start_carried(&mut self, text: String, images: Vec<(String, String)>,
+        delivery: Delivery, context: OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        anyhow::ensure!(!self.opening && !self.ready, "ACP opening already has an original operation or completed session");
+        self.carriers.stashed = Some(context.clone());
+        let actions = self.start_with_delivery(text, images, Some(delivery));
+        self.carry(actions, &context)
+    }
+
+    pub(crate) fn prompt_carried(&mut self, text: String, images: Vec<(String, String)>,
+        delivery: Delivery, context: OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        anyhow::ensure!(self.ready, "carried prompt requires an admitted completed opening");
+        self.carriers.stashed = Some(context.clone());
+        let actions = self.prompt_with_delivery(text, images, Some(delivery));
+        self.carry(actions, &context)
+    }
+
+    /// Separate Configure context, never derived from the opening's Drive.
+    /// Its correlation retains the native pending settings ID, independently
+    /// of the legacy model-refusal ID and the numeric ACP JSON-RPC request.
+    pub(crate) fn retain_setting(&mut self, context: OperationContext) -> anyhow::Result<()> {
+        let Correlation::Setting { setting, .. } = context.correlation() else {
+            anyhow::bail!("ACP setting lacks original settings request identity");
+        };
+        anyhow::ensure!(matches!(setting.as_str(), "model" | "mode"), "unsupported ACP setting");
+        let id = context.operation_id().to_string();
+        if let Some(old) = self.carriers.settings.insert(setting.clone(), context) {
+            if old.operation_id() != id { old.withdraw(); }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_model_carried(&mut self, model: &str, model_request: Option<String>,
+        context: OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        anyhow::ensure!(matches!(context.correlation(), Correlation::Setting { setting, .. } if setting == "model"), "wrong ACP setting context");
+        self.retain_setting(context.clone())?;
+        let actions = self.set_requested_model(model, model_request);
+        self.carry(actions, &context)
+    }
+
+    pub(crate) fn set_mode_carried(&mut self, mode: &str, context: OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        anyhow::ensure!(matches!(context.correlation(), Correlation::Setting { setting, .. } if setting == "mode"), "wrong ACP setting context");
+        self.retain_setting(context.clone())?;
+        let actions = self.set_mode(mode);
+        self.carry(actions, &context)
+    }
+
+    /// Peek before consuming ANY adapter state. The session owner must first
+    /// check the exact association and invoke try_callback ONCE for the whole
+    /// response batch. It calls handle_carried_response inside that closure,
+    /// where follow-ons can be derived before the parent becomes Delivered.
+    pub(crate) fn response_context(&self, line: &str) -> Option<OperationContext> {
+        let value: Value = serde_json::from_str(line).ok()?;
+        if value.get("method").is_some() { return None; }
+        self.carriers.requests.get(&value["id"].as_u64()?).cloned()
+    }
+
+    pub(crate) fn request_current(&self, id: u64, context: &OperationContext) -> bool {
+        self.pending.contains_key(&id) && self.carriers.requests.get(&id).is_some_and(|original|
+            original.operation_id() == context.operation_id() && original.correlation() == context.correlation())
+    }
+
+    /// Called by the owner after denied dispatch/callback, without interpreting
+    /// the reply. Exact removal keeps stale equal-value replies bounded and
+    /// cannot cancel a replacement request merely because a value matches.
+    pub(crate) fn retire_request(&mut self, id: u64, context: &OperationContext) -> bool {
+        if !self.request_current(id, context) { return false; }
+        self.withdraw_delivery(id);
+        true
+    }
+
+    pub(crate) fn interrupt_carried(&mut self, context: OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        anyhow::ensure!(matches!(context.correlation(), Correlation::Control { kind, .. } if kind == "interrupt"), "ACP interrupt requires original control identity");
+        Ok(self.interrupt().into_iter().map(|action| ProviderAction { context: context.clone(), action }).collect())
+    }
+
+    pub(crate) fn handle_carried_response(&mut self, line: &str, admitted: &OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        let value: Value = serde_json::from_str(line)?;
+        let id = value["id"].as_u64().ok_or_else(|| anyhow::anyhow!("ACP response has no numeric request"))?;
+        anyhow::ensure!(value.get("method").is_none(), "ACP response entry cannot execute provider requests");
+        anyhow::ensure!(self.carriers.requests.get(&id).is_some_and(|original|
+            original.operation_id() == admitted.operation_id() && original.correlation() == admitted.correlation()),
+            "ACP response belongs to a different original operation");
+        self.carriers.requests.remove(&id);
+        let kind = self.pending.get(&id).cloned();
+        let failed = value.get("error").is_some_and(|error| !error.is_null());
+        let mut actions = self.handle(line);
+        if matches!(kind, Some(Pending::SetModel { .. } | Pending::SetMode)) {
+            // Equal-value Current reports cannot settle a newer request. The
+            // owner settles ONLY admitted.correlation's native settings ID.
+            actions.retain(|action| !matches!(action, Action::Emit(Payload::ProviderSettings { .. })));
+            if !failed && matches!(kind, Some(Pending::SetModel { .. })) {
+                actions.push(Action::Emit(Payload::ProviderSettings { signal: Signal::Accepted { setting: Setting::Model } }));
+            }
+            // Mode has no Setting enum variant: owner uses the exact mode
+            // correlation to settle; it must not infer settlement from value.
+        }
+        self.carry(actions, admitted)
+    }
+
+    /// Permission answers are independently admitted Approve operations. Keep
+    /// the ask until the exact answer attempt is physically delivered; a failed
+    /// old allow must not remove a newer deny for the same provider request.
+    pub(crate) fn answer_carried(&mut self, request_id: &str, option_id: &str,
+        context: OperationContext) -> anyhow::Result<ProviderAction> {
+        let ask = self.asks.get(request_id).ok_or_else(|| anyhow::anyhow!("ACP ask is no longer pending"))?;
+        let id = ask.id;
+        let allowed = self.answer_choice(request_id, option_id)
+            .ok_or_else(|| anyhow::anyhow!("ACP permission option has no unambiguous outcome"))?;
+        anyhow::ensure!(matches!(context.correlation(), Correlation::Approval { ask_id, provider_request, .. }
+            if ask_id == request_id && provider_request == &id.to_string()), "ACP approval attempt identity changed");
+        if let Some(old) = self.carriers.answers.insert(request_id.into(), PermissionAnswer { context: context.clone(), allowed }) {
+            if old.context.operation_id() != context.operation_id() { old.context.withdraw(); }
+        }
+        let outcome = if option_id == "raccoon:cancel" { json!({"outcome":"cancelled"}) }
+            else { json!({"outcome":"selected", "optionId":option_id}) };
+        Ok(ProviderAction { context, action: Action::Write(json!({"jsonrpc":"2.0", "id":id, "result":{"outcome":outcome}}).to_string()) })
+    }
+
+    pub(crate) fn answer_current(&self, context: &OperationContext) -> bool {
+        let Correlation::Approval { ask_id, provider_request, .. } = context.correlation() else { return false };
+        self.asks.get(ask_id).is_some_and(|ask| ask.id.to_string() == *provider_request)
+            && self.carriers.answers.get(ask_id).is_some_and(|current| current.context.operation_id() == context.operation_id())
+    }
+
+    pub(crate) fn answer_delivered(&mut self, context: &OperationContext) -> Option<bool> {
+        if !self.answer_current(context) { return None; }
+        let Correlation::Approval { ask_id, .. } = context.correlation() else { return None };
+        self.asks.remove(ask_id);
+        self.carriers.answers.remove(ask_id).map(|answer| answer.allowed)
+    }
+
+    /// Unknown, ambiguous or absent metadata must never mean Allowed.
+    pub(crate) fn answer_choice(&self, request_id: &str, option_id: &str) -> Option<bool> {
+        let ask = self.asks.get(request_id)?;
+        // This is our native cancelled outcome, never a selected provider ID.
+        // Stop/Escape must still deny an ask even when the provider offered its
+        // own reject option (and no synthetic cancel menu item was needed).
+        if option_id == "raccoon:cancel" { return Some(false); }
+        ask.choices.get(option_id).copied().flatten()
+    }
+
+    /// Deferred native envelopes live separately from legacy privacy tuples.
+    /// Moving them never recaptures a sender or changes the request identity.
+    #[cfg(test)]
+    pub(crate) fn defer_carried(&mut self, action: ProviderAction) { self.carriers.deferred.push(action); }
+    #[cfg(test)]
+    pub(crate) fn take_deferred_carried(&mut self) -> Vec<ProviderAction> { std::mem::take(&mut self.carriers.deferred) }
+
+    pub(crate) fn withdraw_carriers(&mut self) {
+        for (_, context) in self.carriers.requests.drain() { context.withdraw(); }
+        for (_, context) in self.carriers.settings.drain() { context.withdraw(); }
+        for (_, answer) in self.carriers.answers.drain() { answer.context.withdraw(); }
+        for action in self.carriers.deferred.drain(..) { action.context.withdraw(); }
+        if let Some(context) = self.carriers.stashed.take() { context.withdraw(); }
+    }
+
+    fn withdraw_prompt_carriers(&mut self) {
+        self.carriers.requests.retain(|_, context| {
+            let input = matches!(context.correlation(), Correlation::Opening { .. } | Correlation::Prompt { .. });
+            if input { context.withdraw(); }
+            !input
+        });
+        self.carriers.deferred.retain(|action| {
+            let input = matches!(action.context.correlation(), Correlation::Opening { .. } | Correlation::Prompt { .. });
+            if input { action.context.withdraw(); }
+            !input
+        });
+        if let Some(context) = self.carriers.stashed.take() { context.withdraw(); }
+    }
+
+    fn carry(&mut self, actions: Vec<Action>, parent: &OperationContext) -> anyhow::Result<Vec<ProviderAction>> {
+        let mut out = Vec::new();
+        for action in actions {
+            let line = match &action {
+                Action::Write(line) | Action::AcpMode { line: Some(line), .. } => Some(line.as_str()),
+                Action::AcpPrompt(write) => Some(write.line.as_str()),
+                _ => None,
+            };
+            let Some(line) = line else {
+                // No-op mode confirmations still need their own Configure
+                // carrier; opening Drive cannot authorize their settlement.
+                let context = if matches!(&action, Action::AcpMode { .. }) {
+                    let Some(context) = self.carriers.settings.get("mode") else { continue };
+                    context.clone()
+                } else { parent.clone() };
+                out.push(ProviderAction { context, action });
+                continue;
+            };
+            let value: Value = serde_json::from_str(line)?;
+            let id = value["id"].as_u64().ok_or_else(|| anyhow::anyhow!("carried ACP request missing identity"))?;
+            let method = value["method"].as_str().unwrap_or("");
+            let request = id.to_string();
+            let (original, correlation) = match method {
+                "session/prompt" => {
+                    let original = self.carriers.stashed.take().unwrap_or_else(|| parent.clone());
+                    let seq = match &action { Action::AcpPrompt(write) => write.delivery.seq,
+                        _ => anyhow::bail!("carried ACP prompt missing delivery") };
+                    (original, Correlation::Prompt { seq, request })
+                }
+                "session/set_model" | "session/set_mode" => {
+                    let setting = if method == "session/set_model" { "model" } else { "mode" };
+                    let Some(original) = self.carriers.settings.get(setting).cloned() else {
+                        // Keep automatic opening settings from upgrading Drive.
+                        self.discard_write(&action);
+                        continue;
+                    };
+                    let Correlation::Setting { request_id, .. } = original.correlation() else { unreachable!() };
+                    let correlation = Correlation::Setting { setting: setting.into(), request_id: request_id.clone(), adapter_request: request };
+                    (original, correlation)
+                }
+                "initialize" | "authenticate" | "session/load" | "session/new" =>
+                    (parent.clone(), Correlation::Opening { request, parent_operation: parent.operation_id().into() }),
+                _ => anyhow::bail!("ACP mutation has no original operation carrier: {method}"),
+            };
+            match original.derive_follow_on(correlation) {
+                Ok(context) => {
+                    self.carriers.requests.insert(id, context.clone());
+                    out.push(ProviderAction { context, action });
+                }
+                Err(error) => {
+                    self.discard_write(&action);
+                    if let Action::AcpPrompt(write) = &action { self.withdraw_delivery(write.id); }
+                    for action in &out { action.context.withdraw(); }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn request(&mut self, method: &str, params: Value, kind: Pending) -> String {
@@ -197,19 +499,23 @@ impl Acp {
         let line = match action { Action::Write(line) | Action::AcpMode { line: Some(line), .. } => line, _ => return };
         if let Ok(value) = serde_json::from_str::<Value>(line) {
             if value.get("method").is_some() {
-                if let Some(id) = value["id"].as_u64() { self.pending.remove(&id); }
+                if let Some(id) = value["id"].as_u64() {
+                    self.pending.remove(&id);
+                    if let Some(context) = self.carriers.requests.remove(&id) { context.withdraw(); }
+                }
             }
         }
     }
     pub fn withdraw_delivery(&mut self, id: u64) {
+        if let Some(context) = self.carriers.requests.remove(&id) { context.withdraw(); }
         self.undelivered.remove(&id);
-        self.pending.remove(&id);
-        self.turn_started_at = None;
+        if self.pending.remove(&id) == Some(Pending::Prompt) { self.turn_started_at = None; }
     }
 
     /// Stop, initialization failure and interrupt all retire unsent input.
     /// A later response can continue the handshake, but never revive it.
     pub fn withdraw_input(&mut self) -> Vec<Action> {
+        self.withdraw_prompt_carriers();
         let mut seqs: Vec<_> = self.stashed.take().and_then(|s| s.delivery).map(|d| d.seq).into_iter().collect();
         for (id, seq) in self.undelivered.drain() { self.pending.remove(&id); seqs.push(seq); }
         seqs.into_iter().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).collect()
@@ -291,7 +597,8 @@ impl Acp {
 
     /// Answer a permission request with one of the agent's own options.
     pub fn answer(&mut self, request_id: &str, option_id: &str) -> Option<Vec<Action>> {
-        let id = self.asks.remove(request_id)?;
+        self.answer_choice(request_id, option_id)?;
+        let id = self.asks.remove(request_id)?.id;
         let outcome = if option_id == "raccoon:cancel" { json!({"outcome": "cancelled"}) } else { json!({"outcome": "selected", "optionId": option_id}) };
         Some(vec![Action::Write(json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}).to_string())])
     }
@@ -477,14 +784,30 @@ impl Acp {
                         Some(PermissionOption { id: oid.into(), label: o["name"].as_str().unwrap_or(oid).into(), kind })
                     })
                     .collect();
+                let mut choices = HashMap::new();
+                for option in params["options"].as_array().into_iter().flatten() {
+                    let Some(id) = option["optionId"].as_str() else { continue };
+                    let allowed = match option["kind"].as_str() {
+                        Some("allow_once" | "allow_always") => Some(true),
+                        Some("reject_once" | "reject_always") => Some(false),
+                        _ => None,
+                    };
+                    // Duplicate IDs cannot identify a unique semantic choice.
+                    choices.entry(id.to_owned()).and_modify(|value| *value = None).or_insert(allowed);
+                }
+                // This ID is reserved for our cancelled wire outcome, never a
+                // provider-selected option with a potentially different kind.
+                if choices.contains_key("raccoon:cancel") { choices.insert("raccoon:cancel".into(), None); }
                 if !options.iter().any(|o| o.kind == PermissionOptionKind::Deny) {
+                    choices.entry("raccoon:cancel".into()).or_insert(Some(false));
                     options.push(PermissionOption { id: "raccoon:cancel".into(), label: "Deny".into(), kind: PermissionOptionKind::Deny });
                 }
                 let tc = &params["toolCall"];
                 let kind = tc["kind"].as_str().unwrap_or("other");
                 let tool_use_id = tc["toolCallId"].as_str().unwrap_or("").to_string();
                 let input = if tc["rawInput"].is_null() { json!({"locations": tc["locations"]}) } else { tc["rawInput"].clone() };
-                self.asks.insert(request_id.clone(), rid);
+                if let Some(old) = self.carriers.answers.remove(&request_id) { old.context.withdraw(); }
+                self.asks.insert(request_id.clone(), PermissionRequest { id: rid, choices });
                 let mut out = self.flush();
                 out.push(Action::Emit(Payload::PermissionRequested {
                     cwd: None,
@@ -633,6 +956,55 @@ mod tests {
     }
     fn emits(actions: &[Action]) -> Vec<&Payload> {
         actions.iter().filter_map(|a| if let Action::Emit(p) = a { Some(p) } else { None }).collect()
+    }
+
+    #[test]
+    fn acp_permission_choice_opaque_ids_follow_kinds_and_preserve_selected_wire() {
+        for (id, kind, allowed) in [("opaque-allow-42", "reject_once", false), ("opaque-42", "allow_once", true),
+            ("opaque-reject-42", "allow_always", true)] {
+            let mut a = Acp::new("/tmp", None, None, "auto");
+            a.handle(&json!({"id":77,"method":"session/request_permission","params":{"options":[
+                {"optionId":id,"kind":kind}]}}).to_string());
+            assert_eq!(a.answer_choice("acp:77", id), Some(allowed));
+            let actions = a.answer("acp:77", id).unwrap();
+            assert_eq!(writes(&actions)[0]["result"]["outcome"], json!({"outcome":"selected","optionId":id}));
+        }
+    }
+
+    #[test]
+    fn acp_permission_choice_missing_unknown_and_duplicate_metadata_fail_closed() {
+        for options in [json!([{"optionId":"opaque","kind":"future_kind"}]), json!([{"optionId":"opaque"}]),
+            json!([{"optionId":"opaque","kind":"allow_once"},{"optionId":"opaque","kind":"reject_once"}]),
+            json!([{"optionId":"different","kind":"allow_once"}])] {
+            let mut a = Acp::new("/tmp", None, None, "auto");
+            a.handle(&json!({"id":77,"method":"session/request_permission","params":{"options":options}}).to_string());
+            assert_eq!(a.answer_choice("acp:77", "opaque"), None);
+            assert!(a.answer("acp:77", "opaque").is_none());
+            assert!(a.has_ask("acp:77"));
+        }
+    }
+
+    #[test]
+    fn acp_permission_choice_native_cancel_preserves_cancelled_wire() {
+        let mut a = Acp::new("/tmp", None, None, "auto");
+        a.handle(&json!({"id":77,"method":"session/request_permission","params":{"options":[
+            {"optionId":"opaque","kind":"allow_once"}]}}).to_string());
+        assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), Some(false));
+        assert_eq!(writes(&a.answer("acp:77", "raccoon:cancel").unwrap())[0]["result"]["outcome"], json!({"outcome":"cancelled"}));
+    }
+
+    #[test]
+    fn acp_permission_choice_native_cancel_is_denial_even_without_a_cancel_menu_item() {
+        for options in [json!([{"optionId":"allow","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]),
+            json!([{"optionId":"opaque","kind":"future_kind"}]),
+            json!([{"optionId":"raccoon:cancel","kind":"allow_once"}])] {
+            let mut a = Acp::new("/tmp", None, None, "auto");
+            a.handle(&json!({"id":77,"method":"session/request_permission","params":{"options":options}}).to_string());
+            assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), Some(false));
+            assert_eq!(writes(&a.answer("acp:77", "raccoon:cancel").unwrap())[0]["result"]["outcome"], json!({"outcome":"cancelled"}));
+            assert!(!a.has_ask("acp:77"));
+            assert_eq!(a.answer_choice("acp:77", "raccoon:cancel"), None);
+        }
     }
 
     #[test]

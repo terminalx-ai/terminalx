@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { agent, api, errorMessage, onPromptDelivery, type DeliveryStage } from "@/lib/api";
-import { continuationPrompt, launchContinuation, launchContinuationInDestination, moveChatToProject, type ContextMode, type ContinuationContext, type Launched, type ProjectDestination } from "@/lib/continuation";
+import { continuationPrompt, launchContinuation, launchContinuationInDestination, moveChatToProject, type PromptAttachments, type ContextMode, type ContinuationContext, type Launched, type ProjectDestination } from "@/lib/continuation";
 import { loadModels, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
 import { handoffStart, launchSettingsOf, useSessionAgent, type LaunchSettings } from "@/lib/useSessionAgent";
@@ -17,7 +17,6 @@ import { SessionAgentControls } from "./SessionAgentControls";
 import { PipelineLaunchControls } from "./PipelineLaunchControls";
 import { HandoffScene } from "./HandoffScene";
 import { Fold } from "@/components/ui/Fold";
-import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
 import { machineWhereRow } from "@/lib/machineNewSession";
 import { openMachineDraft } from "./MachineNewSession";
@@ -42,7 +41,7 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * does take it, even after the dialog said it could not confirm it, the
  * dialog closes as it would have on success (#662).
  */
-export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, retry = false, onClose, onLateError, onDelivered }: {
+export function ContinuationDialog({ session, source, into, initialHarness, reviewPrompt, attachments, retry = false, onClose, onLateError, onDelivered }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
   /** The new session took the handoff, just before the dialog closes: where it went (#815). */
   onDelivered?: (to: { sessionId: string; tabId: string }) => void;
@@ -53,8 +52,10 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   reviewPrompt?: string;
   /** `reviewPrompt` is a failed turn's prompt, retried as it was in a new tab: the tab's own mode, not Plan (PRO-378). */
   retry?: boolean;
+  attachments?: PromptAttachments;
   onLateError?: (error: string) => void;
 }) {
+  const hasPrompt = reviewPrompt !== undefined;
   const [context, setContext] = useState<ContinuationContext | null>(null);
   const [providers, setProviders] = useState<HarnessInfo[]>([]);
   const [mode, setMode] = useState<ContextMode>("focused");
@@ -77,17 +78,16 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
   const [chosen, setChosen] = useState<LaunchSettings | null>(null);
-  // Runs on (PRO-348): this Mac, or a paired machine while Machines is on. A machine gets the new-session form with the handoff in it.
-  const machinesOn = useMachineDashboardEnabled();
+  // Runs on (PRO-348): this Mac, or a paired machine. A machine gets the new-session form with the handoff in it.
   const connections = useMachineConnections();
   const [runsOn, setRunsOn] = useState<string | null>(null);
-  const runsOnShown = machinesOn && !into && !reviewPrompt && connections.machines.length > 0;
+  const runsOnShown = !into && !hasPrompt && connections.machines.length > 0;
   const onMachine = runsOnShown && runsOn ? machineConnection(connections, runsOn) : null;
   const models = useModels();
   const prefs = usePrefs();
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
   const value = chosen ?? (loading ? null : handoffStart(
-    { ...launchSettingsOf(source), ...(reviewPrompt && !retry ? { permissionMode: "plan" } : {}) },
+    { ...launchSettingsOf(source), ...(hasPrompt && !retry ? { permissionMode: "plan" } : {}) },
     initialHarness ? providers.filter((provider) => provider.id === initialHarness) : providers, models, prefs,
   ));
   const store = useSessionStore();
@@ -96,10 +96,10 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const projects = into ? [into.project] : store.projects.filter((project) => !project.archived);
   // Only a quick chat's automatic default needs discovery across projects.
   // Explicit destinations query that project alone; staying here needs no lookup.
-  const inferProject = !into && !reviewPrompt && session.kind === "quick" && projectChoice === undefined;
+  const inferProject = !into && !hasPrompt && session.kind === "quick" && projectChoice === undefined;
   const explicitProject = into?.project.path ?? (projectChoice !== undefined ? projectChoice : session.kind === "quick" ? null : session.projectPath ?? null);
-  const staysHere = !into && (reviewPrompt || (session.kind === "quick" ? explicitProject === null : explicitProject === (session.projectPath ?? null)));
-  const discoveryProjects = reviewPrompt ? [] : inferProject ? projects : staysHere || !explicitProject ? [] : projects.filter((project) => project.path === explicitProject);
+  const staysHere = !into && (hasPrompt || (session.kind === "quick" ? explicitProject === null : explicitProject === (session.projectPath ?? null)));
+  const discoveryProjects = hasPrompt ? [] : inferProject ? projects : staysHere || !explicitProject ? [] : projects.filter((project) => project.path === explicitProject);
   const needsDiscovery = discoveryProjects.length > 0;
   const workspaceKey = JSON.stringify([inferProject, discoveryProjects.map((project) => [project.path, project.kind]), context?.cwd, attempt, workspaceRevision]);
   const [workspaceState, setWorkspaceState] = useState<{ key: string; workspaces: ContainingWorkspace[]; error?: string }>();
@@ -115,7 +115,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const discoveryReady = !needsDiscovery || (workspaceState?.key === workspaceKey && !workspaceState.error);
   const workspaces = workspaceState?.key === workspaceKey ? workspaceState.workspaces : [];
   const selectedProject = inferProject ? continuationDefaultProject(session, context?.cwd ?? session.cwd, workspaces) : explicitProject;
-  const sameSession = !into && (reviewPrompt || (session.kind === "quick" ? selectedProject === null : selectedProject === (session.projectPath ?? null)));
+  const sameSession = !into && (hasPrompt || (session.kind === "quick" ? selectedProject === null : selectedProject === (session.projectPath ?? null)));
   const project = into?.project ?? store.projects.find((project) => project.path === selectedProject);
   const destinationReady = !!destination || (discoveryReady && (sameSession || selectedProject === null || !!project));
   const matchingWorkspace = project && context ? containingWorkspace(workspaces, context.cwd, project.path) : undefined;
@@ -134,7 +134,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const accountProject = sameSession ? (session.kind === "quick" ? null : session.projectPath ?? null) : project?.path ?? null;
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined, undefined, accountProject);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(selection.accountId ? { account: selection.accountId } : {}), ...(!reviewPrompt && (sameSession || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(selection.accountId ? { account: selection.accountId } : {}), ...(!hasPrompt && (sameSession || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts) ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {
@@ -180,7 +180,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
     setProviders([]);
     // The model list too, so the source's model is checked against it before anything can start.
     // A turn review needs only that turn's saved content; no full-history export.
-    const prepare = reviewPrompt ? Promise.resolve<ContinuationContext>({
+    const prepare = hasPrompt ? Promise.resolve<ContinuationContext>({
       sessionId: session.id, tabId: source.id, title: source.title || session.title,
       cwd: session.cwd, provider: source.harness, providerSessionId: source.providerSessionId ?? null,
       sourceActive: false, transcriptPath: null, fullUnavailableReason: null,
@@ -242,7 +242,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
     setError(null);
     try {
       let prompt = preparedPrompt.current ?? reviewPrompt ?? continuationPrompt(context, mode, into && !matchingWorkspace ? into.project.path : undefined);
-      if (!preparedPrompt.current && !reviewPrompt && !into && !sameSession && !matchingWorkspace) {
+      if (!preparedPrompt.current && !hasPrompt && !into && !sameSession && !matchingWorkspace) {
         prompt = prompt.replace("Inspect the current workspace, including git status and relevant files. Workspace files are authoritative when they differ from the history. This is the same shared workspace, branch, and uncommitted changes; subsequent edits affect it as usual.",
           `This is a new destination ${project ? `in the project at ${project.path}` : "in a quick chat"}. Inspect the current working directory before continuing. Files mentioned in the historical source may be in a different workspace; do not assume they are present here.`);
       }
@@ -257,8 +257,8 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, plan.target!, plan.settings, prompt, created, destination, confirming)
         : !plan.sameSession
           ? await launchContinuationInDestination(context, plan.target, plan.settings, prompt, created, destination, confirming)
-        : reviewPrompt
-          ? await launchContinuation(context, plan.settings, prompt, created, destination, confirming, "review")
+        : hasPrompt
+          ? await launchContinuation(context, plan.settings, prompt, created, destination, confirming, "review", ...(attachments ? [attachments] : []))
           : await launchContinuation(context, plan.settings, prompt, created, destination, confirming);
       if (!active.current) {
         if (result.stage !== "delivered") onLateError?.(result.error);
@@ -281,7 +281,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
       if (active.current) setStarting(false);
     }
   };
-  const readyReview = !!reviewPrompt && !loading && !error && !!settings;
+  const readyReview = hasPrompt && !loading && !error && !!settings;
   useEffect(() => {
     if (!active.current || !readyReview || autoStarted.current) return;
     autoStarted.current = true;
@@ -324,14 +324,14 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {/* Destination, agent and context stay in view; Autopilot is folded away. */}
         <HandoffScene className="mb-8 mt-6" />
         <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{reviewPrompt ? (retry ? "Retry in a new chat" : "Second opinion") : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
+          <DialogTitle className="text-base font-semibold">{hasPrompt ? (retry ? "Retry in a new chat" : "Second opinion") : into ? "Link to a Project" : "Continue in New Session"}</DialogTitle>
           <DialogDescription className="text-[13px] text-muted-foreground">
-            {reviewPrompt && retry ? `Sends the failed turn's prompt to ${agentName} again, in a new tab in this workspace.` : reviewPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
+            {hasPrompt && retry ? `Sends the failed turn's prompt to ${agentName} again, in a new tab in this workspace.` : hasPrompt ? `Share the selected turn's prompt, answer and recorded file diffs with ${agentName} for review in a new tab in this workspace.` : into
               ? `Opens a new session in ${into.project.name} that carries over this chat's context. This chat is archived once it starts.`
               : "Opens a new conversation that carries over this chat's context, so the agent picks up where it left off. This chat stays open."}
           </DialogDescription>
         </DialogHeader>
-        {reviewPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
+        {hasPrompt && !loading && settings && <p role="status" className="mt-4 text-xs text-muted-foreground" data-testid="review-settings">
           {agentName} · {selection.model?.label ?? (settings.model || "Agent default")}{retry ? "" : " · Plan (read-only)"}
         </p>}
         {runsOnShown && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
@@ -348,7 +348,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         {onMachine && <p className="mt-4 text-xs text-muted-foreground" data-testid="handoff-on-machine">
           Opens the new-session form on {onMachine.machine?.name ?? "the machine"} with this handoff as its prompt, carrying the recent conversation. Choose the project, branch and agent there; nothing starts until you press Create.
         </p>}
-        {!onMachine && !into && !reviewPrompt && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
+        {!onMachine && !into && !hasPrompt && <label className="mt-4 flex flex-col gap-2 text-xs font-medium">
           Project
           <select aria-label="Project" className="h-8 rounded-md border bg-background px-2 text-xs" disabled={locked} value={inferProject && !discoveryReady ? "__resolving__" : selectedProject ?? ""} onChange={(event) => { setProjectChoice(event.target.value || null); setWorkspaceRevision((n) => n + 1); setWorktree(false); }}>
             {inferProject && !discoveryReady && <option disabled value="__resolving__">Choose a project or wait for workspace discovery</option>}
@@ -357,8 +357,8 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
             {projects.map((project) => <option key={project.path} value={project.path}>{project.name}</option>)}
           </select>
         </label>}
-        {!onMachine && !reviewPrompt && project && !sameSession && matchingWorkspace && <p className="mt-4 text-xs text-muted-foreground">In the existing workspace: {context?.cwd}</p>}
-        {!onMachine && !reviewPrompt && discoveryReady && project && !sameSession && !matchingWorkspace && (isGit ? (
+        {!onMachine && !hasPrompt && project && !sameSession && matchingWorkspace && <p className="mt-4 text-xs text-muted-foreground">In the existing workspace: {context?.cwd}</p>}
+        {!onMachine && !hasPrompt && discoveryReady && project && !sameSession && !matchingWorkspace && (isGit ? (
           <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
             <Switch size="sm" checked={worktree} onCheckedChange={setWorktree} disabled={locked} aria-label="Start on a new branch in a worktree" />
             <span className="flex items-center gap-1"><GitBranch className="size-3.5" />{worktree ? "On a new branch (worktree)" : "In its main checkout, shared with its other conversations"}</span>
@@ -366,7 +366,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
         ) : <p className="mt-4 text-xs text-muted-foreground">In the folder · no Git</p>)}
         {/* While it reads the context, the same rows with placeholders where the pills will be: the dialog opens at
             its final height and nothing moves when they arrive. */}
-        {loading && reviewPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />{retry ? "Preparing the retry…" : "Preparing the review…"}</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
+        {loading && hasPrompt ? <p role="status" className="mt-5 flex items-center gap-2 text-xs text-faint"><LoaderCircle className="size-3 animate-spin" />{retry ? "Preparing the retry…" : "Preparing the review…"}</p> : loading ? <div className="mt-5 flex flex-col gap-2" data-testid="continuation-loading">
           <span className="flex items-center gap-2 text-xs font-medium text-foreground">Agent<span role="status" className="flex items-center gap-1.5 font-normal text-faint"><LoaderCircle className="size-3 animate-spin" />Preparing context…</span></span>
           <div className="flex gap-1.5" aria-hidden>
             {/* In proportion to the pills they stand for (agent, model, effort, permissions), not fixed widths. */}
@@ -376,7 +376,7 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
           <div className="h-8 animate-pulse-soft rounded-md bg-veil-raised" aria-hidden />
           <p className="text-xs text-faint" aria-hidden>&nbsp;</p>
           <span className="mt-3 h-0" aria-hidden />
-        </div> : !reviewPrompt && !onMachine && <>
+        </div> : !hasPrompt && !onMachine && <>
           {/* Two rows of the same make: a label, then controls across the full width at one height, so the
               pills and the context switch line up edge to edge. */}
           <div role="group" aria-label="New session settings" className="mt-5 flex flex-col gap-2">

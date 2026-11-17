@@ -126,6 +126,29 @@ it("separates measured runtime, estimates and delayed provider billing, and list
   expect(alerts.textContent).toContain("running limit is reached");
   const retained = screen.getByRole("list", { name: "Retained storage" });
   expect(within(retained).getByRole("listitem", { name: "api-staging" }).textContent).toContain("Archived · 40 GiB");
+  // No provider TerminalX itself provides is described here, so nothing is said of one.
+  expect(screen.queryByTestId("compute-platform-billing")).toBeNull();
+});
+
+// PRO-452: a provider TerminalX itself provides has no account or console of the organization's.
+it("says a platform provider has no provider account to connect and no provider invoice, and limits it like any other", async () => {
+  rememberCloudProviders(
+    [describedAs("terminalx-cloud"), describedAs("box"), describedAs("hetzner")].map((descriptor) => ({ id: descriptor.id, descriptor }) as CloudProviderSummary),
+  );
+  const usage = report();
+  const unreported = usage.providers[1]!;
+  api.usage.mockResolvedValue({ ...usage, providers: [{ ...unreported, provider: "terminalx-cloud" }, unreported] });
+  render(<OrganizationCompute contextRevision="account-1" />);
+  const platform = await screen.findByLabelText("TerminalX Cloud usage");
+  expect(platform.textContent).toContain("Billed by TerminalX. There is no provider invoice for it.");
+  expect(platform.textContent).not.toContain("provider's console");
+  // An organization's provider reads as before.
+  expect(screen.getByLabelText("Boat usage").textContent).toContain("Not reported to TerminalX. Check the provider's console for the invoice.");
+  const notice = screen.getByLabelText("Billing responsibility");
+  expect(notice.textContent).toContain("provider bills the account directly");
+  expect(screen.getByTestId("compute-platform-billing").textContent).toContain("TerminalX Cloud is provided by TerminalX, with no provider account to connect: Billed by TerminalX.");
+  expect(screen.getByLabelText("Allowed sizes for TerminalX Cloud")).toBeTruthy();
+  expect(screen.getByLabelText("Allowed regions for TerminalX Cloud")).toBeTruthy();
 });
 
 it("saves limits with the policy version and account context revision", async () => {

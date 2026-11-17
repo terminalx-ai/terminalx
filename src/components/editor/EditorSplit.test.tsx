@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, fs, git } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp as ask } from "@/lib/confirm";
 import { liveEditorsFor } from "@/lib/editorViews";
 import { selectSessionTab } from "@/lib/terminal";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -22,7 +22,7 @@ vi.mock("@/lib/api", () => ({
   git: { discard: vi.fn().mockResolvedValue(undefined) },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
 vi.mock("./PdfSurface", () => ({ default: ({ data }: { data: string }) => <div data-testid="pdf">{data}</div> }));
@@ -187,7 +187,7 @@ it("does not compare a large-file placeholder with working-file contents", async
   // An expected limit, drawn as a calm empty state with the file to open: no red text, no Retry, no Edit of a placeholder.
   const state = await screen.findByTestId("changes-empty-state");
   expect(state.textContent).toContain("No diff to show");
-  expect(state.textContent).toContain("large.ts is over the text preview limit, so the diff isn't drawn.");
+  expect(state.textContent).toContain("large.ts is over the text preview limit (size unknown), so the diff isn't drawn.");
   expect(within(state).queryByRole("button", { name: "Retry" })).toBeNull();
   expect(state.querySelector(".text-destructive")).toBeNull();
   expect(screen.queryByText(/exceeds the text preview limit/)).toBeNull();
@@ -345,4 +345,23 @@ it("routes Cmd+F to the focused chat, actual file editor, or terminal regardless
   fireEvent.keyDown(second, { key: "f", ctrlKey: true });
   expect(screen.getAllByRole("search", { name: "Find in chat" })).toHaveLength(2);
   expect(document.activeElement?.parentElement?.closest('[data-find-scope="chat"]')).toBe(second.parentElement);
+});
+
+it("shows the actual byte size and opens the workspace file from a local Changes selection", async () => {
+  const { ChangesPanel } = await import("@/components/changes/ChangesPanel");
+  const files = [{ path: "large.ts", status: "modified" as const, additions: 0, deletions: 0 }];
+  vi.mocked(api.changesBetween).mockResolvedValue(files);
+  vi.mocked(api.reviewRange).mockResolvedValue({ target: "main", base: "base", head: "head" });
+  vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "<file too large to show>", afterSize: 7 * 1024 * 1024 });
+  const source = {
+    key: "local:/workspace", cloud: false, canWrite: false,
+    branches: async () => [], reviewRange: async () => ({ target: "main", base: "base", head: "head" }),
+    changesBetween: async () => files, logCommits: async () => [], errorMessage: String,
+  } as unknown as import("@/lib/gitSource").GitSource;
+  render(<TooltipProvider><ChangesPanel source={source} sessionId="split" events={[]} version={0} active live={false} /><EditorSplit sessionId="split" active /></TooltipProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: /Modified.*large.ts/ }));
+  expect(await screen.findByText("7.0 MB")).toBeTruthy();
+  expect(within(screen.getByTestId("changes-empty-state")).queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(getEditors().editors.some((entry) => entry.kind === "text" && entry.rel === "large.ts" && entry.root === "/workspace")).toBe(true);
 });

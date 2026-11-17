@@ -11,7 +11,9 @@ vi.mock("@tauri-apps/api/event", async () => {
   return { listen: backend.listen };
 });
 const native = vi.hoisted(() => ({ ask: vi.fn(async () => true), reveal: vi.fn(async () => undefined) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: native.ask, message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+// "ask" is the app's own confirmation (PRO-400), not the system alert.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: native.ask, chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: native.reveal, openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -315,6 +317,23 @@ describe("a tab's right-click menu", () => {
     expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
   });
 
+  it.each([
+    { status: "idle", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: false, disabled: false },
+    { status: "completed", markedUnread: false, readOnly: false, disabled: true },
+    { status: "completed", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: true, disabled: true },
+    { status: "idle", markedUnread: true, readOnly: true, disabled: true },
+  ] as const)("Mark as unread: $status, markedUnread=$markedUnread, readOnly=$readOnly", async ({ status, markedUnread, readOnly, disabled }) => {
+    Object.assign(backend.sessions.find((entry) => entry.id === "a")!.tabs[0], { status, markedUnread });
+    await refreshSessions();
+    render(<Menu tab="agent:a1" readOnlyReason={readOnly ? "View only" : undefined} />);
+
+    expect(item("Mark as unread").getAttribute("aria-disabled")).toBe(disabled ? "true" : null);
+    await choose("Mark as unread");
+    expect(backend.callsOf("set_tab_unread")).toEqual(disabled ? [] : [{ sessionId: "a", tabId: "a1", unread: true }]);
+  });
+
   it("does what the design's new items say (PRO-381)", async () => {
     const at = (seq: number, payload: object) => ({ id: `e${seq}`, sessionId: "a", tabId: "a2", harness: "codex", seq, ts: "2026-11-16T10:00:00Z", payload });
     backend.events["a/a2"] = [
@@ -398,6 +417,7 @@ describe("a tab's right-click menu", () => {
     native.ask.mockResolvedValueOnce(false);
     await choose("Restart agent");
     expect(native.ask).toHaveBeenCalledTimes(1);
+    expect((native.ask.mock.calls as unknown[][])[0][0]).toMatchObject({ title: "Restart the agent?", action: "Restart", destructive: true });
     expect(backend.callsOf("stop_tab")).toEqual([]);
     await choose("Restart agent");
     expect(backend.callsOf("stop_tab")).toEqual([{ sessionId: "a", tabId: "a2" }]);

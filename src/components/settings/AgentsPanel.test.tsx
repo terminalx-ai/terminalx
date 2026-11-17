@@ -44,12 +44,14 @@ let offers: Record<string, ShellKeyOffer | null>;
 let running: Record<string, AgentLoginTab[]>;
 let verification: { ok: boolean; reason?: string };
 let saved: { harness: string; key: string }[];
+let latest: Record<string, string | null>;
 
 function backend(command: string, args: Record<string, unknown> = {}) {
   const harness = args.harness as string;
   const now = new Date().toISOString();
   switch (command) {
     case "check_agent_readiness": return readiness[harness] ?? { state: "missing", checkedAt: now, version: null };
+    case "agent_latest_version": return latest[harness] ?? null;
     case "agent_login_status": return logins[harness];
     case "agent_login_shell_offer": return offers[harness] ?? null;
     case "agent_login_save_key":
@@ -123,6 +125,7 @@ beforeEach(() => {
   };
   verification = { ok: true };
   saved = [];
+  latest = { claude: "2.3.41", codex: "0.167.0" };
   store.sessions = [
     { id: "s1", tabs: [{ id: "t1", harness: "claude" }] },
     { id: "s2", tabs: [{ id: "t2", harness: "claude" }] },
@@ -140,7 +143,8 @@ describe("Agents · API key (PRO-306)", () => {
     expect(screen.getByRole("tab", { name: "Claude Code: Signed in", selected: true })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Claude subscription/, checked: true })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /API key\s*ANTHROPIC_API_KEY/, checked: false })).toBeTruthy();
-    expect(row("Version")).toBe("2.3.41");
+    // PRO-377: the installed version beside the latest release.
+    await waitFor(() => expect(row("Version")).toBe("2.3.41 · up to date"));
     expect(row("Login")).toBe("Claude Max · ada@example.com");
     expect(row("Organization")).toBe("Acme");
     expect(row("Executable")).toBe("~/.local/bin/claude");
@@ -149,6 +153,31 @@ describe("Agents · API key (PRO-306)", () => {
     expect(await screen.findByRole("radio", { name: /ChatGPT\s*ada@example.com · Pro/, checked: true })).toBeTruthy();
     await waitFor(() => expect(row("Config")).toBe("~/.codex/config.toml"));
     expect(row("Executable")).toBe("/opt/homebrew/bin/codex");
+    await waitFor(() => expect(row("Version")).toBe("0.166.0 · 0.167.0 available"));
+  });
+
+  it("shows the version alone when the latest release is not known", async () => {
+    latest = { claude: null, codex: null };
+    show();
+    await waitFor(() => expect(calls("agent_latest_version")).toEqual([{ harness: "claude" }]));
+    expect(row("Version")).toBe("2.3.41");
+  });
+
+  it.each([
+    ["2.3.41-beta.1", "2.3.41", " · 2.3.41 available"],
+    ["2.3.41-beta.2", "2.3.41-beta.11", " · 2.3.41-beta.11 available"],
+    ["2.3.41", "2.3.41-beta.1", " · up to date"],
+    ["2.3.41+build.1", "2.3.41+build.2", " · up to date"],
+    ["2.3.41-beta.1", "2.3.41-beta.1", " · up to date"],
+    ["2.3.41oops", "2.3.42", ""],
+    ["2.3.41", "3.invalid", ""],
+    ["unknown", "unknown", ""],
+  ])("shows the release status for installed %s and latest %s", async (version, release, note) => {
+    readiness.claude = ready("claude", { version });
+    latest.claude = release;
+    show([claude]);
+    await waitFor(() => expect(calls("agent_latest_version")).toEqual([{ harness: "claude" }]));
+    await waitFor(() => expect(row("Version")).toBe(version + note));
   });
 
   it("saves a key to the Keychain, shows it masked, and restarts exactly the agent's running tabs", async () => {
@@ -173,7 +202,8 @@ describe("Agents · API key (PRO-306)", () => {
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
     expect(calls("agent_login_verify")).toEqual([{ harness: "claude" }]);
     expect(row("Login")).toBe("API key · ANTHROPIC_API_KEY · Keychain");
-    expect(screen.queryByText("Organization", { selector: "dt" })).toBeNull();
+    // PRO-377: the organization stays in the details with a key in use.
+    expect(row("Organization")).toBe("Acme");
     // The badge follows the readiness check a save asks for, which may answer after the key's own check.
     expect(await screen.findByRole("tab", { name: "Claude Code: Using an API key" })).toBeTruthy();
 
@@ -196,7 +226,14 @@ describe("Agents · API key (PRO-306)", () => {
     expect(within(toast("API key saved to the Keychain")).queryByRole("button", { name: /Restart/ })).toBeNull();
   });
 
-  it("removes the key from the Keychain and goes back to the subscription login", async () => {
+  it.each([0, 1, 2])("removes the key with %i running tabs and goes back to the subscription login", async (count) => {
+    running.claude = running.claude.slice(0, count);
+    if (count) {
+      // A tab already on the new login must not inflate the retained-login count.
+      invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => command === "agent_login_tabs"
+        ? [...running[args!.harness as string], { sessionId: "s4", tabId: "t4", current: true }]
+        : backend(command, args));
+    }
     logins.claude = { ...logins.claude, mode: "api_key", saved: { masked: MASKED, savedAt: "2026-11-11T09:00:00Z" }, verified: { ok: true, checkedAt: new Date().toISOString() } };
     show();
     await waitFor(() => expect(statusLine().textContent).toBe("Using an API key · verified just now"));
@@ -205,7 +242,19 @@ describe("Agents · API key (PRO-306)", () => {
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(calls("agent_login_remove_key")).toEqual([{ harness: "claude" }]);
     expect(toast(title).textContent).toContain("Deleted from the Keychain. New tabs sign in with Claude Max (ada@example.com).");
-    expect(within(toast(title)).getByRole("button", { name: "Restart 2 tabs" })).toBeTruthy();
+    if (count) {
+      expect(toast(title).textContent).toContain(count === 1
+        ? "1 running tab keeps its current login until you restart it."
+        : "2 running tabs keep their current login until you restart them.");
+      expect(toast(title).textContent).toContain("Usage in these tabs may still be billed to their current login.");
+    } else {
+      expect(toast(title).textContent).not.toContain("running");
+      expect(toast(title).textContent).not.toContain("billed");
+    }
+    expect(toast(title).textContent).toContain("This does not revoke the key with your provider.");
+    expect(within(toast(title)).queryByRole("button", { name: /Restart/ })).toBeNull();
+    expect(calls("stop_tab")).toEqual([]);
+    expect(startTabAgent).not.toHaveBeenCalled();
     expect(statusLine().textContent).toBe("Signed in");
     expect(screen.getByRole("radio", { name: /Claude subscription/, checked: true })).toBeTruthy();
     expect(row("Login")).toBe("Claude Max · ada@example.com");
@@ -221,6 +270,8 @@ describe("Agents · API key (PRO-306)", () => {
     const title = "API key removed · Claude Code needs a sign-in";
     await waitFor(() => expect(toast(title)).toBeTruthy());
     expect(toast(title).textContent).toContain("Deleted from the Keychain. Sign in to Claude Code below to start new tabs.");
+    expect(toast(title).textContent).not.toContain("running");
+    expect(within(toast(title)).queryByRole("button", { name: /Restart/ })).toBeNull();
     await waitFor(() => expect(statusLine().textContent).toBe("Sign in required"));
     expect(row("Login")).toBe("None · sign in required");
     expect(screen.getByRole("button", { name: "Sign in to Claude Code" })).toBeTruthy();
@@ -256,6 +307,8 @@ describe("Agents · API key (PRO-306)", () => {
     expect(screen.getByRole("radio", { name: /API key/, checked: true })).toBeTruthy();
     expect(screen.getByText("From your shell")).toBeTruthy();
     expect(screen.getByText(/A copy is now in the Keychain/).textContent).toBe("Found in your login shell (~/.zshrc). A copy is now in the Keychain, so it works without that file.");
+    // PRO-377: no second Keychain note under an imported key.
+    expect(screen.queryByText(/^Kept in the Keychain/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Import to the Keychain" })).toBeNull();
     await waitFor(() => expect(screen.getByLabelText("Verified")).toBeTruthy());
   });

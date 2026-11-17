@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   search: vi.fn(),
   list: vi.fn(),
   openProjectSearch: vi.fn(),
-  changes: { files: [] as { path: string; status: string; oldPath?: string }[] },
+  changes: { files: [] as { path: string; status: string; oldPath?: string }[], staged: [] as { path: string; status: string; oldPath?: string }[], unstaged: undefined as { path: string; status: string; oldPath?: string }[] | undefined },
   reviewRange: vi.fn(),
   discard: vi.fn(),
   openDiff: vi.fn(),
@@ -18,7 +18,7 @@ vi.mock("@/lib/gitSource", () => ({
   localGitSource: (cwd: string) => ({ key: `local:${cwd}`, reviewRange: mocks.reviewRange, discard: mocks.discard, errorMessage: String }),
 }));
 vi.mock("@/lib/projectSearch", () => ({ openProjectSearch: mocks.openProjectSearch }));
-vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: mocks.changes.files, loading: false, head: null }) }));
+vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: mocks.changes.files, staged: mocks.changes.staged, unstaged: mocks.changes.unstaged ?? mocks.changes.files, loading: false, head: null }) }));
 vi.mock("@/lib/editors", () => ({
   openFile: vi.fn(),
   openDiff: mocks.openDiff,
@@ -195,6 +195,8 @@ describe("FileTreeView", () => {
     });
     afterEach(() => {
       mocks.changes.files = [];
+      mocks.changes.staged = [];
+      mocks.changes.unstaged = undefined;
     });
 
     it("heads the tree with the checkout's name and branch, and lists 26px mono rows with no root row", async () => {
@@ -248,10 +250,31 @@ describe("FileTreeView", () => {
       fireEvent.contextMenu(await screen.findByText("a.ts"));
       fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
       const dialog = await screen.findByRole("dialog");
-      expect(within(dialog).getByText("Discard changes to this file?")).toBeTruthy();
+      // The dialog names the file (PRO-400). The tree has no line counts for it, so it says what goes back without them.
+      expect(within(dialog).getByText("Discard changes to a.ts?")).toBeTruthy();
+      expect(dialog.textContent).toContain("go back to the last commit. This can’t be undone.");
       expect(mocks.discard).not.toHaveBeenCalled();
       fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
       await waitFor(() => expect(mocks.discard).toHaveBeenCalledWith("a.ts", undefined, undefined));
+    });
+
+    // PRO-400 review: discarding a file the last commit does not have deletes it, and the card must say so.
+    it("says a new file is deleted, whether untracked or staged as new and edited since", async () => {
+      mocks.changes.files = [{ path: "a.ts", status: "added" }];
+      const view = render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="alpha" active />);
+      fireEvent.contextMenu(await screen.findByText("a.ts"));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
+      expect((await screen.findByRole("dialog")).textContent).toContain("The file is not in that version, so it is deleted.");
+      view.unmount();
+
+      // The tree's own status is the unstaged one ("modified"); the index knows the file is new.
+      mocks.changes.files = [{ path: "a.ts", status: "modified" }];
+      mocks.changes.staged = [{ path: "a.ts", status: "added" }];
+      mocks.changes.unstaged = [{ path: "a.ts", status: "modified" }];
+      render(<FileTreeView sessionId="f" root="/repos/alpha" rootName="alpha" active />);
+      fireEvent.contextMenu(await screen.findByText("a.ts"));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
+      expect((await screen.findByRole("dialog")).textContent).toContain("The file is not in that version, so it is deleted.");
     });
 
     it("greys out View diff and Discard for a file with no changes", async () => {

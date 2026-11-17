@@ -5,7 +5,6 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { useFold } from "@/components/layout/useFold";
-import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { machineConnection, reconnectMachine, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineProjects, type MachineProjectNode } from "@/lib/machineCatalog";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -25,13 +24,12 @@ import { startMachineSession } from "./machineNewSession";
  * one of its projects, and a fold; choosing the name opens the machine's view.
  * Under it come its projects, each with its sessions. A machine that cannot be
  * reached keeps its section, dimmed, with the sessions it last reported.
- * Shown only with Experimental → Machines on.
+ * Nothing shows while no machine is paired.
  */
 export function MachinesSection() {
-  const on = useExperimentalSettings()?.machines === true;
   const store = useMachineConnections();
   const sessions = useSessionStore();
-  if (!on || !store.machines.length) return null;
+  if (!store.machines.length) return null;
   return (
     <div role="group" aria-label="Machines" className="min-w-0" data-testid="machines-section">
       {store.machines.map((machine) => {

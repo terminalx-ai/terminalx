@@ -813,6 +813,36 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
     })
 }
 
+/// The checkout's files and staging at the end of the turn a fork starts from
+/// (PRO-379), as tree ids in the session's repository, while they are kept.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub fn turn_end(session: &str, tab: &str, end_seq: u64) -> Result<(String, String)> {
+    locked(session, || {
+        let state = load(session, tab)?;
+        let missing = "This turn has no saved file checkpoint.";
+        let turn = state.turns.iter().rev().find(|t| t.seq <= end_seq && !t.abandoned).ok_or_else(|| anyhow::anyhow!(missing))?;
+        let end = turn.end.clone().ok_or_else(|| anyhow::anyhow!(missing))?;
+        if let Some(reason) = &turn.unavailable_reason {
+            bail!("{reason}");
+        }
+        if !trees::exists(Path::new(&turn.cwd), session, &format!("{tab}-{}", turn.seq), "end")? {
+            bail!("This turn's file checkpoint has expired under the workspace retention limit.");
+        }
+        let end_index = turn.end_index.clone().ok_or_else(|| anyhow::anyhow!("This turn ended with unresolved Git conflicts."))?;
+        Ok((end, end_index))
+    })
+}
+
+/// Put a fresh checkout's files and staging at a turn's end (see [`turn_end`]).
+/// Only for a worktree made for the fork: whatever it held is replaced.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub fn check_out_turn(cwd: &str, tree: &str, index: &str) -> Result<()> {
+    let cwd = Path::new(cwd);
+    git::run(cwd, &["read-tree", "--reset", "-u", tree])?;
+    git::run(cwd, &["read-tree", index])?;
+    Ok(())
+}
+
 /// Whether the reset `generation` restored files, so its Undo puts them back.
 pub fn reset_has_files(session: &str, tab: &str, generation: &str) -> bool {
     load(session, tab).is_ok_and(|state| state.reset.is_some_and(|backup| backup.generation == generation))

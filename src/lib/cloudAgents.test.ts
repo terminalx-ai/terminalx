@@ -1,6 +1,8 @@
+import { configureCloudReadMarkers, reconcileCloudReadMarker } from "./cloudReadMarkers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { CLOUD_FILES_REFUSED } from "@/lib/cloudComposer";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -22,6 +24,9 @@ import {
   getCloudAgents,
   loadCloudAgents,
   markCloudAgentsOffline,
+  markCloudAgentRead,
+  setCloudAgentsAccess,
+  denyCloudAgentsWorkspace,
   reconcileCloudAgents,
   refreshFromCheckpoint,
   resetCloudAgents,
@@ -188,6 +193,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetCloudAgents();
+  configureCloudReadMarkers(null, null);
   vi.useRealTimers();
 });
 
@@ -897,6 +903,29 @@ describe("cloud agent tabs store", () => {
     expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
   });
 
+  it("PRO-407: uploads a machine message's files first, then names them in session.send; a cloud agent never gets one", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m3" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1", "composer/3", "composer/4"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+    await sendToCloudAgent(machine, "t-1", "read this", client, [], { files: [{ name: "plan.md", data: "IyBQbGFu", mediaType: "text/markdown" }] });
+    const [attach, send] = client.mutate.mock.calls;
+    expect(attach![0]).toBe("session.attach");
+    expect(attach![1]).toEqual({ sessionId: "s-1", tabId: "t-1", attachmentId: expect.stringMatching(/^att-/), kind: "file", name: "plan.md", mediaType: "text/markdown", offset: 0, data: "IyBQbGFu", last: true });
+    const id = (attach![1] as { attachmentId: string }).attachmentId;
+    expect(send![0]).toBe("session.send");
+    expect(send![1]).toEqual({ sessionId: "s-1", tabId: "t-1", text: "read this", files: [{ id, name: "plan.md", mediaType: "text/markdown" }] });
+    // The file itself never rides in the message.
+    expect(JSON.stringify(send![1])).not.toContain("IyBQbGFu");
+
+    // A cloud workspace's agent takes images only: nothing is uploaded or enqueued.
+    applyLiveTabs(scope, [tabInfo()]);
+    const cloud = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: () => true });
+    await expect(sendToCloudAgent(scope, "t-1", "read this", cloud, [], { files: [{ name: "plan.md", data: "IyBQbGFu" }] })).rejects.toThrow(CLOUD_FILES_REFUSED);
+    expect(cloud.mutate).not.toHaveBeenCalled();
+    expect(backend.calls.some((call) => call.cmd === "cloud_agent_enqueue")).toBe(false);
+  });
+
   // Found in a live two-user test: a pane kept "chunk 98 of 150 / Working" long after the turn had finished.
   describe("a turn that finished while this desktop was away", () => {
     const projection = (status: AgentTabInfo["status"], events: AgentEvent[]): Checkpoint["projection"] => ({
@@ -1024,4 +1053,103 @@ it("retains message presence from a legacy checkpoint with no verified time or r
   expect(getCloudAgents(scope).tabs[0].info.lastMessageAt).toBeUndefined();
   await flushCloudAgentCache(scope);
   expect(backend.cache["t-1"].tab).toMatchObject({ hasMessages: true, sessionHasMessages: true });
+});
+
+
+describe("account read markers and local unread", () => {
+  it("clears only activity covered by the matching runtime session marker, including delayed live replay", () => {
+    configureCloudReadMarkers("a", null);
+    const at = "2026-11-14T10:00:00Z";
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastMessageAt: at })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(true);
+    reconcileCloudReadMarker(scope.organizationId, scope.workspaceId, { sessionId: "s-1", readAt: at });
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(false);
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastMessageAt: at })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(false);
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress", lastMessageAt: "2026-11-14T11:00:00Z" })]);
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastMessageAt: "2026-11-14T11:00:00Z" })]);
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(true);
+  });
+  it("keeps local read working when the server denies a marker write and sends a session ID rather than tab ID", async () => {
+    const send = vi.fn().mockRejectedValue({ code: "cloud_workspace_collaboration_forbidden" });
+    configureCloudReadMarkers("a", send);
+    applyLiveTabs(scope, [tabInfo({ status: "completed", lastMessageAt: "2026-11-14T10:00:00Z" })]);
+    await markCloudAgentRead(scope, "t-1", null);
+    expect(send).toHaveBeenCalledWith(scope.organizationId, scope.workspaceId, "2026-11-14T10:00:00.000Z", "s-1");
+    expect(getCloudAgents(scope).tabs[0].unread).toBe(false);
+  });
+});
+
+
+it("blocks revoked native cache/live replay across store resets until a fresh authorized list", async () => {
+  setCloudAgentAccount("revoked-account");
+  applyLiveTabs(scope, [tabInfo({ title: "private" })]);
+  setCloudAgentsAccess(scope, false);
+  resetCloudAgents();
+  await loadCloudAgents(scope);
+  applyLiveTabs(scope, [tabInfo({ title: "stale private" })]);
+  expect(getCloudAgents(scope).tabs).toEqual([]);
+  expect(backend.count("cloud_agent_cache_load")).toBe(0);
+  setCloudAgentsAccess(scope, true);
+  applyLiveTabs(scope, [tabInfo({ title: "authorized" })]);
+  expect(getCloudAgents(scope).tabs[0].info.title).toBe("authorized");
+  setCloudAgentAccount(null);
+});
+
+
+it("discards an in-flight native cache read when access is revoked before it resolves", async () => {
+  let resolve!: (value: { tabs: Record<string, CachedTab> }) => void;
+  const pending = new Promise<{ tabs: Record<string, CachedTab> }>((r) => { resolve = r; });
+  mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => cmd === "cloud_agent_cache_load" ? pending : backend.handle(cmd, args));
+  const loading = loadCloudAgents(scope);
+  setCloudAgentsAccess(scope, false);
+  resolve({ tabs: { "t-1": { tab: tabInfo({ title: "secret" }), events: [], cursor: null, checkpoint: null, unread: true, completed: true, updatedAt: 1 } } });
+  await loading;
+  expect(getCloudAgents(scope).tabs).toEqual([]);
+  expect(backend.count("cloud_agent_outbox")).toBe(0);
+  setCloudAgentsAccess(scope, true);
+});
+
+
+it("blocks minimal revocations before the catalog knows an organization, across A -> B -> A", async () => {
+  setCloudAgentAccount("a");
+  denyCloudAgentsWorkspace(scope.workspaceId);
+  setCloudAgentAccount("b"); resetCloudAgents();
+  applyLiveTabs(scope, [tabInfo({ title: "B's tab" })]);
+  expect(getCloudAgents(scope).tabs).toHaveLength(1);
+  setCloudAgentAccount("a"); resetCloudAgents();
+  await loadCloudAgents(scope);
+  applyLiveTabs(scope, [tabInfo({ title: "revoked" })]);
+  expect(getCloudAgents(scope).tabs).toEqual([]);
+  expect(backend.count("cloud_agent_cache_load")).toBe(0);
+  setCloudAgentsAccess(scope, true);
+  setCloudAgentAccount(null);
+});
+
+it("ignores callbacks from a revoked live feed after a fresh catalog grants access again", async () => {
+  applyLiveTabs(scope, [tabInfo()]);
+  const client = fakeClient();
+  const off = await attachCloudAgentTab(scope, "t-1", client);
+  const oldEvent = client.subscribeSession.mock.calls[0]![2];
+  const options = client.subscribeSession.mock.calls[0]![3] as { onStatus: (value: { status: string }) => void };
+  setCloudAgentsAccess(scope, false);
+  setCloudAgentsAccess(scope, true);
+  applyLiveTabs(scope, [tabInfo({ title: "current" })]);
+  oldEvent(ev(1, { type: "assistant_text", text: "revoked content" }));
+  options.onStatus({ status: "completed" });
+  expect(getTabLog("s-1", "t-1").events).toEqual([]);
+  expect(getCloudAgents(scope).tabs[0].info).toMatchObject({ title: "current", status: "idle" });
+  off();
+});
+
+it("ignores a runtime tab list from before an account store was replaced", async () => {
+  let resolve!: (tabs: AgentTabInfo[]) => void;
+  const client = fakeClient();
+  client.listAgentTabs.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+  const pending = reconcileCloudAgents(scope, client);
+  resetCloudAgents();
+  applyLiveTabs(scope, [tabInfo({ title: "new account" })]);
+  resolve([tabInfo({ title: "old account's secret" })]);
+  await pending;
+  expect(getCloudAgents(scope).tabs[0].info.title).toBe("new account");
 });

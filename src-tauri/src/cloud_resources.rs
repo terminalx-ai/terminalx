@@ -275,6 +275,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn phase2_desktop_contract_resources_keep_bytes_ms_and_cpu_readings() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = observe(dir.path());
+        assert_eq!(value["v"], 1);
+        assert!(value["observedAt"].as_i64().unwrap() > 1_000_000_000_000);
+        assert!(value["cpu"]["cores"].as_u64().unwrap() >= 1);
+        assert_eq!(memory("MemTotal: 42 kB\nMemAvailable: 20 kB\n"), Some((42 * 1024, 20 * 1024)));
+        assert_eq!(observe(&dir.path().join("absent"))["storage"], Value::Null);
+        assert_eq!(within_limit(None, None), None);
+    }
+
+    #[test]
     fn processor_use_is_the_busy_share_of_the_time_between_two_readings() {
         let first = stat_ticks("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
         assert_eq!(first, Ticks { busy: 150, total: 1000 });

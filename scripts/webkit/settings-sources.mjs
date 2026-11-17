@@ -104,9 +104,15 @@ try {
     await row.scrollIntoViewIfNeeded();
     checks["Your value beside a row the file sets"] = await row.getByText("Your value", { exact: true }).isVisible();
     checks["no badge on a row the file does not set"] = await settings.locator('[data-setting-id="general.sounds"]').getByText("Your value", { exact: true }).count() === 0;
-    await row.getByRole("button", { name: "Link actions actions" }).click();
+    // PRO-374: one “…” per row, holding Reset to default (with the default), Copy setting link, Save for this project… and Saved in.
+    checks["one row menu per row"] = await row.getByRole("button", { name: /actions/i }).count() === 1;
+    await row.hover();
+    await row.getByRole("button", { name: "Actions for Link actions" }).click();
     const rowMenu = page.getByRole("menu");
     checks["row menu offers Reset to default"] = await rowMenu.getByRole("menuitem", { name: "Reset to default" }).isEnabled();
+    checks["Reset to default names the default"] = (await rowMenu.getByRole("menuitem", { name: "Reset to default" }).textContent()).endsWith("On");
+    checks["row menu copies the setting link"] = (await rowMenu.getByRole("menuitem", { name: "Copy setting link" }).textContent()).includes("general.linkActions");
+    checks["Save for this project… is disabled, per person"] = await rowMenu.getByRole("menuitem", { name: /Save for this project/ }).getAttribute("aria-disabled") === "true";
     checks["row menu says where it is saved"] = await rowMenu.getByText("~/.raccoon/settings.json", { exact: true }).isVisible();
     await shoot(browser, page, "09.04-row-menu", mode);
     await rowMenu.getByRole("menuitem", { name: "Reset to default" }).click();
@@ -118,7 +124,7 @@ try {
     const repositorySelect = editor.getByLabel("Repository", { exact: true });
     await repositorySelect.locator('option[value="/repos/p0"]').waitFor({ state: "attached" });
     await repositorySelect.selectOption("/repos/p0");
-    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input')?.value === "tx/");
+    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input[aria-label="Custom prefix"]')?.value === "tx/");
     const badge = editor.getByRole("button", { name: "Branch prefix: where this value comes from" });
     await badge.filter({ hasText: "Your value · overrides project" }).waitFor().catch(async (error) => {
       console.log("state when the badge did not appear:", JSON.stringify(await editor.evaluate((node) => ({ select: node.querySelector("select")?.value, options: [...(node.querySelector("select")?.options ?? [])].map((o) => o.value), text: node.textContent.slice(0, 600) }))));
@@ -145,9 +151,9 @@ try {
     checks["chips"] = await filesView.getByText("none on this Mac", { exact: true }).isVisible() && await filesView.getByText("ignored by Git", { exact: true }).isVisible() && await filesView.getByText("committed", { exact: true }).isVisible();
     checks["the error names file, line and key"] = (await filesView.getByRole("alert").textContent()).startsWith("/repos/p0/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting.");
     checks["subtitle"] = await filesView.getByText(/Edits made in an editor show up here within a second\./).isVisible();
-    await settings.getByRole("button", { name: "More ways to open settings.json" }).click();
+    await settings.getByRole("button", { name: "More ways to open personal settings.json" }).click();
     const openMenu = page.getByRole("menu");
-    checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder", "Cursor", "VS Code", "Zed", "Copy path"]);
+    checks["Open menu"] = JSON.stringify(await openMenu.getByRole("menuitem").allTextContents()) === JSON.stringify(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⇧⌘C"]);
     await shoot(browser, page, "11.10-settings-files", mode);
     await openMenu.getByRole("menuitem", { name: "VS Code" }).click();
     await page.waitForFunction(() => window.__PW_CALLS__.some((call) => call[0] === "open_settings_file"));
@@ -166,14 +172,15 @@ try {
     // 09.43: a save refused by an invalid file.
     await nav.getByRole("button", { name: "General", exact: true }).click();
     await page.evaluate(() => window.__PW_BREAK__());
-    const openButton = settings.getByRole("button", { name: "Open settings.json · line 7" });
+    const openButton = settings.getByRole("button", { name: "Open personal settings.json · line 7" });
     await openButton.waitFor();
-    checks["Open settings.json names the line in the destructive colour"] = await openButton.evaluate((node) => node.parentElement.className.includes("text-destructive"));
-    checks["the banner reads as one error"] = (await settings.getByRole("alert").first().textContent()).startsWith("~/.raccoon/settings.json line 7: preferences.sounds Unexpected");
+    checks["Open personal settings.json names the line in the destructive colour"] = await openButton.evaluate((node) => node.parentElement.className.includes("text-destructive"));
+    // PRO-374 (09.43): no banner above the title; the red header link and the toast only.
+    checks["no banner above the title"] = await settings.getByRole("alert").count() === 0;
     await row.locator('[role="switch"]').click();
     const toast = page.getByRole("alert", { name: "Can’t save: ~/.raccoon/settings.json has an error on line 7" });
     await toast.waitFor();
-    checks["Can’t save names the parser's words"] = (await toast.textContent()).includes("preferences.sounds: Unexpected “,” before “}”. This change wasn’t saved");
+    checks["Can’t save names the setting that stayed"] = (await toast.textContent()).includes("Link actions stays on until the file is fixed; nothing else changed.");
     await shoot(browser, page, "09.43-cant-save", mode);
     await toast.getByRole("button", { name: "Copy error" }).click();
     await page.waitForFunction(() => window.__PW_CALLS__.some((call) => call[0] === "copy_text"));

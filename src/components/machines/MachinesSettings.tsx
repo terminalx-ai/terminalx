@@ -12,10 +12,13 @@ import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
+import { MachinesGuideLink as GuideLink, SettingsDescription } from "@/components/settings/SettingsDescription";
+export { MACHINES_GUIDE_URL } from "@/components/settings/SettingsDescription";
 import { machineSectionKey } from "@/types/target";
 import type { MachineActivityEntry, MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import type { MachineName } from "@/types/pairing";
 import { AddMachineDialog } from "./AddMachineDialog";
+import { StepRow } from "./HeadlessServerTab";
 import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connectionStatus";
 import { PlatformIcon, keyLabel, osLabel, routeLabel, seenText, shortDate, soft } from "./machineText";
 import { runningText, useRunningSessions } from "./useRunningSessions";
@@ -30,12 +33,12 @@ const iconBox = "grid size-8 shrink-0 place-items-center rounded-md bg-muted";
 /**
  * Settings → Machines (PRO-349, screen 21.02): the switch that lets other
  * computers operate this Mac, this Mac's name and key label, the machines
- * this Mac operates, and the computers that operate it. Shown only with
- * Experimental → Machines on, until PRO-360. Data privacy mode turns off
+ * this Mac operates, and the computers that operate it. With no machine
+ * paired it opens with how to start, and the guide (PRO-360). Data privacy mode turns off
  * both operating and being operated (PRO-357), and the page says so.
  */
-export function MachinesSettings() {
-  return useDataPrivacy().enabled ? <MachinesPrivacyState /> : <MachinesSettingsContent />;
+export function MachinesSettings({ showIntroduction = true }: { showIntroduction?: boolean }) {
+  return useDataPrivacy().enabled ? <MachinesPrivacyState /> : <MachinesSettingsContent showIntroduction={showIntroduction} />;
 }
 
 /** What data privacy mode turns off here: the runtime opens no listener, and no machine connection is made. */
@@ -48,7 +51,7 @@ function MachinesPrivacyState() {
   );
 }
 
-function MachinesSettingsContent() {
+function MachinesSettingsContent({ showIntroduction }: { showIntroduction: boolean }) {
   // A machine's page (21.10) in place of the list; Machines in its breadcrumb comes back.
   const [page, setPage] = useState<string | null>(null);
   // Asked for from elsewhere (the new-session form's "Open its machine page").
@@ -59,10 +62,10 @@ function MachinesSettingsContent() {
     takeMachinePageRequest(requested);
   }, [requested]);
   if (page) return <MachinePage machineId={page} onBack={() => setPage(null)} />;
-  return <MachinesList onOpen={setPage} />;
+  return <MachinesList onOpen={setPage} showIntroduction={showIntroduction} />;
 }
 
-function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
+function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string) => void; showIntroduction: boolean }) {
   const host = useMachineHost();
   useEffect(() => {
     void bootMachineHost();
@@ -72,7 +75,7 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
 
   return (
     <div className="flex flex-col" data-testid="machines-settings">
-      <p className="-mt-4 mb-2 text-[13px] text-muted-foreground">Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.</p>
+      {showIntroduction && <SettingsDescription section="machines" className="mb-2" />}
       <div className="border-b border-hairline py-1.5">
         <RegisteredSetting
           setting="machines.allowOperating"
@@ -303,10 +306,39 @@ function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
           ))}
         </ul>
       )}
-      {store.ready && store.machines.length === 0 && !store.error && <p className="mt-3 text-[12.5px] text-faint">No machines yet. Add one to operate it from this Mac.</p>}
+      {store.ready && store.machines.length === 0 && !store.error && <MachinesFirstRun />}
       <AddMachineDialog open={adding} onOpenChange={setAdding} onPaired={() => void refreshPairedMachines()} />
       <RemoveMachineDialog machine={removing} onClose={() => setRemoving(null)} />
     </>
+  );
+}
+
+/**
+ * Your machines with none paired (PRO-360): how to start, in three steps, and
+ * the guide. No 21.xx screen shows this state; it is 21.02's bordered card
+ * with 21.06's numbered steps.
+ */
+function MachinesFirstRun() {
+  const step = "text-[12px] leading-[18px] text-muted-foreground";
+  return (
+    <div className="mt-2.5 rounded-lg border border-hairline px-4 py-3.5" data-testid="machines-first-run">
+      <p className="text-[13px] font-medium">No machines yet</p>
+      <p className={cn(soft, "mt-0.5")}>Add a Mac, a Mac mini or a Linux server that runs TerminalX. Its sessions run there, and this Mac shows them in the sidebar.</p>
+      <ol className="mt-3 grid gap-3" aria-label="How to add a machine">
+        <StepRow n={1} title="Get the other computer ready">
+          <p className={step}>On a Mac, open Settings → Machines there and turn on “Let other computers operate this Mac”. On a server, install TerminalX and run terminalx-serve pair.</p>
+        </StepRow>
+        <StepRow n={2} title="Add it here">
+          <p className={step}>Choose Add a machine: from your account, with a pairing code, or as a headless server. Check that both screens show the same fingerprint, then choose Allow on the other computer.</p>
+        </StepRow>
+        <StepRow n={3} title="Start a session there">
+          <p className={step}>It appears as a section in the sidebar. Start a session from its +, or choose it under Where it runs in a new session.</p>
+        </StepRow>
+      </ol>
+      <div className="mt-3">
+        <GuideLink />
+      </div>
+    </div>
   );
 }
 

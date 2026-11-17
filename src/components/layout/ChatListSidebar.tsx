@@ -28,7 +28,7 @@ const canon = (path: string) => path.replace(/\/+$/, "");
  * Group by Sections). Rows are the same compact one-line rows as the project layout's: status mark, title, then
  * PR, line counts or age.
  */
-export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const order = useSidebarOrder();
   const { sidebarLayout, sidebarSort } = usePrefs();
@@ -88,7 +88,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       <SidebarTitlebar onHide={onHide} />
 
       <div className="shrink-0 px-2">
-        <AppDestinations onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
+        <AppDestinations onOpenHome={onOpenHome} onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}

@@ -135,7 +135,7 @@ fn writer_child() {
     };
     ready.mark();
     let (receipt, _received) = mpsc::channel();
-    let delivery = || PromptDelivery { mobile:mobile.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),
+    let delivery = || PromptDelivery { collaboration: None, mobile:mobile.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),
         shared:shared.clone().map(|p|(p,SESSION.into(),TAB.into(),seq)),ready:Some(ready.clone()),seq:Some(seq),receipt:Some((seq,receipt.clone())),..Default::default() };
     rig.manager.type_prompt(&rig.rt,&rig.pane,"remote".into(),vec![],delivery());
     wait_for("privacy activation and restoration", || coordination.join("restored").exists());
@@ -657,3 +657,80 @@ mod relay;
 
 #[path = "session_opencode_privacy_tests.rs"]
 mod opencode_privacy;
+
+#[test]
+fn phase2_collaboration_v2_deferred_settings_recheck_provenance_at_actual_pty_launch() {
+    use crate::remote::collab::v2::{Action, Permit, Snapshot};
+    for change in ["safe", "revision", "source", "approval", "disconnect", "lost-permit", "after-reservation"] {
+        let mut rig = Rig::on(CliKind::Codex, "original-model", Some("low"));
+        rig.pane = index::get(SESSION).unwrap().tab(TAB).unwrap().pane_id();
+        index::update_tab(SESSION, TAB, |tab| { tab.permission_mode = "plan".into(); Ok(()) }).unwrap();
+        let program = rig._dir.path().join("codex");
+        executable(&program, r#"#!/bin/sh
+case "$1" in
+  --help) printf '  --no-daemon  Run without the daemon\n'; exit 0;;
+  app-server)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"id":"original-model","isDefault":true},{"id":"remote-model"}]}}'; exit 0;;
+      esac
+    done
+    exit 0;;
+esac
+printf 'LAUNCH %s\n' "$*" >> "$0.launches"
+stty raw -echo
+exec cat
+"#);
+        let _program = codex::pty::codex_program_for_tests(program.clone());
+        let rpc = crate::remote::server::WorkspaceRpc::new(rig._dir.path(), 1, rig.manager.sink.clone(), rig.manager.terminals.clone(), Some(rig.manager.clone())).unwrap();
+        let policy = rpc.collab.clone();
+        let dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(dir.path(), 1).unwrap();
+        let snapshot = |revision: &str, role: &str, approve: bool, source: &str| -> Snapshot {
+            serde_json::from_value(json!({"v":2,"revision":revision,"members":[{"userId":"manager","role":role,"canApprove":approve,"writeSource":source}]})).unwrap()
+        };
+        policy.install_v2(snapshot("1", "driver", true, "explicit")).unwrap();
+        let (peer, _events) = crate::remote::server::Peer::for_user("settings-attachment".into(), crate::remote::protocol::Authority::Manage, Some("manager".into()));
+        let permit = Permit::new(policy.clone(), "manager", policy.runtime_policy.stamp_for_peer("manager", &peer), Action::Configure).for_peer(&peer);
+        rig.rt.lock().unwrap().turn_open = true;
+        permit.with(|| {
+            rig.manager.set_model(SESSION, TAB, "remote-model").unwrap();
+            rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").unwrap();
+        });
+        // An unrelated trusted local edit must keep its own authority.
+        rig.manager.set_effort(SESSION, TAB, Some("high")).unwrap();
+        let pending = Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap());
+        let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&pending).unwrap()).unwrap();
+        assert_eq!(restored.collaboration_requests().len(), 2, "durable native markers must survive serialization");
+        match change {
+            "revision" => { policy.install_v2(snapshot("2", "driver", true, "explicit")).unwrap(); }
+            "source" => { policy.install_v2(snapshot("2", "driver", true, "everyone")).unwrap(); }
+            "approval" => { policy.install_v2(snapshot("2", "driver", false, "explicit")).unwrap(); }
+            "disconnect" => rpc.disconnect(&peer),
+            "lost-permit" => rig.rt.lock().unwrap().collaboration_settings.clear(),
+            _ => {},
+        }
+        // The real idle-restart reservation is entered without thread-local
+        // remote authority, as the watcher does after the turn ends.
+        let tail = {
+            let mut rt = rig.rt.lock().unwrap(); rt.turn_open = false;
+            match &rt.engine { Engine::Cli(cli) => cli.tail.clone(), _ => unreachable!() }
+        };
+        let work = rig.manager.begin_idle_restart_launch(&rig.rt, &tail).expect("local effort still requires a restart");
+        if change == "after-reservation" { policy.install_v2(snapshot("2", "driver", false, "explicit")).unwrap(); }
+        rig.manager.complete_cli_restart(&rig.rt, work).unwrap();
+        let launches = program.with_extension("launches");
+        // The fake CLI's `printf >>` creates the file before it writes the line: wait for the whole line.
+        let until = Instant::now() + Duration::from_secs(30);
+        let args = loop {
+            let seen = std::fs::read_to_string(&launches).unwrap_or_default();
+            if seen.starts_with("LAUNCH ") && seen.ends_with('\n') { break seen; }
+            assert!(Instant::now() < until, "{change}: no launch recorded: {seen:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(args.contains("remote-model"), change == "safe", "{change}: {args}");
+        assert_eq!(args.contains("--dangerously-bypass-approvals-and-sandbox"), change == "safe", "{change}: {args}");
+        assert!(args.contains("high"), "{change}: the local effort edit was lost: {args}");
+        assert!(Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap()).request_privacy.is_empty());
+        rig.manager.stop(SESSION, TAB).unwrap();
+    }
+}

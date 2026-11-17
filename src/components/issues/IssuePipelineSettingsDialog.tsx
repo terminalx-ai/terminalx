@@ -127,20 +127,6 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
     save({ protected: { ...current.protected, paths: nextPaths }, ignoredChecks: nextIgnored, ...(localCommand.trim() !== (current.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) });
   };
   const off = !settings.enabled;
-  // Not part of the pipeline: what agents may do to this project's issues on their own.
-  const [agentUpdates, setAgentUpdates] = useState<boolean | null>(null);
-  const agentUpdatesOn = agentUpdates ?? project.agentIssueUpdates === true;
-  const saveAgentUpdates = (value: boolean) => {
-    setAgentUpdates(value);
-    setError(null);
-    void updateProject(project.path, { agentIssueUpdates: value }).then(
-      () => setAgentUpdates(null),
-      (cause) => {
-        setAgentUpdates(null);
-        setError(errorMessage(cause));
-      },
-    );
-  };
 
   return (
     <Dialog
@@ -279,11 +265,9 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
               className="resize-y rounded-md bg-well px-2 py-1.5 font-mono text-xs outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
             />
           </label>
-          <SettingRow
-            label="Agents comment and change status without asking"
-            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels and edits to existing Linear issues always ask. Creating GitHub or Linear issues needs no additional approval."
-            control={<Switch aria-label="Agents comment and change status without asking" checked={agentUpdatesOn} onCheckedChange={saveAgentUpdates} />}
-          />
+          <p className="text-xs text-muted-foreground">
+            GitHub and Linear issue updates run without additional approval. Only deleting an issue requires explicit human approval.
+          </p>
         </div>
 
         {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}

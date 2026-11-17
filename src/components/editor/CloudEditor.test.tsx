@@ -1,17 +1,18 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { searchPanelOpen } from "@codemirror/search";
+import { SearchQuery, openSearchPanel, searchPanelOpen, setSearchQuery } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeAllEditors, getEditors, openFile, type FileEditorEntry } from "@/lib/editors";
 import { setPrefs } from "@/lib/prefs";
+import { registerShortcut } from "@/lib/hotkeys";
 import { registerFileSource, type FileSource, type FileState } from "@/lib/workspaceFiles";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EditorPane } from "./EditorPane";
 
 vi.mock("@/lib/api", () => ({ api: { headTree: vi.fn(), fileContentsAt: vi.fn() }, fs: {} }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn() }));
 
 const SESSION = "cloud:org-1:ws-1";
 const KEY = SESSION;
@@ -69,8 +70,8 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup();
   unregister();
-  const { ask } = await import("@tauri-apps/plugin-dialog");
-  vi.mocked(ask).mockResolvedValue(true);
+  const { confirmInApp } = await import("@/lib/confirm");
+  vi.mocked(confirmInApp).mockResolvedValue(true);
   await closeAllEditors(SESSION);
 });
 
@@ -245,6 +246,36 @@ describe("a cloud workspace file in the editor", () => {
     act(() => void fireEvent.keyDown(content, { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true }));
     expect(searchPanelOpen(view(container).state)).toBe(true);
     act(() => setPrefs({ shortcuts: {} }));
+  });
+
+  it.each(["editor", "search panel"])("preserves Previous match with %s focus while Home has a default shortcut", async (focus) => {
+    setPrefs({ shortcuts: {} });
+    cloud.files.set("src/main.rs", { text: "match match match", version: 1 });
+    const home = vi.fn();
+    const unregisterHome = registerShortcut("app.home", home);
+    try {
+      const { container } = render(<TooltipProvider><EditorPane entry={open()} visible /></TooltipProvider>);
+      await ready(container);
+      const editor = view(container);
+      act(() => {
+        editor.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: "match" })), selection: { anchor: 12, head: 17 } });
+        if (focus === "search panel") openSearchPanel(editor);
+      });
+      const target = focus === "editor" ? editor.contentDOM : screen.getByRole("textbox", { name: "Find" });
+      act(() => target.focus());
+      expect(document.activeElement).toBe(target);
+
+      fireEvent.keyDown(target, { key: "G", code: "KeyG", keyCode: 71, ctrlKey: true, shiftKey: true });
+      expect(home).not.toHaveBeenCalled();
+      expect(editor.state.selection.main.from).toBe(6);
+      expect(editor.state.selection.main.to).toBe(11);
+
+      act(() => target.focus());
+      fireEvent.keyDown(target, { key: "0", code: "Digit0", ctrlKey: true, altKey: true });
+      expect(home).toHaveBeenCalledTimes(1);
+    } finally {
+      unregisterHome();
+    }
   });
 
   it("is read-only for a participant", async () => {

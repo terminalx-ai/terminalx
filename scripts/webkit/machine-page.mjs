@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// PRO-350, PRO-351: a machine's page (screen 21.10) in the desktop's WebKit, with
-// Experimental → Machines on, at the screen's width (1440×900) in the dark
+// PRO-350, PRO-351: a machine's page (screen 21.10) in the desktop's WebKit,
+// at the screen's width (1440×900) in the dark
 // theme.
 //
 // Two paired machines over the relay:
@@ -50,7 +50,7 @@ await mkdir(shots, { recursive: true });
 if (!process.env.MACHINES_SHOTS) await writeFile(join(output, ".gitignore"), "*\n");
 
 const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
-  "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
+  "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
   "machine/1", "machine/2", "machine/3", "machine/4", "machine/6"];
 const OLDER = ALL.filter((capability) => capability !== "machine/4" && capability !== "machine/6");
 
@@ -58,7 +58,7 @@ const OLDER = ALL.filter((capability) => capability !== "machine/4" && capabilit
 const fixture = `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: true };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "linux", version: "24.04" }, publicKeyB64: "a2V5", directEndpoints: [], route: "relayAndNearby", hasWindow: false,
     pairedAt: Date.parse("2026-11-12T09:00:00Z"), lastSeenAt: Date.now(), lastRoute: null, relay: null, ...patch });

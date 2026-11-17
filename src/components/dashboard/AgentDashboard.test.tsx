@@ -115,7 +115,7 @@ it("keeps search and filters across views, hides automations and archives until 
   await waitFor(() => expect(rowNames()).toEqual(["Fix nightly"]));
 });
 
-// Where is offered only with Machines on and a machine paired: MachineDashboard.test sorts and hides it.
+// Where is offered only with a machine paired: MachineDashboard.test sorts and hides it.
 it.each(tableColumns(false))("sorts and toggles the $label column", async ({ id, label, menu }) => {
   state.sessions = [session("Task 10"), session("Task 2")];
   setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, hiddenColumns: [] } });
@@ -151,7 +151,7 @@ it("shows the designed default columns, people and the toolbar", async () => {
   expect(screen.getByRole("textbox", { name: "Search sessions" }).getAttribute("placeholder")).toBe("Search sessions, branches, PRs");
   await showView("Table");
   const headers = within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("columnheader").map((header) => header.textContent);
-  // Where joins after Project only with Machines on and a machine paired (PRO-346).
+  // Where joins after Project only once a machine is paired (PRO-346).
   expect(headers).toEqual(["Session", "Project", "Branch", "Changes", "Status", "Agent", "Owner", "Active"]);
   expect(screen.getByRole("img", { name: "You" })).toBeDefined();
   fireEvent.keyDown(window, { key: "/" });
@@ -207,4 +207,37 @@ it("moves and opens in sorted order, preserves selection after sorting, and leav
   fireEvent.keyDown(window, { key: "ArrowDown" });
   fireEvent.keyDown(window, { key: "Enter" });
   expect(state.select).toHaveBeenCalledWith("Beta");
+});
+
+import { ownerStorageKey, readOwners, teamPredicate } from "./TeamOverview";
+import type { CloudCatalogState } from "@/lib/cloudCatalog";
+it("keeps Mine, Shared, Following and current Active predicates over the identical visible dataset", () => {
+  const catalog = { owner: "account", revision: "revision", loaded: true, viewerUserId: "me", notices: [], createMemory: {}, orgs: {
+    org: { orgId: "org", source: "live", error: null, workspaces: [
+      { workspace: { id: "mine", createdBy: "me", state: "ready" }, following: false },
+      { workspace: { id: "shared", createdBy: "other", state: "ready", you: { role: "viewer" } }, following: true },
+      { workspace: { id: "visible", createdBy: "other", state: "ready" }, following: false },
+    ] },
+  } } as unknown as CloudCatalogState;
+  const rows = [{ id: "local", ownerId: "me" }, ...["mine", "shared", "visible"].map((workspaceId) => ({ id: workspaceId, orgId: "org", workspaceId }))];
+  const active = (_org: string, id: string) => id === "shared";
+  const ids = (view: Parameters<typeof teamPredicate>[1]) => rows.filter((row) => teamPredicate(row, view, catalog, active)).map((row) => row.id);
+  expect(ids("everyone")).toEqual(["local", "mine", "shared", "visible"]);
+  expect(ids("mine")).toEqual(["local", "mine"]);
+  expect(ids("shared")).toEqual(["shared"]);
+  expect(ids("following")).toEqual(["shared"]);
+  expect(ids("active")).toEqual(["shared"]);
+  // Running compute alone never becomes active human presence or a fabricated share.
+  expect(teamPredicate(rows[3]!, "active", catalog, () => false)).toBe(false);
+  catalog.orgs.org!.error = "presence_unavailable";
+  expect(ids("active")).toEqual([]); expect(ids("following")).toEqual([]);
+});
+it("isolates this Mac's multi-person By preference by account and organization", () => {
+  const a = ownerStorageKey("account-a", "org");
+  localStorage.setItem(a, JSON.stringify(["alice", "bob", "alice"]));
+  expect(readOwners(a)).toEqual(["alice", "bob"]);
+  expect(readOwners(ownerStorageKey("account-b", "org"))).toEqual([]);
+  expect(readOwners(ownerStorageKey("account-a", "other-org"))).toEqual([]);
+  localStorage.setItem(a, "[]"); expect(readOwners(a)).toEqual([]);
+  localStorage.removeItem(a);
 });

@@ -103,6 +103,40 @@ try {
         checks["data privacy mode is an Account row"] = layout.privacySwitch?.checked === "false" && !layout.privacySwitch.disabled;
       }
       failed += report(`${mode}, 1440px, ${name}`, checks, layout);
+      if (name === "account") {
+        // PRO-400 (17.01): Sign out asks in the app's own dialog: what happens, then Cancel on the left and a red Sign out on the right.
+        await settings.locator("[data-testid=account-sign-out]").getByRole("button", { name: "Sign out", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Sign out of TerminalX?" });
+        await dialog.waitFor();
+        await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
+        if (shots) await page.screenshot({ path: join(shots, `sign-out-${mode}-1440.png`) });
+        const asked = await dialog.evaluate((node) => {
+          const probe = document.createElement("i");
+          probe.style.background = "var(--destructive)";
+          document.body.append(probe);
+          const red = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          const buttons = [...node.querySelectorAll("button")];
+          const box = node.getBoundingClientRect();
+          return {
+            text: node.textContent,
+            buttons: buttons.map((button) => button.textContent.trim()),
+            cancelFirst: buttons.length === 2 && buttons[0].getBoundingClientRect().right <= buttons[1].getBoundingClientRect().left,
+            red: buttons.length === 2 && getComputedStyle(buttons[1]).backgroundColor === red,
+            inWindow: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
+            row: document.querySelector("[data-testid=account-sign-out]").textContent,
+          };
+        });
+        await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+        await dialog.waitFor({ state: "detached" });
+        failed += report(`${mode}, 1440px, sign out dialog`, {
+          "says what happens": /Phones paired through your account disconnect\. QR and code pairings keep working, and running agents are untouched\./.test(asked.text),
+          "Cancel on the left, a red Sign out on the right": JSON.stringify(asked.buttons) === JSON.stringify(["Cancel", "Sign out"]) && asked.cancelFirst && asked.red,
+          "the dialog is inside the window": asked.inWindow,
+          "the row has no inline confirmation": !/Confirm sign out/.test(asked.row),
+          "Cancel closes it and stays signed in": (await page.getByRole("dialog").count()) === 0 && (await settings.locator("[data-testid=account-identity]").count()) === 1,
+        }, asked);
+      }
       await page.close();
     }
   }

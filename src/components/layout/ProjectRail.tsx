@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { usePrefs } from "@/lib/prefs";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
-import type { ShortcutId } from "@/lib/shortcuts";
+import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
@@ -28,6 +28,7 @@ export interface RailProps {
   onHide: () => void;
   onOpenSettings: (tab?: SettingsTab) => void;
   onOpenAccount: () => void;
+  onOpenHome: () => void;
   onNewSession: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
@@ -47,16 +48,17 @@ export function ProjectRail(props: RailProps) {
 }
 
 /**
- * The destinations at the top of the sidebar (02.01): Overview, New session and Search with their shortcuts, then
+ * The destinations at the top of the sidebar (02.01): Home, Overview, New session and Search with their shortcuts, then
  * Automations and Issues, with status beside their names.
  */
 export function AppDestinations({
+  onOpenHome,
   onNewSession,
   onSearch,
   onOpenIssues,
   onOpenAgents,
   onOpenAutomations,
-}: Pick<RailProps, "onNewSession" | "onSearch" | "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
+}: Pick<RailProps, "onOpenHome" | "onNewSession" | "onSearch" | "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
   const store = useSessionStore();
   const automationStore = useAutomationStore();
   // The overview's totals count cloud sessions too (PRO-23 CS-19), like the overview itself.
@@ -68,6 +70,7 @@ export function AppDestinations({
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   const active = onNavView ? store.view : null;
+  const home = { id: "home", label: "Home", shortcut: "app.home", kbd: true, icon: <Home />, onOpen: onOpenHome } satisfies Destination;
   const overview = { id: "agents", label: "Overview", shortcut: "app.agentDashboard", kbd: true, icon: <Home />, onOpen: onOpenAgents, ...dashboardStatus(dashboardBuckets) } satisfies Destination;
   const newSession = { id: "new", label: "New session", shortcut: "app.newSession", kbd: true, icon: <SquarePen />, onOpen: onNewSession } satisfies Destination;
   const search = { id: "search", label: "Search", shortcut: "app.commandPalette", kbd: true, icon: <Search />, onOpen: onSearch } satisfies Destination;
@@ -82,7 +85,7 @@ export function AppDestinations({
     count: automationFailures || undefined,
   };
   // Skills and Usage are reached from Settings (and their shortcuts), not from here.
-  return <DestinationList active={active} destinations={[overview, newSession, search, automations, issues]} />;
+  return <DestinationList active={active} destinations={[home, overview, newSession, search, automations, issues]} />;
 }
 
 /**
@@ -94,6 +97,7 @@ type Destination = { id: string; label: string; shortcut: ShortcutId; kbd?: bool
 /** The destinations as named rows, inset and rounded, each with its count or dot, then its shortcut, on the right. */
 function DestinationList({ active, destinations }: { active: string | null; destinations: Destination[] }) {
   const keycaps = useShortcutKeycaps();
+  const keymap = useKeymap();
   return (
     <div className="flex flex-col gap-0.5" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
       {destinations.map((destination) => {
@@ -106,7 +110,7 @@ function DestinationList({ active, destinations }: { active: string | null; dest
             variant="ghost"
             className={cn("h-8 justify-start gap-2.5 rounded-md px-2.5 text-[13px] font-normal", pressed ? "bg-selected text-foreground" : "text-muted-foreground")}
             aria-label={status ? `${destination.label}, ${status}` : destination.label}
-            aria-keyshortcuts={keys.length ? keys.join("+") : undefined}
+            aria-keyshortcuts={keymap[destination.shortcut].map((binding) => ariaKeyShortcut(binding)).filter(Boolean).join(" ") || undefined}
             aria-pressed={pressed}
             title={status}
             onClick={destination.onOpen}

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
-import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
+import { cloudProviderIsPlatform, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { ago, formatDuration } from "@/lib/time";
 import {
   cleanDefinition,
@@ -43,7 +43,7 @@ const formatTime = (timestamp: number | null) => (timestamp ? ago(timestamp, Dat
 /** The age or progress a version row shows beside its name. */
 function versionAge(version: EnvironmentVersion, now: number): string {
   if (version.state === "queued") return "waiting to build";
-  if (version.state === "running") return `building · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
+  if (version.state === "running") return `building: ${stageLabel(version.stage).toLowerCase()} · ${formatDuration(Math.max(0, now - (version.startedAt ?? version.createdAt)))}`;
   const age = ago(version.finishedAt ?? version.createdAt, now);
   if (version.state === "canceled") return `canceled · ${age}`;
   if (version.publication === "expired") return `${age} · expired`;
@@ -266,7 +266,8 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
       .cloudProviders()
       .then((response) => {
         if (context !== contextEpoch.current) return;
-        const options = listedProviders(response.providers).map((summary) => ({ id: summary.id as string, connected: summary.connection !== null }));
+        // A provider TerminalX provides (PRO-452) is in place without a connection.
+        const options = listedProviders(response.providers).map((summary) => ({ id: summary.id as string, connected: summary.connection !== null || cloudProviderIsPlatform(summary) }));
         setProviders(options);
         const first = options.find((option) => option.connected) ?? options[0];
         if (first) setProvider(first.id);
@@ -466,13 +467,13 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         </p>
       )}
 
+      {status.supported && <ActiveVersion version={active} />}
       {!status.supported ? (
         <p className="text-xs" role="status">
           {name} cannot build environment images yet. Workspaces on {name} clone their repositories when they start, so there is nothing to configure here.
         </p>
       ) : !status.canManage ? (
         <>
-          <ActiveVersion version={active} />
           <p className="text-xs text-muted-foreground">Organization owners and admins set up the environment and build its versions.</p>
         </>
       ) : (
@@ -552,7 +553,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
                             )}
                           </div>
                         )}
-                        {version.state === "failed" && log?.versionId === version.id && (
+                        {version.state === "failed" && (
                           <div className="flex flex-wrap items-center gap-2 pb-3 text-xs">
                             {confirming === `retry:${version.id}` ? (
                               <>

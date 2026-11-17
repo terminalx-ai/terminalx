@@ -79,6 +79,7 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
     directory, binding = activation_context(home, observed, header)
     path = directory / "activation.json"
     lease = None
+    runtime_fd = None
     try:
         with activation_lock(directory / "activation.lock"):
             if path.exists():
@@ -91,7 +92,7 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
             # The owner later receives the host key, so it is the sealed runtime,
             # never the copy the guest account can rewrite (#978). Checked
             # before any retained state so a refusal leaves nothing to fence.
-            os.close(open_sealed(header["installation"]["intent"]["runtimeSha256"]))
+            runtime_fd = open_sealed(header["installation"]["intent"]["runtimeSha256"])
             lease_path = directory / "activation-owner.lock"
             fd = os.open(lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             lease = os.fdopen(fd, "r+b")
@@ -100,14 +101,16 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
             value = {"version": 1, "binding": binding, "status": "outcomeUnknown",
                      "instance": str(uuid.uuid4()), "cancelRequested": False}
             write_new(path, canonical(value))  # precedes process creation
-            env = {"HOME": str(home), "USER": "cua", "LOGNAME": "cua",
+            env = {"HOME": str(home), "USER": OWNER, "LOGNAME": OWNER,
                    "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
                    "TERMINALX_LINUX_ACTIVATION": header["activationId"],
                    "TERMINALX_LINUX_INSTANCE": value["instance"]}
             child = spawn([str(SEALED), "--data-dir", str(directory),
-                           "--runtime-kind", "local"], cwd=home, env=env,
+                           "--runtime-kind", "local"], cwd=home, env=env, executable="/proc/self/fd/" + str(runtime_fd),
                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          close_fds=True, pass_fds=(lease.fileno(),), start_new_session=True)
+                          close_fds=True, pass_fds=(lease.fileno(), runtime_fd), start_new_session=True)
+            os.close(runtime_fd)
+            runtime_fd = None
             value["status"] = "running"  # process exists; not serving or Ready
             replace_receipt(path, value)
         termination_sent = False
@@ -128,6 +131,8 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
             # No timeout/kill escalation. If TERM fails, retain the original fence.
             pause(0.2)
     finally:
+        if runtime_fd is not None:
+            os.close(runtime_fd)
         if lease:
             lease.close()
 
@@ -135,7 +140,8 @@ def activation_supervise(home, observed, header, spawn=subprocess.Popen, pause=t
 def activation_main():
     require(len(sys.argv) == 2 and len(sys.argv[1]) <= 32 * 1024, "Bounded activation envelope required")
     header = json.loads(base64.b64decode(sys.argv[1], validate=True))
-    home, observed = pathlib.Path("/home/cua"), account()
+    home, observed = OWNER_HOME, account()
+    drop_to_account()
     if header["action"] == "start":
         return activation_supervise(home, observed, header)
     return activation_observe(home, observed, header)

@@ -574,6 +574,10 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
         };
         let reader = BufReader::new(resp.into_reader());
         for line in reader.lines().map_while(Result::ok) {
+            // A read may have blocked across Stop/replacement. The owner must
+            // supply exact association currentness here, and fence emit itself
+            // under runtime; never use the old prompt's Drive right for reads.
+            if !alive() { return; }
             if let Some(data) = line.strip_prefix("data:") {
                 let data = data.trim();
                 if !data.is_empty() {
@@ -586,6 +590,204 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
         }
     }
 }
+
+/// Native HTTP carrier. Constructed only from an already admitted owner
+/// envelope; callbacks and transport workers never capture caller TLS.
+/// This path is dormant until the owner supplies reviewed final admission.
+#[allow(dead_code)]
+pub(crate) struct NativeHttp {
+    context: crate::session::provider_authority::OperationContext,
+    generation: u64,
+    tag: String,
+    method: String,
+    url: String,
+    body: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteAdmission { Admitted, Deferred, Refused }
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PhysicalOutcome {
+    /// No byte was accepted by the socket. The consumed request is NOT replayed.
+    Refused,
+    /// Some bytes may have reached the provider. Never retry or open a session.
+    Unknown,
+    Response { status: u16, body: Value },
+}
+
+/// Owner must run the supplied nonblocking syscall synchronously, at most once,
+/// under original-context policy/session/sender/attachment/runtime admission.
+/// It must release every guard BEFORE returning Deferred. This is deliberately
+/// not a precheck or a reusable ready token. No default positive implementation.
+pub(crate) type FinalWrite<'a> = dyn FnMut(
+    &crate::session::provider_authority::OperationContext,
+    u64,
+    &mut dyn FnMut() -> std::io::Result<usize>,
+) -> WriteAdmission + 'a;
+
+#[allow(dead_code)]
+impl NativeHttp {
+    pub(crate) fn from_envelope(envelope: crate::harness::ProviderAction) -> anyhow::Result<Self> {
+        match envelope.action {
+            Action::Http { generation, tag, method, url, body } =>
+                Ok(Self { context: envelope.context, generation, tag, method, url, body }),
+            _ => { envelope.context.withdraw(); anyhow::bail!("OpenCode expected an HTTP envelope") }
+        }
+    }
+
+    /// Missing owner hook is an explicit refusal, never the legacy ureq path.
+    /// Each physical chunk needs a new admission of THIS original operation.
+    /// The current A one-shot try_dispatch cannot implement that hook: root must
+    /// supply a reviewed chunk lifecycle before using Some(final_write).
+    pub(crate) fn dispatch(self, final_write: Option<&mut FinalWrite<'_>>,
+        mut current: impl FnMut(&crate::session::provider_authority::OperationContext, u64) -> bool) -> NativeHttpReply {
+        let owner_reserved = final_write.is_some();
+        let outcome = match final_write {
+            None => PhysicalOutcome::Refused,
+            Some(gate) => bounded_http(&self.method, &self.url, self.body.as_ref(),
+                std::time::Duration::from_secs(30), || current(&self.context, self.generation),
+                |attempt| gate(&self.context, self.generation, attempt)),
+        };
+        // A supplied final hook owns D's nonclone stream reservation. It must
+        // finish the classified outcome after dispatch returns (Drop retires on
+        // unwind). Do not preempt finish(Refused) by turning a known zero-byte
+        // DispatchStarted reservation into UnknownOutcome with withdraw().
+        if !owner_reserved { self.context.withdraw(); }
+        NativeHttpReply { context: self.context, generation: self.generation, tag: self.tag, outcome }
+    }
+}
+
+/// Only an owner exact-callback admission may consume this result. No synthetic
+/// status=0 line is manufactured: legacy session_get fallback would replay an
+/// uncertain operation. Expose no automatic engine/settle_answer entry point.
+#[allow(dead_code)]
+pub(crate) struct NativeHttpReply {
+    pub(crate) context: crate::session::provider_authority::OperationContext,
+    pub(crate) generation: u64,
+    pub(crate) tag: String,
+    pub(crate) outcome: PhysicalOutcome,
+}
+
+/// One consumed HTTP exchange over loopback. Connection attempts carry no HTTP
+/// bytes and wait outside admission. Every write is a single nonblocking call;
+/// WouldBlock/Interrupted/Deferred release admission before the next attempt.
+/// A dropped/partial response has an unknown outcome, even for session-open.
+fn bounded_http(
+    method: &str, url: &str, body: Option<&Value>, budget: std::time::Duration,
+    mut current: impl FnMut() -> bool,
+    mut gate: impl FnMut(&mut dyn FnMut() -> std::io::Result<usize>) -> WriteAdmission,
+) -> PhysicalOutcome {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    if !current() { return PhysicalOutcome::Refused; }
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else { return PhysicalOutcome::Refused };
+    let Some((port, path)) = rest.split_once('/') else { return PhysicalOutcome::Refused };
+    let Ok(port) = port.parse::<u16>() else { return PhysicalOutcome::Refused };
+    if !matches!(method, "GET" | "POST" | "DELETE" | "PATCH" | "PUT")
+        || path.bytes().any(|b| b <= 0x20 || b == 0x7f) { return PhysicalOutcome::Refused; }
+    let payload = body.map(Value::to_string).unwrap_or_default();
+    // Bound both memory and each final syscall, independent of provider input.
+    const MAX: usize = 8 * 1024 * 1024;
+    const CHUNK: usize = 4096;
+    if payload.len() > MAX { return PhysicalOutcome::Refused; }
+    let bytes = format!("{method} /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).into_bytes();
+    let deadline = Instant::now() + budget;
+    let pause = || std::thread::sleep(Duration::from_millis(5));
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    // Nonblocking connect: no network wait, even the connect, owns policy guards.
+    let socket = match socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP)) {
+        Ok(socket) => socket, Err(_) => return PhysicalOutcome::Refused,
+    };
+    if socket.set_nonblocking(true).is_err() { return PhysicalOutcome::Refused; }
+    if let Err(error) = socket.connect(&address.into()) {
+        if !matches!(error.raw_os_error(), Some(libc::EINPROGRESS) | Some(libc::EWOULDBLOCK)) {
+            return PhysicalOutcome::Refused;
+        }
+    }
+    let mut stream: std::net::TcpStream = socket.into();
+    while stream.peer_addr().is_err() {
+        if !current() || Instant::now() >= deadline || stream.take_error().ok().flatten().is_some() {
+            return PhysicalOutcome::Refused;
+        }
+        pause();
+    }
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if !current() || Instant::now() >= deadline { return if offset == 0 { PhysicalOutcome::Refused } else { PhysicalOutcome::Unknown }; }
+        let mut result = None;
+        let mut called = false;
+        let mut repeated = false;
+        let admission = gate(&mut || {
+            if called {
+                repeated = true;
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "physical attempt already consumed"));
+            }
+            called = true;
+            let written = stream.write(&bytes[offset..bytes.len().min(offset + CHUNK)]);
+            // Save the actual syscall result; gate cannot invent a byte count.
+            result = Some(written.as_ref().map(|n| *n).map_err(|e| e.kind()));
+            written
+        });
+        if repeated { return PhysicalOutcome::Unknown; }
+        if admission != WriteAdmission::Admitted {
+            // A hook that wrote and then refused has an uncertain outcome.
+            if called { return PhysicalOutcome::Unknown; }
+            if admission == WriteAdmission::Deferred { pause(); continue; }
+            return if offset == 0 { PhysicalOutcome::Refused } else { PhysicalOutcome::Unknown };
+        }
+        match result {
+            Some(Ok(n)) if n > 0 => offset += n,
+            Some(Err(std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)) => pause(),
+            _ => return if offset == 0 { PhysicalOutcome::Refused } else { PhysicalOutcome::Unknown },
+        }
+    }
+    // Reading is not another mutation. No policy/session/runtime guard spans
+    // response waits. Original callback admission is still required afterward.
+    let mut response = Vec::new();
+    let mut buffer = [0; CHUNK];
+    loop {
+        if !current() || Instant::now() >= deadline { return PhysicalOutcome::Unknown; }
+        match stream.read(&mut buffer) {
+            Ok(0) => return parse_bounded_response(&response).unwrap_or(PhysicalOutcome::Unknown),
+            Ok(n) => {
+                if response.len() + n > MAX { return PhysicalOutcome::Unknown; }
+                response.extend_from_slice(&buffer[..n]);
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => pause(),
+            Err(_) => return PhysicalOutcome::Unknown,
+        }
+    }
+}
+
+/// Deliberately small HTTP/1.x response surface. Unsupported framing is unknown,
+/// never a reason to resubmit a mutation using a different HTTP client.
+fn parse_bounded_response(response: &[u8]) -> Option<PhysicalOutcome> {
+    let boundary = response.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let header = std::str::from_utf8(&response[..boundary]).ok()?;
+    let mut lines = header.split("\r\n");
+    let mut status = lines.next()?.split_whitespace();
+    if !matches!(status.next()?, "HTTP/1.0" | "HTTP/1.1") { return None; }
+    let status: u16 = status.next()?.parse().ok()?;
+    if !(200..600).contains(&status) { return None; }
+    let body = &response[boundary + 4..];
+    let mut length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("transfer-encoding") { return None; }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() { return None; }
+            length = Some(value.trim().parse::<usize>().ok()?);
+        }
+    }
+    if length.is_some_and(|length| length != body.len()) { return None; }
+    let text = std::str::from_utf8(body).ok()?;
+    Some(PhysicalOutcome::Response { status, body: serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.into())) })
+}
+
+#[cfg(test)]
+#[path = "../../session_opencode_collaboration_tests.rs"]
+mod phase2_opencode_collaboration;
 
 /// One request, blocking; the reply becomes a line the engine understands.
 ///

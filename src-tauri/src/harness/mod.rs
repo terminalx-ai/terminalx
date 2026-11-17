@@ -48,6 +48,13 @@ pub enum Action {
     Http { generation: u64, tag: String, method: String, url: String, body: Option<Value> },
 }
 
+/// Native-only action plus its original operation. No serde or wire authority.
+/// Legacy adapter constructors keep using Action until their writer integration.
+pub(crate) struct ProviderAction {
+    pub context: crate::session::provider_authority::OperationContext,
+    pub action: Action,
+}
+
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,
 /// their hook plumbing and their transcript, and in the stand-in they draw
 /// for a long paste.
@@ -290,6 +297,11 @@ pub fn catalog() -> Vec<HarnessInfo> {
 /// What an agent is called in a sentence the reader is shown.
 pub fn display_name(harness: &str) -> &'static str {
     REGISTRY.iter().find(|spec| spec.id == harness).map_or("The agent", |spec| spec.name)
+}
+
+/// The npm package an agent's releases are published as, the first one when it has several.
+pub fn npm_package(harness: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.id == harness).and_then(|spec| spec.packages.first().copied())
 }
 
 /// Programs that run a script named by their first argument that is not an

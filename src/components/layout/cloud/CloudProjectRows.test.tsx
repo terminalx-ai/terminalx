@@ -6,8 +6,16 @@ import { takeAgentLoginsRequest, takeOrganizationRequest } from "@/lib/settingsL
 import { reconcileCloudAttention, resolveCloudAttention } from "@/lib/cloudAttention";
 import { buildCloudSessions, type CloudSessionRow } from "@/lib/cloudSessions";
 import type { CloudAgentTab } from "@/lib/cloudAgents";
+import { loadedSidebarSessions, sidebarOwner, unavailableSidebarOwner } from "./cloudSessionFixtures.test-utils";
 import { CloudProjectGroup } from "./CloudProjectRows";
 
+const owners = vi.hoisted(() => ({ enabled: false, members: [] as import("@/lib/organizationMembers").OrganizationMember[], error: null as unknown }));
+vi.mock("@/lib/featureFlags", () => ({ featureFlags: { teamRoster: "team.roster.v1" }, useFeatureFlag: () => owners.enabled }));
+vi.mock("@/lib/organizationRoster", async (original) => ({
+  ...await original<typeof import("@/lib/organizationRoster")>(),
+  readOrganizationRoster: vi.fn(async () => undefined),
+  useOrganizationRoster: (_org: string, enabled: boolean) => ({ roster: enabled ? { members: owners.members } : null, error: owners.error }),
+}));
 const checkpointRows = vi.hoisted(() => ({ value: [] as CloudSessionRow[] }));
 
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: { state: "signed-out" } }), getAccount: () => ({ status: { state: "signed-out" } }), subscribeAccount: () => () => undefined }));
@@ -20,7 +28,7 @@ function project(grouped: boolean): CloudProject {
   const item = { workspace: { id: "one", orgId: "workspace-org", name: "One", state: "ready", provider: "box", authority: "participate", launch: { state: "failed", phase: "failed", category: "agent-sign-in-required", timings: { failedAt: 10 } } }, latestOperation: null } as unknown as CloudWorkspaceListItem;
   return { key: "cloud:workspace-org:github.com/acme/api", orgId: "workspace-org", identity: "github.com/acme/api", fullName: "acme/api", selected: true, pinned: false, blank: false, workspaces: [{ key: "cloud:workspace-org:one", item, placedBy: "server" }, ...(grouped ? [{ key: "cloud:workspace-org:two" as const, item: { workspace: { ...item.workspace, id: "two", name: "Two", launch: null }, latestOperation: null }, placedBy: "server" as const }] : [])] };
 }
-afterEach(() => { checkpointRows.value = []; cleanup(); takeOrganizationRequest(); takeAgentLoginsRequest("workspace-org"); });
+afterEach(() => { owners.enabled = false; owners.members = []; owners.error = null; checkpointRows.value = []; cleanup(); takeOrganizationRequest(); takeAgentLoginsRequest("workspace-org"); });
 describe("attention under the workspace's sidebar row", () => {
   it.each([false, true])("shows a visible reason and separate accessible button (grouped=%s)", (grouped) => {
     render(<CloudProjectGroup project={project(grouped)} onLifecycle={() => undefined} />);
@@ -87,15 +95,52 @@ it.each(["created", "lastMessageAt"] as const)("clears grouped-row attention fro
   } } as unknown as CloudAgentTab;
   checkpointRows.value = buildCloudSessions({ item, agentTabs: [checkpoint] });
   const { rerender } = render(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
-  const group = screen.getAllByTestId("cloud-workspace-group").find((row) => row.getAttribute("data-workspace") === "one")!;
-  expect(within(group).getByTestId("cloud-workspace-row-state").textContent).toContain("Needs attention");
-  expect(within(group).getByTestId("cloud-row-attention")).toBeTruthy();
+  expect(screen.getByTestId("cloud-workspace-notice").getAttribute("data-workspace")).toBe("one");
+  expect(screen.getByTestId("cloud-row-attention")).toBeTruthy();
 
   checkpointRows.value = buildCloudSessions({ item, agentTabs: [{ ...checkpoint, info: { ...checkpoint.info, [field]: later } }] });
   expect(checkpointRows.value[0].tabs[0][field]).toBe(later);
   // The catalog item is unchanged and has no recovery marker; only the checkpoint proves recovery.
   expect(resolveCloudAttention(item)).not.toBeNull();
   rerender(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
-  expect(within(group).queryByTestId("cloud-row-attention")).toBeNull();
-  expect(within(group).getByTestId("cloud-workspace-row-state").textContent).not.toContain("Needs attention");
+  expect(screen.queryByTestId("cloud-row-attention")).toBeNull();
+  expect(screen.queryByTestId("cloud-workspace-notice")).toBeNull();
+});
+
+
+describe("flat cloud session rows and authorized owner identity", () => {
+  function loaded() {
+    const value = project(true);
+    value.workspaces[0].item.workspace.launch = null;
+    value.workspaces[0].item.workspace.createdBy = sidebarOwner.userId;
+    checkpointRows.value = loadedSidebarSessions();
+    return value;
+  }
+  it("renders multiple sessions directly under the project, retaining the unloaded workspace action", () => {
+    owners.enabled = true;
+    owners.members = [sidebarOwner];
+    render(<CloudProjectGroup project={loaded()} onLifecycle={() => undefined} />);
+    const rows = screen.getAllByTestId("cloud-session-row");
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.closest("li")?.parentElement?.parentElement?.parentElement?.getAttribute("data-testid")).toBe("cloud-project-sessions");
+      expect(within(row).getByRole("button", { name: "Workspace owner: Avery Owner" })).toBeTruthy();
+    }
+    expect(rows[0].querySelector('[data-row-meta="pr"]')?.textContent).toBe("PR #42");
+    expect(rows[1].querySelector('[data-row-meta="time"]')).toBeTruthy();
+    expect(screen.getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["two"]);
+    expect(screen.getByRole("button", { name: "Open to load sessions" })).toBeTruthy();
+  });
+  it.each(["missing", "no-creator", "disabled", "refused", "no-access"])("uses a neutral owner when %s", (condition) => {
+    const value = loaded();
+    owners.enabled = condition !== "disabled";
+    owners.members = [condition === "missing" ? unavailableSidebarOwner : sidebarOwner];
+    if (condition === "no-creator") value.workspaces[0].item.workspace.createdBy = null;
+    if (condition === "refused") owners.error = { code: "forbidden" };
+    if (condition === "no-access") value.workspaces[0].item.workspace.you = { role: "none" } as never;
+    render(<CloudProjectGroup project={value} onLifecycle={() => undefined} />);
+    expect(screen.getAllByRole("img", { name: "Workspace owner unavailable" })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /Workspace owner: Avery/ })).toBeNull();
+    expect(screen.queryByText(sidebarOwner.email)).toBeNull();
+  });
 });

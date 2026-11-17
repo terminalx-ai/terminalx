@@ -48,8 +48,6 @@ function PairPhoneDialog() {
         closePairPhone();
       }}
     >
-      {/* Just under the connected bar, which sits top-centre over everything (top-1.5, 28px tall). DialogContent centres
-          with inset-0 and auto margins, so a top margin with an automatic bottom one pins it there instead. */}
       <DialogContent width="max-w-[700px]" showClose={false} className="mb-auto mt-[70px] max-h-[calc(100dvh-86px)] p-0">
         <header className="flex h-14 items-center gap-2 border-b border-hairline px-5">
           <Smartphone className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />

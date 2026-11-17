@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { suspendHotkeys, useHotkey } from "@/lib/hotkeys";
 import { SystemShortcutSection } from "./FloatingWindowSettings";
+import { ChordCap, SHORTCUT_CARD, SHORTCUT_GROUP_TITLE } from "./Keycap";
+import { Pencil, Plus } from "@/icons";
 import {
   HOLD_CODES,
   SHORTCUT_ACTIONS,
@@ -17,7 +19,6 @@ import {
   isCustomized,
   isMac,
   isModifierKey,
-  keycaps,
   resetAllShortcuts,
   resetShortcut,
   saveShortcut,
@@ -26,7 +27,6 @@ import {
   type ShortcutAction,
 } from "@/lib/shortcuts";
 
-const KEYCAP = "rounded-md bg-veil-raised px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground hairline";
 
 /**
  * Settings → Shortcuts: every shortcut with its keys, and the way to change
@@ -76,8 +76,8 @@ export function ShortcutsTab() {
       <SystemShortcutSection />
       {SHORTCUT_GROUPS.map((group) => (
         <section key={group} aria-label={`${group} shortcuts`}>
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">{group}</div>
-          <ul className="flex flex-col">
+          <div className={SHORTCUT_GROUP_TITLE}>{group}</div>
+          <ul className={SHORTCUT_CARD}>
             {SHORTCUT_ACTIONS.filter((action) => action.group === group).map((action) => (
               <ShortcutRow
                 key={action.id}
@@ -101,18 +101,7 @@ export function ShortcutsTab() {
   );
 }
 
-function Keycaps({ binding }: { binding: string }) {
-  return (
-    <span className="flex items-center gap-0.5">
-      {holdCode(binding) != null && <span className="mr-0.5 text-[11px] text-faint">Hold</span>}
-      {keycaps(binding).map((k, i) => (
-        <kbd key={i} className={KEYCAP}>
-          {k}
-        </kbd>
-      ))}
-    </span>
-  );
-}
+const ROW_BUTTON = "grid size-6 shrink-0 place-items-center rounded-md text-faint outline-none transition-colors hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 [&_svg]:size-3.5";
 
 const spoken = (binding: string) => (holdCode(binding) != null ? `hold ${bindingText(binding)}` : bindingText(binding));
 
@@ -154,22 +143,25 @@ function ShortcutRow({
   };
 
   return (
-    <RegisteredSetting setting={`shortcuts.${action.id}`}><li ref={row} className="flex flex-col py-1 text-[13px]" data-shortcut={action.id}>
-      <div className="flex min-w-0 items-center gap-3">
+    <RegisteredSetting setting={`shortcuts.${action.id}`}><li ref={row} className="flex flex-col px-3 text-[13px]" data-shortcut={action.id}>
+      <div className="flex min-h-[35px] min-w-0 items-center gap-3 py-1">
         <span className="min-w-0 flex-1">{action.label}</span>
         <span className="flex shrink-0 items-center gap-1">
           {action.fixed ? (
             <>
               <span className="px-1" title="Typed in the composer">
-                <Keycaps binding={bindings[0]} />
+                <ChordCap binding={bindings[0]} />
               </span>
-              {/* The width of a Reset button, so these keys line up with the rows above. */}
-              <Button variant="ghost" size="xs" disabled aria-hidden tabIndex={-1} className="invisible">
-                Reset
-              </Button>
+              {/* The width of the edit button, so these keys line up with the rows around them. */}
+              <span aria-hidden className="size-6" />
             </>
           ) : (
             <>
+              {custom && (
+                <Button variant="ghost" size="xs" className="text-xs" aria-label={`Reset ${action.label}`} onClick={() => reset(false)}>
+                  Reset
+                </Button>
+              )}
               {bindings.map((binding, i) => (
                 <button
                   key={binding}
@@ -179,37 +171,41 @@ function ShortcutRow({
                   aria-expanded={slot === i}
                   onClick={() => onEdit(slot === i ? null : i)}
                   className={cn(
-                    "rounded-md px-1 py-0.5 outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40",
+                    "rounded-md p-0.5 outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40",
                     slot === i && "bg-selected",
                   )}
                 >
-                  <Keycaps binding={binding} />
+                  <ChordCap binding={binding} />
                 </button>
               ))}
-              {!bindings.length && (
+              {bindings.length ? (
+                <button type="button" aria-label={`Change the shortcut for ${action.label}`} title="Change" aria-expanded={slot === 0} onClick={() => onEdit(slot === 0 ? null : 0)} className={ROW_BUTTON}>
+                  <Pencil aria-hidden />
+                </button>
+              ) : (
+                // "Not set" and its + are one button: the whole of it sets the keys.
                 <button
                   type="button"
                   data-binding
                   aria-label={`${action.label}: no shortcut. Set one`}
+                  title="Set a shortcut"
                   aria-expanded={slot === 0}
                   onClick={() => onEdit(slot === 0 ? null : 0)}
                   className={cn(
-                    "rounded-md px-1.5 py-0.5 text-[11px] text-faint outline-none transition-colors hover:bg-veil-raised hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40",
+                    "group/unset flex h-6 items-center gap-1 rounded-md pl-1.5 text-xs text-faint outline-none transition-colors hover:bg-veil-raised hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40",
                     slot === 0 && "bg-selected",
                   )}
                 >
                   Not set
+                  <span className="grid size-6 place-items-center group-hover/unset:text-foreground [&_svg]:size-3.5"><Plus aria-hidden /></span>
                 </button>
               )}
-              <Button variant="ghost" size="xs" disabled={!custom} aria-label={`Reset ${action.label}`} className={cn(!custom && "invisible")} onClick={() => reset(false)}>
-                Reset
-              </Button>
             </>
           )}
         </span>
       </div>
       {resetConflict && (
-        <div className="mt-1 flex flex-wrap items-center justify-end gap-1.5 rounded-md bg-well p-2 text-xs" role="alert">
+        <div className="mb-2 flex flex-wrap items-center justify-end gap-1.5 rounded-md bg-well p-2 text-xs" role="alert">
           <span className="min-w-0 text-warning">
             {bindingText(resetConflict.binding)} is used by “{resetConflict.owner.label}” now.
           </span>
@@ -325,7 +321,7 @@ function ShortcutEditor({
     : "Press the keys together. Tab leaves the box.";
 
   return (
-    <div className="mt-1 flex flex-col items-end gap-1.5 rounded-md bg-well p-2" role="group" aria-label={`Change the shortcut for ${action.label}`} data-testid="shortcut-editor">
+    <div className="mb-2 flex flex-col items-end gap-1.5 rounded-md bg-well p-2" role="group" aria-label={`Change the shortcut for ${action.label}`} data-testid="shortcut-editor">
       <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
         <button
           ref={recorder}
@@ -343,7 +339,7 @@ function ShortcutEditor({
             recording && "ring-2 ring-ring/40",
           )}
         >
-          {captured != null ? <Keycaps binding={captured} /> : recording ? "Press the new keys…" : "Click, then press the new keys"}
+          {captured != null ? <ChordCap binding={captured} /> : recording ? "Press the new keys…" : "Click, then press the new keys"}
         </button>
         {conflict ? (
           <Button ref={confirm} size="sm" variant="accent" onClick={() => save(true)}>

@@ -60,6 +60,8 @@ mod codex_device_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
+mod desktop_inbox;
+#[cfg(feature = "desktop")]
 mod organization_github_app;
 #[cfg(feature = "desktop")]
 mod organization_members;
@@ -159,6 +161,9 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+/// The phone protocol, which the window and the runtime both serve (PRO-359).
+#[cfg(unix)]
+mod phone;
 #[cfg(feature = "desktop")]
 mod machines;
 /// The operating computer's side of pairing by code (`machines/pair.rs`),
@@ -712,6 +717,18 @@ pub fn run() {
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
+            commands::phase2_desktop_contracts_available,
+            commands::cloud_workspace_follow_put,
+            commands::cloud_workspace_follow_delete,
+            commands::cloud_workspace_reassign,
+            commands::desktop_presence_put,
+            commands::desktop_presence_read,
+            commands::desktop_inbox,
+            commands::desktop_inbox_stream,
+            commands::desktop_inbox_receipts,
+            commands::cloud_workspace_read_marker,
+            commands::cloud_workspace_restart,
+            commands::cloud_workspace_details,
             commands::cloud_workspace_idle_suspend,
             commands::cloud_workspace_set_idle_suspend,
             commands::cloud_workspace_operation,
@@ -854,6 +871,7 @@ pub fn run() {
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_latest_version,
             commands::agent_setup_start,
             commands::agent_setup_running,
             commands::list_skills,
@@ -880,6 +898,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::store_attachments,
+            commands::read_attachment_part,
             commands::inspect_attachments,
             commands::save_attachment_copy,
             commands::report_send_shown,
@@ -980,6 +999,7 @@ pub fn run() {
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
+            commands::pr_delete_branch,
             commands::pr_ready,
             commands::pr_check_authority,
             commands::pr_check_log,
@@ -1034,6 +1054,7 @@ pub fn run() {
             commands::search_text,
             commands::replace_text,
             commands::fork_session,
+            commands::fork_turn,
             commands::dictation_available,
             commands::notification_permission,
             commands::dictation_start,

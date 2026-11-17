@@ -130,6 +130,13 @@ pub enum DecisionError {
 /// What the mailbox and checkpoints need from the agents. The real one is
 /// [`ManagerOps`]; tests stand in for it.
 pub trait AgentOps: Send + Sync {
+    /// A raw current engine witness, not a launch setting or approval count.
+    /// Until ManagerOps and its final writers carry this atomically, Everyone
+    /// driving fails closed and collaboration-v2 must remain unadvertised.
+    #[allow(private_interfaces)] // Dormant v2 witness stays internal, not a public capability.
+    fn collaboration_v2_witness(&self, _session_id: &str, _tab_id: &str) -> Option<collab::v2::TabWitness> {
+        None
+    }
     /// Agent tabs of this workspace, without follow-ups.
     fn tabs(&self) -> Vec<AgentTabInfo>;
     fn busy(&self, session_id: &str, tab_id: &str) -> bool;
@@ -141,6 +148,16 @@ pub trait AgentOps: Send + Sync {
             return self.send(session_id, tab_id, text);
         }
         anyhow::bail!("this runtime cannot send images to an agent")
+    }
+    /// A message with images and files already stored in the session's
+    /// attachments folder (PRO-407), handed to the agent as a local tab's
+    /// are (`SessionManager::send_pressed`). An agent host that cannot take
+    /// files says so.
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        if files.is_empty() {
+            return self.send_with_images(session_id, tab_id, text, images);
+        }
+        anyhow::bail!("this runtime cannot send files to an agent")
     }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     /// Escape for the tab's running turn (#427): the turn is interrupted, the
@@ -252,6 +269,11 @@ fn tab_title(first_in_session: bool, own: Option<&str>, session_title: &str) -> 
 }
 
 impl AgentOps for ManagerOps {
+    #[allow(private_interfaces)] // Implements the internal witness of the public adapter trait.
+    fn collaboration_v2_witness(&self, session: &str, tab: &str) -> Option<collab::v2::TabWitness> {
+        self.manager.collaboration_v2_witness(session, tab)
+    }
+
     fn tabs(&self) -> Vec<AgentTabInfo> {
         let pending = self.manager.pending_permissions();
         let mut out = Vec::new();
@@ -333,6 +355,10 @@ impl AgentOps for ManagerOps {
 
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
         self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
+    }
+
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        self.manager.send_pressed(session_id, tab_id, text.to_string(), images, None, files).map(|_| ())
     }
 
     fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
@@ -505,6 +531,11 @@ impl CloudAgents {
     /// Use the workspace RPC's roles and leases, and keep notes next to the
     /// rest of the agent state.
     pub fn share_collaboration(&self, collab: Arc<Collaboration>) {
+        let _admission = collab.enter_admission();
+        if let Err(error) = collab.runtime_policy.bind(&self.dir, self.generation()) {
+            log::error!("bind collaboration policy store: {error:#}");
+        }
+        drop(_admission);
         collab.store_notes_in(&self.dir.join("notes"));
         let _ = self.collab.set(collab);
     }
@@ -571,7 +602,10 @@ impl CloudAgents {
 
     /// What a mailbox actor may do now (contract §21.4-21.5).
     pub fn actor_access(&self, actor: &api::Actor) -> Access {
-        let stamped = collab::stamped_access(actor.role.as_deref(), actor.can_approve);
+        let stamped = if self.collab.get().is_some_and(|collab| collab.runtime_policy.is_v2()) {
+            actor.role.as_ref().and_then(|role| serde_json::from_value(serde_json::Value::String(role.clone())).ok())
+                .zip(actor.can_approve).map(|(role, can_approve)| Access { role, can_approve })
+        } else { collab::stamped_access(actor.role.as_deref(), actor.can_approve) };
         match self.collab.get() {
             Some(collab) => collab.actor_access(&actor.authority, &actor.user_id, stamped),
             None => stamped.unwrap_or(if actor.authority == "manage" { Access::MANAGER } else { Access::NONE }),
@@ -593,6 +627,12 @@ impl CloudAgents {
     /// shell command and they no longer approve. One queued before sharing
     /// existed, or before the API listed anyone, is kept.
     fn follow_up_refusal(&self, tab_id: &str, follow_up: &FollowUp) -> Option<&'static str> {
+        if let Some(collab) = self.collab.get() {
+            let witness = self.ops.collaboration_v2_witness(&follow_up.session_id, tab_id);
+            if collab.runtime_policy.admit(&follow_up.actor_id, follow_up.policy_stamp.as_ref(), collab::v2::Action::Drive, witness.as_ref()).is_err() {
+                return Some("Dropped a queued message whose collaboration policy or tab safety changed.");
+            }
+        }
         let access = match self.collab.get() {
             Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)),
             _ => return None,
@@ -663,7 +703,11 @@ impl CloudAgents {
     }
 
     pub fn set_generation(&self, generation: u64) {
-        self.generation.store(generation, Ordering::SeqCst);
+        let _admission = self.collab.get().map(|collab| collab.enter_admission());
+        let previous = self.generation.fetch_max(generation, Ordering::SeqCst);
+        if generation > previous {
+            if let Some(collab) = self.collab.get() { collab.runtime_policy.set_generation(generation); }
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -737,15 +781,15 @@ impl CloudAgents {
         Ok(key_id)
     }
 
-    /// One part of an image `owner` attaches to a message they are about to
-    /// send (`session.attach`). Uploads nobody sent within a day are dropped
+    /// One part of an image or, with `file`, another file (PRO-407) `owner`
+    /// attaches to a message they are about to send (`session.attach`). Uploads nobody sent within a day are dropped
     /// first, except those a queued message still waits for.
     #[allow(clippy::too_many_arguments)]
-    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
+    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, file: bool, last: bool) -> Result<u64, attachments::AttachError> {
         if offset == 0 {
             self.prune_attachments();
         }
-        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now_ms())
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, file, last, now_ms())
     }
 
     /// Drop uploads nobody sent within a day, except those a queued message
@@ -775,6 +819,7 @@ impl CloudAgents {
         let tabs: Vec<String> = std::mem::take(&mut *self.dispatch.lock().unwrap());
         let mut sent = 0;
         for tab_id in tabs {
+            let _admission = self.collab.get().map(|collab| collab.enter_admission());
             let Some(next) = self.follow_ups.list(&tab_id).into_iter().next() else { continue };
             if self.ops.busy(&next.session_id, &tab_id) {
                 continue;
@@ -795,9 +840,12 @@ impl CloudAgents {
                 Ok(Some(follow_up)) => {
                     // Its images were checked when it was queued; if they are
                     // gone since, it is not sent without them.
+                    let permit = self.collab.get().map(|collab| collab::v2::Permit::new(collab.clone(), &follow_up.actor_id, follow_up.policy_stamp.clone(), collab::v2::Action::Drive));
                     match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
                         Ok(images) => {
-                            if let Err(error) = self.ops.send_with_images(&follow_up.session_id, &tab_id, &follow_up.text, images) {
+                            let send = || self.ops.send_attached(&follow_up.session_id, &tab_id, &follow_up.text, images, follow_up.files.clone());
+                            let result = match permit { Some(permit) => permit.with(send), None => send() };
+                            if let Err(error) = result {
                                 log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
                                 self.ops.note(&follow_up.session_id, &tab_id, &format!("A queued message could not be sent: {error:#}"));
                             }

@@ -4,7 +4,7 @@ import { listRepositories } from "@terminalx/portable/workspaceGit";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
 import { isOpen } from "@/lib/cloudLifecycle";
-import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, ProposalError, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
+import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, ProposalError, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type BuildFailureContext, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
 import { SCRATCH_DIRECTORY, cleanupScript, verifyProposal, type RunScript, type ScriptRun, type VerifiedSource } from "@/lib/environmentVerification";
 import { effectiveRunningLimit, organizationCompute } from "@/lib/organizationCompute";
 import type { RecipeObservations } from "@/lib/organizationEnvironment";
@@ -95,6 +95,8 @@ export interface PreparationRequest {
   idempotencyKey: string;
   /** Marks the proposal file as written in this run; the agent is told to copy it. */
   token: string;
+  /** A failed build the agent is asked to fix ("Fix with an agent"), when it was started from one. */
+  failure?: BuildFailureContext | null;
 }
 
 export interface PreparationResult {
@@ -281,7 +283,7 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
       confirmProviderSpend: true,
       idempotencyKey: request.idempotencyKey,
       repositories: repositories.map((repository) => ({ cloneUrl: `https://github.com/${repository.owner}/${repository.name}`, ref: repository.defaultBranch })),
-      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories, request.token) },
+      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories, request.token, request.failure) },
       preparation: true,
     });
   } catch (failure) {

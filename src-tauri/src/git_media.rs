@@ -46,7 +46,7 @@ pub fn read(
         match crate::git::blob_bytes_at(cwd, tree, path, limit)? {
             None => return Ok(None),
             Some(crate::git::BlobContents::Bytes(bytes)) => bytes,
-            Some(crate::git::BlobContents::TooLarge) => bail!("Media preview exceeds the {} KiB limit", limit / 1024),
+            Some(crate::git::BlobContents::TooLarge(_)) => bail!("Media preview exceeds the {} KiB limit", limit / 1024),
         }
     } else {
         let root = cwd.canonicalize()?;

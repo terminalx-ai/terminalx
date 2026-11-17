@@ -2,7 +2,7 @@ import { cn } from "@/lib/cn";
 import { agentName, lookupAgent } from "@terminalx/portable/agentMarks";
 
 // The agents' marks and names live in `@terminalx/portable/agentMarks`, shared with the phone.
-export { KNOWN_AGENT_IDS, agentBrandColor, agentName, type KnownAgentId } from "@terminalx/portable/agentMarks";
+export { KNOWN_AGENT_IDS, agentBrandColor, agentName, agentVendor, type KnownAgentId } from "@terminalx/portable/agentMarks";
 
 export function AgentMark({
   id,

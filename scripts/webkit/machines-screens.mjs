@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The Machines screens 21.01 (sidebar and overview), 21.08 (a session on
 // another machine) and 21.02 (Settings → Machines) in the desktop's WebKit at
-// the screens' own size (1440×900), in the light and the dark theme, with
-// Experimental → Machines on, drawn from one world that matches the screens.
+// the screens' own size (1440×900), in the light and the dark theme, drawn
+// from one world that matches the screens.
 //
 // The world:
 //   - this Mac (Local): project terminalx; sessions "Show the diff inside edit
@@ -24,9 +24,11 @@
 //   21.01-sidebar-overview-<theme>.png    sidebar sections and the overview (Table), all machines
 //   21.08-session-<theme>.png             a Mac mini session: header chip, "Runs on Mac mini" strip, transcript, changes panel, "Mac mini terminal 1"
 //   21.02-settings-machines-<theme>.png   Settings → Machines
+//   21.02-first-run-<theme>.png           Settings → Machines with no machine paired (PRO-360)
+//   21.07-new-session-where-<theme>.png   the new-session form's Where it runs menu
 // go to MACHINES_SCREENS_SHOTS, by default scripts/webkit/output/machines-screens
 // (a folder that ignores itself). When MACHINES_DESIGNS names a folder holding
-// 21.01.png, 21.08.png and 21.02.png each shot also gets a
+// 21.01.png, 21.02.png, 21.07.png and 21.08.png each shot also gets a
 // <shot>-vs-design.png beside it, the design on the left.
 //
 // Checked per screen and theme: each machine the screen names appears, nothing
@@ -49,15 +51,15 @@ const VIEWPORT = { width: 1440, height: 900 };
 const TITLE = "Add read markers to the catalog feed";
 // Every feature this desktop uses, so no connected machine is shown as needing an update (PRO-354).
 const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
-  "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
+  "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
   "machine/1", "machine/2", "machine/3", "machine/4"];
 
-// Runs in the page, after the stub. `settings` adds ci-box and Studio to the paired machines.
-const fixture = (settings) => `(() => {
+// Runs in the page, after the stub. `settings` adds ci-box and Studio to the paired machines; `none` pairs none (PRO-360).
+const fixture = (settings, none = false) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: true };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   answers["plugin:app|version"] = "0.2.33";
   answers.machine_name = { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
   answers.machines_account_list = { signedIn: false };
@@ -106,6 +108,7 @@ const fixture = (settings) => `(() => {
     "m-studio": { state: "offline", lastSeenAt: yesterday.getTime(), retryInMs: 10_000 },
   };
   answers.machines_connections = () => paired.map((m) => ({ machineId: m.machineId, state: views[m.machineId] }));
+  ${none ? "paired.length = 0;" : ""}
 
   // Computers that can operate this Mac (Settings → Machines).
   answers.machines_host_status = { allowOperating: true, keepAwake: true, status: { enabled: true, hostKey: "ready", machineId: "host-1", listening: "0.0.0.0:6768", takesPort: true, phoneRoute: false,
@@ -298,8 +301,8 @@ try {
       await page.screenshot({ path });
       await besideDesign(browser, path, design);
     };
-    const world = (settings) => open(browser, server.url, { cloud: false, localProjects: 1 }, VIEWPORT, {
-      extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${fixture(settings)}`,
+    const world = (settings, none = false) => open(browser, server.url, { cloud: false, localProjects: 1 }, VIEWPORT, {
+      extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${fixture(settings, none)}`,
       colorScheme: mode,
     });
 
@@ -340,6 +343,51 @@ try {
       failed += report(`21.08 session on Mac mini (${mode})`, {
         ...common(m, ["Mac mini", "Runs on Mac mini", "Mac mini terminal 1", TITLE]),
         "the Changes panel lists the session's files": /cloudCatalog\.ts/.test(m.text) && /readMarkers\.ts/.test(m.text),
+      }, { small: m.small });
+      await page.close();
+    }
+
+    // ---- 21.07: the new-session form's Where it runs, listing this Mac and each machine.
+    {
+      const page = await world(false);
+      await sidebar(page);
+      for (const machine of ["m-mini", "m-server"]) await page.locator(`[data-testid="machine-section"][data-machine="${machine}"][data-reachable="true"]`).waitFor();
+      await page.locator("main").getByRole("button", { name: "New session", exact: true }).click();
+      await page.getByTestId("where-it-runs").first().click();
+      const where = page.getByTestId("where-menu");
+      await where.waitFor();
+      await where.getByText("dev-server").first().waitFor();
+      await page.waitForTimeout(300);
+      await take(page, "21.07-new-session-where", "21.07.png");
+      const m = await measure(page);
+      failed += report(`21.07 new session, Where it runs (${mode})`, {
+        ...common(m, [/this mac/i, "Mac mini", "dev-server", /Add a machine/]),
+      }, { small: m.small });
+      await page.close();
+    }
+
+    // ---- 21.02 with no machine paired (PRO-360): the first-run card and the guide,
+    // no machine section in the sidebar, and no Machines switch under Experimental.
+    {
+      const page = await world(false, true);
+      await sidebar(page);
+      await page.waitForTimeout(500);
+      const sections = await page.locator('[data-testid="machines-section"]').count();
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      const settings = page.getByRole("main", { name: "Settings", exact: true });
+      const nav = settings.getByRole("navigation", { name: "Settings sections" });
+      await nav.getByRole("button", { name: "Machines", exact: true }).click();
+      await settings.getByTestId("machines-first-run").waitFor();
+      await page.waitForTimeout(300);
+      await take(page, "21.02-first-run", "21.02.png");
+      const m = await measure(page);
+      await nav.getByRole("button", { name: "Experimental", exact: true }).click();
+      await settings.getByTestId("experimental-settings").waitFor();
+      const experimentalSwitch = await settings.getByRole("switch", { name: "Machines", exact: true }).count();
+      failed += report(`21.02 Settings → Machines, nothing paired (${mode})`, {
+        ...common(m, ["No machines yet", "Get the other computer ready", "Add it here", "Start a session there", "Machines guide"]),
+        "the sidebar has no machine section": sections === 0,
+        "Experimental has no Machines switch": experimentalSwitch === 0,
       }, { small: m.small });
       await page.close();
     }

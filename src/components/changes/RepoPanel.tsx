@@ -1,5 +1,5 @@
 import { useReviewComments } from "./ReviewComments";
-import { DiscardDialog, DiscardButton } from "./DiscardDialog";
+import { DiscardDialog, DiscardButton, workingDiscardTarget, type DiscardTarget } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { commitRange } from "@/lib/changesScope";
@@ -25,7 +25,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff, onOpenFile }: {
+  onOpenFile?: (path: string) => void;
   onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
@@ -43,11 +44,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const selectedSource = useRef({ source, generation: 0 });
   if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
   const generation = selectedSource.current.generation;
-  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
+  const [discarding, setDiscarding] = useState<DiscardTarget | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
   const { head, index, files, staged, unstaged, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
+  // Asked about the file as a whole, staged and unstaged: that is what a discard takes back.
+  const askDiscard = (file: DiscardTarget) => setDiscarding(workingDiscardTarget(file.path, staged, unstaged) ?? file);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -269,12 +272,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               }}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
-                <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
+                <DiscardButton path={f.path} onClick={() => askDiscard(f)} />
               )}
             />}
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined}
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => askDiscard(current) : undefined}
+              onOpenFile={onOpenFile && current.status !== "deleted" ? () => onOpenFile(current.path) : undefined}
               staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}
         </>

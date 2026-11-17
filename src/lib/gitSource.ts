@@ -36,11 +36,12 @@ export interface GitSource {
   generateCommitMessage?(agent: "claude" | "codex"): Promise<string>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
   changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
-  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
+  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>;
   mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
   /** Resolves to a notice worth showing (e.g. what a reconciled push found), or null. */
@@ -83,6 +84,8 @@ export interface GitSource {
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
   mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
+  /** "Delete the branch after merge": only a local checkout can ask for it today. */
+  deleteMergedBranch?(number: number, url?: string): Promise<void>;
   errorMessage(error: unknown): string;
 }
 
@@ -154,6 +157,7 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     createPr: ({ title, body, base, draft, sessionId }) => gh.create(cwd, title, body, base, draft, sessionId).then(() => null),
     readyPr: (number) => gh.ready(cwd, number),
     mergePr: (number, method) => gh.merge(cwd, number, method),
+    deleteMergedBranch: (number, url) => gh.deleteBranch(cwd, number, url),
     errorMessage,
   };
   if (locals.size > 64) locals.clear();

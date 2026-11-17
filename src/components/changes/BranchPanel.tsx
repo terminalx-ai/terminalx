@@ -261,8 +261,9 @@ export function BranchPanel({
           )}
         </header>
 
-        {/* Merged: what clean-up does with this workspace comes first, as the branch's last step. */}
-        <MergedWorkspaceStep cwd={cwd} />
+        {/* Merged: what clean-up does with this workspace, as the branch's last step. In the Branch tab the pull request
+            section says it, under the merged card's WHAT NEXT (design 05.12). */}
+        {!inline && <MergedWorkspaceStep cwd={cwd} />}
 
         {localOnly && (
           <div className="flex flex-wrap items-center gap-2" data-testid="local-git-actions">

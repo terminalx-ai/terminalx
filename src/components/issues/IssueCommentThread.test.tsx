@@ -136,17 +136,12 @@ describe.each(["github", "linear"] as const)("the %s comment thread", (provider)
     expect((within(mine).getByRole("textbox", { name: "Edit comment" }) as HTMLTextAreaElement).value).toBe("Changed");
   });
 
-  it("deletes the viewer's comment only after a confirmation", async () => {
+  it("deletes the viewer's comment directly without an issue-deletion approval", async () => {
     renderThread(provider);
     const mine = (await screen.findAllByRole("listitem"))[1];
     mouseClick(within(mine).getByRole("button", { name: /Actions for comment/ }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    expect(issues.calls.some((call) => call.command === "issue_comment_delete")).toBe(false);
-    fireEvent.click(within(mine).getByRole("button", { name: "Cancel" }));
-    expect(within(mine).queryByRole("group", { name: "Confirm delete" })).toBeNull();
-    mouseClick(within(mine).getByRole("button", { name: /Actions for comment/ }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    fireEvent.click(within(mine).getByRole("button", { name: "Delete comment" }));
+    expect(screen.queryByRole("group", { name: "Confirm delete" })).toBeNull();
     await waitFor(() => expect(bodies()).toEqual([`${provider}-c1`]));
     expect(issues.calls.find((call) => call.command === "issue_comment_delete")?.args).toMatchObject({ commentId: `${provider}-c2` });
   });

@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+## 0.2.35
+
+- Machines is on for everyone: work on your other Macs and Linux servers from
+  this Mac, with their projects and sessions in your sidebar. Settings →
+  Experimental no longer has a Machines switch. Settings → Machines shows how
+  to add a first machine and links the new guide, docs/MACHINES-GUIDE.md. Until
+  a machine is added the app looks as before, and "Let other computers operate
+  this Mac" stays off until you turn it on. Agents can use the machines you
+  added through the terminalx command line (PRO-360, #1112).
+- Machines: add and remove a machine's projects from the desktop (PRO-351,
+  #1054) and from the command line, `terminalx projects add/remove` (#1080);
+  forward a machine's ports and open its previews on this Mac (PRO-355,
+  #1055); target a machine from the terminalx command line (PRO-356, #1084);
+  reach a headless machine from the phone, which now lists every machine
+  (PRO-359, #1109); a signed-in machine registers with the relay, so paired
+  computers reach it away from home (PRO-368, #1110).
+- Operating another computer has a written threat model, boundary tests and
+  an activity log of what was done, with Disconnect and Let back (PRO-357,
+  #1042). Two-machine end-to-end tests run in CI (PRO-358, #1085).
+- Design pass across the app, matching the reviewed designs: the session
+  overview table (PRO-385, #1038), the new-session box and Start from rows
+  (PRO-396, #1045), sidebar menus, dialogs and toasts (PRO-386, #1049), files,
+  terminal and file tabs (PRO-402, #1053), the Changes panel and diff tab
+  (PRO-393, #1057), project scripts and actions (PRO-388, #1063), the review
+  tab and comments (PRO-392, #1068), the orchestrator run view (PRO-383,
+  #1069), the chat transcript (PRO-378, #1072), the share session dialog
+  (PRO-390, #1074), the PR panel (PRO-395, #1077), the approval card (PRO-382,
+  #1079), chat tabs (PRO-381, #1081), and turn details with context and usage
+  popovers (PRO-379, #1082).
+- Settings: the designed menu, page header, rows and switches (PRO-374,
+  #1075); Account (PRO-375, #1065); Environment variables as compact rows with
+  a side sheet (PRO-376, #1056); Appearance, Keyboard shortcuts and Agents
+  (PRO-377, #1073); nested project settings pages with a breadcrumb and a
+  Settings files page (PRO-387, #1070).
+- Sidebar sections have Change icon, Sort by and Collapse, with built-in
+  sections for cloud workspaces (PRO-288, #1161); cloud sidebar rows show a
+  single session and the owner (#1141).
+- Cloud: "Creating the workspace…" shows from the first click (PRO-409,
+  #1051); choose how long a cloud VM stays up when idle, including Never
+  (PRO-410, #1059); compute has an Environment tab with version rows,
+  Activate and an unbuilt-changes bar (PRO-391, #1061); the setup flow keeps
+  its coach mark off the composer and offers Fix with an agent (PRO-389,
+  #1066); providers come from one registry described by the server (PRO-415,
+  #1076), and a platform-credential provider is used without a connect step
+  (PRO-452, #1113).
+- New session no longer stacks agent setup cards above the prompt box
+  (#1083). GitHub and Linear issue tools ask for approval only to delete
+  (#1128). Local VM runs its Linux guest owner under its own account, away
+  from workers (#1159, #1162).
+- Pipelines: a pipeline stops for good when its author tab is gone after a
+  restart (#1067), and a review whose branch moved reviews the new head by
+  itself (#1071, #1105).
+- Held follow-ups and steering: /goal is validated, queue failures are
+  explained, and the tray and goal card follow the design (#1058, #1124).
+- Fixes from the design review: Mark as unread is disabled on a tab already
+  marked unread (#1120); one terminal-view switch per pane (#1123); Home and
+  Overview navigation and shortcuts (#1125, #1126, #1160); the cloud quota note
+  is reachable by keyboard (#1127); renaming a session title no longer renames
+  its Git branch (#1136); action reset is scoped to one action (#1137); script
+  edits survive closing Settings (#1138); dropping onto a pinned session keeps
+  its section (#1139); linked cloud-compute settings get focus (#1140);
+  managed privacy switches use muted amber (#1142); Changes scope lists only
+  the current branch's commits (#1144); environment repository and commit
+  details for owners and admins (#1145); a too-large diff shows its size and
+  Open file (#1146); environment build retry and current stage stay visible
+  (#1147, #1148); an unsaved orchestration brief survives a column change
+  (#1149); Retry in a new chat keeps images and attachments (#1150); the
+  project settings file button no longer opens personal settings (#1151);
+  settings search, settings files and Files to copy fixes (#1153, #1155,
+  #1156); running tabs keep their login after an API key is removed, and the
+  app says so (#1154); Machines and Agents introductions (#1157); an older
+  agent prerelease is not labelled up to date (#1158).
+- Code cleanups and CI fixes (#1060, #1111, #1119, #1121, #1122, #1129, #1143).
+
 ## 0.2.34
 
 - Machines (Experimental, Settings → Experimental → Machines): the desktop

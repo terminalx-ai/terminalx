@@ -9,7 +9,7 @@ class ActivationFixtures(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.home = pathlib.Path(self.temporary.name)
-        self.observed = {"name": "cua", "uid": 1000, "gid": 1000, "home": "/home/cua",
+        self.observed = {"name": "terminalx-owner", "uid": 991, "gid": 992, "home": "/var/lib/terminalx-owner",
                          "homeDevice": 1, "homeInode": 2, "architecture": "arm64"}
         binary = bytearray(64)
         binary[:7] = b"\x7fELF\x02\x01\x01"
@@ -51,8 +51,11 @@ class ActivationFixtures(unittest.TestCase):
                                str(self.home / ".terminalx-local/runtime"), "--runtime-kind", "local"])
         self.assertEqual(set(kwargs["env"]), {"HOME", "USER", "LOGNAME", "PATH", "LANG",
                                              "TERMINALX_LINUX_ACTIVATION", "TERMINALX_LINUX_INSTANCE"})
+        self.assertEqual(digest(os.pread(kwargs["pass_fds"][1], 64, 0)), self.intent["runtimeSha256"])
+        self.assertTrue(kwargs["executable"].startswith("/proc/self/fd/"))
+        self.assertEqual(kwargs["env"]["USER"], "terminalx-owner")
         self.assertTrue(kwargs["close_fds"])
-        self.assertEqual(len(kwargs["pass_fds"]), 1)
+        self.assertEqual(len(kwargs["pass_fds"]), 2)
         self.child_lease = os.dup(kwargs["pass_fds"][0])
         outer = self
         class Child:

@@ -1,3 +1,4 @@
+import { localCommands } from "@/lib/localCommands";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
 import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
@@ -9,7 +10,8 @@ import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from
 import type { Transcript } from "@/lib/transcript";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
-import { setDraft, useDraft } from "@/lib/drafts";
+import { getDraft, setDraft, useDraft } from "@/lib/drafts";
+import { showError } from "@/lib/errorToasts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
@@ -23,6 +25,7 @@ import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MES
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { Composer, type Handoff } from "@/components/chat/Composer";
+import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -42,6 +45,8 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import { SaveSnippetDialog } from "@/components/chat/SaveSnippetDialog";
+import { forkTurn } from "@/lib/sessions";
 import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
@@ -170,6 +175,7 @@ export function TabView({
   const sendBusy = sendNotice !== null;
   const [busyRefused, setBusyRefused] = useState<string | null>(null);
   const [resetTarget, setResetTarget] = useState<{ endSeq: number | null; target?: ResetTarget } | null>(null);
+  const [snippetPrompt, setSnippetPrompt] = useState<string | null>(null);
   const [localError, setError] = useState<string | null>(null);
   const error = localError ?? (sendState.error != null && !sendBusy ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
@@ -322,6 +328,9 @@ export function TabView({
   const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
     && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  // Fork from a turn (PRO-379): what a reset can cut, a fork can copy.
+  const canFork = canReset;
+  const turnSettings = useMemo(() => ({ effort: tab.effort, permissionMode: tab.permissionMode }), [tab.effort, tab.permissionMode]);
   // Switch account (#980): this computer's accounts, so a local tab's only, and not while it is only read.
   const accountSwitch = useAccountSwitch(session, tab, local && !readOnly);
   // Only while the turn it met runs: once that has ended, the message in the composer is simply unsent.
@@ -380,10 +389,16 @@ export function TabView({
   const changeHeldQueue = useCallback(async (change: HeldQueueChange) => {
     if (blockedRef.current) throw new Error(blockedRef.current);
     if (!backend.changeHeldQueue) throw new Error("This session does not support held follow-ups.");
+    if (change.type === "edit") {
+      const item = heldQueue.items.find(item => item.id === change.id);
+      const problem = goalCommandProblem(change.text, tab.harness, !!(item?.images.length || item?.files?.length), (backend.commands?.(tab) ?? (local ? localCommands(session.cwd, tab.harness) : null))?.known()?.commands ?? []);
+      if (problem === "unsupported") throw new Error("Goals work in Codex chats only. Open a Codex tab to set a goal, or change this held message's text.");
+      if (problem === "empty") throw new Error("Type a goal after /goal, like “/goal ship saved views with tests”.");
+    }
     const out = await backend.changeHeldQueue(tab.id, change);
     for (const event of out.events) applyEvent(event);
     if (!out.queued) backend.patchTab(tab.id, { status: "in_progress" });
-  }, [backend, tab.id]);
+  }, [backend, tab, heldQueue, local, session.cwd]);
   const send = useCallback(
     async (text: string, images: ImageInput[], alternate = false, files?: FileInput[]) => {
       // A viewer, or someone else holds this tab's lease (PRO-30): nothing is queued.
@@ -619,7 +634,8 @@ export function TabView({
   };
 
   // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
-  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
+  // So does an edit open in the chat (a held follow-up's, PRO-380): `data-owns-escape` on it says so.
+  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane, [data-owns-escape]");
   // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
   // there the key is typed into the agent's own screen, like every other key.
   useShortcut("session.interrupt", () => (takesKey() ? (actions.pressedWith("shortcut"), interrupt(), true) : false), {
@@ -658,9 +674,45 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // The goal card's Pause and Resume are Codex's own `/goal pause` and `/goal resume`, sent now rather than held
+  // behind the turn; Edit puts the goal in the composer to change (PRO-380).
+  const sendGoalCommand = useCallback((command: string) => {
+    if (blockedRef.current) return;
+    setError(null);
+    void backend.send(tab.id, command, []).then((out) => {
+      for (const ev of out.events) applyEvent(ev);
+    }, (e) => setError(local ? safeError(e) : commandError(e)));
+  }, [backend, local, tab.id]);
+  const editGoal = useCallback((objective: string) => {
+    const put = () => {
+      setDraft(tab.id, `/goal ${objective}`);
+      focusDraftEnd();
+    };
+    // A message half written in the composer is not lost to the goal: the reader says whether it goes.
+    const current = getDraft(tab.id).trim();
+    if (!current || goalCommand(current) !== null) return put();
+    showError("Edit puts the goal in the composer, which holds a message you haven't sent", undefined, {
+      title: "Replace your draft with the goal?",
+      key: `goal-edit:${tab.id}`,
+      tone: "warning",
+      icon: "target",
+      copy: false,
+      actions: [{ label: "Replace the draft", primary: true, run: put }],
+    });
+  }, [tab.id]);
+  const focusDraftEnd = useCallback(() => {
+    requestAnimationFrame(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(`[data-tab-composer="${CSS.escape(tab.id)}"] textarea[data-composer]`);
+      composer?.focus({ preventScroll: true });
+      composer?.setSelectionRange(composer.value.length, composer.value.length);
+    });
+  }, [tab.id]);
+  // A /goal is checked as it is sent (PRO-380): it never goes as a steer, which would pass it to the agent as words.
+  const steerable = goalCommand(draft) === null;
+  const chatAgent = useMemo(() => ({ id: tab.harness, name: agentLabel }), [tab.harness, agentLabel]);
   const steer = useCallback(async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || goalCommand(text) !== null) return;
     setError(null);
     try {
       await backend.steer(tab.id, text);
@@ -853,10 +905,19 @@ export function TabView({
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
       onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
-      onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt?.text) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true); } : undefined}
+      onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
+      secondOpinionAgent={counterpart?.name}
+      onFork={canFork ? (endSeq, into) => void forkTurn(session.id, tab.id, endSeq, into).then(
+        (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
+        (e) => showError("Couldn't fork the conversation", e)) : undefined}
+      onSaveSnippet={setSnippetPrompt}
+      turnSettings={turnSettings}
+      agent={chatAgent}
+      onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}
+      onEditGoal={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? editGoal : undefined}
       footer={
         <>
         {local && localVmTasks ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
@@ -886,7 +947,7 @@ export function TabView({
         <AccountSwitchNote tabId={tab.id} reportedModel={transcript.model} modelName={(id) => modelLabel(tab.harness, id)} />
         {recovery !== "signed_out" && <AccountGoneNotice gone={accountSwitch.gone} targets={tab.providerSessionId ? accountSwitch.targets : []} switching={accountSwitch.switching} error={accountSwitch.error} onSwitch={(account) => void accountSwitch.switchTo(account)} />}
         {banner("composer")}
-        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
+        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && steerable && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>
@@ -894,7 +955,7 @@ export function TabView({
             </Button>
           </div>
         )}
-        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
+        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
         <Composer
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}
@@ -906,6 +967,7 @@ export function TabView({
           commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
           remote={!local}
+          attachFiles={backend.caps.files}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {
@@ -957,6 +1019,7 @@ export function TabView({
           disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
           heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
+          onOpenCodexTab={counterpart?.id === "codex" ? () => openAgentHandoff(session, tab, "codex") : undefined}
         />
         </>
         )
@@ -1121,6 +1184,7 @@ export function TabView({
       <span>{resetNotice(tab)}</span>
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
+    {snippetPrompt !== null && <SaveSnippetDialog prompt={snippetPrompt} onClose={() => setSnippetPrompt(null)} />}
     {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}

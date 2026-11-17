@@ -1,12 +1,19 @@
-import { useEffect, useState } from "react";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
+import { useEffect, useState, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { ChevronDown, CircleCheck, Copy, FileJson, FileTerminal, Folder, FolderOpen, KeyRound, RefreshCw, Settings2, TriangleAlert, Trash2, Zap } from "@/icons";
+import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { api, errorMessage } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { copyText } from "@/lib/clipboard";
+import { shortPath } from "@/lib/paths";
 import { updateProject, useSessionStore } from "@/lib/sessions";
 import type { Project } from "@/types/session";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
-import { RegisteredSetting, type SettingId } from "./settingsRegistry";
+import { confirmRemoveProject, conversationLink } from "@/components/layout/SessionSidebar";
+import { RegisteredSetting } from "./settingsRegistry";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { RepositoryOrchestratorSettings } from "./OrchestratorSettings";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
@@ -16,53 +23,113 @@ import { RepositoryActionsPage } from "./RepositoryActionsPage";
 import { RepositoryPreviewUrlsPage } from "./RepositoryPreviewUrlsPage";
 import { RepositoryEnvironmentSettings } from "./RepositoryEnvironmentSettings";
 import { ProjectAgentAccounts } from "./ProjectAgentAccounts";
+import { ProjectSettingsFiles } from "./SettingsFiles";
 
-// Preview URLs and Files to copy are sections of General (PRO-131): their rows, and links to them, open General.
-const REPOSITORY_PAGES: { row: SettingId; label: string }[] = [
-  { row: "repositories.rootPath", label: "General" },
-  { row: "repositories.scripts", label: "Scripts" },
-  { row: "repositories.actions", label: "Actions" },
-  { row: "repositories.environment", label: "Environment" },
+/** A project's pages, nested under it in the Settings sidebar (design 11.02, 11.10). */
+export type ProjectPage = "general" | "scripts" | "actions" | "environment" | "settingsFiles";
+export const PROJECT_PAGES: readonly { page: ProjectPage; label: string; icon: LucideIcon }[] = [
+  { page: "general", label: "General", icon: Settings2 },
+  { page: "scripts", label: "Scripts", icon: FileTerminal },
+  { page: "actions", label: "Actions", icon: Zap },
+  { page: "environment", label: "Environment", icon: KeyRound },
+  { page: "settingsFiles", label: "Settings files", icon: FileJson },
 ];
+/** A folder project has only General. */
+export const projectPages = (project: Pick<Project, "kind">) => project.kind === "folder" ? PROJECT_PAGES.slice(0, 1) : PROJECT_PAGES;
 
-export function RepositoriesTab({ projectPath, row, onSelectRow }: { projectPath?: string; row?: string | null; onSelectRow?: (row: SettingId) => void }) {
+/** The page a project's row lives on: Preview URLs, Files to copy, cleanup and the rest live on General (PRO-131). */
+export function projectPageForRow(row: string | null | undefined): ProjectPage {
+  if (row === "repositories.scripts") return "scripts";
+  if (row === "repositories.actions") return "actions";
+  if (row === "repositories.environment") return "environment";
+  return "general";
+}
+
+export function RepositoriesTab({ projectPath, page = "general" }: { projectPath?: string; page?: ProjectPage }) {
   const { projects } = useSessionStore();
   const project = projects.find((project) => !project.archived && project.path === projectPath);
   const orchestratorRuns = useExperimentalSettings()?.orchestratorRuns === true;
   if (!project) return <p className="text-sm text-muted-foreground">Choose a project to view its settings.</p>;
   // A folder project has a default account too (#980): shown only once an agent has several.
-  if (project.kind === "folder") return <><ProjectAgentAccounts projectPath={project.path} /><MergedCleanupSettings projectPath={project.path} /></>;
-  // Every other project row (paths, preview URLs, files to copy, cleanup, orchestrator) lives on General.
-  const page = REPOSITORY_PAGES.find((candidate) => candidate.row === row) ?? REPOSITORY_PAGES[0];
-  const general = page.row === "repositories.rootPath";
+  if (project.kind === "folder") return <><ProjectAgentAccounts projectPath={project.path} /><MergedCleanupSettings projectPath={project.path} /><RemoveProjectRow project={project} /></>;
+  const general = page === "general";
   return <>
-    <nav aria-label="Project settings" className="mb-5 flex flex-wrap gap-2">
-      {REPOSITORY_PAGES.map((candidate) => (
-        <Button key={candidate.row} size="sm" variant={candidate === page ? "outline" : "ghost"} aria-current={candidate === page ? "page" : undefined} onClick={() => onSelectRow?.(candidate.row)}>{candidate.label}</Button>
-      ))}
-    </nav>
     {general && <RepositorySettingsPage key={project.path} project={project} />}
-    {page.row === "repositories.scripts" && <RepositoryScriptsTab projectPath={project.path} />}
-    {page.row === "repositories.actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
-    {page.row === "repositories.environment" && <RegisteredSetting setting="repositories.environment" instance={project.path}><div><RepositoryEnvironmentSettings key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page === "scripts" && <RepositoryScriptsTab projectPath={project.path} />}
+    {page === "actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page === "environment" && <RegisteredSetting setting="repositories.environment" instance={project.path}><div><RepositoryEnvironmentSettings key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page === "settingsFiles" && <ProjectSettingsFiles key={project.path} projectPath={project.path} />}
     <div hidden={!general}>
-      <div className="mt-8"><MergedCleanupSettings projectPath={project.path} /></div>
-      {orchestratorRuns && <div className="mt-8"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
+      <div className="border-b border-hairline py-4"><MergedCleanupSettings projectPath={project.path} /></div>
+      {orchestratorRuns && <div className="border-b border-hairline py-4"><RepositoryOrchestratorSettings projectPath={project.path} /></div>}
+      <RemoveProjectRow project={project} />
     </div>
   </>;
 }
 
+/** The last row of General (design 11.02): the sidebar menu's Remove project, with what it leaves in place. */
+function RemoveProjectRow({ project }: { project: Project }) {
+  const store = useSessionStore();
+  const remove = () => {
+    const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
+    const sessions = (store.sessions ?? []).filter((session) => {
+      if (session.archived) return false;
+      const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
+      return !!link && canon(link.path) === canon(project.path);
+    });
+    void confirmRemoveProject({ path: project.path, name: project.name, project, sessions, archived: [], branches: {} });
+  };
+  return <ProjectRow title="Remove project" description={`Takes ${project.name} out of TerminalX and archives its conversations. The folder on disk stays.`} last
+    action={<Button size="sm" variant="outline" className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={remove}><Trash2 />Remove project</Button>} />;
+}
+
+const canon = (path: string) => path.replace(/\/+$/, "");
+
+/** One row of a project page: a 14px title, a 12.5px description, an optional action on the right and content below. */
+function ProjectRow({ title, description, action, children, last }: { title: string; description: ReactNode; action?: ReactNode; children?: ReactNode; last?: boolean }) {
+  return <div className={cn("min-w-0 py-4", !last && "border-b border-hairline")}>
+    <div className="flex items-center gap-6">
+      <div className="min-w-0 flex-1">
+        <h4 className="text-sm font-medium">{title}</h4>
+        <div className="mt-0.5 text-[12.5px] leading-[18px] text-muted-foreground">{description}</div>
+      </div>
+      {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
+    </div>
+    {children}
+  </div>;
+}
+
+/** A folder shown as its path, with Show in Finder and Copy path in its menu. Read-only: never changed here. */
+function PathMenu({ label, path, onError }: { label: string; path: string; onError: (error: unknown) => void }) {
+  const run = (action: () => Promise<unknown>) => void action().catch(onError);
+  return <DropdownMenu>
+    <DropdownMenuTrigger asChild>
+      <button type="button" aria-label={`${label}: ${path}`} className="-ml-2 mt-1.5 inline-flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-md px-2 font-mono text-[12px] text-muted-foreground outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-veil-raised">
+        <Folder aria-hidden className="size-3.5 shrink-0 text-faint" />
+        <span className="truncate">{shortPath(path)}</span>
+        <ChevronDown aria-hidden className="size-3 shrink-0 text-faint" />
+      </button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="start">
+      <DropdownMenuItem onSelect={() => run(() => revealItemInDir(path))}><FolderOpen />Show in Finder</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => run(() => copyText(path))}><Copy />Copy path</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>;
+}
+
 type PreviewPattern = RepositoryFilesPreview["patterns"][number];
 
-/** Why a valid pattern matched nothing, as the preview says (PRO-131); a plain line when it gives no reason. */
+/** Why a valid pattern matched nothing, as the preview says (PRO-131), as a sentence. */
 function patternReason(item: PreviewPattern): string {
-  return item.reason?.trim() || "No ignored files match.";
+  return sentence(item.reason?.trim() || "No ignored files match");
 }
+const sentence = (text: string) => `${text.replace(/[.\s]+$/, "")}.`;
 
 /** A project's General page (design 11.02): its paths, Preview URLs and Files to copy, one after another. */
 export function RepositorySettingsPage({ project }: { project: Project }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [preview, setPreview] = useState<RepositoryFilesPreview | null>(null);
+  const [previewed, setPreviewed] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,111 +143,122 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
     setError(null);
     const timer = window.setTimeout(() => {
       api.repositoryFilesPreview(project.path, lines(text), snapshot).then((value) => {
-        if (live) { setPreview(value); setError(value.error ?? null); }
+        if (live) { setPreview(value); setPreviewed(text); setError(value.error ?? null); }
       }).catch((error) => {
-        if (live) { setPreview(null); setError(errorMessage(error)); }
+        if (live) { setPreview(null); setPreviewed(null); setError(errorMessage(error)); }
       }).finally(() => { if (live) setLoading(false); });
     }, 200);
     return () => { live = false; window.clearTimeout(timer); };
   }, [project.path, text, snapshot]);
 
-  const action = async (run: () => Promise<unknown>) => {
-    try { await run(); } catch (error) { setError(errorMessage(error)); }
-  };
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await updateProject(project.path, { repositorySettings: { filesToCopy: lines(text) } });
-      setDraft(null);
-      setSnapshot(crypto.randomUUID());
-    } catch (error) {
-      setError(errorMessage(error));
-    } finally { setSaving(false); }
-  };
-  // Read-only: a path is revealed or copied here, never changed.
-  const pathRow = (label: string, path: string, help: string) => (
-    <div className="flex flex-wrap items-center gap-3 border-b border-hairline py-4">
-      <div className="min-w-0 flex-1 basis-48">
-        <h4 className="text-sm font-medium">{label}</h4>
-        <p className="text-xs text-muted-foreground">{help}</p>
-        <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{path}</p>
-      </div>
-      <Button size="sm" variant="outline" aria-label={`Reveal ${label.toLowerCase()}`} onClick={() => void action(() => revealItemInDir(path))}>Reveal</Button>
-      <Button size="sm" variant="outline" aria-label={`Copy ${label.toLowerCase()}`} onClick={() => void action(() => copyText(path))}>Copy</Button>
-    </div>
-  );
-
   const patterns: PreviewPattern[] = preview?.patterns ?? [];
+  // Design 11.02 has no Save button. Leaving the field commits an edit; previewing
+  // alone never changes the policy used by workspace creation. If validation is still
+  // pending, only this exact draft may commit, and resuming editing cancels that intent.
+  const valid = !loading && !!preview && !preview.error && !preview.fromIncludeFile && previewed === text && !patterns.some((item) => item.error);
+  const [commit, setCommit] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Keep this editor mounted through validation and persistence, including a failed
+  // save. The shared boundary covers project/page navigation and leaving Settings.
+  const dirty = !preview?.fromIncludeFile && lines(text).join("\n") !== lines(stored).join("\n");
+  useSettingsLeaveGuard(dirty || saving);
+  useEffect(() => {
+    if (!valid || commit === null || commit !== text || saving) return;
+    setCommit(null);
+    if (lines(commit).join("\n") === lines(stored).join("\n")) return;
+    setSaving(true);
+    setSaveError(null);
+    updateProject(project.path, { repositorySettings: { filesToCopy: lines(commit) } })
+      .catch((cause) => setSaveError(errorMessage(cause)))
+      .finally(() => setSaving(false));
+  }, [valid, commit, text, stored, project.path, saving]);
+
+  const commitDraft = () => {
+    if (draft !== null && !preview?.fromIncludeFile) setCommit(draft);
+  };
+
+  const report = (cause: unknown) => setError(errorMessage(cause));
   // Design 11.12: every pattern is valid and none matches an ignored file.
   const nothingMatches = !loading && !!preview && !preview.error && patterns.length > 0 && patterns.every((item) => !item.error && !item.matches.length);
   const recheck = () => setSnapshot(crypto.randomUUID());
+  const matched = [...new Set(patterns.flatMap((item) => item.matches))];
+  const matchCount = matched.length + patterns.reduce((total, item) => total + (item.omitted ?? 0), 0);
+  const omitted = patterns.reduce((total, item) => total + (item.omitted ?? 0), 0);
+  const failing = patterns.filter((item) => !item.error && !item.matches.length);
+  const warn = <TriangleAlert aria-hidden className="mr-1 inline size-3 -translate-y-px text-warning" />;
 
   return (
     <div className="min-w-0">
-      <h3 className="mb-3 text-base font-medium">General</h3>
-      <RegisteredSetting setting="repositories.rootPath" instance={project.path}>{pathRow("Root path", project.path, "Don't move or delete this folder; remove the project instead.")}</RegisteredSetting>
-      {preview && <RegisteredSetting setting="repositories.workspacesPath" instance={project.path}>{pathRow("Worktree folder", preview.workspacesPath, "New workspaces are created here. Remove workspaces in TerminalX rather than deleting folders.")}</RegisteredSetting>}
+      <RegisteredSetting setting="repositories.rootPath" instance={project.path}>
+        <div className="outline-none"><ProjectRow title="Root path" description={<>{warn}Don’t move or delete this folder; remove the project here instead.</>}>
+          <PathMenu label="Root path" path={project.path} onError={report} />
+        </ProjectRow></div>
+      </RegisteredSetting>
+      {preview && <RegisteredSetting setting="repositories.workspacesPath" instance={project.path}>
+        <div className="outline-none"><ProjectRow title="Worktree folder" description={<>{warn}New workspaces are created here. Remove workspaces in TerminalX rather than deleting folders.</>}>
+          <PathMenu label="Worktree folder" path={preview.workspacesPath} onError={report} />
+        </ProjectRow></div>
+      </RegisteredSetting>}
       <RegisteredSetting setting="repositories.sparseCheckout" instance={project.path}><SparseCheckoutRow project={project} /></RegisteredSetting>
       <ProjectAgentAccounts projectPath={project.path} />
       <RegisteredSetting setting="repositories.previewUrls" instance={project.path}>
         <div className="border-b border-hairline py-4"><RepositoryPreviewUrlsPage projectPath={project.path} /></div>
       </RegisteredSetting>
       <RegisteredSetting setting="repositories.filesToCopy" instance={project.path}>
-        <section aria-label="Files to copy" className="flex flex-col gap-3 py-4">
-          <h4 className="text-sm font-medium">Files to copy</h4>
-          <p className="text-sm text-muted-foreground">Copy up to 1,000 matching files and 100 MiB into each new workspace. Files must be ignored and untracked in both checkouts. Existing files, symbolic links and .gitignore files are skipped.</p>
-          <p className="text-xs text-muted-foreground">Both lists use positive globs from the project root: .env matches only the root, **/.env matches any folder, and secrets/** includes a directory's contents. Leading / and ! exclusions are unsupported. In .worktreeinclude, blank lines and # comments are ignored.</p>
-          {preview?.fromIncludeFile && <p role="status" className="text-sm">Patterns come from this repository's .worktreeinclude</p>}
-          <label htmlFor="repository-copy-patterns" className="text-sm font-medium">Glob patterns (one per line)</label>
+        <section aria-label="Files to copy" className="border-b border-hairline py-4">
+          <h4 className="text-sm font-medium"><label htmlFor="repository-copy-patterns">Files to copy</label></h4>
+          <p className="mt-0.5 text-[12.5px] leading-[18px] text-muted-foreground">Ignored files copied into each new workspace, one pattern per line.</p>
+          {preview?.fromIncludeFile && <p role="status" className="mt-1 text-[12.5px] text-muted-foreground">Patterns come from this repository's .worktreeinclude</p>}
           <textarea
             id="repository-copy-patterns"
-            className="min-h-28 w-full rounded-md border border-hairline bg-well p-3 font-mono text-sm"
+            className={cn("mt-2.5 min-h-[66px] w-full rounded-md border bg-well px-3 py-2 font-mono text-[13px] leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40", nothingMatches ? "border-warning/60" : "border-border")}
+            rows={Math.min(Math.max(lines(text).length + 1, 3), 10)}
             placeholder={".env*\nconfig/local/**"}
             spellCheck={false}
             value={preview?.fromIncludeFile ? patterns.map((item) => item.pattern).join("\n") : text}
             readOnly={(draft === null && !preview && loading) || !!preview?.fromIncludeFile}
-            disabled={saving}
-            onChange={(event) => setDraft(event.target.value)}
+            aria-describedby="repository-copy-commit-help"
+            onFocus={() => setCommit(null)}
+            onBlur={commitDraft}
+            onChange={(event) => { setDraft(event.target.value); setCommit(null); }}
           />
-          <div className="flex gap-2">
-            {!preview?.fromIncludeFile && <Button size="sm" disabled={saving || loading || !preview || !!preview.error || draft === null || text === stored || patterns.some((item) => item.error)} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>}
-            {!nothingMatches && <Button size="sm" variant="outline" disabled={saving} onClick={recheck}>Refresh preview</Button>}
-          </div>
-          <h5 className="text-sm font-medium">Ignored files matching each pattern</h5>
-          <p className="text-xs text-muted-foreground">Preview uses a snapshot of this project's ignored files. Refresh after files or ignore rules change. Workspace creation checks the files and destination rules again.</p>
-          {preview?.warning && <p role="status" className="text-xs text-warning">{preview.warning}</p>}
-          {loading ? <p role="status" className="text-xs text-muted-foreground">Updating preview…</p> : nothingMatches ? (
-            <div aria-label="Ignored files preview" className="rounded-md border border-hairline bg-well p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p role="status" className="text-sm font-medium">No ignored files match these patterns</p>
-                <Button size="sm" variant="outline" disabled={saving} onClick={recheck}>Check again</Button>
-              </div>
-              <ul aria-label="Why each pattern matched nothing" className="mt-2 flex flex-col gap-2">
-                {patterns.map((item, index) => (
-                  <li key={`${index}:${item.pattern}`} className="min-w-0 text-xs">
-                    <span className="break-all font-mono text-foreground">{item.pattern}</span>
-                    <p className="break-words text-muted-foreground">{patternReason(item)}</p>
-                  </li>
-                ))}
-              </ul>
+          {!preview?.fromIncludeFile && <p id="repository-copy-commit-help" className="mt-1 text-[12px] text-muted-foreground">Changes save when you leave this field after validation. New workspaces use the last saved patterns.</p>}
+          {saveError && <div className="mt-2">
+            <p role="alert" className="text-sm text-destructive">{saveError}</p>
+            {!preview?.fromIncludeFile && <Button size="sm" variant="outline" className="mt-2" disabled={saving} onClick={commitDraft}>Retry save</Button>}
+          </div>}
+          {preview?.warning && <p role="status" className="mt-2 text-[12px] text-warning">{preview.warning}</p>}
+          {patterns.filter((item) => item.error).map((item, index) => (
+            <p key={`${index}:${item.pattern}`} role="alert" className="mt-2 break-words text-[12px] text-destructive"><span className="font-mono">{item.pattern}</span>: {item.error}</p>
+          ))}
+          {loading ? <p role="status" className="mt-2 text-[12px] text-muted-foreground">Updating preview…</p> : nothingMatches ? <>
+            <div className="mt-2 flex items-center gap-2 text-[12px] text-warning">
+              <TriangleAlert aria-hidden className="size-3.5 shrink-0" />
+              {/* Amber, mixed toward the text colour so it reads at 4.5:1 on the light theme too. */}
+              <p role="status" className="text-[color-mix(in_oklab,var(--color-warning)_60%,var(--color-foreground))]">No ignored files match these patterns</p>
+              <button type="button" onClick={recheck} className="ml-auto flex items-center gap-1 rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"><RefreshCw aria-hidden className="size-3" />Check again</button>
             </div>
-          ) : preview && (
-            <div className="flex flex-col gap-3" aria-label="Ignored files preview">
-              {!patterns.length && !preview.error && <p className="text-xs text-muted-foreground">No patterns. No files will be copied.</p>}
-              {patterns.map((item, index) => (
-                <div key={`${index}:${item.pattern}`} className="rounded-md border border-hairline p-3">
-                  <div className="break-all font-mono text-sm">{item.pattern}</div>
-                  {item.error ? <p role="alert" className="text-xs text-destructive">{item.error}</p> : item.matches.length ? (
-                    <ul className="mt-2 max-h-60 overflow-y-auto text-xs text-muted-foreground">
-                      {item.matches.map((path) => <li key={path} className="break-all font-mono">{path}</li>)}
-                    </ul>
-                  ) : <p className="mt-2 break-words text-xs text-muted-foreground">{patternReason(item)}</p>}
-                  {!!item.omitted && <p className="mt-2 text-xs text-muted-foreground">{item.omitted} more matches omitted from preview.</p>}
-                </div>
-              ))}
+            <p aria-label="Why each pattern matched nothing" className="mt-2 break-words rounded-md bg-well px-3 py-2 text-[12px] leading-[18px] text-muted-foreground hairline">
+              {preview!.ignoredChecked != null && <>Checked {preview!.ignoredChecked.toLocaleString("en-US")} ignored {preview!.ignoredChecked === 1 ? "file" : "files"} in <span className="font-mono text-[11.5px]">{shortPath(preview!.rootPath)}</span>. </>}
+              {patterns.map((item, index) => <span key={`${index}:${item.pattern}`}><span className="font-mono text-[11.5px] text-foreground">{item.pattern}</span>: {patternReason(item)} </span>)}
+              Patterns are globs from the project root: <span className="font-mono text-[11.5px]">.env</span> matches only the root, <span className="font-mono text-[11.5px]">**/.env</span> any folder.
+            </p>
+          </> : preview && !preview.error && <>
+            <div className="mt-2 flex items-center gap-2 text-[12px] text-muted-foreground">
+              {patterns.length ? <><CircleCheck aria-hidden className={cn("size-3.5 shrink-0", matchCount ? "text-add" : "text-faint")} />
+                <span role="status">{matchCount.toLocaleString("en-US")} ignored {matchCount === 1 ? "file matches" : "files match"}</span></>
+                : <span role="status">No patterns. No files will be copied.</span>}
+              <Button variant="ghost" size="icon-xs" aria-label="Refresh preview" className="ml-auto text-faint" onClick={recheck}><RefreshCw /></Button>
             </div>
-          )}
+            {matched.length > 0 && <ul aria-label="Matching ignored files" className="mt-1.5 flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
+              {matched.map((path) => <li key={path} className="inline-flex h-6 max-w-full items-center truncate rounded bg-veil-strong px-1.5 font-mono text-[11.5px] text-muted-foreground">{path}</li>)}
+            </ul>}
+            {omitted > 0 && <p className="mt-1.5 text-[12px] text-muted-foreground">{omitted} more {omitted === 1 ? "match" : "matches"} omitted from preview.</p>}
+            {failing.length > 0 && <ul aria-label="Patterns that match nothing" className="mt-1.5 flex flex-col gap-0.5">
+              {failing.map((item, index) => <li key={`${index}:${item.pattern}`} className="break-words text-[12px] text-muted-foreground"><span className="font-mono text-foreground">{item.pattern}</span>: {patternReason(item)}</li>)}
+            </ul>}
+          </>}
+          {!loading && (!preview || preview.error) && <Button size="sm" variant="outline" className="mt-2" onClick={recheck}>Refresh preview</Button>}
         </section>
       </RegisteredSetting>
       {error && <p role="alert" className="mt-3 break-words text-sm text-destructive">{error}</p>}

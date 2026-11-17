@@ -29,7 +29,7 @@ import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
-import { WorkspacePanes } from "./WorkspacePanes";
+import { WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabAccountLabel, TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
@@ -55,6 +55,7 @@ import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -349,8 +350,14 @@ function CloudLocation({
     </>
   );
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
+  const detailsRequest = request && ["restart", "details", "copy-machine", "copy-info"].includes(request.action);
+  const detailsVisible = !cloud.locked && !!item && request?.item.workspace.id === cloud.workspaceId && request.item.workspace.orgId === cloud.orgId;
+  useEffect(() => {
+    if (detailsRequest && !detailsVisible) setRequest(null);
+  }, [detailsRequest, detailsVisible]);
   return (
     <>
+      {item && !cloud.locked && <CloudWorkspaceDetails item={item} />}
       {item || diagnosticsOffered || onShowPorts ? (
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -366,7 +373,7 @@ function CloudLocation({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
-            {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {item && <WorkspaceActionItems item={item} detailsAllowed={!cloud.locked} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
             {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
             {item && !cloud.locked && (
               <>
@@ -401,7 +408,7 @@ function CloudLocation({
           {error}
         </span>
       )}
-      {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
+      {request && (!detailsRequest || detailsVisible) && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
       {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
       {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
@@ -576,6 +583,8 @@ export function SessionView({
   // A local session's files are tabs in its panes, beside the chat (PRO-402). A cloud session's, and the
   // floating window's (it has no panes), are the editor pane's.
   const tabsInPanes = !cloud && !compact;
+  const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow);
+  const switchInPaneStrip = tabsInPanes && paneLayout.showStrip;
   const hasEditors = !tabsInPanes && ed.editors.some((e) => e.sessionId === session.id);
   const shownFile = tabsInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
   useFileTabShortcuts(session.id, shownFile, tabsInPanes);
@@ -626,7 +635,7 @@ export function SessionView({
     <div className="relative flex h-full min-h-0 min-w-0 flex-1">
       {/* "Port N forwarded to 127.0.0.1:N" for each forward that opened unasked (14.10). */}
       {cloud?.ports.offered && <PortToasts connectionId={cloud.ports.connectionId} where={machine ? `on ${machine.name}` : `in ${cloud.workspaceName}`} />}
-      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col" data-conversation-column>
         <header
           data-tauri-drag-region="deep"
           className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"
@@ -850,7 +859,7 @@ export function SessionView({
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
             {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
             {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !(stripRow && !compact) && (
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !switchInPaneStrip && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
@@ -940,7 +949,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
+              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} layout={paneLayout} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}

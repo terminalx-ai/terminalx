@@ -12,6 +12,8 @@ const buttonVariants = cva(
         ghost: "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
         outline: "border-border bg-transparent text-foreground hover:bg-veil-raised",
         destructive: "bg-destructive/15 text-destructive hover:bg-destructive/25",
+        // The red action of a confirmation (design 17.01): solid, so it is the one button that reads as the point of no return.
+        danger: "bg-destructive text-white hover:opacity-90",
         accent: "bg-accent text-accent-foreground shadow-button hover:opacity-90",
         link: "text-foreground underline-offset-4 hover:underline",
       },

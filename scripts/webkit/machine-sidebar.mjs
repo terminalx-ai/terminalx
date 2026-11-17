@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // PRO-346: each paired machine's sidebar section lists its projects and,
-// under each, its sessions (screen 21.01), in the desktop's WebKit with
-// Experimental → Machines on.
+// under each, its sessions (screen 21.01), in the desktop's WebKit.
 //
 // Two machines are paired: "Mac mini" (macOS, Direct) with two projects, one
 // of them named as a project on the other machine, and "dev-server" (Linux,
@@ -21,7 +20,7 @@
 //   text under 12 px; Try again asks the native side to reconnect;
 // - Mac mini revoking this Mac shows "no longer allows this Mac" with Pair
 //   again; coming back removes the card;
-// - the sidebar never scrolls sideways; with Machines off nothing shows.
+// - the sidebar never scrolls sideways; with no machine paired nothing shows.
 //
 // Pictures of each state go to MACHINE_SIDEBAR_SHOTS when it is set (the
 // PR evidence uses ~/.raccoon/pr-evidence/pro-346/), named after the state.
@@ -45,10 +44,10 @@ const LAST_SEEN = (() => {
 })();
 
 // Runs in the page, after the stub: the two machines, their projects and sessions, and their runtimes.
-const fixture = (machines) => `(() => {
+const fixture = (paired) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   // This desktop's version, which a machine's view compares with the machine's (PRO-354).
   answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5", directEndpoints: ["ws://192.168.1.20:6768/machine/1"],
@@ -62,6 +61,8 @@ const fixture = (machines) => `(() => {
     "m-server": { state: "relay", route: { kind: "relay", endpoint: null }, since: Date.now(), rttMs: 41 },
   };
   answers.machines_connections = () => Object.entries(views).map(([machineId, state]) => ({ machineId, state }));
+  // No machine paired (PRO-360): the app is as it was before Machines.
+  if (!${paired}) { answers.machines_list = []; answers.machines_connections = () => []; }
 
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const project = (projectId, name, path) => ({ projectId, name, path, kind: "git", defaultBranch: "main", archived: false });
@@ -368,16 +369,16 @@ for (const colorScheme of ["light", "dark"]) {
   await page.close();
 }
 
-// Machines off: nothing of the machines shows.
+// No machine paired: nothing of the machines shows (PRO-360).
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1000, height: 620 }, { extra: fixture(false) });
   await sidebar(page);
   await page.waitForTimeout(500);
-  failed += report("machines off", {
+  failed += report("no machine paired", {
     "there is no Machines section": (await page.locator('[data-testid="machines-section"]').count()) === 0,
     "there are no machine rows": (await page.locator('[data-testid="machine-session-row"], [data-testid="machine-project"]').count()) === 0,
   });
-  await shoot(page, "machines-off");
+  await shoot(page, "no-machine-paired");
   await page.close();
 }
 

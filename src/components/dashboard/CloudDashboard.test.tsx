@@ -170,7 +170,9 @@ describe("a waiting cloud tab", () => {
     await poll(OTHER, [item("ws-b", OTHER, { repositories: [betaSite], runtimeActivity: pending(1) })]);
     await settle();
     expect(mocks.badge).toHaveBeenLastCalledWith(1);
-    const toast = await screen.findByRole("status");
+    const body = await screen.findByText("Landing page copy · Beta cloud. Open the session to review its pending request.", { exact: true });
+    const toast = body.closest<HTMLElement>('[role="status"]')!;
+    expect(toast?.getAttribute("role")).toBe("status");
     expect(toast.textContent).toContain("Claude needs attention");
     fireEvent.click(toast);
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`);
@@ -211,7 +213,9 @@ describe("a waiting cloud tab", () => {
     render(<Toasts />);
     await poll(ORG, [...acmeWorkspaces(1).slice(0, 1), item("ws-2", ORG, { runtimeActivity: pending(1) }), acmeWorkspaces(1)[2]]);
     await settle();
-    const toast = await screen.findByRole("status");
+    const body = await screen.findByText("Add tests · Acme cloud. Open the session to review its pending request.", { exact: true });
+    const toast = body.closest<HTMLElement>('[role="status"]')!;
+    expect(toast?.getAttribute("role")).toBe("status");
     expect(toast.textContent).toContain("Claude needs attention");
     fireEvent.click(toast);
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-2:s2`);
@@ -412,9 +416,10 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();
   const row = await screen.findByRole("row", { name: /Archived cloud work/ });
-  expect(within(row).getByRole("img", { name: "Amy" })).toBeTruthy();
+  // A cloud owner is the member's profile, named beside it (PRO-288).
+  expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
   act(() => rememberPeople([{ userId: "amy", displayName: "Amy Updated" }]));
-  expect(within(row).getByRole("img", { name: "Amy Updated" })).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "View profile: Amy Updated" })).toBeTruthy();
   expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
   fireEvent.click(row);
   expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);

@@ -56,7 +56,7 @@ function CommandBox({ command, label }: { command: string; label: string }) {
   );
 }
 
-function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
+export function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
   const Title = titleFor ? "label" : "div";
   return (
     <li className="flex gap-3">

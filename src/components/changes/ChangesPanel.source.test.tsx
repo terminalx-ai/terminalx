@@ -549,7 +549,7 @@ it("selects and restores a commit's exact range and returns to the saved workspa
 it("discards an in-flight commit response when the scope changes", async () => {
   const source = fakeSource("commit-race");
   let resolve!: (value: typeof selectedCommit[]) => void;
-  vi.mocked(source.logCommits).mockImplementation((from) => from ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
+  vi.mocked(source.logCommits).mockImplementation((from) => from === selectedCommit.sha ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   await pickCommit(/^aaaaaaa\s*A selected commit/);
   await waitFor(() => expect(resolve).toBeDefined());
@@ -643,4 +643,31 @@ it("keeps the current discard dialog and Viewed controls together in All changes
   fireEvent.click(within(dialog).getByRole("button", { name: /^Discard$/ }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("edited.ts", "merge-base", undefined));
   await screen.findByText("No file changes yet");
+});
+
+it("passes revision byte sizes and the host's open action through the real Changes panel", async () => {
+  const source = fakeSource("large-revision");
+  source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 0, deletions: 0 }]);
+  source.fileContentsAt.mockImplementation(async (path) => path === "old.ts"
+    ? { before: "<file too large to show>", after: null, beforeSize: 6 * 1024 * 1024 }
+    : { before: null, after: "small", afterSize: 5 });
+  const open = vi.fn();
+  render(<ChangesPanel source={source} onOpenFile={open} events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
+  expect(await screen.findByText("6.0 MB")).toBeTruthy();
+  expect(screen.getByTestId("changes-empty-state").textContent).toContain("6.0 MB, over the text preview limit");
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(open).toHaveBeenCalledWith("new.ts");
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("keeps missing size metadata unknown and never opens a deleted file", async () => {
+  const source = fakeSource("large-deleted");
+  source.changesBetween.mockResolvedValue([{ path: "gone.ts", status: "deleted", additions: 0, deletions: 0 }]);
+  source.fileContentsAt.mockResolvedValue({ before: "<file too large to show>", after: null });
+  render(<ChangesPanel source={source} onOpenFile={vi.fn()} events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /gone.ts/ }));
+  expect((await screen.findByTestId("changes-empty-state")).textContent).toContain("size unknown");
+  expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  expect(screen.queryByText("0 B")).toBeNull();
 });
