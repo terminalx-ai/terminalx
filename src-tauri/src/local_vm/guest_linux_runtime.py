@@ -10,22 +10,7 @@ reads it; on any refusal it is never read at all.
 """
 import base64
 
-ACCOUNT = "cua"
-
-
-def drop_to_account():
-    entry = pwd.getpwnam(ACCOUNT)
-    require(entry.pw_uid != 0 and entry.pw_dir == "/home/cua", "Dedicated nonroot cua account required")
-    os.initgroups(ACCOUNT, entry.pw_gid)
-    os.setgid(entry.pw_gid)
-    os.setuid(entry.pw_uid)
-    require(os.getuid() == os.geteuid() == entry.pw_uid and os.getgid() == os.getegid() == entry.pw_gid,
-            "Privilege drop failed")
-    try:
-        os.setuid(0)
-    except PermissionError:
-        return entry
-    raise ValueError("Privilege drop is reversible")
+ACCOUNT = OWNER
 
 
 def runtime_main(argv, stdin, execute=os.execve, drop=drop_to_account):
@@ -44,19 +29,16 @@ def runtime_main(argv, stdin, execute=os.execve, drop=drop_to_account):
     require(header.get("action") == "rpc" and set(header) == {"action", "runtimeSha256"},
             "Unknown runtime action")
     fd = open_sealed(expected)
-    entry = drop()
-    os.chdir(entry.pw_dir)
-    env = {"HOME": entry.pw_dir, "USER": ACCOUNT, "LOGNAME": ACCOUNT,
-           "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
-    # fexecve: the inode just hashed, not whatever the path names next. The
-    # runtime runs as cua, like the workers; its first act is to make itself
-    # non-dumpable (guest.rs seal_key_holder), which closes /proc/<pid>/fd/0,
-    # mem and ptrace to them. Known residual (#1000): the key is forwarded to
-    # the owner's socket under cua's own runtime directory, which a worker as
-    # cua can replace, and a worker can race that first instruction. Closing
-    # it needs the key-verifying owner under its own account.
-    execute(fd, [str(SEALED), "local-vm-rpc", "-"], env)
-    raise ValueError("Sealed runtime did not execute")
+    try:
+        entry = drop()
+        os.chdir(entry.pw_dir)
+        env = {"HOME": entry.pw_dir, "USER": ACCOUNT, "LOGNAME": ACCOUNT,
+               "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+        # Execute the same verified inode after the irreversible owner privilege drop.
+        execute(fd, [str(SEALED), "local-vm-rpc", "-"], env)
+        raise ValueError("Sealed runtime did not execute")
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
