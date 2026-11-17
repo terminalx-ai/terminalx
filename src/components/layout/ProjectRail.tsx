@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { usePrefs } from "@/lib/prefs";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
-import type { ShortcutId } from "@/lib/shortcuts";
+import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
@@ -94,6 +94,7 @@ type Destination = { id: string; label: string; shortcut: ShortcutId; kbd?: bool
 /** The destinations as named rows, inset and rounded, each with its count or dot, then its shortcut, on the right. */
 function DestinationList({ active, destinations }: { active: string | null; destinations: Destination[] }) {
   const keycaps = useShortcutKeycaps();
+  const keymap = useKeymap();
   return (
     <div className="flex flex-col gap-0.5" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
       {destinations.map((destination) => {
@@ -106,7 +107,7 @@ function DestinationList({ active, destinations }: { active: string | null; dest
             variant="ghost"
             className={cn("h-8 justify-start gap-2.5 rounded-md px-2.5 text-[13px] font-normal", pressed ? "bg-selected text-foreground" : "text-muted-foreground")}
             aria-label={status ? `${destination.label}, ${status}` : destination.label}
-            aria-keyshortcuts={keys.length ? keys.join("+") : undefined}
+            aria-keyshortcuts={keymap[destination.shortcut].map((binding) => ariaKeyShortcut(binding)).filter(Boolean).join(" ") || undefined}
             aria-pressed={pressed}
             title={status}
             onClick={destination.onOpen}
