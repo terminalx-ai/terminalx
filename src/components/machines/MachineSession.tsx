@@ -19,6 +19,12 @@ import { selectCloudWorkspace } from "@/lib/sessions";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { machineSectionKey, parseMachineKey } from "@/types/target";
 import type { MachineConnectionState } from "@/types/machines";
+import type { MachineSetupRun } from "@terminalx/portable/workspace";
+import { setupSettling, type MachineScriptRun, type MachineSessionScripts } from "@/lib/machineSessionRuns";
+import { MachineRunRestartOffer, machineRunsByAction, runStateText, showMachineRun, startMachineAction } from "@/components/session/RunMenu";
+import { Dot, RUN_ACTIONS_PLACE, tabClass } from "@/components/terminal/TerminalDock";
+import { SETUP_SCRIPT_PLACE } from "@/components/terminal/WorkspaceSetupPane";
+import { RepositoryIcon } from "@/components/ui/IconPicker";
 import { MachineChip, MachineLocation, tryingText, useTick } from "./connectionStatus";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 import { MachineMessage } from "./MachineMessage";
@@ -132,6 +138,8 @@ export function MachineSessionStrips({
           {closeError}
         </p>
       )}
+      {/* Under the header, as a local session's: an action already running on the machine, with the offer to restart it there. */}
+      <MachineRunRestartOffer cloud={cloud} />
       <MachineLocation machine={machine.record} name={machine.name} state={machine.state} />
       <MachineHiddenFeatures machineId={machine.machineId} view={view} />
       <MachineConnectionNotice machineId={machine.machineId} name={machine.name} state={machine.state} />
@@ -226,24 +234,71 @@ export function MachineConnectionNotice({ machineId, name, state }: { machineId:
   return null;
 }
 
+
 const MIN_HEIGHT = 120;
 const MAX_HEIGHT = 800;
 const clampHeight = (h: number) => Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, h));
 
+const SETUP_STATUS: Record<MachineSetupRun["status"], string> = {
+  pending: "Setup queued",
+  running: "Setup running",
+  stopping: "Stopping setup…",
+  stopped: "Setup stopped",
+  succeeded: "Setup succeeded",
+  failed: "Setup failed",
+};
+
+/** "✓ Last setup finished · exit 0", "✗ Last setup failed · exit 7": the machine reports no timings. */
+export function machineSetupOutcome(setup: MachineSetupRun): string {
+  const exit = setup.exitCode == null ? "" : ` · exit ${setup.exitCode}`;
+  switch (setup.status) {
+    case "succeeded": return `✓ Last setup finished${exit}`;
+    case "failed": return `✗ Last setup failed${exit}`;
+    case "stopped": return `Last setup stopped${exit}`;
+    case "running": return "Setup running…";
+    default: return SETUP_STATUS[setup.status];
+  }
+}
+
+function setupMark(setup: MachineSetupRun | null | undefined) {
+  if (!setup) return { label: "Setup not run", className: "ring-1 ring-muted-foreground/60 ring-inset" };
+  const className = setup.status === "failed" ? "bg-destructive" : setup.status === "succeeded" ? "bg-add" : setup.status === "stopped" ? "bg-muted-foreground" : "bg-warning animate-pulse";
+  return { label: SETUP_STATUS[setup.status], className };
+}
+
+/** Running when any action runs on the machine; else the latest exit; hollow when nothing has run. */
+function runMark(runs: readonly MachineScriptRun[]) {
+  if (runs.some((run) => run.state === "running")) return { label: "Running", className: "bg-add" };
+  const last = runs.at(-1);
+  if (!last) return { label: "Not running", className: "ring-1 ring-muted-foreground/60 ring-inset" };
+  return { label: runStateText(last) ?? "Exited", className: last.exitCode ? "bg-destructive" : "bg-muted-foreground" };
+}
+
+/** Which of the dock's views shows: a fixed tab the person picked, else what the selected terminal is. */
+type DockView = "setup" | "run" | "terminal";
+
 /**
- * The right panel's terminals for a machine session (21.08): shells on the
- * machine in the session's folder, named after the machine ("Mac mini
- * terminal 1"), one shown at a time. They are the machine's: they keep
- * running when this Mac closes the view, and every paired computer lists
- * them.
+ * The right panel's dock for a machine session (21.08): Setup and Run, then
+ * shells on the machine in the session's folder, named after the machine
+ * ("Mac mini terminal 1"), one shown at a time. All of it is the machine's:
+ * Setup and Run read and start the session's scripts there (`scripts`,
+ * `machine/7`), each run's output is its terminal on the machine, and the
+ * shells keep running when this Mac closes the view.
  */
 export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
   const machine = cloud.machine!;
+  const scripts = cloud.scripts;
   const prefs = usePrefs();
   const open = prefs.panelTerminalOpen;
   const { selected } = useCloudTerminals(cloud.workspaceKey);
   const terminals = cloud.terminals;
-  const current: CloudTerminal | undefined = terminals.find((terminal) => terminal.id === selected) ?? terminals.at(-1);
+  // A script run is shown under Setup or Run, not as a numbered shell.
+  const shells = terminals.filter((terminal) => !terminal.run);
+  const selectedTerminal = terminals.find((terminal) => terminal.id === selected);
+  const [picked, setPicked] = useState<DockView | null>(null);
+  const derived: DockView = selectedTerminal?.run ? (selectedTerminal.run.kind === "setup" ? "setup" : "run") : selectedTerminal || shells.length ? "terminal" : "setup";
+  const view: DockView = scripts ? (picked ?? derived) : "terminal";
+  const currentShell: CloudTerminal | undefined = (selectedTerminal && !selectedTerminal.run ? selectedTerminal : undefined) ?? shells.at(-1);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [height, setHeight] = useState(() => clampHeight(prefs.panelTerminalHeight));
@@ -257,22 +312,30 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
     setPrefs({ panelTerminalOpen: true });
     try {
       await cloud.openTerminal();
+      setPicked(null);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setStarting(false);
     }
   };
+  const show = (tab: DockView) => {
+    setPicked(tab);
+    setPrefs({ panelTerminalOpen: true });
+  };
   const toggle = () => {
     if (open) return setPrefs({ panelTerminalOpen: false });
-    if (!terminals.length && cloud.connected) return void add();
+    if (!shells.length && !scripts?.info?.setup && !scripts?.runs.length && cloud.connected && cloud.manage) return void add();
     setPrefs({ panelTerminalOpen: true });
   };
   const closeOne = (terminal: CloudTerminal) => void closeCloudTerminal(cloud.workspaceKey, cloud.client, terminal.id).catch((e: unknown) => setError(errorMessage(e)));
-  // A terminal another surface opened (the "+" menu, a shortcut) shows here, in the open dock.
+  // A terminal another surface opened or showed (the "+" menu, the Run menu, a shortcut) shows here, in the open dock.
   const shown = useRef(selected);
   useLayoutEffect(() => {
-    if (selected && selected !== shown.current && terminals.some((terminal) => terminal.id === selected)) setPrefs({ panelTerminalOpen: true });
+    if (selected && selected !== shown.current && terminals.some((terminal) => terminal.id === selected)) {
+      setPicked(null);
+      setPrefs({ panelTerminalOpen: true });
+    }
     shown.current = selected;
   }, [selected, terminals]);
   useEffect(() => setError(null), [cloud.connected]);
@@ -291,6 +354,8 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
     setPrefs({ panelTerminalHeight: height });
   };
 
+  const setupDot = setupMark(scripts?.info?.setup);
+  const runDot = runMark(scripts?.runs ?? []);
   return (
     <section aria-label="Terminal" data-testid="machine-terminal-dock" className="relative flex shrink-0 flex-col border-t border-hairline bg-background" style={open ? { height, maxHeight: "75%" } : undefined}>
       {open && (
@@ -309,13 +374,23 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
           {open ? <ChevronDown /> : <ChevronUp />}
         </Button>
         <div role="tablist" aria-label="Terminals" className="flex h-full min-w-0 flex-1 items-stretch gap-3 overflow-x-auto pr-2">
-          {!terminals.length && (
-            <button type="button" onClick={toggle} disabled={!cloud.connected} className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">
+          {scripts && (
+            <>
+              <button type="button" role="tab" aria-selected={open && view === "setup"} title={setupDot.label} onClick={() => show("setup")} className={tabClass(open && view === "setup")}>
+                Setup<Dot {...setupDot} />
+              </button>
+              <button type="button" role="tab" aria-selected={open && view === "run"} title={runDot.label} onClick={() => show("run")} className={tabClass(open && view === "run")}>
+                Run<Dot {...runDot} />
+              </button>
+            </>
+          )}
+          {!shells.length && (
+            <button type="button" onClick={() => void add()} disabled={!cloud.connected || !cloud.manage} className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">
               {machine.name} terminal
             </button>
           )}
-          {terminals.map((terminal) => {
-            const on = open && terminal.id === current?.id;
+          {shells.map((terminal) => {
+            const on = open && view === "terminal" && terminal.id === currentShell?.id;
             return (
               <div key={terminal.id} className="group relative flex shrink-0 items-stretch">
                 <button
@@ -324,9 +399,9 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
                   aria-selected={on}
                   onClick={() => {
                     selectCloudTerminal(cloud.workspaceKey, terminal.id);
-                    setPrefs({ panelTerminalOpen: true });
+                    show("terminal");
                   }}
-                  className={cn("border-b text-xs", on ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
+                  className={tabClass(on)}
                 >
                   {label(terminal)}
                 </button>
@@ -357,21 +432,179 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
               {error}
             </p>
           )}
-          {!cloud.connected && !terminals.length && <p className="px-3 py-2 text-xs text-muted-foreground">Terminals open once {machine.name} is connected.</p>}
-          {current && cloud.client && (
-            <CloudTerminalPane
-              key={current.id}
-              workspace={cloud.workspaceKey}
-              terminal={current}
-              client={cloud.client}
-              connected={cloud.connected}
-              manage={cloud.manage}
-              mayControl={cloud.mayControlTerminals}
-              base={cloud.terminalBase}
-            />
+          {view === "setup" && scripts && <MachineSetupPane cloud={cloud} scripts={scripts} />}
+          {view === "run" && scripts && <MachineRunPane cloud={cloud} scripts={scripts} selected={selectedTerminal?.run?.kind === "action" ? selectedTerminal.id : null} />}
+          {view === "terminal" && (
+            <>
+              {!cloud.connected && !shells.length && <p className="px-3 py-2 text-xs text-muted-foreground">Terminals open once {machine.name} is connected.</p>}
+              {currentShell && <MachinePane cloud={cloud} terminal={currentShell} />}
+            </>
           )}
         </div>
       )}
     </section>
   );
+}
+
+/** One of the session's terminals on the machine, streamed into this window. */
+function MachinePane({ cloud, terminal }: { cloud: CloudSessionModel; terminal: CloudTerminal }) {
+  if (!cloud.client) return null;
+  return (
+    <CloudTerminalPane
+      key={terminal.id}
+      workspace={cloud.workspaceKey}
+      terminal={terminal}
+      client={cloud.client}
+      connected={cloud.connected}
+      manage={cloud.manage}
+      mayControl={cloud.mayControlTerminals}
+      base={cloud.terminalBase}
+    />
+  );
+}
+
+const PaneLabel = ({ children }: { children: ReactNode }) => <h3 className="text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase">{children}</h3>;
+
+/** Before the first read of the machine's scripts: why there is nothing yet. */
+function ScriptsUnread({ scripts, name }: { scripts: MachineSessionScripts; name: string }) {
+  if (scripts.error) return <p role="alert" className="text-xs text-destructive">{scripts.error}</p>;
+  return <p className="text-xs text-muted-foreground">{scripts.blocked ?? `Reading ${name}'s scripts…`}</p>;
+}
+
+/**
+ * The dock's Setup tab in a machine session: the setup script saved on the
+ * machine, its latest attempt there, Stop and Rerun (`scripts.stopSetup`,
+ * `scripts.rerunSetup`), and that attempt's terminal on the machine.
+ */
+export function MachineSetupPane({ cloud, scripts }: { cloud: CloudSessionModel; scripts: MachineSessionScripts }) {
+  const name = cloud.machine!.name;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const info = scripts.info;
+  const setup = info?.setup ?? null;
+  const text = setup?.command || info?.setupScript?.trim() || "";
+  const going = setupSettling(setup);
+  const terminal = scripts.setupTerminalId ? cloud.terminals.find((item) => item.id === scripts.setupTerminalId) : undefined;
+  const act = async (step: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await step();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!info) {
+    return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="setup-pane">
+      <PaneLabel>After setup</PaneLabel>
+      <ScriptsUnread scripts={scripts} name={name} />
+    </div>;
+  }
+  if (!setup && !text) {
+    return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="setup-empty">
+      <PaneLabel>After setup</PaneLabel>
+      <p className="text-xs text-muted-foreground">No setup script on {name} yet. Add one to this project on {name}, in <span className="text-foreground">{SETUP_SCRIPT_PLACE}</span>: it runs once when a workspace is created there.</p>
+    </div>;
+  }
+  return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="setup-pane">
+    <div className="flex shrink-0 items-center gap-2">
+      <div className="flex-1"><PaneLabel>After setup on {name}</PaneLabel></div>
+      {going && setup && (
+        <Button size="xs" variant="outline" disabled={busy || setup.status === "stopping" || !!scripts.blocked} title={scripts.blocked ?? undefined} onClick={() => void act(() => scripts.stopSetup())}>
+          {setup.status === "stopping" ? "Stopping…" : "Stop"}
+        </Button>
+      )}
+      {info.setupApplies && text && (
+        <Button size="xs" variant="outline" disabled={busy || going || !!scripts.blocked} title={scripts.blocked ?? undefined} onClick={() => void act(() => scripts.rerunSetup())}>
+          {setup ? "Rerun" : "Run setup"}
+        </Button>
+      )}
+    </div>
+    {text && <pre data-testid="setup-script" className="max-h-32 shrink-0 overflow-auto rounded-md border border-hairline bg-veil-card px-3 py-2 font-mono text-xs leading-5 whitespace-pre text-foreground">{text}</pre>}
+    {setup ? (
+      <p role="status" data-testid="setup-outcome" className={cn("shrink-0 text-xs", setup.status === "succeeded" ? "text-add" : setup.status === "failed" ? "text-destructive" : "text-muted-foreground")}>{machineSetupOutcome(setup)}</p>
+    ) : (
+      <p role="status" data-testid="setup-outcome" className="shrink-0 text-xs text-muted-foreground">
+        {info.setupApplies ? "Not run in this workspace yet." : "Setup runs in a workspace's own worktree; this session works in the project's folder."}
+      </p>
+    )}
+    {(error || setup?.error || scripts.error) && <p role="alert" className="shrink-0 text-xs text-destructive">{error ?? setup?.error ?? scripts.error}</p>}
+    {setup && (
+      <>
+        <PaneLabel>Output</PaneLabel>
+        <div className="relative flex min-h-32 flex-1 flex-col overflow-hidden rounded-md border border-hairline" data-testid="setup-output">
+          {terminal ? <MachinePane cloud={cloud} terminal={terminal} /> : <p className="px-3 py-2 text-xs text-muted-foreground">{name} no longer keeps this setup's output.</p>}
+        </div>
+      </>
+    )}
+  </div>;
+}
+
+/**
+ * The dock's Run tab in a machine session: the actions saved in the machine's
+ * project, each with its latest run there. Run and Restart go through the Run
+ * menu's `startMachineAction` (`scripts.run` on the machine); Show brings a
+ * run's terminal forward, and the shown run's output is under the list.
+ */
+export function MachineRunPane({ cloud, scripts, selected }: { cloud: CloudSessionModel; scripts: MachineSessionScripts; selected: string | null }) {
+  const name = cloud.machine!.name;
+  const place = { sessionKey: cloud.session.id, workspaceKey: cloud.workspaceKey, name, scripts };
+  const runs = machineRunsByAction(scripts);
+  const actions = scripts.actions;
+  // The run the person showed; else one still running; else the latest.
+  const shownRun = scripts.runs.find((run) => run.terminalId === selected) ?? scripts.latestRuns.filter((run) => run.state === "running").at(-1) ?? scripts.runs.at(-1);
+  const terminal = shownRun ? cloud.terminals.find((item) => item.id === shownRun.terminalId) : undefined;
+
+  if (!scripts.info && !actions.length) {
+    return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="run-pane">
+      <PaneLabel>Run</PaneLabel>
+      <ScriptsUnread scripts={scripts} name={name} />
+    </div>;
+  }
+  if (!actions.length) {
+    return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="run-empty">
+      <PaneLabel>Run</PaneLabel>
+      <p className="text-xs text-muted-foreground">
+        {scripts.info?.available === false
+          ? "This session's worktree was removed; nothing runs in it."
+          : <>No run script on {name} yet. Add one to this project on {name}, in <span className="text-foreground">{RUN_ACTIONS_PLACE}</span>: it starts the project's dev server or app there, and ⌘R runs it.</>}
+      </p>
+    </div>;
+  }
+  return <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5" data-testid="run-pane">
+    <PaneLabel>Run on {name}</PaneLabel>
+    {scripts.blocked && <p className="text-xs text-muted-foreground" data-testid="run-blocked">{scripts.blocked}</p>}
+    {scripts.error && <p role="alert" className="text-xs text-destructive">{scripts.error}</p>}
+    <ul className="flex shrink-0 flex-col gap-1.5">
+      {actions.map((action) => {
+        const run = runs.get(action.id);
+        const running = run?.state === "running";
+        const restart = running && !action.concurrent;
+        const state = runStateText(run);
+        return <li key={action.id} data-action-id={action.id} className="flex min-w-0 items-center gap-2 rounded-md border border-hairline bg-veil-card px-2.5 py-1.5">
+          <RepositoryIcon value={action.icon} />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate text-xs text-foreground">{action.name}</span>
+            <code className="truncate font-mono text-[11px] text-muted-foreground" title={action.command}>{action.command}</code>
+          </div>
+          {state && <span className={cn("shrink-0 text-[11px]", running ? "text-add" : run?.exitCode ? "text-destructive" : "text-faint")}>{state}</span>}
+          {run && <Button size="xs" variant="ghost" onClick={() => showMachineRun(cloud.workspaceKey, run.ptyId)}>Show</Button>}
+          <Button size="xs" variant="outline" disabled={!!scripts.blocked} title={scripts.blocked ?? undefined} onClick={() => void startMachineAction(place, action, { restart })}>
+            {restart ? "Restart" : "Run"}
+          </Button>
+        </li>;
+      })}
+    </ul>
+    {shownRun && (
+      <>
+        <PaneLabel>Output · {shownRun.name}</PaneLabel>
+        <div className="relative flex min-h-32 flex-1 flex-col overflow-hidden rounded-md border border-hairline" data-testid="run-output" data-terminal-id={shownRun.terminalId}>
+          {terminal && <MachinePane cloud={cloud} terminal={terminal} />}
+        </div>
+      </>
+    )}
+  </div>;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, Globe, Loader2, Play, RotateCw, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,11 @@ import { openBrowserTab } from "@/lib/browser";
 import { selectSessionTab } from "@/lib/terminal";
 import { showError } from "@/lib/errorToasts";
 import { cn } from "@/lib/cn";
+import { cloudTerminalsOf, selectCloudTerminal } from "@/lib/cloudTerminals";
+import { setPrefs } from "@/lib/prefs";
+import type { CloudSessionModel } from "@/lib/cloudSession";
+import type { MachineScriptRun, MachineSessionScripts } from "@/lib/machineSessionRuns";
+import type { MachineAction } from "@terminalx/portable/workspace";
 import type { Project, SessionEntry } from "@/types/session";
 
 /**
@@ -24,7 +29,11 @@ import type { Project, SessionEntry } from "@/types/session";
  * non-concurrent action that is already running is not started twice: its
  * tab is shown, with an offer to restart it (`RunRestartOffer`).
  *
- * Local sessions only: a cloud session's actions and ports are its runtime's.
+ * A machine session (PRO-403) has its own: `MachineRunMenu` and
+ * `MachineRunRestartOffer` list the actions saved in the machine's project
+ * and start, restart and show them through the session model's `scripts`
+ * (`machine.runAction` on the machine). Nothing runs on this computer; a
+ * run's output is the machine's terminal, under the dock's Run tab.
  */
 
 type Place = Pick<SessionEntry, "id" | "cwd">;
@@ -148,7 +157,7 @@ export function useActionRuns(sessionId: string, enabled: boolean): Map<string, 
 const EMPTY_RUNS = new Map<string, ActionRun>();
 
 /** "Running", "Exited 0", "Exited 1"; "Exited" when a signal ended it or its code was not heard. */
-export function runStateText(run: ActionRun | undefined): string | null {
+export function runStateText(run: Pick<ActionRun, "state" | "exitCode"> | undefined): string | null {
   if (!run) return null;
   if (run.state === "running") return "Running";
   return run.exitCode == null ? "Exited" : `Exited ${run.exitCode}`;
@@ -161,7 +170,7 @@ export function offersRunMenu(session: SessionEntry, project: Project | undefine
 
 // ---------------------------------------------------------------- the header controls
 
-function RunState({ run }: { run: ActionRun | undefined }) {
+function RunState({ run }: { run: Pick<ActionRun, "state" | "exitCode"> | undefined }) {
   const text = runStateText(run);
   if (!text || !run) return null;
   return (
@@ -300,6 +309,148 @@ export function RunRestartOffer({ session }: { session: Place }) {
         Restart
       </Button>
       <Button size="xs" variant="ghost" aria-label="Dismiss" onClick={() => dismissRestartOffer(session.id)}>
+        <X className="size-3" />
+      </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- a machine session's (PRO-403)
+
+/** What a machine session's Run controls need from its model. */
+type MachinePlace = { sessionKey: string; workspaceKey: string; name: string; scripts: MachineSessionScripts };
+
+function useMachinePlace(cloud: CloudSessionModel): MachinePlace | null {
+  const sessionKey = cloud.session.id;
+  const { workspaceKey, scripts } = cloud;
+  const name = cloud.machine?.name;
+  return useMemo(() => (name && scripts ? { sessionKey, workspaceKey, name, scripts } : null), [sessionKey, workspaceKey, name, scripts]);
+}
+
+/** The machine project's Run menu applies: the machine serves `machine/7` and has an action saved for this session's worktree. */
+export function offersMachineRunMenu(cloud: CloudSessionModel): boolean {
+  return !!cloud.machine && !!cloud.scripts?.served && cloud.scripts.actions.length > 0;
+}
+
+/** The latest run of each action on the machine, by action id. */
+export function machineRunsByAction(scripts: MachineSessionScripts): Map<string, MachineScriptRun> {
+  return new Map(scripts.latestRuns.map((run) => [run.actionId, run]));
+}
+
+/**
+ * Show a run's terminal of the machine in the side panel's dock, under Run:
+ * the dock follows the selected terminal of the connection's store.
+ */
+export function showMachineRun(workspaceKey: string, ptyId: string) {
+  const terminal = cloudTerminalsOf(workspaceKey).terminals.find((item) => item.ptyId === ptyId);
+  if (!terminal) return;
+  setPrefs({ panelOpen: true, panelTerminalOpen: true });
+  selectCloudTerminal(workspaceKey, terminal.id);
+}
+
+/**
+ * Run a saved action of the machine's project in a terminal of the session on
+ * the machine (`scripts.run`, `machine.runAction`) and show that terminal. A
+ * non-concurrent action already running there is shown instead, with the
+ * offer to restart it; `restart` has the machine replace that run.
+ */
+export async function startMachineAction(place: MachinePlace, action: MachineAction, options: { restart?: boolean } = {}): Promise<void> {
+  dismissRestartOffer(place.sessionKey);
+  try {
+    const outcome = await place.scripts.run(action.id, { restart: options.restart });
+    showMachineRun(place.workspaceKey, outcome.run.ptyId);
+    if (!outcome.started) setOffer(place.sessionKey, { sessionId: place.sessionKey, action, paneId: outcome.run.ptyId });
+  } catch (cause) {
+    showError(`Couldn't run ${action.name} on ${place.name}`, cause, { key: `action:${place.sessionKey}:${action.id}` });
+  }
+}
+
+/** The header's Run menu in a machine session: the machine project's actions, each with its latest run there; ⌘R as in a local session. */
+export function MachineRunMenu({ cloud, className }: { cloud: CloudSessionModel; className?: string }) {
+  const place = useMachinePlace(cloud);
+  const actions = place?.scripts.actions ?? [];
+  const blocked = place?.scripts.blocked ?? null;
+  const runs = place ? machineRunsByAction(place.scripts) : EMPTY_MACHINE_RUNS;
+  const [open, setOpen] = useState(false);
+  const keys = useShortcutKeys("session.runAction");
+  const first = actions[0];
+
+  const onRunKey = useCallback(() => {
+    if (!first || !place) return false;
+    if (blocked) {
+      showError(`Couldn't run ${first.name}`, blocked, { key: `action:${place.sessionKey}:${first.id}` });
+      return;
+    }
+    if (actions.length === 1) void startMachineAction(place, first);
+    else setOpen(true);
+  }, [actions.length, first, place, blocked]);
+  useShortcut("session.runAction", onRunKey);
+
+  if (!place || !actions.length) return null;
+  const runningCount = actions.filter((action) => runs.get(action.id)?.state === "running").length;
+  return (
+    <div className={cn("flex items-stretch", className)} data-testid="run-controls">
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <WithTooltip label={`Run an action on ${place.name}`} shortcut="session.runAction">
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className="gap-1.5 px-2.5" aria-label={runningCount ? `Run, ${runningCount} running` : "Run"} data-testid="run-menu-trigger">
+              <Play className="size-4" />
+              <span className="@max-[560px]/session-header:hidden">Run</span>
+              {runningCount > 0 && <span aria-hidden className="size-1.5 rounded-full bg-success" data-testid="run-menu-running" />}
+              <ChevronDown className="size-3 text-faint" />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="end" className="min-w-56 max-w-80" aria-label="Run" data-testid="run-menu">
+          <DropdownMenuLabel className={cn(actions.length > 1 && "flex items-center")}>
+            Run on {place.name}
+            {actions.length > 1 && <span className="ml-auto flex" data-testid="run-menu-picker-key"><MenuShortcut keys={keys} /></span>}
+          </DropdownMenuLabel>
+          {blocked && <p className="px-2 pb-1 text-[11px] text-muted-foreground" data-testid="run-menu-blocked">{blocked}</p>}
+          {actions.map((action, index) => {
+            const run = runs.get(action.id);
+            return (
+              <DropdownMenuItem key={action.id} disabled={!!blocked} onSelect={() => void startMachineAction(place, action)} data-action-id={action.id}>
+                <RepositoryIcon value={action.icon} />
+                <span className="min-w-0 truncate" title={action.command}>{action.name}</span>
+                <RunState run={run} />
+                {index === 0 && actions.length === 1 && !run && <MenuShortcut keys={keys} />}
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+const EMPTY_MACHINE_RUNS = new Map<string, MachineScriptRun>();
+
+/** Under a machine session's header: an action already running on the machine had its terminal shown; offer to restart it there. */
+export function MachineRunRestartOffer({ cloud }: { cloud: CloudSessionModel }) {
+  const place = useMachinePlace(cloud);
+  const offer = useRestartOffer(cloud.session.id);
+  const [busy, setBusy] = useState(false);
+  if (!offer || !place) return null;
+  const blocked = place.scripts.blocked;
+  return (
+    <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-xs" role="status" data-testid="run-restart-offer">
+      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+        <span className="text-foreground">{offer.action.name}</span> is already running on {place.name}; its terminal is shown.
+      </span>
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={busy || !!blocked}
+        title={blocked ?? undefined}
+        onClick={() => {
+          setBusy(true);
+          void startMachineAction(place, offer.action, { restart: true }).finally(() => setBusy(false));
+        }}
+      >
+        {busy ? <Loader2 className="size-3 animate-spin" /> : <RotateCw className="size-3" />}
+        Restart
+      </Button>
+      <Button size="xs" variant="ghost" aria-label="Dismiss" onClick={() => dismissRestartOffer(cloud.session.id)}>
         <X className="size-3" />
       </Button>
     </div>

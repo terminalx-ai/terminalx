@@ -23,11 +23,12 @@ const MAX_HEIGHT = 800;
 const clampHeight = (h: number) => Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, h));
 
 /** Where the project's run actions are saved, for the Run tab's empty state. */
-const RUN_ACTIONS_PLACE = "Settings → Projects → Actions";
+export const RUN_ACTIONS_PLACE = "Settings → Projects → Actions";
 
-const tabClass = (selected: boolean) => cn("flex shrink-0 items-center border-b text-xs", selected ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground");
+export const tabClass = (selected: boolean) => cn("flex shrink-0 items-center border-b text-xs", selected ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground");
 
-function Dot({ label, className }: { label: string; className: string }) {
+/** A tab's state mark (Setup, Run), shared with a machine session's dock. */
+export function Dot({ label, className }: { label: string; className: string }) {
   return <span role="img" aria-label={label} title={label} className={cn("ml-1.5 inline-block size-1.5 shrink-0 rounded-full", className)} />;
 }
 
