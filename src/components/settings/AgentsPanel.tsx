@@ -254,13 +254,18 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     const after = await (refresh?.() as Promise<AgentReadiness | null> | undefined);
     const name = subscriptionName(harness.id, after ?? null);
     const signedIn = after?.state === "ready";
+    const stale = await tabsKeepingOlderLogin(harness.id);
     showAgentLoginNotice({
-      // The design's Removed toast is the change alone, with no restart offer (PRO-377).
+      // Explain retained logins without offering to restart tabs after removal.
       harness: harness.id, kind: "removed", stale: [],
       title: signedIn ? `API key removed · ${harness.name} uses ${subscription.again} again` : `API key removed · ${harness.name} needs a sign-in`,
-      body: signedIn
+      body: [signedIn
         ? `Deleted from the Keychain. New tabs sign in with ${[name, after?.account].filter(Boolean).length === 2 ? `${name} (${after?.account})` : name ?? subscription.again}.`
         : `Deleted from the Keychain. Sign in to ${harness.name} below to start new tabs.`,
+        keepLine(stale.length),
+        stale.length ? "Usage in these tabs may still be billed to their current login." : "",
+        "This does not revoke the key with your provider.",
+      ].filter(Boolean).join(" "),
     });
   };
   const choose = async (mode: "subscription" | "api_key") => {
