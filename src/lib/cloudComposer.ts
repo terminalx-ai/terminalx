@@ -254,7 +254,7 @@ export async function uploadMachineFiles(client: WorkspaceRpcClient, where: { se
         if (last) break;
         offset = next;
       }
-    } else if (file.data) {
+    } else if (file.data !== undefined) {
       const parts = Math.max(1, Math.ceil(file.data.length / PART_CHARS));
       for (let part = 0; part < parts; part++) {
         await send((part * PART_CHARS * 3) / 4, file.data.slice(part * PART_CHARS, (part + 1) * PART_CHARS), part === parts - 1);
