@@ -165,10 +165,12 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
       : source === "repositoryShared" ? null : "user";
   const [draft, setDraft] = useState(value);
   const [draftTimeout, setDraftTimeout] = useState(timeout);
+  const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const dirty = draft !== value || (kind === "archive" && draftTimeout !== timeout);
+  // A resolved-value change is not itself an edit (for example removing an override).
+  const dirty = edited && (draft !== value || (kind === "archive" && draftTimeout !== timeout));
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   useSettingsLeaveGuard(dirtyRef.current || busy);
@@ -176,7 +178,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
   useEffect(() => {
     // Follow the resolved value until the person starts editing.
     if (!dirtyRef.current) { setDraft(value); setDraftTimeout(timeout); }
-  }, [value, timeout, source]);
+  }, [value, timeout, source, edited]);
   const save = async ({ reset = false, script = draft, minutes = draftTimeout }: { reset?: boolean; script?: string; minutes?: number } = {}) => {
     if (saving.current) return;
     saving.current = true;
@@ -195,8 +197,8 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
         if (next.archiveTimeoutMinutes == null) delete next.archiveTimeoutMinutes;
         await updateProject(project.path, { scripts: next });
       }
-      dirtyRef.current = false;
       await reload();
+      setEdited(false);
       setMessage(reset ? "Local override removed." : `${kind === "setup" ? "Setup" : "Archive"} script saved.`);
     } catch (cause) { setError(errorMessage(cause)); }
     finally { saving.current = false; setBusy(false); }
@@ -216,7 +218,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
         {kind === "setup" ? <EnvironmentInfo environmentId={environmentId} /> : <label className="flex shrink-0 items-center gap-2 text-xs text-faint" title="If it fails or times out, TerminalX asks before removing the worktree.">timeout
           <select aria-label="Archive timeout" disabled={busy || timeoutLocked} value={draftTimeout} onChange={(event) => {
             const minutes = Number(event.target.value);
-            setDraftTimeout(minutes); setMessage(null);
+            setEdited(true); setDraftTimeout(minutes); setMessage(null);
             void save({ minutes });
           }}
             className="h-6 rounded-md border border-hairline-strong bg-transparent px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60">
@@ -226,7 +228,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
       </CardHeader>
       <div onKeyDown={(event) => saveKey(event, saveIfChanged)}>
         <ScriptEditor label={label} value={draft} readOnly={locked} disabled={busy} onBlur={saveIfChanged}
-          placeholder={kind === "setup" ? "pnpm install" : "docker compose down"} onChange={(next) => { setDraft(next); setMessage(null); }} />
+          placeholder={kind === "setup" ? "pnpm install" : "docker compose down"} onChange={(next) => { setEdited(true); setDraft(next); setMessage(null); }} />
       </div>
     </div>
     {(note || kind === "setup") && <div className="flex flex-wrap items-center gap-x-3 gap-y-2">

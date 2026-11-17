@@ -39,6 +39,13 @@ beforeEach(() => {
 });
 
 it("shows the page's heading and saves each script on this computer as it is left, with the archive timeout", async () => {
+  state.update.mockImplementation(async (_path, { scripts }) => {
+    state.resolve.mockResolvedValue(resolved({
+      setupScript: { value: scripts.setup, source: "user" },
+      archiveScript: { value: scripts.archive, source: "user" },
+      archiveTimeoutMinutes: { value: scripts.archiveTimeoutMinutes ?? 5, source: "user" },
+    }));
+  });
   render(<RepositoryScriptsTab projectPath="/a" />);
   expect(screen.getByRole("heading", { name: "Scripts" })).toBeTruthy();
   expect(screen.getByText("Commands that run when a workspace is set up, run or removed.")).toBeTruthy();
@@ -277,4 +284,56 @@ it("keeps Settings and the draft open after a failed save, with an explicit retr
   await screen.findByText("Setup script saved.");
   fireEvent.click(button("Back to previous page"));
   expect(button("Reopen Settings")).toBeTruthy();
+});
+
+
+it.each((["setup", "archive"] as const).flatMap((kind) =>
+  [false, true].map((edited) => ({ kind, edited })),
+))("shows the inherited $kind script after removing its local override (edited: $edited) and lets Settings close", async ({ kind, edited }) => {
+  const key = kind === "setup" ? "setupScript" : "archiveScript";
+  const label = kind === "setup" ? "Setup script" : "Archive script";
+  let removed = false;
+  state.resolve.mockImplementation(async () => resolved({
+    [key]: { value: removed ? "echo committed" : "echo local", source: removed ? "repositoryShared" : "repositoryLocal" },
+    archiveTimeoutMinutes: { value: removed ? 10 : 2, source: removed ? "repositoryShared" : "repositoryLocal" },
+  }));
+  state.write.mockImplementation(async (_path, _layer, writtenKey, value) => {
+    if (writtenKey === key && value === null) removed = true;
+  });
+  render(<SettingsHarness />);
+  await waitFor(() => expect(textarea(label).value).toBe("echo local"));
+  // Removing an override also discards any draft in that override, after the write succeeds.
+  if (edited) fireEvent.change(textarea(label), { target: { value: "echo unsaved local" } });
+  fireEvent.click(button("Remove local override"));
+  await screen.findByText("Local override removed.");
+  expect(state.write).toHaveBeenCalledWith("/a", "repositoryLocal", key, null);
+  await waitFor(() => expect(textarea(label).value).toBe("echo committed"));
+  expect(textarea(label).readOnly).toBe(true);
+  expect(screen.queryByRole("button", { name: `Save ${kind} script` })).toBeNull();
+  if (kind === "archive") {
+    expect(state.write).toHaveBeenCalledWith("/a", "repositoryLocal", "archiveTimeoutMinutes", null);
+    expect((screen.getByLabelText("Archive timeout") as HTMLSelectElement).value).toBe("10");
+  }
+  act(() => textarea(label).focus());
+  fireEvent.keyDown(textarea(label), { key: "Escape" });
+  expect(button("Reopen Settings")).toBeTruthy();
+  fireEvent.click(button("Reopen Settings"));
+  await waitFor(() => expect(textarea(label).value).toBe("echo committed"));
+});
+
+
+it("keeps the local draft and close guard when removing an override fails", async () => {
+  state.resolve.mockResolvedValue(resolved({ setupScript: { value: "echo local", source: "repositoryLocal" } }));
+  state.write.mockRejectedValueOnce(new Error("Cannot remove override"));
+  render(<SettingsHarness />);
+  await screen.findByLabelText("Setup script");
+  fireEvent.change(textarea("Setup script"), { target: { value: "echo unsaved" } });
+  fireEvent.click(button("Remove local override"));
+  await screen.findByText("Cannot remove override");
+  expect(textarea("Setup script").value).toBe("echo unsaved");
+  expect(textarea("Setup script").readOnly).toBe(false);
+  expect(button("Save setup script").disabled).toBe(false);
+  fireEvent.keyDown(textarea("Setup script"), { key: "Escape" });
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  expect(screen.getByText(/Save your script changes before leaving Settings/)).toBeTruthy();
 });
