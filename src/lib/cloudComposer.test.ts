@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
 import {
   CLOUD_IMAGES_NEED_CONNECTION,
@@ -7,11 +10,14 @@ import {
   CLOUD_TOO_MANY_IMAGES,
   COMMANDS_RESTRICTED_NOTE,
   CloudImageError,
+  MACHINE_FILES_OLD_RUNTIME,
+  MACHINE_TOO_MANY_FILES,
   cloudComposerCommands,
   cloudComposerFiles,
   cloudImagesBlocked,
   resetCloudComposer,
   uploadCloudImages,
+  uploadMachineFiles,
 } from "./cloudComposer";
 
 const approver: WorkspaceYou = { userId: "u-me", role: "driver", canApprove: true, listed: true } as WorkspaceYou;
@@ -210,5 +216,78 @@ describe("a cloud tab's images", () => {
     expect(cloudImagesBlocked(null, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
     expect(cloudImagesBlocked(runtime({}, ["composer/1", "composer/2"]).client, false)).toBe(CLOUD_IMAGES_OLD_RUNTIME);
     expect(cloudImagesBlocked(runtime({}, ["composer/3"]).client, false)).toBeNull();
+  });
+});
+
+describe("a machine tab's files (PRO-407)", () => {
+  const where = { sessionId: "s-1", tabId: "t-1" };
+  function machine(capabilities = ["composer/3", "composer/4"], refuse?: WorkspaceRpcError) {
+    const mutate = vi.fn(async (_method: string, _params: Record<string, unknown>) => {
+      if (refuse) throw refuse;
+      return {};
+    });
+    return { mutate, client: { mutate, hasCapability: (capability: string) => capabilities.includes(capability) } as unknown as WorkspaceRpcClient };
+  }
+  /** This computer's file, read part by part: 400 KiB, so one full part of 384 KiB and a rest. */
+  const SIZE = 400 * 1024;
+  function picked() {
+    mocks.invoke.mockReset();
+    mocks.invoke.mockImplementation(async (command: string, args: { path: string; offset: number }) => {
+      if (command !== "read_attachment_part") throw new Error(command);
+      const bytes = Math.max(0, Math.min(384 * 1024, SIZE - args.offset));
+      return { data: `part@${args.offset}`, bytes, size: SIZE };
+    });
+  }
+
+  it("upload a picked file's bytes in parts, named by its last segment, never by a path of this computer", async () => {
+    picked();
+    const { mutate, client } = machine();
+    const refs = await uploadMachineFiles(client, where, [{ name: "/Users/me/private/report.pdf", path: "/Users/me/private/report.pdf", mediaType: "application/pdf" }]);
+    expect(refs).toEqual([{ id: expect.stringMatching(/^att-[0-9a-f]{32}$/), name: "report.pdf", mediaType: "application/pdf" }]);
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["read_attachment_part", { path: "/Users/me/private/report.pdf", offset: 0 }],
+      ["read_attachment_part", { path: "/Users/me/private/report.pdf", offset: 393_216 }],
+    ]);
+    expect(mutate.mock.calls).toEqual([
+      ["session.attach", { ...where, attachmentId: refs[0]!.id, kind: "file", name: "report.pdf", mediaType: "application/pdf", offset: 0, data: "part@0", last: false }],
+      ["session.attach", { ...where, attachmentId: refs[0]!.id, kind: "file", name: "report.pdf", mediaType: "application/pdf", offset: 393_216, data: "part@393216", last: true }],
+    ]);
+    // Nothing the machine is told names where the file was.
+    expect(JSON.stringify(mutate.mock.calls)).not.toContain("/Users/me");
+  });
+
+  it("upload a pasted file's base64 in parts, and an empty file as one empty last part", async () => {
+    const { mutate, client } = machine();
+    const large = "QUJD".repeat(150_000);
+    const refs = await uploadMachineFiles(client, where, [{ name: "notes.txt", data: large }, { name: "empty.log", data: "" }]);
+    expect(refs.map((ref) => ref.name)).toEqual(["notes.txt", "empty.log"]);
+    const sent = mutate.mock.calls.map(([, params]) => ({ name: params.name, offset: params.offset, data: (params.data as string).length, last: params.last, mediaType: params.mediaType }));
+    expect(sent).toEqual([
+      { name: "notes.txt", offset: 0, data: 524_288, last: false, mediaType: "" },
+      { name: "notes.txt", offset: 393_216, data: 75_712, last: true, mediaType: "" },
+      { name: "empty.log", offset: 0, data: 0, last: true, mediaType: "" },
+    ]);
+  });
+
+  it("say why a file was not sent, and send nothing to a machine that takes images only or to a full message", async () => {
+    const refused = machine(undefined, new WorkspaceRpcError("invalid_params", "terminalx.json is a name TerminalX uses for session files. Rename it and attach it again", "session.attach"));
+    await expect(uploadMachineFiles(refused.client, where, [{ name: "terminalx.json", data: "e30=" }])).rejects.toThrow(
+      "terminalx.json was not sent: terminalx.json is a name TerminalX uses for session files. Rename it and attach it again.",
+    );
+    const old = machine(["composer/3"]);
+    await expect(uploadMachineFiles(old.client, where, [{ name: "a.txt", data: "YQ==" }])).rejects.toThrow(MACHINE_FILES_OLD_RUNTIME);
+    expect(old.mutate).not.toHaveBeenCalled();
+    const full = machine();
+    const nine = Array.from({ length: 9 }, (_, index) => ({ name: `${index}.txt`, data: "YQ==" }));
+    await expect(uploadMachineFiles(full.client, where, nine, 2)).rejects.toThrow(MACHINE_TOO_MANY_FILES);
+    expect(full.mutate).not.toHaveBeenCalled();
+    // A file that cannot be read here is refused in words before anything goes.
+    mocks.invoke.mockReset();
+    mocks.invoke.mockRejectedValue(new Error("report.pdf can’t be read."));
+    const unread = machine();
+    const failure = await uploadMachineFiles(unread.client, where, [{ name: "report.pdf", path: "/tmp/report.pdf" }]).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CloudImageError);
+    expect((failure as Error).message).toBe("report.pdf was not sent: report.pdf can’t be read.");
+    expect(unread.mutate).not.toHaveBeenCalled();
   });
 });
