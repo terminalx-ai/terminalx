@@ -36,6 +36,14 @@ interface TestServer {
 const configPath = process.env.TERMINALX_CLOUD_TEST_SERVER;
 const server: TestServer | null = configPath ? JSON.parse(readFileSync(configPath, "utf8")) : null;
 
+// Older test stacks need local-docker named explicitly when listing workspaces.
+const withLocalDocker: typeof fetch = (input, init) => {
+  const headers = new Headers(init?.headers);
+  const providersHeader = "X-TerminalX-Cloud-Workspace-Providers";
+  headers.set(providersHeader, [headers.get(providersHeader), "local-docker"].filter(Boolean).join(","));
+  return fetch(input, { ...init, headers });
+};
+
 function memoryStorage() {
   const values = new Map<string, string>();
   return {
@@ -51,7 +59,7 @@ function memoryStorage() {
 
 function phone(token: string): CloudCatalog {
   const storage = memoryStorage();
-  const api = new CloudApi({ origin: server!.origin, accessToken: async () => token });
+  const api = new CloudApi({ origin: server!.origin, accessToken: async () => token, fetch: withLocalDocker });
   return new CloudCatalog({ api, secrets: storage, storage, clientInstallationId: `server-test-${token.slice(0, 6)}`, appVersion: "test" });
 }
 

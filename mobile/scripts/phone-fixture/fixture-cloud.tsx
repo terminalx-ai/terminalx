@@ -104,18 +104,15 @@ function server(holdList: boolean): typeof fetch {
       if (holdList) await never;
       return json(200, { organizations: ORGS, capabilities: { flags: {} } });
     }
-    const cloudPath = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces(?:\/([^/]+))?(?=\/|$)/.exec(path);
-    if (cloudPath) {
+    const list = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces$/.exec(path);
+    if (list) {
       const headers = new Headers(init?.headers);
       const providers = headers.get("X-TerminalX-Cloud-Workspace-Contract") === "providers-v1"
         ? (headers.get("X-TerminalX-Cloud-Workspace-Providers") ?? "").split(",").map((value) => value.trim())
         : ["machine0"];
-      const rows = WORKSPACES[decodeURIComponent(cloudPath[1]!)] ?? [];
+      const rows = WORKSPACES[decodeURIComponent(list[1]!)] ?? [];
       const workspaces = providers.includes("described") ? rows : rows.filter(({ workspace }) => providers.includes(workspace.provider));
-      if (cloudPath[0] === path && !cloudPath[2]) return json(200, { workspaces, tombstones: [] });
-      if (!workspaces.some(({ workspace }) => workspace.id === decodeURIComponent(cloudPath[2] ?? ""))) {
-        return json(404, { error: "cloud_workspace_not_found" });
-      }
+      return json(200, { workspaces, tombstones: [] });
     }
     const match = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces\/([^/]+)\/transcript-checkpoints(?:\/([^/]+))?$/.exec(path);
     if (match) {
