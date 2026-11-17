@@ -49,6 +49,9 @@ export interface EnvironmentVersion {
   configurationRevision: number;
   errorCode: string | null;
   failurePhase: string | null;
+  /** The failed step's exit status and the script line it stopped on, when the server reports them. */
+  exitCode?: number | null;
+  failureLine?: number | null;
   retryOf: string | null;
   repositories: EnvironmentRepositoryCommit[];
   createdAt: number;
@@ -167,6 +170,8 @@ export function normalizeVersion(value: unknown): EnvironmentVersion {
     configurationRevision: numberOrNull(value.configurationRevision) ?? 0,
     errorCode: text(value.errorCode) || null,
     failurePhase: text(value.failurePhase) || null,
+    exitCode: numberOrNull(value.exitCode),
+    failureLine: numberOrNull(value.failureLine),
     retryOf: text(value.retryOf) || null,
     repositories: objects(value.repositories).map((repository) => ({
       owner: text(repository.owner),
@@ -376,6 +381,70 @@ const STAGE_LABEL: Record<string, string> = {
 
 export const stageLabel = (stage: string) => STAGE_LABEL[stage] ?? stage;
 
+/** The build's stages in the order the server runs them. */
+export const BUILD_STAGES = ["creating-builder", "toolchain", "install", "repositories", "setup", "sanitize", "verify", "snapshot", "publish", "cleanup"] as const;
+
+/** What ran in each scripted stage, as the failure header names it. */
+const SCRIPT_NAME: Record<string, string> = { install: "the install script", setup: "repository setup" };
+
+/**
+ * Where a failed build stopped, from the version and its log: the step's
+ * exit status and the script line, each only when known. Bash names the line
+ * itself for some failures ("install.sh: line 9: …"); the server's own
+ * `exitCode`/`failureLine` win when it sends them.
+ */
+export function buildFailure(version: Pick<EnvironmentVersion, "failurePhase" | "exitCode" | "failureLine" | "logs">): { script: string | null; exitCode: number | null; line: number | null } {
+  const phase = version.failurePhase ?? "";
+  const script = SCRIPT_NAME[phase] ?? null;
+  let line = version.failureLine ?? null;
+  let exitCode = version.exitCode ?? null;
+  const output = (version.logs ?? []).filter((entry) => !phase || entry.phase === phase).at(-1)?.content ?? "";
+  if (line === null && script) {
+    const lines = [...output.matchAll(/\.sh: line (\d+):/g)];
+    if (lines.length) line = Number(lines.at(-1)![1]);
+  }
+  if (exitCode === null) {
+    const exits = [...output.matchAll(/\b(?:exited with(?: code| status)?|exit (?:status|code)):? (\d{1,3})\b/gi)];
+    if (exits.length) exitCode = Number(exits.at(-1)![1]);
+  }
+  return { script, exitCode, line };
+}
+
+/** The failed card's header after the time: "exit 100 in the install script, line 9", or the stage it failed in. */
+export function failureSummary(version: Pick<EnvironmentVersion, "state" | "stage" | "failurePhase" | "exitCode" | "failureLine" | "logs">): string {
+  const { script, exitCode, line } = buildFailure(version);
+  if (exitCode === null && line === null) return versionStateLabel(version).toLowerCase();
+  const where = script ?? stageLabel(version.failurePhase ?? version.stage).toLowerCase();
+  return `${exitCode !== null ? `exit ${exitCode}` : "failed"} in ${where}${line !== null ? `, line ${line}` : ""}`;
+}
+
+/** The last line of the failed card's log box: what exited, and what stays in use. */
+export function failureOutcome(version: Pick<EnvironmentVersion, "state" | "stage" | "failurePhase" | "exitCode" | "failureLine" | "logs">, active: Pick<EnvironmentVersion, "number"> | null): string {
+  const { script, exitCode } = buildFailure(version);
+  const what = exitCode !== null ? `${(script ?? stageLabel(version.failurePhase ?? version.stage).toLowerCase()).replace(/^the /, "")} exited with ${exitCode}` : versionStateLabel(version).toLowerCase();
+  return `${what} · ${active ? `environment v${active.number} stays active` : "workspaces keep the provider's base image"}`;
+}
+
+/**
+ * How long a running build has left: the last successful build's length less
+ * the time this one has run, or the step it is on when no build has finished
+ * before. "about 3 minutes left", "step 3 of 10".
+ */
+export function buildTimeLeft(building: Pick<EnvironmentVersion, "stage" | "startedAt" | "createdAt">, versions: readonly Pick<EnvironmentVersion, "state" | "startedAt" | "finishedAt">[], now: number): string {
+  const last = versions
+    .filter((version) => version.state === "succeeded" && version.startedAt !== null && version.finishedAt !== null && version.finishedAt > version.startedAt)
+    .sort((left, right) => right.finishedAt! - left.finishedAt!)[0];
+  if (last) {
+    const left = last.finishedAt! - last.startedAt! - (now - (building.startedAt ?? building.createdAt));
+    // Past the last build's length there is no honest estimate left to give.
+    if (left <= 0) return "taking longer than the last build";
+    const minutes = Math.ceil(left / 60_000);
+    return minutes > 1 ? `about ${minutes} minutes left` : "about a minute left";
+  }
+  const index = BUILD_STAGES.indexOf(building.stage as (typeof BUILD_STAGES)[number]);
+  return index >= 0 ? `step ${index + 1} of ${BUILD_STAGES.length}` : stageLabel(building.stage).toLowerCase();
+}
+
 export function versionStateLabel(version: Pick<EnvironmentVersion, "state" | "stage" | "failurePhase">): string {
   switch (version.state) {
     case "queued":
@@ -417,6 +486,19 @@ const CHANGE_LABEL: Record<string, string> = {
 };
 
 export const changeLabel = (change: string) => CHANGE_LABEL[change] ?? change;
+
+// The same changes said briefly, for the "Unbuilt changes · Changed: install script" bar.
+const SHORT_CHANGE_LABEL: Record<string, string> = {
+  "install-script": "install script",
+  "repositories-added": "repositories added",
+  "repositories-removed": "repositories removed",
+  "repository-branch": "default branch",
+  "setup-steps": "setup steps",
+  toolchain: "base tools",
+  runtime: "TerminalX runtime",
+};
+
+export const shortChangeLabel = (change: string) => SHORT_CHANGE_LABEL[change] ?? change;
 
 export const CHECK_LABEL: Record<RecipeCheckKind, string> = { install: "Install", lint: "Lint", test: "Test", build: "Build", start: "Start" };
 

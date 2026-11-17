@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stand-in for a released terminalx-serve in scripts/install/test.sh. The test
+# replaces @VERSION@ and @ASSET@ when it builds a fake release.
+# asset: @ASSET@
+case "${1:-}" in
+  --version) echo "terminalx-serve @VERSION@" ;;
+  service)
+    echo "@VERSION@ $*" >>"$HOME/stub-calls.log"
+    echo "(stub) installed the user service"
+    ;;
+  *)
+    echo "stub terminalx-serve @VERSION@: unexpected arguments: $*" >&2
+    exit 2
+    ;;
+esac

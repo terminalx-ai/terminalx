@@ -55,6 +55,25 @@ describe("the phone's cloud API client", () => {
     expect(calls.every((call) => !call.url.includes("reconcileProvider"))).toBe(true);
   });
 
+  it("starts a stopped workspace with the mobile resume route, as only its managers may (#988)", async () => {
+    // The shape the account service answers `POST /v1/mobile/orgs/:orgId/cloud-workspaces/:workspaceId/resume` with: 202, the workspace and its queued operation.
+    const operation = { id: "op-1", workspaceId: "ws-1", type: "lifecycle", action: "resume", state: "queued", stage: null, cancelable: true, createdAt: 1, updatedAt: 1 };
+    const { client, calls } = api(() => ({ status: 202, body: { workspace: workspace({ state: "resuming", you: { role: "manager", canApprove: true } }).workspace, operation } }));
+    const answer = await client.resume("org-1", "ws-1");
+    expect(answer.workspace).toMatchObject({ id: "ws-1", state: "resuming" });
+    expect(answer.operation).toMatchObject({ id: "op-1", action: "resume", state: "queued" });
+    expect(calls).toEqual([expect.objectContaining({ method: "POST", url: "https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-1/resume", body: {} })]);
+
+    // Someone who is not a manager is refused by the server, and told so in words by the screen.
+    const refused = api(() => ({ status: 403, body: { error: "cloud_workspace_manager_required" } }));
+    await expect(refused.client.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_manager_required", status: 403 });
+    // An answer about another workspace, or in a shape this app does not know, is not taken.
+    const other = api(() => ({ status: 202, body: { workspace: workspace({ id: "ws-2" }).workspace, operation } }));
+    await expect(other.client.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response" });
+    const odd = api(() => ({ status: 202, body: { workspace: workspace().workspace } }));
+    await expect(odd.client.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response" });
+  });
+
   it("does not accept an attachment that claims runtime scope for a phone", async () => {
     const { client } = api(() => ({ status: 202, body: { id: "a1", workspaceId: "ws-1", state: "ready", authority: "manage", expiresAt: 9, pairingCode: "code" } }));
     await expect(client.open("org-1", "ws-1", "install-1")).rejects.toThrow();

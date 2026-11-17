@@ -148,6 +148,12 @@ export function cantSaveEffect(problem: SettingsFileProblem): string {
     : `This change wasn’t saved. ${effectSentence(problem.effect)}`;
 }
 
+/** What a refused save left as it was, naming the setting (design 09.43): "Send key stays on Enter until the file is fixed; nothing else changed." */
+export function cantSaveStays(setting: string, value?: string): string {
+  const state = value === "On" ? "on" : value === "Off" ? "off" : value ? `on ${value}` : "as it was";
+  return `${setting} stays ${state} until the file is fixed; nothing else changed.`;
+}
+
 /** The text Copy error puts on the clipboard: the toast whole. */
 export function cantSaveCopy(displayPath: string, problem: SettingsFileProblem): string {
   return `${cantSaveTitle(displayPath, problem)}\n${problem.key ? `${problem.key}: ` : ""}${problem.message}\n${cantSaveEffect(problem)}`;

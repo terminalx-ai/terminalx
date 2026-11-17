@@ -178,9 +178,9 @@ const DEFAULTS: Prefs = {
   sounds: true,
   animations: true,
   fontScale: "md",
-  transcriptLayout: "wide",
-  // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
-  foldToolCalls: false,
+  transcriptLayout: "chat",
+  // On: a settled turn's steps fold behind one summary row; opened, they read in the order the agent did them.
+  foldToolCalls: true,
   turnChanges: true,
   writeCommitMessagesWithAgent: false,
   promptMap: true,
@@ -381,6 +381,11 @@ export function legacyUserPreferences(): Record<string, unknown> {
     const legacy = load(true);
     return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, legacy[key]]));
   } catch { return {}; }
+}
+
+/** A preference's built-in value, for "Reset to default" to name (PRO-374). */
+export function preferenceDefault(key: string): unknown {
+  return Object.hasOwn(DEFAULTS, key) ? (DEFAULTS as unknown as Record<string, unknown>)[key] : undefined;
 }
 
 export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }

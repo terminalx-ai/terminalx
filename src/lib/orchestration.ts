@@ -1,10 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { orchestration } from "@/lib/api";
-import type {
-  Cap, MergeState, PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification,
-  RunWindowUse, Tier, TryOutcome, TryStep,
-} from "@/types/orchestration";
+import type { AutoStep, Cap, MergeState, PieceKind, PieceState, PieceTry, Route, RoutedAgent, RoutingRows, RoutingTable, Run, RunCheck, RunEstimate, RunGate, RunHold, RunLimits, RunPiece, RunPlan, RunRefusal, RunReview, RunState, RunVerification, RunWindowUse, Tier, TryOutcome, TryStep } from "@/types/orchestration";
 
 /** The runs this window has heard of, by the session that leads each: a lead has one run to show, its newest. */
 let runs: Record<string, Run | null> = {};
@@ -326,6 +323,27 @@ export function pieceCost(piece: Pick<RunPiece, "tries" | "costUsd" | "costUnpri
   return { cost, unpriced };
 }
 
+/** Blocked, and the run hands it to the lead by itself (#1004): nothing waits on the person. */
+export function goesToLead(piece: Pick<RunPiece, "state" | "toLead">): boolean {
+  return piece.state === "blocked" && !!piece.toLead;
+}
+
+/** Paused on its own points of a window, and it goes on by itself at the reset (#1004): nothing waits on the person. */
+export function waitsForReset(run: Pick<Run, "state" | "pause">): boolean {
+  return run.state === "needsYou" && !!run.pause?.byItself && !!run.pause.resumeAt;
+}
+
+/** What each step a run took by itself is called in the Run view's list. */
+export const AUTO_STEP_LABEL: Record<AutoStep, string> = {
+  askedVerifierAgain: "Asked again",
+  handedToLead: "To the lead",
+  acceptedBaseFailure: "Failing on base",
+  waitsForReset: "Waits for reset",
+  wentOnAfterReset: "Went on",
+  ignoredStaleReport: "Late report",
+  stoppedOldWorker: "Worker stopped",
+};
+
 /** The ladder ran out: the piece is blocked and its last try fell short (`Piece::gave_up`). */
 export function gaveUp(piece: Pick<RunPiece, "state" | "tries">): boolean {
   const last = piece.tries?.[piece.tries.length - 1];
@@ -344,8 +362,9 @@ export const RUN_STATE_LABEL: Record<RunState, string> = {
   failed: "Run failed",
 };
 
-export const PIECE_STATE_LABEL: Record<PieceState, string> = {
+export const PIECE_STATE_LABEL: Record<ShownPieceState, string> = {
   queued: "Queued",
+  waiting: "Waiting",
   running: "Running",
   stalled: "Stalled",
   verifying: "Verifying",
@@ -403,6 +422,27 @@ export function reviewTokens(review: RunReview | undefined): number | null {
 /** The 1-based place of each piece in the plan: what "After" names, as the plan's rows are numbered. */
 export function pieceNumbers(run: Pick<Run, "pieces">): Record<string, number> {
   return Object.fromEntries(run.pieces.map((piece, index) => [piece.id, index + 1]));
+}
+
+/** The pieces a piece still waits for, by id: those it depends on that are not done. A Done piece is never named (PRO-383). */
+export function openDependencies(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "dependsOn">): RunPiece[] {
+  return piece.dependsOn.flatMap((id) => run.pieces.find((other) => other.id === id && other.state !== "done") ?? []);
+}
+
+/** A queued piece held up by a dependency that cannot go on by itself (18.03): blocked, failed or stopped, or held up in turn. */
+export function heldUp(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "state" | "dependsOn">, seen = new Set<string>()): boolean {
+  if (piece.state !== "queued") return false;
+  return openDependencies(run, piece).some((dep) => {
+    if (seen.has(dep.id)) return false;
+    seen.add(dep.id);
+    return ["blocked", "failed", "stopped"].includes(dep.state) || heldUp(run, dep, seen);
+  });
+}
+
+/** A piece's state as the Run view shows it: a queued piece held up by a blocked one is Waiting (18.03). */
+export type ShownPieceState = PieceState | "waiting";
+export function shownPieceState(run: Pick<Run, "pieces">, piece: Pick<RunPiece, "state" | "dependsOn">): ShownPieceState {
+  return heldUp(run, piece) ? "waiting" : piece.state;
 }
 
 const settingsRequests = new Set<() => void>();
@@ -664,7 +704,8 @@ export function skippedWith(run: Pick<Run, "pieces">, id: string): RunPiece[] {
  * blocked, what waits for them, and whether anything else is running. `null` while none is.
  */
 export function blockedSubtitle(run: Run): string | null {
-  const blocked = run.pieces.filter((piece) => piece.state === "blocked" || piece.state === "failed");
+  // One the run hands to the lead by itself is not held up on the person (#1004).
+  const blocked = run.pieces.filter((piece) => (piece.state === "blocked" || piece.state === "failed") && !goesToLead(piece));
   if (!blocked.length) return null;
   const numbers = pieceNumbers(run);
   const ids = new Set(blocked.map((piece) => piece.id));

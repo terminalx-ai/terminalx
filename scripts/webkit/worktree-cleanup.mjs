@@ -187,7 +187,7 @@ for (const width of [1100, 760]) {
   // Hidden: the run carries on, and the corner shows it without covering what a message is sent with.
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "Back to previous page" }).first().click();
+  await page.getByRole("button", { name: "Back to app" }).first().click();
   const indicator = page.getByRole("region", { name: "Worktree clean-up" });
   await indicator.waitFor();
   const composer = page.locator('[role="tabpanel"]:not([aria-hidden="true"]) [data-composer-box]');

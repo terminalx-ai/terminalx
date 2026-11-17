@@ -11,6 +11,31 @@ beforeEach(() => orchestratorRuns(false));
 afterEach(() => orchestratorRuns(false));
 
 describe("settings row search", () => {
+  it("uses Appearance for the current section, not as a legacy alias for General", () => {
+    const matches = searchSettings("appearance");
+    expect(matches.map((match) => match.id)).toEqual(expect.arrayContaining(["appearance.theme", "appearance.mode"]));
+    expect(matches.every((match) => match.section === "appearance")).toBe(true);
+  });
+
+  it.each([
+    ["font size", "general.textSize"],
+    ["zoom", "general.textSize"],
+    ["transcript layout", "general.transcriptLayout"],
+    ["reorder", "general.customOrder"],
+    ["tab bar", "general.tabBar"],
+    ["sessions on a branch", "general.branchSessions"],
+    ["usage", "general.openUsage"],
+    ["status bar", "general.statusBar"],
+    ["usage", "general.usage"],
+    ["resources", "general.resources"],
+    ["usage display", "general.usageDisplay"],
+    ["auto-refresh", "general.usageRefresh"],
+  ])("still finds %s in General after removing the old section alias (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "general", sectionTitle: "General" }),
+    ]));
+  });
+
   it("ranks a title match ahead of a description match ahead of a search term", () => {
     // "When quitting TerminalX" (title), "When a session warns…" (description), and "when" as a search term.
     const ids = searchSettings("when").map((match) => match.id);
@@ -24,9 +49,9 @@ describe("settings row search", () => {
 
   it("finds the font rows for 'font', and only those", () => {
     const ids = searchSettings("font").map((match) => match.id);
-    expect(ids).toContain("appearance.textSize");
+    expect(ids).toContain("general.textSize");
     // Not every row whose description happens to hold an f, an o, an n and a t in order.
-    expect(ids).toEqual(["appearance.textSize"]);
+    expect(ids).toEqual(["general.textSize"]);
   });
 
   it("finds nothing for a mistyped second word, as the empty state expects", () => {
@@ -41,7 +66,7 @@ describe("settings row search", () => {
 
   it("keeps finding what the old section search found, now as rows", () => {
     const first = (query: string) => searchSettings(query)[0]?.id;
-    expect(first("data privacy")).toBe("general.dataPrivacy");
+    expect(first("data privacy")).toBe("account.dataPrivacy");
     expect(first("archive script")).toBe("repositories.scripts");
     expect(first("setup script")).toBe("repositories.scripts");
     expect(first("settings file")).toBe("general.settingsFile");
@@ -136,7 +161,7 @@ describe("settings row search", () => {
     expect(behind.every((row) => settingOffered(row))).toBe(true);
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
-    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms").every((row) => settingOffered(row))).toBe(true);
+    expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
   });
 
   it("finds Local VMs rows only while their Experimental switch is on", () => {
@@ -147,6 +172,13 @@ describe("settings row search", () => {
     expect(named()).toContain("localVms.tasks");
     localVmTasks(false);
     expect(named()).not.toContain("localVms.tasks");
+  });
+
+  it("finds Settings → Machines rows whatever the Experimental switches say (PRO-360)", () => {
+    const named = () => searchSettings("pairing code").map((match) => match.id);
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
+    expect(named()).toContain("machines.pairingCode");
+    expect(searchSettings("machines").map((match) => match.id)).not.toContain("experimental.machines");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {

@@ -120,8 +120,8 @@ const browser = await launch();
 let failed = 0;
 let shot = 0;
 
-async function app(fixture, viewport) {
-  const page = await browser.newPage({ viewport });
+async function app(fixture, viewport, colorScheme) {
+  const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}) });
   await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: false, localProjects: 1 };\n${stub}\n(${setup})(${JSON.stringify(fixture)});`);
   await page.goto(server.url);
   // The two sessions share a branch and sit beside each other as tabs, so the
@@ -129,7 +129,7 @@ async function app(fixture, viewport) {
   // the branch's latest session: the first one, whose tabs the checks count and
   // whose issue, automation and pipeline chips the header shows.
   const list = (await sidebar(page)).locator('[data-testid="conversation-list"]');
-  await list.getByRole("button", { name: /^raccoon\/438-browser-style-tab-strip, 2 sessions$/ }).click();
+  await list.getByRole("button", { name: /^raccoon\/438-browser-style-tab-strip, / }).click();
   // Attached, not visible: the narrowest header draws the row as its menu alone.
   await page.locator('[data-testid="workspace-tab-strip"] [role="tab"]').first().waitFor({ state: "attached" });
   await page.waitForTimeout(250);
@@ -348,12 +348,56 @@ function tier(layout) {
   failed += report(
     "the right-click menu",
     {
-      "offers the tab's own actions": ["Rename…", "Duplicate tab", "Fork conversation", "Pin tab", "Close tab"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))),
-      "offers the bulk closes": ["Close other tabs", "Close tabs to the right", "Close tabs to the left", "Close all tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))),
+      // The design's groups (PRO-381, 03.14); the rest is under More.
+      "offers the tab's own actions": ["Rename chat…", "Mark as unread", "Pin tab", "Mute notifications for this tab", "Move to the right pane", "Switch to terminal view", "Fork to new tab", "Copy transcript", "Copy link to this tab", "More", "Close tab", "Close other tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))),
+      "keeps the rest under More": ["Duplicate tab", "Close tabs to the right", "Close tabs to the left", "Close all tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))) === false,
     },
     items,
   );
   await page.keyboard.press("Escape");
+  await page.close();
+}
+
+// ---- PRO-381 at 1440 by 900, dark and light: the designed tab menu (03.14), the new-tab menu and the strip's switch (03.29)
+for (const colorScheme of ["dark", "light"]) {
+  const page = await app({ tabs: 3 }, { width: 1440, height: 900 }, colorScheme);
+  await page.locator('[data-tab-key="agent:a1"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: /^Rename chat/ }).waitFor();
+  await page.waitForTimeout(300);
+  await snap(page, `designed-menu-${colorScheme}`);
+  const menu = await page.getByRole("menu").first().evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const items = [...node.querySelectorAll('[role="menuitem"]')].map((item) => ({ text: item.textContent.trim(), color: getComputedStyle(item).color, height: item.getBoundingClientRect().height }));
+    return { width: box.width, height: box.height, bottom: box.bottom, items, body: getComputedStyle(node).color };
+  });
+  const close = menu.items.find((item) => item.text.startsWith("Close tab"));
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "New tab" }).click();
+  await page.getByRole("menuitem", { name: "Claude Code chat" }).waitFor();
+  await page.waitForTimeout(300);
+  await snap(page, `new-tab-menu-${colorScheme}`);
+  const picker = await page.getByRole("menu").first().evaluate((node) => ({
+    width: node.getBoundingClientRect().width,
+    heading: node.querySelector("div:not([role])")?.textContent?.trim(),
+    // Its uppercase heading is 11 px in the design too; the items and their hints are 12 px or more.
+    small: [...node.querySelectorAll('[role="menuitem"] *')].filter((item) => item.children.length === 0 && item.textContent.trim() && parseFloat(getComputedStyle(item).fontSize) < 12).map((item) => item.textContent.trim()),
+  }));
+  await page.keyboard.press("Escape");
+  const toggle = await page.locator('[data-testid="strip-terminal-view"]').evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const strip = node.closest('[data-testid="workspace-tab-strip"]').getBoundingClientRect();
+    return { text: node.textContent.trim(), atEnd: strip.right - box.right <= 16, inStrip: box.top >= strip.top && box.bottom <= strip.bottom };
+  }).catch(() => null);
+  const headerSwitch = await page.locator('main header [aria-label="Show terminal view"]').count();
+  failed += report(`the designed tab menus, 1440x900 ${colorScheme}`, {
+    "the tab menu is the design's groups at the design's height (about 420 px, under 480)": menu.height <= 480 && menu.bottom <= 900 && menu.items.length <= 14,
+    "the tab menu is the design's width (286 px)": Math.abs(menu.width - 286) <= 2,
+    "Close tab is in the menu's own colour, not red": !!close && close.color === menu.items[0].color,
+    "the new-tab menu is headed New tab and about 290 px wide": picker.heading === "New tab" && Math.abs(picker.width - 290) <= 2,
+    "nothing in the new-tab menu is under 12 px": picker.small.length === 0,
+    "the strip ends with ⇧⌘T terminal view": !!toggle && toggle.atEnd && toggle.inStrip && /terminal view$/.test(toggle.text),
+    "the title bar has no terminal view button of its own": headerSwitch === 0,
+  }, { menu, picker, toggle, headerSwitch });
   await page.close();
 }
 

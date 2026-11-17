@@ -1,12 +1,18 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { AppearanceTab, AgentsTab } from "./SettingsSections";
+import { SETTINGS_SECTIONS } from "./settingsRegistry";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SETTING_HIGHLIGHT_FADE_MS, SETTING_HIGHLIGHT_HOLD_MS, SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { bindingText, resetShortcut, saveShortcut } from "@/lib/shortcuts";
+import { setTheme } from "@/lib/theme";
+import { ShortcutsTab } from "./ShortcutsTab";
 import { movePaletteSelection } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
+import { api, experimental } from "@/lib/api";
 
 const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
 vi.mock("@/lib/settingsFile", () => ({
@@ -20,7 +26,7 @@ beforeEach(() => {
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
 });
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Settings search", () => {
   const search = () => screen.getByRole("combobox", { name: "Search settings" }) as HTMLInputElement;
@@ -36,6 +42,56 @@ describe("Settings search", () => {
     expect(screen.getByRole("alert").textContent).toContain("preferences.sounds, line 3");
   });
 
+  // PRO-374 (design 09.01): a result row carries the row's live control, which changes the setting in place.
+  it("puts each row's live control on its result, and using it does not open the page", async () => {
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "link actions" } });
+    const option = screen.getByRole("option", { name: /Link actions/ });
+    const control = await within(option).findByRole("switch");
+    const before = control.getAttribute("aria-checked");
+    fireEvent.click(control);
+    await waitFor(() => expect(control.getAttribute("aria-checked")).not.toBe(before));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “link actions”");
+    // The description is one line; the full text is its tooltip.
+    expect(option.querySelector("[title]")?.className).toContain("truncate");
+  });
+
+  // Review of PRO-374: typing a query must not start a page's disk or network work.
+  it("does not mount Storage, with its leftover scan, to search it", async () => {
+    const scan = vi.spyOn(api, "scanLeftovers").mockResolvedValue([] as never);
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "leftovers" } });
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
+    await act(async () => {});
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it("lends the open page's controls to its results instead of mounting it again", async () => {
+    const settings = vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    render(<SettingsPage initialTab="experimental" onBack={vi.fn()} />);
+    // The page has read its switches (the app's shared store reads them too).
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Session cost" }).hasAttribute("disabled")).toBe(false));
+    await act(async () => {});
+    const before = settings.mock.calls.length;
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await act(async () => {});
+    expect(settings.mock.calls.length).toBe(before);
+  });
+
+  it("says, above the results, when a change made from a result is refused", async () => {
+    vi.spyOn(experimental, "settings").mockResolvedValue({ nativeCodex: false, sessionCost: false } as never);
+    vi.spyOn(experimental, "setSessionCost").mockRejectedValue(new Error("refused by the runtime"));
+    render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+    fireEvent.change(search(), { target: { value: "session cost" } });
+    const control = await within(screen.getByRole("option", { name: /Session cost/ })).findByRole("switch");
+    await waitFor(() => expect(control.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(control);
+    // The page's own alert is hidden with the page; the results say it.
+    await waitFor(() => expect(screen.getAllByRole("alert").map((element) => element.textContent)).toContain("Experimental: refused by the runtime"));
+    expect(control.getAttribute("aria-checked")).toBe("false");
+  });
+
   it("lists matching rows grouped by page under the query, a count and the keys (design 09.31)", () => {
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "text size" } });
@@ -45,14 +101,14 @@ describe("Settings search", () => {
     const listbox = screen.getByRole("listbox", { name: "Settings search results" });
     const pages = within(listbox).getAllByRole("group");
     expect(pages.map((page) => document.getElementById(page.getAttribute("aria-labelledby")!)?.textContent)).toEqual(expected.map((page) => page.title));
-    expect(pages[0].textContent).toContain("Appearance");
+    expect(pages[0].textContent).toContain("General");
     pages.forEach((page, index) => expect(within(page).getAllByRole("option")).toHaveLength(expected[index].matches.length));
     const first = within(pages[0]).getByRole("option");
     expect(first.textContent).toContain("Text size");
     expect(first.textContent).toContain("Scales the transcript and composer.");
     expect(first.querySelector("mark")?.textContent).toBe("Text");
     // Rows, not sections: the old section results are gone.
-    expect(within(listbox).queryByRole("option", { name: /^Appearance/ })).toBeNull();
+    expect(within(listbox).queryByRole("option", { name: /^General/ })).toBeNull();
   });
 
   it("lists what 'font' finds by page with its count, marks the matched text, and Enter opens and highlights the first row", () => {
@@ -64,8 +120,8 @@ describe("Settings search", () => {
     expect(found.length).toBeGreaterThan(0);
     expect(found.length).toBeLessThanOrEqual(SETTINGS_SEARCH_LIMIT);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Results for “font”");
-    // The app's font setting is Appearance › Text size; it is listed under its page.
-    expect(within(screen.getByRole("group", { name: "Appearance" })).getByRole("option", { name: /Text size/ })).toBeTruthy();
+    // The app's font setting is General › Text size (PRO-377); it is listed under its page.
+    expect(within(screen.getByRole("group", { name: "General" })).getByRole("option", { name: /Text size/ })).toBeTruthy();
     expect(screen.getByText(/^\d+ settings? on \d+ pages? · /)).toBeTruthy();
     expect(screen.getByText(`${settingsSearchSummary(found)} · ↑↓ to move · ↵ opens the setting · esc clears`)).toBeTruthy();
     const listbox = screen.getByRole("listbox", { name: "Settings search results" });
@@ -108,10 +164,10 @@ describe("Settings search", () => {
       const scrolled = vi.mocked(Element.prototype.scrollIntoView);
       scrolled.mockClear();
       fireEvent.keyDown(input, { key: "Enter" });
-      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+      expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
       expect(screen.queryByRole("listbox")).toBeNull();
       expect(input.value).toBe("");
-      const target = row("appearance.textSize")!;
+      const target = row("general.textSize")!;
       expect(document.activeElement).toBe(target);
       expect(scrolled.mock.contexts).toContain(target);
       expect(scrolled).toHaveBeenCalledWith({ block: "start" });
@@ -127,16 +183,16 @@ describe("Settings search", () => {
   });
 
   it("draws the highlight from design tokens and drops its transition under reduced motion", () => {
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
-    const section = row("appearance.textSize")!.closest("section")!;
-    expect(row("appearance.textSize")!.dataset.settingHighlight).toBe("on");
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
+    const section = row("general.textSize")!.closest("section")!;
+    expect(row("general.textSize")!.dataset.settingHighlight).toBe("on");
     expect(section.className).toContain("[&_[data-setting-highlight=on]]:bg-selected");
     expect(section.className).toContain("motion-reduce:[&_[data-setting-highlight]]:transition-none");
   });
 
   it("highlights only the latest row: opening another moves the highlight, and a plain section clears it", () => {
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
-    const first = row("appearance.textSize")!;
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
+    const first = row("general.textSize")!;
     expect(first.dataset.settingHighlight).toBe("on");
     fireEvent.change(search(), { target: { value: "theme" } });
     fireEvent.keyDown(search(), { key: "Enter" });
@@ -187,8 +243,8 @@ describe("Settings search", () => {
     expect(result.textContent).toContain("Text size");
     expect(active()).toBe(result.id);
     fireEvent.click(result);
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
-    expect(document.activeElement).toBe(row("appearance.textSize"));
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
+    expect(document.activeElement).toBe(row("general.textSize"));
   });
 
   it("opens a clicked result on its row", () => {
@@ -240,7 +296,7 @@ describe("Settings search", () => {
     render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
     fireEvent.change(search(), { target: { value: "zzqx" } });
     fireEvent.click(screen.getByRole("button", { name: "search keyboard shortcuts" }));
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Shortcuts");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Keyboard shortcuts");
     expect(search().value).toBe("");
   });
 
@@ -335,7 +391,7 @@ describe("Settings dismissal", () => {
     render(<SettingsPage initialTab="appearance" onBack={onBack} />);
 
     expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
@@ -376,12 +432,12 @@ describe("Settings dismissal", () => {
 });
 
 describe("the section Settings opens on", () => {
-  // PRO-81: the general way into Settings shows Account.
-  it("is Account when no section is asked for", () => {
+  // PRO-374: the general way into Settings shows General, first in the menu (it was Account, PRO-81).
+  it("is General when no section is asked for", () => {
     render(<SettingsPage onBack={vi.fn()} />);
-    expect(DEFAULT_SETTINGS_TAB).toBe("account");
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(DEFAULT_SETTINGS_TAB).toBe("general");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-current") === "page")).toHaveLength(1);
   });
 
@@ -402,8 +458,8 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
     // …asking for Settings again does not.
     rerender(<SettingsPage openRequest={2} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     // The same for a section asked for by name twice.
     rerender(<SettingsPage initialTab="agents" openRequest={3} onBack={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "General" }));
@@ -411,12 +467,12 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Agents");
   });
 
-  it("is Account, not a blank page, when it is handed something that names no section", () => {
+  it("is General, not a blank page, when it is handed something that names no section", () => {
     // What a click handler passes along: the click's event (O1 of the live check).
     const event = { type: "click" } as unknown as Parameters<typeof SettingsPage>[0]["initialTab"];
     render(<SettingsPage initialTab={event} onBack={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Account" }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
+    expect(screen.getByRole("button", { name: "General" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
   });
 });
 
@@ -434,7 +490,7 @@ describe("Usage auto-refresh interval", () => {
       },
     };
     try {
-      render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+      render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
       const group = screen.getByRole("radiogroup", { name: "Usage auto-refresh interval" });
       const choices = within(group).getAllByRole("radio");
       expect(choices.map((choice) => choice.textContent)).toEqual(["Off", "1 min", "2 min", "5 min", "15 min"]);
@@ -462,20 +518,20 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
   });
 
   it("opens and focuses a row, keeps manual navigation, and handles a repeated request", () => {
-    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
-    const row = () => view.container.querySelector('[data-setting-id="appearance.textSize"]');
+    const view = render(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
+    const row = () => view.container.querySelector('[data-setting-id="general.textSize"]');
     expect(document.activeElement).toBe(row());
-    fireEvent.click(screen.getByRole("button", { name: "General" }));
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
-    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Appearance");
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={2} onBack={vi.fn()} />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("General");
     expect(document.activeElement).toBe(row());
   });
 
   it("keeps row controls connected to the original preference keys", () => {
     setPrefs({ fontScale: "md", transcriptLayout: "wide" });
-    render(<SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />);
+    render(<SettingsPage initialTab="general.textSize" onBack={vi.fn()} />);
     fireEvent.click(within(screen.getByRole("radiogroup", { name: "Text size" })).getByRole("radio", { name: "Large" }));
     expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).fontScale).toBe("lg");
     fireEvent.click(within(screen.getByRole("radiogroup", { name: "Transcript layout" })).getByRole("radio", { name: "Chat" }));
@@ -483,29 +539,72 @@ describe("grouped settings navigation and row links (PRO-123)", () => {
   });
 
   it("clears an active search and focuses and highlights a repeated external row link", () => {
-    const view = render(<SettingsPage initialTab="appearance.textSize" openRequest={1} onBack={vi.fn()} />);
+    const view = render(<SettingsPage initialTab="general.textSize" openRequest={1} onBack={vi.fn()} />);
     const input = screen.getByRole("combobox", { name: "Search settings" });
     input.focus();
     fireEvent.change(input, { target: { value: "theme" } });
     expect(screen.getAllByRole("option").length).toBeGreaterThan(0);
     expect(view.container.querySelector("[data-setting-highlight]")).toBeNull();
 
-    view.rerender(<SettingsPage initialTab="appearance.textSize" openRequest={2} onBack={vi.fn()} />);
+    view.rerender(<SettingsPage initialTab="general.textSize" openRequest={2} onBack={vi.fn()} />);
 
     expect((input as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("listbox")).toBeNull();
-    expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="appearance.textSize"]'));
-    expect(view.container.querySelector<HTMLElement>('[data-setting-id="appearance.textSize"]')!.dataset.settingHighlight).toBe("on");
+    expect(document.activeElement).toBe(view.container.querySelector('[data-setting-id="general.textSize"]'));
+    expect(view.container.querySelector<HTMLElement>('[data-setting-id="general.textSize"]')!.dataset.settingHighlight).toBe("on");
   });
 });
 
 it("does not move focus out of an open dialog when a row link arrives", () => {
   function WithDialog() {
     return <>
-      <SettingsPage initialTab="appearance.textSize" onBack={vi.fn()} />
+      <SettingsPage initialTab="general.textSize" onBack={vi.fn()} />
       <Dialog open><DialogContent aria-describedby={undefined}><DialogTitle>Confirm sign in</DialogTitle><button>Continue</button></DialogContent></Dialog>
     </>;
   }
   render(<WithDialog />);
   expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
+});
+
+
+describe("consolidated page introductions (#1152)", () => {
+  it.each(["machines", "agents"] as const)("renders one %s description associated with its heading", async (section) => {
+    render(<SettingsPage initialTab={section} onBack={vi.fn()} />);
+    const heading = screen.getByRole("heading", { level: 2, name: SETTINGS_SECTIONS[section].title });
+    const description = document.getElementById(heading.getAttribute("aria-describedby")!);
+    expect(description?.textContent).toContain(SETTINGS_SECTIONS[section].subtitle);
+    expect(screen.getAllByText(SETTINGS_SECTIONS[section].subtitle, { exact: false })).toHaveLength(1);
+    if (section === "machines") expect(within(description!).getByRole("button", { name: "Machines guide" })).toBeTruthy();
+    await act(async () => {});
+  });
+
+  it("retains the complete introduction when Agents is rendered standalone", async () => {
+    render(<AgentsTab />);
+    expect(screen.getByText(SETTINGS_SECTIONS.agents.subtitle)).toBeTruthy();
+    await act(async () => {});
+  });
+});
+
+// #1131: hints must follow the bound action, never the conflicting design chord.
+describe("light/dark shortcut hints", () => {
+  it("keeps Appearance and Shortcuts in sync through customization, removal and reset", () => {
+    setTheme("den");
+    setPrefs({ shortcuts: {} });
+    render(<><AppearanceTab /><ShortcutsTab /></>);
+    const assertHint = (binding: string) => {
+      const text = bindingText(binding);
+      expect(screen.getByText(`${text} switches light and dark`)).toBeTruthy();
+      expect(screen.getByRole("button", { name: `Switch light and dark: ${text}. Change` })).toBeTruthy();
+    };
+    assertHint("mod+alt+shift+l");
+    expect(screen.queryByText(`${bindingText("mod+alt+t")} switches light and dark`)).toBeNull();
+    act(() => { expect(saveShortcut("app.toggleMode", ["mod+alt+shift+f6"])).toEqual({ ok: true }); });
+    assertHint("mod+alt+shift+f6");
+    expect(screen.queryByText(`${bindingText("mod+alt+shift+l")} switches light and dark`)).toBeNull();
+    act(() => { expect(saveShortcut("app.toggleMode", [])).toEqual({ ok: true }); });
+    expect(screen.queryByText(/switches light and dark/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Switch light and dark: .*Change$/ })).toBeNull();
+    act(() => { expect(resetShortcut("app.toggleMode")).toEqual({ ok: true }); });
+    assertHint("mod+alt+shift+l");
+  });
 });

@@ -1,43 +1,73 @@
-import { projectHueByName } from "@terminalx/portable/botFace";
+import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusDescription, type StatusTab } from "@terminalx/portable/sessionStatus";
 import { isPlaceholderBranch } from "@terminalx/portable/worktreeNames";
-import { conversationLabel, providerName } from "./conversations";
+import { conversationLabel, providerName, tabTitle } from "./conversations";
 import type { SessionSummary } from "./host-api";
 
-/** What a chat asks of the reader: an answer, patience, or nothing. */
+/** What a chat asks of the reader: an answer, patience, or nothing. The session's tab strip marks its tabs by it. */
 export type ChatState = "needs" | "working" | "done";
 
-/** One chat in the list: a session on the Mac, as the desktop's chat list shows it. */
+/**
+ * A row's mark, as 22.04 draws it: a spinner, an amber question mark or
+ * shield, a green tick, a red triangle, or a grey ring. Which one follows the
+ * shared rule the row's status came from, never the words alone: three rules
+ * read "Needs approval".
+ */
+export type RowMark = "working" | "answer" | "approval" | "done" | "failed" | "idle";
+
+/** A row's status: the shared rule the desktop sidebar shows, the mark the phone draws for it, and the words it reads. */
+export interface RowStatus {
+  status: StatusDescription;
+  mark: RowMark;
+  /** The sidebar's label (with the PR it is about), except that a question reads "Needs your answer". */
+  words: string;
+}
+
+/** The rules that wait on the person: an answer, an approval, or a tab waiting with nothing more said. */
+const NEEDS_YOU = new Set(["needs_answer", "needs_permission", "review_plan", "needs_attention"]);
+const MARKS: Record<string, RowMark> = {
+  needs_answer: "answer", needs_attention: "answer",
+  needs_permission: "approval", review_plan: "approval",
+  setup_failed: "failed", merge_conflict: "failed", checks_failing: "failed",
+  merged: "done", ready_to_merge: "done", in_merge_queue: "done",
+};
+
+export function rowStatus(status: StatusDescription): RowStatus {
+  const mark = MARKS[status.id] ?? (status.icon === "working" ? "working" : "idle");
+  return { status, mark, words: status.id === "needs_answer" ? "Needs your answer" : statusText(status) };
+}
+
+/** Whether a status waits on the person: what the "Needs you" section and filter hold. */
+export const needsYou = (status: StatusDescription) => NEEDS_YOU.has(status.id);
+
+/** One of a session's tabs, as its row lists them when it opens in place. */
+export interface TabRow { id: string; name: string; status: RowStatus; /** Last activity, in ms; 0 when unknown. */ time: number }
+
+/** One session in the list. */
 export interface ChatRow {
   key: string;
   session: SessionSummary;
   /** The conversation a tap opens: the one waiting on the reader, else the one working, else the first. */
   tabId: string;
-  /** The chat's title, as the Mac names the conversation. */
+  /** The session's title, as the Mac names it: line 1 of the row, never cut for the branch. */
   title: string;
-  /** What the row is called, as the Mac's project list calls it: its branch, or its title when the branch has no real name. */
+  /** What the Mac's project list calls the row: its branch, or its title when the branch has no real name. */
   name: string;
   /** Whether `name` is a branch. */
   branched: boolean;
-  /** What was last said in it, on one line; else where it is. */
-  preview: string;
-  state: ChatState;
-  /** Whether a conversation in it is unread: a finished turn not yet opened, or one marked unread on the Mac. */
-  unread: boolean;
+  /** The branch, as line 3 of the row shows it; null for a quick chat or a drawn worktree name. */
+  branch: string | null;
+  /** The status the desktop sidebar shows for the session: its most urgent tab wins. */
+  status: RowStatus;
+  /** Whether it waits on the person for an answer or an approval. */
+  needsYou: boolean;
+  tabs: TabRow[];
   /** Last activity, in ms; 0 when unknown. */
   time: number;
-  /** The face's colour: its project's, or none for a quick chat, which takes its own. */
-  color: string | null;
 }
 
-export interface ProjectGroup { project: string; color: string | null; rows: ChatRow[]; latest: number; needs: number }
+export interface ProjectGroup { project: string; rows: ChatRow[]; latest: number }
 
 export const QUICK_CHATS = "Quick chats";
-
-export function chatState(session: SessionSummary): ChatState {
-  if (session.tabs.some((tab) => tab.status === "waiting")) return "needs";
-  if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
-  return "done";
-}
 
 type SummaryTab = SessionSummary["tabs"][number];
 
@@ -45,6 +75,7 @@ type SummaryTab = SessionSummary["tabs"][number];
 export const tabUnread = (tab: SummaryTab) => !!tab.markedUnread || tab.status === "completed";
 
 const isQuick = (session: SessionSummary) => session.kind === "quick" || session.project === QUICK_CHATS;
+const parsedTime = (value?: string) => { const time = value ? Date.parse(value) : NaN; return Number.isFinite(time) ? time : 0; };
 
 /** A row's name by the Mac's rule: its branch, unless that is only a drawn worktree name. An older Mac sends no branch; its worktree's name stands in. */
 export function rowName(session: SessionSummary, title: string): { name: string; branched: boolean } {
@@ -52,26 +83,57 @@ export function rowName(session: SessionSummary, title: string): { name: string;
   const branch = session.branch === undefined ? session.worktree || null : session.branch;
   return branch && !isPlaceholderBranch(branch) ? { name: branch, branched: true } : { name: title, branched: false };
 }
-const firstLine = (text?: string) => text?.replace(/\s+/g, " ").trim() || undefined;
+
+/**
+ * The facts the shared rules read for the session, as the Mac decided them.
+ * An older Mac sends none: the tabs' own lifecycle stands in, which the rules
+ * read the same way (a waiting tab with no activity needs the person).
+ */
+const statusInput = (session: SessionSummary): SessionStatusInput => session.rowStatus ?? session;
+
+/** Each tab's agent facts, in the session's tab order; the Mac's when it sent one per tab. */
+function tabInputs(session: SessionSummary): StatusTab[] {
+  const sent = session.rowStatus?.tabs;
+  return session.tabs.map((tab, index) => sent && sent.length === session.tabs.length ? sent[index] : { status: tab.status });
+}
+
+/**
+ * A tab alone: only its agent's state, as the rules read one tab with nothing
+ * about the branch. A tab whose turn has finished shows Done's tick (22.04),
+ * where the rules, which read the branch for that, would leave it idle.
+ */
+function tabRowStatus(fact: StatusTab): RowStatus {
+  const status = rowStatus(sessionStatus({ tabs: [fact] }));
+  return status.mark === "idle" && fact.status === "completed" ? { ...status, mark: "done" } : status;
+}
 
 function chatRow(session: SessionSummary): ChatRow {
-  const state = chatState(session);
-  const tab = session.tabs.find((item) => item.status === "waiting") ?? session.tabs.find((item) => item.status === "in_progress") ?? session.tabs[0];
-  const said = firstLine(session.lastReply) ?? firstLine(session.lastPrompt);
-  const place = isQuick(session) ? undefined : [session.project, session.worktree].filter(Boolean).join(" · ");
-  const time = Date.parse(session.modified);
-  const title = session.title?.trim() || (tab ? conversationLabel(tab, session.tabs) : "Untitled chat");
+  const status = rowStatus(sessionStatus(statusInput(session)));
+  const facts = tabInputs(session);
+  const chats = branchChats(session);
+  const tabs = session.tabs.map((tab, index): TabRow => ({
+    id: tab.id,
+    name: chats[index].name,
+    status: tabRowStatus(facts[index]),
+    time: parsedTime(tab.modified),
+  }));
+  // The tab a tap opens: the most urgent by the same rules, else the first.
+  const urgent = facts.map((fact) => sessionStatus({ tabs: [fact] }).id);
+  const order = SESSION_STATUSES.map((rule) => rule.id);
+  const first = urgent.reduce((best, id, index) => order.indexOf(id) < order.indexOf(urgent[best]) ? index : best, 0);
+  const title = session.title?.trim() || (session.tabs[first] ? conversationLabel(session.tabs[first], session.tabs) : "Untitled chat");
+  const named = rowName(session, title);
   return {
     key: session.id,
     session,
-    tabId: tab?.id ?? "",
+    tabId: session.tabs[first]?.id ?? "",
     title,
-    ...rowName(session, title),
-    preview: said ?? place ?? "",
-    state,
-    unread: session.tabs.some(tabUnread),
-    time: Number.isFinite(time) ? time : 0,
-    color: isQuick(session) ? null : projectHueByName(session.project),
+    ...named,
+    branch: named.branched ? named.name : null,
+    status,
+    needsYou: needsYou(status.status),
+    tabs,
+    time: parsedTime(session.modified),
   };
 }
 
@@ -82,25 +144,53 @@ function matches(session: SessionSummary, words: string[]): boolean {
   return words.every((word) => value.includes(word));
 }
 
-/** Every chat with a conversation to open, those waiting on the reader first, then the most recent. */
+/** Every session with a conversation to open, those waiting on the person first, then by last activity. */
 export function chatRows(sessions: SessionSummary[], query = ""): ChatRow[] {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return sessions.filter((session) => session.tabs.length > 0 && matches(session, words)).map(chatRow)
-    .sort((left, right) => Number(right.state === "needs") - Number(left.state === "needs") || right.time - left.time);
+    .sort((left, right) => Number(right.needsYou) - Number(left.needsYou) || right.time - left.time);
 }
 
-/** The chats by project, as channels: the most recently active project first, quick chats last. */
+/** The sessions by project: the most recently active project first, quick chats last. */
 export function projectGroups(rows: ChatRow[]): ProjectGroup[] {
   const groups = new Map<string, ProjectGroup>();
   for (const row of rows) {
     const project = isQuick(row.session) ? QUICK_CHATS : row.session.project || "Other";
-    const group = groups.get(project) ?? { project, color: row.color, rows: [], latest: 0, needs: 0 };
+    const group = groups.get(project) ?? { project, rows: [], latest: 0 };
     group.rows.push(row);
     group.latest = Math.max(group.latest, row.time);
-    if (row.state === "needs") group.needs += 1;
     groups.set(project, group);
   }
   return [...groups.values()].sort((left, right) => Number(left.project === QUICK_CHATS) - Number(right.project === QUICK_CHATS) || right.latest - left.latest);
+}
+
+/** The list's filters: every session, those waiting on the person, those whose agent works. */
+export type ListFilter = "all" | "needs" | "working";
+export const LIST_FILTERS: readonly { id: ListFilter; label: string }[] = [{ id: "all", label: "All" }, { id: "needs", label: "Needs you" }, { id: "working", label: "Working" }];
+
+const inFilter = (row: ChatRow, filter: ListFilter) => filter === "all" || (filter === "needs" ? row.needsYou : row.status.mark === "working");
+
+export function filterCounts(rows: ChatRow[]): Record<ListFilter, number> {
+  return { all: rows.length, needs: rows.filter((row) => inFilter(row, "needs")).length, working: rows.filter((row) => inFilter(row, "working")).length };
+}
+
+/** A run of rows under a heading; an empty title has none. */
+export interface RowSection { key: string; title: string; data: ChatRow[] }
+
+/**
+ * The list as 22.04 lays it out. Under All, what waits on the person comes
+ * first in its own section, across projects, and the rest stay by project.
+ * "Needs you" is that section alone; "Working" keeps its rows by project.
+ */
+export function listSections(rows: ChatRow[], filter: ListFilter): RowSection[] {
+  const shown = rows.filter((row) => inFilter(row, filter));
+  if (filter === "needs") return shown.length ? [{ key: "needs", title: "", data: shown }] : [];
+  const waiting = filter === "all" ? shown.filter((row) => row.needsYou) : [];
+  const rest = filter === "all" ? shown.filter((row) => !row.needsYou) : shown;
+  return [
+    ...(waiting.length ? [{ key: "needs", title: "Needs you", data: waiting }] : []),
+    ...projectGroups(rest).map((group) => ({ key: `project:${group.project}`, title: group.project, data: group.rows })),
+  ];
 }
 
 /** When, as a chat list says it: "now", "5m", "3h", a weekday, then a date. */
@@ -117,13 +207,38 @@ export function shortTime(time: number, now = Date.now()): string {
   return date.toLocaleDateString(undefined, { year: "2-digit", month: "numeric", day: "numeric" });
 }
 
+/**
+ * When, said after a status where there is room (the Cloud list, 22.06):
+ * as `shortTime` within the day, then "2 days ago" for the week, then the date.
+ */
+export function agoTime(time: number, now = Date.now()): string {
+  if (!time) return "";
+  const days = Math.floor((now - time) / 86_400_000);
+  if (days < 1 || days >= 7) return shortTime(time, now);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+/** When, as VoiceOver should say it: "active now", "active 5 minutes ago", then the day. */
+export function spokenTime(time: number, now = Date.now()): string {
+  if (!time) return "";
+  const minutes = Math.floor((now - time) / 60_000);
+  if (minutes < 1) return "active now";
+  if (minutes < 60) return `active ${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `active ${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  return `active ${new Date(time).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}`;
+}
+
 /** One of the chats a branch holds: a tab on the Mac. */
 export interface BranchChat { id: string; name: string; harness: string; state: ChatState; unread: boolean }
 
-/** The chats a branch holds, as the Mac's tab strip lists them: each by its own title, else its agent's name. */
+/**
+ * The chats a branch holds, as the Mac's tab strip lists them: each by the
+ * name made for it, else its own title, else its agent's name.
+ */
 export function branchChats(session: SessionSummary): BranchChat[] {
   return session.tabs.map((tab) => {
-    const title = tab.title?.trim();
+    const title = tabTitle(tab);
     const own = title && title !== providerName(tab.harness);
     return {
       id: tab.id,

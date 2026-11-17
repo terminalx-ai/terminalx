@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Terminal, TerminalSquare, TriangleAlert, X } from "@/icons";
+import { ChevronDown, FileDiff, GitPullRequest, Globe, Lock, TerminalSquare, TriangleAlert, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { fileChipIcon } from "@/components/chat/FileChip";
 import { StatusStripe } from "@/components/layout/SidebarRows";
@@ -13,6 +13,7 @@ import { registerHotkey } from "@/lib/hotkeys";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
+import { useErrorToasts } from "@/lib/errorToasts";
 import { closeTabTelling } from "@/components/session/TabMenu";
 import { isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { tabViewIn } from "@/lib/tabFront";
@@ -21,6 +22,7 @@ import { useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { TabMenuItems } from "./TabMenu";
+import { TabAccountMark } from "./TabStrip";
 
 /** The id of a tab in the strip: what its panel is labelled by while the strip is shown. */
 export function stripTabId(tab: SelectedSessionTab): string {
@@ -89,11 +91,15 @@ export function WorkspaceTabStrip({
   readOnlyReason,
   hideSingle = false,
   trailing,
+  end,
   className,
   paneRow,
   paneDrag,
+  accounts = true,
 }: {
   session: SessionEntry;
+  /** Whether its agent tabs show which of this computer's accounts they run on (#980): not for a cloud session's. */
+  accounts?: boolean;
   /** The tab on screen in `session`. */
   selected: SelectedSessionTab | null;
   /** Why this person may not change the tabs (a viewer of a shared session); the tabs still show. */
@@ -102,6 +108,8 @@ export function WorkspaceTabStrip({
   hideSingle?: boolean;
   /** What ends the row of tabs: the "+" that opens one. */
   trailing?: ReactNode;
+  /** At the strip's right end (PRO-381): the open tab's terminal view switch. */
+  end?: ReactNode;
   className?: string;
   paneRow?: TabRow;
   paneDrag?: {
@@ -115,6 +123,8 @@ export function WorkspaceTabStrip({
   const store = useSessionStore();
   const tabViews = useTabViews();
   const mobileDriven = useMobileDrivenTabs();
+  // A tab whose close was refused (PRO-291) keeps its × in red while the toast that says so is up (03.29).
+  const closeFailed = new Set(useErrorToasts().flatMap((toast) => (toast.key?.startsWith("close:") ? [toast.key.slice("close:".length)] : [])));
   const scroller = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   /** Which ends of the row have tabs scrolled out of view: those ends fade, so a cut-off tab reads as "more this way". */
@@ -259,7 +269,7 @@ export function WorkspaceTabStrip({
   const fade = more.before || more.after ? `linear-gradient(to right, ${more.before ? "transparent, black 1.25rem" : "black"}, ${more.after ? "black calc(100% - 1.25rem), transparent" : "black"})` : null;
 
   return (
-    <div className={cn("flex w-full shrink-0 items-stretch gap-1 border-b border-hairline px-2", className)} data-testid="workspace-tab-strip">
+    <div className={cn("@container/strip flex w-full shrink-0 items-stretch gap-1 border-b border-hairline px-2", className)} data-testid="workspace-tab-strip">
       <div
         ref={scroller}
         role="tablist"
@@ -279,6 +289,7 @@ export function WorkspaceTabStrip({
           const isActive = tab.key === activeKey;
           const status = peerStatus(tab);
           const exited = !!peerShell(tab)?.exited;
+          const failedClose = closeFailed.has(tab.key);
           return (
             <ContextMenu key={tab.key}>
               <ContextMenuTrigger asChild>
@@ -328,8 +339,9 @@ export function WorkspaceTabStrip({
                         {status ? <StatusStripe status={status} size="tab" /> : null}
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
+                        {accounts && !tab.pinned && tab.kind === "agent" && !isShellPeer(tab) ? <TabAccountMark tab={tab.tab} /> : null}
                         {!tab.pinned && tab.kind === "agent" && mobileDriven.has(tab.id) ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
-                        {!tab.pinned && tab.kind === "agent" && !isShellPeer(tab) && tabViewIn(tabViews.views, tab.tab) === "terminal" ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
+                        {!tab.pinned && tab.kind === "agent" && !isShellPeer(tab) && tabViewIn(tabViews.views, tab.tab) === "terminal" ? <span className="shrink-0 rounded bg-info/15 px-1.5 text-[12px] leading-4 text-info" aria-label="In terminal view">terminal view</span> : null}
                         {!tab.pinned && tab.kind === "browser" && tab.page.active ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
                       </button>
                     </TooltipTrigger>
@@ -344,14 +356,16 @@ export function WorkspaceTabStrip({
                     <button
                       type="button"
                       data-tab-close
-                      aria-label={`Close ${label}`}
+                      aria-label={failedClose ? `Close ${label} (closing failed)` : `Close ${label}`}
+                      data-close-failed={failedClose || undefined}
                       onClick={() => void closeTabTelling(session.id, tab, tabs, selected, label)}
                       // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
                       // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
                       // narrow tab shows its title instead.
                       className={cn(
                         "mr-2 size-4 shrink-0 items-center justify-center rounded-sm outline-none transition-opacity hover:bg-veil-strong hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40",
-                        isActive ? "flex opacity-0 group-hover/tab:opacity-70 group-focus-within/tab:opacity-70" : "hidden opacity-70 group-focus-within/tab:flex group-hover/tab:flex",
+                        failedClose ? "flex size-5 bg-destructive/15 text-destructive opacity-100 hover:bg-destructive/25"
+                          : isActive ? "flex opacity-0 group-hover/tab:opacity-70 group-focus-within/tab:opacity-70" : "hidden opacity-70 group-focus-within/tab:flex group-hover/tab:flex",
                       )}
                     >
                       <X className="size-3" />
@@ -359,7 +373,7 @@ export function WorkspaceTabStrip({
                   ) : null}
                 </div>
               </ContextMenuTrigger>
-              <ContextMenuContent className="max-h-(--radix-context-menu-content-available-height) overflow-y-auto">
+              <ContextMenuContent className="max-h-(--radix-context-menu-content-available-height) w-[286px] max-w-[calc(100vw-1rem)] overflow-y-auto">
                 <TabMenuItems row={row} tab={tab} selected={selected} readOnlyReason={readOnlyReason} />
               </ContextMenuContent>
             </ContextMenu>
@@ -373,6 +387,7 @@ export function WorkspaceTabStrip({
           {overflowing ? <AllTabsMenu row={row} active={activeKey} describe={describe} /> : null}
         </div>
       ) : null}
+      {end ? <div className="ml-auto flex shrink-0 items-center pl-2">{end}</div> : null}
     </div>
   );
 }

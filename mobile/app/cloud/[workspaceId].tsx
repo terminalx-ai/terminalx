@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { Send, Square } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
-import type { CloudCatalog } from "@mobile/cloud/catalog";
-import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, roleLabel } from "@mobile/cloud/words";
+import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
+import type { CloudRole } from "@mobile/cloud/api";
+import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { GlassIconButton } from "@mobile/ui/glass";
+import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
@@ -19,8 +23,9 @@ import { linkedText } from "@mobile/ui/LinkedText";
 /**
  * One cloud workspace: its agent tabs and the conversation of the chosen one.
  * A running workspace is shown live. A stopped one is shown from its saved,
- * encrypted conversation, and opening this screen starts nothing; only
- * sending a message does, after the person confirms.
+ * encrypted conversation, and opening this screen starts nothing: in place of
+ * the composer it says so, with Start for someone who may start it (#988).
+ * Under the title, one line says its state and the person's role.
  */
 export default function CloudWorkspaceScreen() {
   const params = useLocalSearchParams<{ workspaceId: string; orgId?: string; tabId?: string; title?: string }>();
@@ -49,7 +54,7 @@ export default function CloudWorkspaceScreen() {
   const checking = access === "not-shared" && checked !== key;
   const closed = !checking && (access === "not-shared" || access === "deleted" || access === "gone") ? accessText(access) : null;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
-    <Stack.Screen options={{ title: listed?.name ?? params.title ?? "Workspace" }} />
+    <Stack.Screen options={{ title: (listed ? workspaceTitle(snapshot, listed) : null) ?? params.title ?? "Workspace" }} />
     {!catalog ? <EmptyState title="Workspace unavailable" detail="Sign in, then open it again from the Cloud tab." />
       // Access ended, also while this screen was open: the conversation goes at once, with the reason.
       : closed ? <EmptyState title={closed.title} detail={closed.detail} />
@@ -88,10 +93,18 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const tabId = tab?.tabId ?? null;
   const live = snapshot.connection.state === "connected";
   const starting = listedState === "suspended" && snapshot.outbox.some((entry) => (entry.state === "queued" || entry.state === "leased") && (entry.wake === "queued" || entry.wake === "in-progress"));
-  const banner = connectionLine(snapshot.connection, listedState, snapshot.problem, starting, { role: snapshot.role, checking: snapshot.checkingAccess });
+  const listed = catalog.workspace(orgId, workspaceId);
+  const listing = useCatalogSnapshot(catalog);
+  // The runtime's word on the role, else the list's while nothing is running.
+  const roleNow: CloudRole | null = snapshot.role ?? listed?.you?.role ?? null;
+  const line = connectionLine(snapshot.connection, listedState, snapshot.problem, starting, { role: roleNow, checking: snapshot.checkingAccess });
   // The link stopped trying by itself, or was refused: it tries again only when asked.
   const canReconnect = snapshot.connection.state === "stopped" && listedState === "ready";
-  const role = roleLabel(snapshot.role);
+  const role = unshared ? null : rolePhrase(roleNow);
+  const subtitle = [line.short, role].filter(Boolean).join(" · ");
+  const title = listed ? workspaceTitle(listing, listed) : "Workspace";
+  const sharing = listedState !== null && !unshared;
+  const stopped = listedState === "suspended";
 
   useEffect(() => (tabId ? session.view(tabId) : undefined), [session, tabId]);
   // The names behind the user ids the runtime reports; without them a short id is shown.
@@ -99,21 +112,76 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const presence = presenceLine(snapshot.collab.participants, snapshot.collab.userId, (id) => snapshot.tabs.find((entry) => entry.tabId === id)?.title ?? null, nameOf);
 
   return <>
-    <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: banner.tone === "live" ? `${palette.success}16` : banner.tone === "warn" ? `${palette.warning}18` : palette.raised }]}>
-      <StatusDot color={banner.tone === "live" ? palette.success : banner.tone === "warn" ? palette.warning : palette.faint} />
-      <Text style={[styles.bannerText, { color: palette.ink }]}>{banner.text}</Text>
-      {role ? <Text style={[styles.role, { color: palette.muted }]}>{role}</Text> : null}
-      {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
-      {listedState !== null && !unshared ? <Pressable accessibilityRole="button" accessibilityLabel="Sharing" onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={[styles.sharing, { backgroundColor: palette.raised }]}><Text style={[styles.role, { color: palette.ink }]}>Sharing</Text></Pressable> : null}
-    </View>
+    {/* The bar a session has (22.06): back, the title over its state and the person's role as plain words, and Sharing. */}
+    <Stack.Screen options={{ title, headerShown: false }} />
+    <ScreenHeader title={title} onBack={() => router.back()}
+      subtitle={<HeaderLine testID="workspace-state-line" text={subtitle} label={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} />}
+      trailing={sharing ? <GlassIconButton label="Sharing" size={40} icon={<Users size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} /> : null} />
+    {/* A warning says more than fits under the title, here, with what can be done about it. */}
+    {line.tone === "warn" ? <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: `${palette.warning}18` }]}>
+      <StatusDot color={palette.warning} />
+      <Text style={[styles.bannerText, { color: palette.ink }]}>{line.text}</Text>
+      {canReconnect ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect" onPress={() => { session.reconnect(); void catalog.refresh(); }} style={[styles.reconnect, { backgroundColor: palette.raised }]}><Text style={[styles.reconnectText, { color: palette.ink }]}>Reconnect</Text></Pressable> : null}
+    </View> : null}
     {presence && !unshared ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
     {snapshot.tabs.length > 1 && !unshared ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
-    {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} /> : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} tabId={tab.tabId} live={live} listedState={listedState} /> : <EmptyState title={live ? "No agent tabs" : "Nothing saved yet"} detail={live ? "This workspace has no agent conversation." : "There is no saved conversation for this workspace to show while it is not running."} />}
+    {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
+      : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} />
+      : <View style={styles.flex}>
+        <View style={[styles.flex, styles.centred]}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
+          : stopped || starting ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
+          : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
+          : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
+        {startBarShown(listedState, starting) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
+      </View>}
   </>;
 }
 
-function Conversation({ catalog, session, scope, tabId, live, listedState }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; tabId: string; live: boolean; listedState: string | null }) {
+/** Whether the composer's place holds the Start bar: stopped, or starting and not running yet. */
+function startBarShown(listedState: string | null, starting: boolean): boolean {
+  return listedState === "suspended" || listedState === "resuming" || listedState === "provisioning" || starting;
+}
+
+/**
+ * In place of the composer while a workspace is stopped: Start, for its
+ * managers (the server lets only them), and who can start it for a viewer. A
+ * driver keeps the composer, whose message starts it (see `Conversation`).
+ * Starting it is billed, so it is asked first. When it runs, the composer is back.
+ */
+function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { catalog: CloudCatalog; orgId: string; workspaceId: string; role: CloudRole | null; creatorId: string | null; starting: boolean }) {
+  const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
+  const nameOf = useNames(catalog);
+  const [asking, setAsking] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const listedState = catalog.workspace(orgId, workspaceId)?.state ?? null;
+  const changing = starting || asking || listedState === "resuming" || listedState === "provisioning";
+  const mayStart = role === "manager";
+  const start = () => Alert.alert("Start this workspace?", "It is billed to the organization while it runs.", [
+    { text: "Cancel", style: "cancel" },
+    { text: "Start", onPress: () => {
+      setAsking(true);
+      setFailure(null);
+      void catalog.start(orgId, workspaceId).catch((error: unknown) => {
+        const code = (error as { code?: unknown })?.code;
+        setFailure(codeText(typeof code === "string" ? code : null) ?? "That did not work.");
+      }).finally(() => setAsking(false));
+    } },
+  ]);
+  // In the composer's place, as a card like it (22.06).
+  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
+    <View style={styles.flex}>
+      <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : "This workspace is stopped"}</Text>
+      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
+      {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
+      {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
+    </View>
+    {mayStart ? <Button label={changing ? "Starting…" : "Start"} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
+  </View>;
+}
+
+function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null }) {
   const { palette } = useTheme();
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const tab = snapshot.tabs.find((entry) => entry.tabId === tabId);
@@ -138,9 +206,15 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
 
   const mayWrite = snapshot.role === "manager" || snapshot.role === "driver";
   const stopped = listedState === "suspended";
+  // Asked to start by a message that is on its way: the workspace is starting, as far as anyone here can tell.
+  const starting = stopped && snapshot.outbox.some((entry) => (entry.state === "queued" || entry.state === "leased") && (entry.wake === "queued" || entry.wake === "in-progress"));
   // Written earlier and still on the phone, for a workspace that is stopped now: held until the person says to start it.
   // Also what the server holds for a workspace that stopped before it was delivered: nothing starts it until the person says so.
   const held = stopped ? outbox.filter((entry) => entry.state === "unsent" || entry.asleep) : [];
+  const roleHere: CloudRole | null = snapshot.role ?? catalog.workspace(orgId, workspaceId)?.you?.role ?? null;
+  // A driver may not start a stopped workspace with Start (/resume is for its managers), but a message they
+  // queue wakes it (contract §11.2): for them the composer stays, and sending asks first, as it always has.
+  const sendStarts = stopped && !starting && roleHere === "driver";
   const working = tab?.status === "in_progress";
   // Stop is Escape first (#427), as on the desktop: the turn is interrupted and the agent's process stays. While the
   // turn it was sent to is still the one running, the same button is the stop that ends the process. A runtime that
@@ -261,7 +335,9 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
         {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
-    {mayWrite && listedState !== "archived" && listedState !== null
+    {startBarShown(listedState, starting) && !sendStarts
+      ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
+      : mayWrite && listedState !== "archived" && listedState !== null
       ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
         {!snapshot.hasKey ? <Text style={[styles.notice, { color: palette.muted }]}>{codeText("no-key")}</Text> : null}
         {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(lease?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
@@ -281,10 +357,15 @@ const CANNOT_ANSWER = "Only someone allowed to approve can answer this question.
 const styles = StyleSheet.create({
   page: { flex: 1 },
   flex: { flex: 1 },
+  centred: { justifyContent: "center" },
   banner: { flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 16, paddingVertical: 10 },
   bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
-  role: { fontSize: 12, fontWeight: "600" },
-  sharing: { minHeight: 32, paddingHorizontal: 11, borderRadius: 9, justifyContent: "center" },
+  // The title and, under it, the state and the role in plain words.
+  // An icon button with a full 44 pt target.
+  reconnectText: { fontSize: 12, fontWeight: "600" },
+  startBar: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12 },
+  startTitle: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
+  startDetail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
   presence: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
   // Wraps on a narrow phone: the buttons go under the driver's name rather than squeezing it.
   wheel: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4, paddingLeft: 16, paddingRight: 6, borderBottomWidth: StyleSheet.hairlineWidth },

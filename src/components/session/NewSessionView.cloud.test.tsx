@@ -9,17 +9,20 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 
 // PRO-61 (CS-13 subset): the project row's `+` opens the same new-session
 // form, preset with "Runs in: <Org> cloud". Start reuses or wakes a
-// workspace, or asks for the one-time cost confirmation before creating one.
+// workspace, or creates one at once: Create is the confirmation (PRO-409).
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart, noLocal, modelConnection } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection, catalog } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  /** What the form reads as the cloud catalog: the new workspace's start is followed there. */
+  catalog: { value: { orgs: {} } as unknown },
   modelConnection: { client: null as import("@terminalx/portable/workspace").WorkspaceRpcClient | null, targets: vi.fn() },
   flow: {
     planCloudStart: vi.fn(),
     startInWorkspace: vi.fn(),
     prepareCloudCreate: vi.fn(),
     confirmCloudCreate: vi.fn(),
+    cloudIdleOptions: vi.fn(),
   },
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
@@ -80,6 +83,10 @@ vi.mock("./CloudNewSession", async (importOriginal) => ({
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/cloudCatalog", async (original) => ({
+  ...(await original<typeof import("@/lib/cloudCatalog")>()),
+  useCloudCatalog: () => catalog.value,
+}));
 vi.mock("@/lib/cloudModels", async (original) => ({
   ...(await original<typeof import("@/lib/cloudModels")>()),
   useCloudModelClient: (target: unknown) => {
@@ -116,10 +123,13 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
+  // The organization's "Stop when idle" windows for a new workspace (PRO-410): the provider's default is 30 minutes.
+  flow.cloudIdleOptions.mockResolvedValue({ choices: [15, 30, 60, 0], defaultMinutes: 30, cap: null });
   modelConnection.client = null;
   modelConnection.targets.mockClear();
   mayStart.value = true;
   noLocal.value = false;
+  catalog.value = { orgs: {} };
   draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
@@ -148,7 +158,8 @@ describe("new session in a cloud project", () => {
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
     // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
     // and the button claims no version for it.
-    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Permissions: Bypass" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
@@ -167,7 +178,7 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
     flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
     const view = render(<NewSessionView />);
-    const button = await screen.findByRole("button", { name: "Opus 4.6, Bypass" });
+    const button = await screen.findByRole("button", { name: "Opus 4.6" });
     expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
     mouseClick(button);
     const top = await screen.findByRole("menu");
@@ -182,26 +193,77 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
     view.rerender(<NewSessionView />);
     expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
-    expect(screen.getByRole("button", { name: "Opus, Bypass" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Permissions: Bypass" })).toBeTruthy();
   });
 
-  it("asks once for the cost, showing the quota, before creating a workspace", async () => {
+  /** The catalog with the workspace Create just made, at this point of its start. */
+  const listed = (launch: Record<string, unknown>) => ({ orgs: { "org-a": { workspaces: [{ workspace: { id: "ws-new", orgId: "org-a", name: "Start the API", state: "provisioning", launch } }] } } });
+  // A new element each time: React skips a rerender handed the same one, and the catalog would not be read again.
+  const form = () => <NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />;
+
+  it("creates the workspace on Create, with no second confirmation, and stays busy until its session opens (PRO-409)", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "create" });
     flow.prepareCloudCreate.mockResolvedValue(prepared);
-    flow.confirmCloudCreate.mockResolvedValue({});
-    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
+    const view = render(form());
+    type("Start the API");
+    // "Stop when idle" is offered once the organization's windows are read.
+    await screen.findByTestId("cloud-idle-line");
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
+    expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1);
+    // The new workspace stops itself after the provider's default idle window unless another is chosen (PRO-410).
+    expect(flow.prepareCloudCreate.mock.calls[0][1]).toMatchObject({ idleSuspendMinutes: 30 });
+    expect(screen.queryByTestId("cloud-create-confirm")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create workspace and start" })).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("Starting the workspace"));
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
+
+    // Where the start is comes from the catalog.
+    catalog.value = listed({ phase: "syncing-repository" });
+    view.rerender(form());
+    await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("syncing repository"));
+
+    // Its first session is there: the wait is over (the session is opened by `followLaunch`).
+    catalog.value = listed({ phase: "running", sessionId: "s-1" });
+    view.rerender(form());
+    await waitFor(() => expect(screen.queryByTestId("cloud-start-status")).toBeNull());
+  });
+
+  it("releases Create and says why when the new workspace's start fails", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    flow.prepareCloudCreate.mockResolvedValue(prepared);
+    flow.confirmCloudCreate.mockResolvedValue({ workspace: { id: "ws-new" } });
+    const view = render(form());
     type("Start the API");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    const card = await screen.findByTestId("cloud-create-confirm");
-    expect(screen.getByTestId("cloud-create-quota").textContent).toBe("Acme has 1 of 2 cloud workspaces in use; this adds one.");
-    expect(screen.getByTestId("cloud-create-price").textContent).toContain("an hour while it runs");
-    expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
-    // Start is off while the confirmation is open: one confirmation, one create.
-    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
-    fireEvent.click(screen.getByTestId("cloud-create-confirm-button"));
-    await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
-    await waitFor(() => expect(card.isConnected).toBe(false));
-    expect(screen.getByTestId("cloud-start-status").textContent).toContain("The session opens when its agent is running");
+    await waitFor(() => expect(screen.getByTestId("cloud-start-status").textContent).toContain("Starting the workspace"));
+    catalog.value = listed({ phase: "failed", state: "failed", category: "payload-invalid" });
+    view.rerender(form());
+    expect(await screen.findByText(/The launch settings were not accepted by the workspace\./)).toBeTruthy();
+    expect(screen.queryByTestId("cloud-start-status")).toBeNull();
+  });
+
+  it("resends the same create after an unknown outcome, so Create again cannot make a second workspace", async () => {
+    flow.planCloudStart.mockReturnValue({ kind: "create" });
+    // The prepared create carries the request it was made from, as the real one does.
+    flow.prepareCloudCreate.mockImplementation(async (_project: unknown, request: { prompt: string; agent: string; model: string; effort: string | null; mode: string; idleSuspendMinutes?: number }) => ({
+      ...prepared,
+      form: { prompt: request.prompt, agent: request.agent, model: request.model, effort: request.effort ?? "", mode: request.mode, idleSuspendMinutes: request.idleSuspendMinutes },
+    }));
+    flow.confirmCloudCreate.mockRejectedValueOnce({ code: "cloud_workspace_request_timeout", status: 0, retryWithSameIdempotencyKey: true }).mockResolvedValue({ workspace: { id: "ws-new" } });
+    render(form());
+    type("Start the API");
+    await screen.findByTestId("cloud-idle-line");
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledTimes(2));
+    // Prepared once: the second press sent the first request again, key and all.
+    expect(flow.prepareCloudCreate).toHaveBeenCalledTimes(1);
+    expect(flow.confirmCloudCreate.mock.calls[1][0]).toBe(flow.confirmCloudCreate.mock.calls[0][0]);
   });
 
   it("at the limit, says so and creates nothing", async () => {
@@ -313,7 +375,6 @@ describe("the running limit (saas PRO-76)", () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("One more");
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    fireEvent.click(await screen.findByTestId("cloud-create-confirm-button"));
     expect(await screen.findByText(/Stop one to start another\./)).toBeTruthy();
     expect(screen.getByTestId("running-limit-notice")).toBeTruthy();
   });
@@ -429,7 +490,7 @@ describe("the composer's pickers", () => {
 
   it("project, and agent with model and permissions, each open on a real mouse click, and a second click closes it", async () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
-    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Opus/, "Agent"], [/^Opus/, "Model"], [/^Opus/, "Permissions"]] as const) {
+    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Opus/, "Agent"], [/^Opus/, "Model"], [/^Permissions/, "Permissions"]] as const) {
       mouseClick(picker(name));
       const menu = await screen.findByRole("menu");
       expect(within(menu).getByText(label)).toBeTruthy();

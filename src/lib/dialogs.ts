@@ -1,3 +1,4 @@
+import type { PromptAttachments } from "./continuation";
 import { useSyncExternalStore } from "react";
 import { BYPASS_MODE } from "./models";
 import { getPrefs } from "./prefs";
@@ -25,7 +26,7 @@ export interface WorkspaceRemoveRequest {
 }
 
 interface State {
-  agentHandoff: { session: SessionEntry; source: TabEntry; harness: string; reviewPrompt?: string } | null;
+  agentHandoff: { session: SessionEntry; source: TabEntry; harness: string; reviewPrompt?: string; retry?: boolean; attachments?: PromptAttachments } | null;
   workspaceRestore: string | null;
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
@@ -71,8 +72,9 @@ export function useDialogs(): State {
 }
 
 /** Pin the source while creating/selecting the destination; repeated clicks open one flow. */
-export function openAgentHandoff(session: SessionEntry, source: TabEntry, harness: string, reviewPrompt?: string) {
-  if (!state.agentHandoff) set({ agentHandoff: { session, source, harness, reviewPrompt } });
+/** `retry`: `reviewPrompt` is a failed turn's own prompt, sent again as it was in a new tab (PRO-378), not a review. */
+export function openAgentHandoff(session: SessionEntry, source: TabEntry, harness: string, reviewPrompt?: string, retry?: boolean, attachments?: PromptAttachments) {
+  if (!state.agentHandoff) set({ agentHandoff: { session, source, harness, reviewPrompt, retry, attachments } });
 }
 
 export function closeAgentHandoff() {

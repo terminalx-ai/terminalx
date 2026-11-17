@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry, Workspace } from "@/types/session";
 import { clearDrafts, setDraft } from "@/lib/drafts";
@@ -18,7 +18,7 @@ vi.mock("@/lib/sessions", () => ({
   refreshWorkspaces: mocks.refresh,
   archiveSession: vi.fn(),
 }));
-const { DraftPreview, SessionRowData, SessionRowExtras, sidebarConversationTitle, useSessionDraft } = await import("./SessionRowExtras");
+const { DraftPreview, SessionRowData, SessionRowExtras, useSessionDraft } = await import("./SessionRowExtras");
 const session: SessionEntry = {
   id: "s", title: "First request", projectPath: "/repo", cwd: "/repo/topic", worktreeName: "topic", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false, activeTab: "t",
   tabs: [{ id: "t", harness: "claude", model: "", permissionMode: "auto", status: "idle", created: "", modified: "" }],
@@ -54,7 +54,15 @@ describe("sidebar row extras", () => {
     render(<Draft />);
     expect(screen.queryByTestId("row-draft")).toBeNull();
     act(() => setDraft("t", "  Please\n  finish the tests  "));
-    expect(screen.getByTestId("row-draft").textContent).toBe("Draft: Please finish the tests");
+    const line = screen.getByTestId("row-draft");
+    // A pencil named "Draft" leads the text, in the line's faint colour; there is no "Draft:" word.
+    expect(line.textContent).toBe("Please finish the tests");
+    const pencil = within(line).getByRole("img", { name: "Draft" });
+    expect(pencil.getAttribute("title")).toBe("Draft");
+    expect(pencil.querySelector("svg")).toBeTruthy();
+    expect(line.firstElementChild).toBe(pencil);
+    expect(line.className).toContain("text-faint");
+    expect(line.innerHTML).not.toContain("text-warning");
     act(() => clearDrafts((id) => id === "t"));
     expect(screen.queryByTestId("row-draft")).toBeNull();
   });
@@ -76,19 +84,5 @@ describe("sidebar row extras", () => {
     expect(await screen.findByRole("img", { name: "Open port" })).toBeTruthy();
     expect(mocks.busy).not.toHaveBeenCalled();
     expect(mocks.ports).toHaveBeenCalledExactlyOnceWith([{ id: "s", cwd: "/repo/topic" }]);
-  });
-  it("uses readable branch names and keeps explicit names and first requests when no useful branch exists", () => {
-    expect(sidebarConversationTitle(session, "raccoon/fix-login_redirect")).toBe("fix login redirect");
-    expect(sidebarConversationTitle(session, "raccoon/calm-ember-panda")).toBe("First request");
-    expect(sidebarConversationTitle(session, "main")).toBe("First request");
-    expect(sidebarConversationTitle(session, "develop")).toBe("First request");
-    expect(sidebarConversationTitle(session, "trunk")).toBe("First request");
-    expect(sidebarConversationTitle({ ...session, tabs: [{ ...session.tabs[0], title: "My task", titlePinned: true }] }, "feature/other")).toBe("My task");
-  });
-  it("keeps conversations distinguishable when they share a worktree or use the project checkout", () => {
-    const peer = { ...session, id: "peer", title: "Second request" };
-    expect(sidebarConversationTitle(session, "feature/login", [session, peer])).toBe("First request");
-    expect(sidebarConversationTitle(peer, "feature/login", [session, peer])).toBe("Second request");
-    expect(sidebarConversationTitle({ ...session, worktreeName: null }, "custom-default")).toBe("First request");
   });
 });

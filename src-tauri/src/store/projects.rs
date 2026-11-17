@@ -34,16 +34,17 @@ pub struct Project {
     pub logo: Option<String>,
     #[serde(default)]
     pub pinned: bool,
+    /// Left out of the sidebar; its sessions keep running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     #[serde(default)]
     pub archived: bool,
     /// How a session started from an issue is carried on to a pull request, a
     /// review and a merge. Absent is every default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_pipeline: Option<IssuePipelineSettings>,
-    /// `terminalx issues` may comment on the issues of this project's GitHub
-    /// repository and move their status without the person being asked each
-    /// time. Assigning, labelling, creating and Linear issues still ask. Off
-    /// by default.
+    /// Legacy persisted preference, retained for compatibility only. Issue
+    /// approval is deletion-only and never consults this field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_issue_updates: bool,
     /// What the reader calls a branch in the sidebar, by branch name. A
@@ -331,6 +332,8 @@ pub struct ProjectPatch {
     #[serde(default)]
     pub pinned: Option<bool>,
     #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
     pub archived: Option<bool>,
     #[serde(default)]
     pub issue_pipeline: Option<IssuePipelineSettings>,
@@ -391,6 +394,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(v) = patch.pinned {
         p.pinned = v;
+    }
+    if let Some(v) = patch.hidden {
+        p.hidden = v;
     }
     if let Some(v) = patch.archived {
         p.archived = v;
@@ -532,10 +538,31 @@ pub fn canonical(path: &str) -> Result<String> {
     Ok(c.to_string_lossy().into_owned())
 }
 
+/// Why a folder cannot become a project. It travels inside the `anyhow::Error`,
+/// so a caller that answers with a code (`terminalx projects add`) can tell the
+/// cases apart by downcasting rather than by reading the message.
+#[derive(Debug, thiserror::Error)]
+pub enum Refusal {
+    #[error("No folder at {0}")]
+    Missing(String),
+    #[error("Not a directory: {0}")]
+    NotADirectory(String),
+    #[error("This folder is a local mirror of a cloud workspace. A mirror is a read-only copy and cannot be opened as a project or used by an agent; work in the cloud workspace, or copy the files somewhere else first.")]
+    Mirror,
+    #[error("{0} is already a project")]
+    AlreadyAdded(String),
+}
+
 /// Validate before persisting projects or choosing a process working directory.
 pub fn canonical_directory(path: &str) -> Result<String> {
-    let canonical = canonical(path)?;
-    anyhow::ensure!(Path::new(&canonical).is_dir(), "Not a directory: {path}");
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical.to_string_lossy().into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Refusal::Missing(path.to_string()).into()),
+        Err(error) => return Err(anyhow::Error::new(error).context(format!("resolve {path}"))),
+    };
+    if !Path::new(&canonical).is_dir() {
+        return Err(Refusal::NotADirectory(path.to_string()).into());
+    }
     Ok(canonical)
 }
 
@@ -573,7 +600,7 @@ pub fn by_public_id(id: &str) -> Result<Project> {
 pub fn refuse_mirror(path: &str) -> Result<()> {
     #[cfg(feature = "desktop")]
     if crate::cloud_mirror::holds(&super::root()?, Path::new(path)) {
-        anyhow::bail!("This folder is a local mirror of a cloud workspace. A mirror is a read-only copy and cannot be opened as a project or used by an agent; work in the cloud workspace, or copy the files somewhere else first.");
+        return Err(Refusal::Mirror.into());
     }
     let _ = path;
     Ok(())
@@ -593,11 +620,24 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, hidden: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
     Ok(p)
+}
+
+/// Add a folder the reader named outside the app (`terminalx projects add`):
+/// the checks and git detection of [`ensure`], but a folder that is already a
+/// project is refused ([`Refusal::AlreadyAdded`]) rather than quietly accepted,
+/// and the reader's selected project is left as it is.
+pub fn add_new(path: &str) -> Result<Project> {
+    let canonical = canonical_directory(path)?;
+    refuse_mirror(&canonical)?;
+    if load()?.projects.iter().any(|project| project.path == canonical) {
+        return Err(Refusal::AlreadyAdded(canonical).into());
+    }
+    ensure(&canonical)
 }
 
 /// Register a folder as a project if it is not one yet, without making it the
@@ -621,7 +661,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, hidden: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new(), scripts: None, actions: Vec::new(), preview_urls: Vec::new(), repository_settings: RepositorySettings::default(), extra: Default::default() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -714,6 +754,26 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["projects"][0]["futureField"], serde_json::json!(["kept"]));
         assert_eq!(saved["projects"][0]["pinned"], true);
+    }
+
+    #[test]
+    fn a_hidden_patch_round_trips_through_the_store() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        assert!(!project.hidden);
+        let path = crate::store::root().unwrap().join("projects.json");
+        let saved = || -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap() };
+        assert!(saved()["projects"][0].get("hidden").is_none(), "a shown project stores nothing");
+        let patch: ProjectPatch = serde_json::from_value(serde_json::json!({"hidden": true})).unwrap();
+        assert!(update(&project.path, patch).unwrap().hidden);
+        assert_eq!(saved()["projects"][0]["hidden"], true);
+        assert!(list().unwrap().0[0].hidden);
+        assert_eq!(serde_json::to_value(&list().unwrap().0[0]).unwrap()["hidden"], true);
+        // Another patch leaves it hidden; only an explicit false shows it again.
+        assert!(update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap().hidden);
+        assert!(!update(&project.path, ProjectPatch { hidden: Some(false), ..Default::default() }).unwrap().hidden);
+        assert!(saved()["projects"][0].get("hidden").is_none());
     }
 
     #[test]
@@ -908,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_ask_before_updating_issues_until_the_project_says_otherwise() {
+    fn legacy_agent_issue_preference_round_trips_for_compatibility() {
         let _home = crate::store::temp_home();
         let older: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
         assert!(!older.agent_issue_updates);

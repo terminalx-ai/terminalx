@@ -1551,6 +1551,7 @@ impl GrantStore {
             route: route_launch_in(&state, provider, cwd, now),
             codex_auth: (provider == Provider::Codex).then(|| grant.and_then(|grant| grant.codex_file.clone())),
             env,
+            ..Default::default()
         }
     }
 
@@ -1889,13 +1890,28 @@ pub struct LaunchGrant {
     /// `Some(None)` for none at all. `None` elsewhere: the reader's own.
     pub codex_auth: Option<Option<PathBuf>>,
     launched: Option<Launched>,
+    /// The agent account this Mac's launch resolved to (#980,
+    /// `agent_accounts`): `local`, the saved key, or an added account.
+    /// `None` in a cloud workspace.
+    pub account: Option<String>,
+    /// Set again after the login shell's profile, so a profile exporting
+    /// its own cannot move the tab off its account: `CLAUDE_CONFIG_DIR` or
+    /// `CODEX_HOME` of an added account. See [`env_prefix`].
+    pub after_profile: Vec<(String, String)>,
 }
 
 impl LaunchGrant {
     /// A grant from this Mac's own agent login settings (`agent_keys`), not
     /// a cloud workspace's: nothing to record for refusals or restarts here.
     pub(crate) fn local(env: Vec<(String, Option<String>)>, route: Option<RouteLaunch>) -> Self {
-        Self { env, route, codex_auth: None, launched: None }
+        Self { env, route, ..Default::default() }
+    }
+
+    /// The same grant, on agent account `id` (#980).
+    pub(crate) fn on_account(mut self, id: &str, after_profile: Vec<(String, String)>) -> Self {
+        self.account = Some(id.to_string());
+        self.after_profile = after_profile;
+        self
     }
 }
 
@@ -2517,14 +2533,26 @@ pub fn status_json() -> Option<Value> {
 
 /// Wrap `command` so `unset` names are removed from its environment after
 /// the login shell has run its profile. The names are plain identifiers.
+#[cfg(test)]
 pub fn unset_prefix(command: &str, unset: &[String]) -> String {
-    if unset.is_empty() || cfg!(not(unix)) {
+    env_prefix(command, unset, &[])
+}
+
+/// `unset_prefix`, and `set` given their values again after the profile
+/// (an agent account's directory, #980). Names are plain identifiers; each
+/// value is one shell word.
+pub fn env_prefix(command: &str, unset: &[String], set: &[(String, String)]) -> String {
+    if (unset.is_empty() && set.is_empty()) || cfg!(not(unix)) {
         return command.to_string();
     }
     let mut out = String::from("env");
     for name in unset {
         out.push_str(" -u ");
         out.push_str(name);
+    }
+    for (name, value) in set {
+        out.push(' ');
+        out.push_str(&shell_quote(&format!("{name}={value}")));
     }
     out.push(' ');
     out.push_str(command);

@@ -39,33 +39,60 @@ export function environmentNameError(name: string): string | null {
   return null;
 }
 
+/** Why a name can't be used, in a few words for a list ("starts with a digit"); null when it can. */
+export function environmentNameProblem(name: string): string | null {
+  if (!name) return "no name before =";
+  if (name.length > 128) return "name over 128 characters";
+  if (/^[0-9]/.test(name)) return "starts with a digit";
+  if (/^[A-Za-z0-9_]+$/.test(name) && /[a-z]/.test(name)) return "has lowercase letters";
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) return "only A-Z, 0-9 and _ allowed";
+  if (RESERVED.has(name) || reserved.prefixes.some((prefix) => name.startsWith(prefix))) return "reserved by TerminalX";
+  return null;
+}
+
+/**
+ * The name of a skipped line as the sheet may show it: only one that reads as
+ * an identifier, in one case (BAD_NAME, 2FA_SEED, lower_case). A mixed-case
+ * run such as a padded base64 token's body ("dGVzdA==" splits at the first
+ * "=") may be a secret, so it is not shown.
+ */
+const shownName = (name: string) => name.length <= 64 && (/^[A-Z0-9_]+$/.test(name) || /^[a-z_][a-z0-9_]*$/.test(name)) ? name : "";
+
+/** A pasted line that is not imported: its 1-based line number, the name (never the value) and why. */
+export interface SkippedLine { line: number; name: string; reason: string }
+
 /** Literal dotenv assignments only: no interpolation, commands or multiline values. */
 export function parseLocalEnv(text: string, existing: string[] = []) {
   const inputs: EnvironmentInput[] = [];
-  const errors: string[] = [];
-  const names = new Set(existing);
+  const skipped: SkippedLine[] = [];
+  /** The line each of `inputs` came from. */
+  const lines: number[] = [];
+  const known = new Set(existing);
+  const names = new Set<string>();
   for (const [i, raw] of text.split(/\r?\n/).entries()) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const assignment = line.replace(/^export\s+/, "");
     const split = assignment.indexOf("=");
+    // Without "=" the line may be a bare secret, so not even a name is shown.
     const name = split < 0 ? "" : assignment.slice(0, split).trim();
     let value = split < 0 ? "" : assignment.slice(split + 1).trim();
-    let error = split < 0 ? "Use NAME=value." : environmentNameError(name);
-    if (!error && names.has(name)) error = "Duplicate name in this scope.";
-    if (!error && (value.startsWith('"') || value.startsWith("'"))) {
+    let reason = split < 0 ? "no = sign" : environmentNameProblem(name);
+    if (!reason && known.has(name)) reason = "already set here";
+    if (!reason && names.has(name)) reason = "listed twice";
+    if (!reason && (value.startsWith('"') || value.startsWith("'"))) {
       const quote = value[0];
       const end = value.indexOf(quote, 1);
-      if (end < 0 || (value.slice(end + 1).trim() && !value.slice(end + 1).trim().startsWith("#"))) error = "Use a single line with matching quotes.";
+      if (end < 0 || (value.slice(end + 1).trim() && !value.slice(end + 1).trim().startsWith("#"))) reason = "unmatched quotes";
       else value = value.slice(1, end);
-    } else if (!error) {
+    } else if (!reason) {
       value = value.replace(/\s+#.*$/, "").trimEnd();
     }
-    if (!error && (value.includes("\0") || new TextEncoder().encode(value).length > 64 * 1024)) error = "Values must contain no NUL and be at most 64 KiB.";
-    if (error) errors.push(`Line ${i + 1}: ${error}`);
-    else { inputs.push({ name, value }); names.add(name); }
+    if (!reason && (value.includes("\0") || new TextEncoder().encode(value).length > 64 * 1024)) reason = "value has a NUL or is over 64 KiB";
+    if (reason) skipped.push({ line: i + 1, name: shownName(name), reason });
+    else { inputs.push({ name, value }); lines.push(i + 1); names.add(name); }
   }
-  return { inputs, errors };
+  return { inputs, skipped, lines };
 }
 
 export const isPrivateRow = (row: EnvironmentRow) => row.scope === "user" || row.scope === "repository";

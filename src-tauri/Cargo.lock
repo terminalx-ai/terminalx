@@ -4066,7 +4066,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raccoon"
-version = "0.2.32"
+version = "0.2.34"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4108,6 +4108,7 @@ dependencies = [
  "portable-pty",
  "rand_core 0.6.4",
  "regex",
+ "ring",
  "salsa20",
  "security-framework",
  "semver",
@@ -5663,12 +5664,17 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "crypto_box",
+ "futures-util",
+ "hmac 0.12.1",
  "libc",
  "raccoon",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "ureq",
  "uuid",
 ]

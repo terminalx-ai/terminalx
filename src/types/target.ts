@@ -39,20 +39,24 @@ export function cloudWorkspaceRoot(orgId: string, workspaceId: string): RemotePa
   return `cloud://${orgId}:${workspaceId}` as RemotePath;
 }
 
-/** Whether a path or id belongs to a cloud workspace (a cloud key, a cloud root or a path under one). */
+/**
+ * Whether a path or id belongs to another computer: a cloud workspace or a
+ * paired machine (a `cloud:`/`machine:` key, a `cloud://`/`machine://` root or
+ * a path under one; docs/MACHINES.md decision 8).
+ */
 export function isRemotePath(value: string): value is RemotePath {
-  return value.startsWith("cloud:");
+  return value.startsWith("cloud:") || value.startsWith("machine:");
 }
 
 export class LocalPathLeakError extends Error {
   constructor(what: string, value: string) {
-    super(`A ${isGuestPath(value) ? "guest" : "cloud"} path reached a local command (${what}: ${value})`);
+    super(`A ${isGuestPath(value) ? "guest" : value.startsWith("machine:") ? "machine" : "cloud"} path reached a local command (${what}: ${value})`);
     this.name = "LocalPathLeakError";
   }
 }
 
 /**
- * Throw before a cloud path or key reaches a local command (Reveal in
+ * Throw before a cloud or machine path or key reaches a local command (Reveal in
  * Finder, local git, fs, pty, browser). A local path passes unchanged.
  */
 export function assertLocal<T extends string | null | undefined>(value: T, what = "path"): T {
@@ -65,7 +69,56 @@ export function isCloudKey(key: string | null | undefined): key is CloudKey {
 }
 
 export function isLocalKey(key: string | null | undefined): key is string {
-  return typeof key === "string" && !isCloudKey(key) && !isGuestPath(key);
+  return typeof key === "string" && !isCloudKey(key) && !isMachineKey(key) && !isGuestPath(key);
+}
+
+/**
+ * A row on a paired machine (docs/MACHINES.md decision 8): the machine's
+ * section `machine:<machineId>`, a project `machine:<machineId>:<projectId>`,
+ * a session `machine:<machineId>:<projectId>:<sessionId>`.
+ */
+export type MachineKey = `machine:${string}`;
+
+export function isMachineKey(key: string | null | undefined): key is MachineKey {
+  return typeof key === "string" && key.startsWith("machine:");
+}
+
+/** A machine's sidebar section, and the key its workspace view is selected by: the same as `workspaceTargetKey`. */
+export function machineSectionKey(machineId: string): MachineKey {
+  return `machine:${machineId}`;
+}
+
+/** A project on a machine: `machine:<machineId>:<projectId>`. */
+export function machineProjectKey(machineId: string, projectId: string): MachineKey {
+  return `machine:${machineId}:${projectId}`;
+}
+
+/** A session on a machine: `machine:<machineId>:<projectId>:<sessionId>`. */
+export function machineSessionKey(machineId: string, projectId: string, sessionId: string): MachineKey {
+  return `machine:${machineId}:${projectId}:${sessionId}`;
+}
+
+/** The display root of a machine project's files (decision 8): not a key, and refused by `assertLocal`. */
+export function machineProjectRoot(machineId: string, projectId: string): RemotePath {
+  return `machine://${machineId}:${projectId}` as RemotePath;
+}
+
+/** Which row a machine key names, by its part count (2, 3 or 4); null for anything else. */
+export function machineKeyKind(key: string | null | undefined): "machine" | "project" | "session" | null {
+  if (typeof key !== "string") return null;
+  const parsed = parseMachineKey(key);
+  if (!parsed) return null;
+  return parsed.sessionId ? "session" : parsed.projectId ? "project" : "machine";
+}
+
+/** The machine a machine key belongs to; null for a display root (`machine://…`) or any other key. */
+export function parseMachineKey(key: string): { machineId: string; projectId: string | null; sessionId: string | null } | null {
+  if (!isMachineKey(key) || key.startsWith("machine://")) return null;
+  const [machineId, projectId, sessionId, ...extra] = key.slice("machine:".length).split(":");
+  if (!machineId || machineId.includes("/") || extra.length) return null;
+  // Every part present is filled: `machine:m::s` (a session with no project) is no key.
+  if (projectId === "" || sessionId === "" || projectId?.includes("/") || sessionId?.includes("/")) return null;
+  return { machineId, projectId: projectId || null, sessionId: sessionId || null };
 }
 
 export function orgSectionKey(orgId: string): string {

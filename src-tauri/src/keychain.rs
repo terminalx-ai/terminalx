@@ -42,7 +42,7 @@ impl SecretStore for Keychain {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "desktop", not(test)))]
+#[cfg(all(target_os = "macos", not(test)))]
 mod imp {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -83,7 +83,7 @@ mod imp {
 }
 
 /// Tests never reach the real login Keychain: they use an in-memory store.
-#[cfg(any(not(target_os = "macos"), not(feature = "desktop"), test))]
+#[cfg(any(not(target_os = "macos"), test))]
 mod imp {
     use anyhow::{anyhow, Result};
 
@@ -249,6 +249,7 @@ mod tests {
             "account_sign_out",
             "organization_create",
             "organization_select",
+            "organization_computer_save",
             "pairing_status",
             "pairing_generate",
             "pairing_revoke",

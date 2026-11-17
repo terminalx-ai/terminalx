@@ -386,14 +386,23 @@ pub struct BranchInfo {
     pub name: String,
     pub current: bool,
     pub remote: bool,
+    /// When the branch's tip was committed (RFC 3339), for "updated 2h ago".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    /// Who wrote the tip commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
     let cur = current_branch(cwd);
-    let out = run(cwd, &["for-each-ref", "--format=%(refname:short)%09%(refname)", "refs/heads", "refs/remotes"])?;
+    let out = run(cwd, &["for-each-ref", "--format=%(refname:short)%09%(refname)%09%(committerdate:iso-strict)%09%(authorname)", "refs/heads", "refs/remotes"])?;
     let mut v = Vec::new();
     for line in out.lines() {
-        let (short, full) = line.split_once('\t').unwrap_or((line, ""));
+        let mut fields = line.splitn(4, '\t');
+        let short = fields.next().unwrap_or_default();
+        let full = fields.next().unwrap_or_default();
+        let mut text = || fields.next().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         if short.ends_with("/HEAD") {
             continue;
         }
@@ -401,6 +410,8 @@ pub fn list_branches(cwd: &Path) -> Result<Vec<BranchInfo>> {
             name: short.to_string(),
             current: cur.as_deref() == Some(short),
             remote: full.starts_with("refs/remotes/"),
+            updated: text(),
+            author: text(),
         });
     }
     Ok(v)
@@ -648,7 +659,7 @@ pub fn changes_between_options(cwd: &Path, base: &str, head: Option<&str>, hide_
 
 pub(crate) enum BlobContents {
     Bytes(Vec<u8>),
-    TooLarge,
+    TooLarge(usize),
 }
 
 /// Read only local objects. The tree proves absence; a missing promised blob
@@ -678,27 +689,40 @@ pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) ->
     let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
     if !size.status.success() { bail!("{}", unavailable()); }
     let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
-    if size > limit { return Ok(Some(BlobContents::TooLarge)); }
+    if size > limit { return Ok(Some(BlobContents::TooLarge(size))); }
     let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
     if !content.status.success() { bail!("{}", unavailable()); }
-    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge } else { BlobContents::Bytes(content.stdout) }))
+    Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge(content.stdout.len()) } else { BlobContents::Bytes(content.stdout) }))
 }
 
 /// Contents of `path` at `tree`, or `None` only if the local tree proves absence.
 pub fn blob_at(cwd: &Path, tree: &str, path: &str) -> Result<Option<String>> {
-    Ok(blob_bytes_at(cwd, tree, path, 4 * 1024 * 1024)?.map(|content| match content {
-        BlobContents::TooLarge => "<file too large to show>".into(),
-        BlobContents::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-    }))
+    Ok(blob_text_at(cwd, tree, path, 4 * 1024 * 1024)?.0)
 }
 
-pub fn working_file(cwd: &Path, path: &str) -> Option<String> {
+/// Keep the byte count even when the preview is replaced with a marker.
+pub fn blob_text_at(cwd: &Path, tree: &str, path: &str, limit: usize) -> Result<(Option<String>, Option<u64>)> {
+    Ok(match blob_bytes_at(cwd, tree, path, limit)? {
+        None => (None, None),
+        Some(BlobContents::TooLarge(size)) => (Some("<file too large to show>".into()), Some(size as u64)),
+        Some(BlobContents::Bytes(bytes)) => {
+            let size = bytes.len() as u64;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            (Some(if text.len() > limit { "<file too large to show>".into() } else { text }), Some(size))
+        }
+    })
+}
+
+pub fn working_file_with_size(cwd: &Path, path: &str) -> (Option<String>, Option<u64>) {
     let p = cwd.join(path);
-    let meta = std::fs::metadata(&p).ok()?;
+    let Ok(meta) = std::fs::metadata(&p) else { return (None, None) };
     if meta.len() > 4 * 1024 * 1024 {
-        return Some("<file too large to show>".into());
+        return (Some("<file too large to show>".into()), Some(meta.len()));
     }
-    std::fs::read(&p).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    match std::fs::read(&p) {
+        Ok(bytes) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
+        Err(_) => (None, None),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1955,6 +1979,17 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn branches_carry_when_their_tip_was_committed_and_by_whom() {
+        let dir = repo();
+        let branches = list_branches(dir.path()).unwrap();
+        assert_eq!(branches.len(), 1);
+        let main = &branches[0];
+        assert_eq!((main.name.as_str(), main.current, main.remote, main.author.as_deref()), ("main", true, false, Some("T")));
+        let updated = main.updated.as_deref().expect("the tip's commit time");
+        assert!(updated.len() >= 20 && updated.as_bytes()[10] == b'T', "RFC 3339, got {updated}");
     }
 
     #[test]

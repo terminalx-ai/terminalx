@@ -26,6 +26,8 @@ export interface ShareLink {
   settings: ShareSettings;
   directOnly: boolean;
   revoked: boolean;
+  /** When the link's credential lapses: 24 hours after it was made, the latest its expiry may be set to. */
+  credentialExpiresAt?: number;
 }
 export interface ShareState {
   active: boolean;

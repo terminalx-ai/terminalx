@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, useRef, useState, type ReactElement } from "react";
-import { CircleAlert, GitFork, LoaderCircle, Network, ShieldAlert } from "@/icons";
+import { ChevronRight, CircleAlert, GitFork, LoaderCircle, Network, ShieldAlert } from "@/icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PieceStateIcon, PIECE_STATE_STYLE } from "@/components/orchestration/PieceStateMark";
 import { StatusMarkIcon } from "@/components/ui/SessionStatus";
@@ -7,7 +7,7 @@ import { formatCost } from "@/components/session/SessionCost";
 import { cn } from "@/lib/cn";
 import { isUnread } from "@/lib/dashboard";
 import { PIECE_STATE_LABEL, numberList, pieceNumbers } from "@/lib/orchestration";
-import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { useSessionRowStatuses } from "@/lib/sessionRowStatus";
 import { useSessionStore } from "@/lib/sessions";
 import { familyNeeds, familyRows, modelTier, needsMark, orderWorkers, runningWorkers, runProgress, runSpend, tryOf, workerModel, workerTitle, type FamilyRow, type Need, type WorkerTry } from "@/lib/runFamily";
@@ -147,7 +147,7 @@ export function StarterMark() {
  * own and what the run has cost.
  */
 export function LeadTrailing({ family, folded, summary, fallback }: { family: LeadFamily; folded: boolean; summary: LeadSummary; fallback: ReactElement }) {
-  const { animations } = usePrefs();
+  const reduced = useReducedMotion();
   if (!folded) {
     return <>
       <NeedsBadge needs={summary.ownNeeds} />
@@ -158,7 +158,7 @@ export function LeadTrailing({ family, folded, summary, fallback }: { family: Le
     <NeedsBadge needs={summary.needs} />
     {summary.running > 0 && (
       <span role="img" aria-label={`${summary.running} running`} data-testid="lead-running" className="inline-flex shrink-0 items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground">
-        <LoaderCircle aria-hidden className={cn("size-3 text-accent", animations && "animate-spin")} />{summary.running}
+        <LoaderCircle aria-hidden className={cn("size-3 text-accent", !reduced && "animate-spin")} />{summary.running}
       </span>
     )}
     {summary.progress
@@ -201,16 +201,17 @@ export function LeadHoverCard({ family, summary, title, children }: { family: Le
   return (
     <Tooltip delayDuration={500} onOpenChange={(open) => { if (open) setOffset(besideSidebar(trigger.current)); }}>
       <TooltipTrigger asChild ref={trigger}>{children}</TooltipTrigger>
-      <TooltipContent side="right" align="start" sideOffset={offset.side} alignOffset={offset.align} className="block w-72 p-0" data-testid="lead-hover">
-        <div className="flex items-center gap-2 border-b border-hairline px-3 py-2">
-          <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
-          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{head}</span>
+      <TooltipContent side="right" align="start" sideOffset={offset.side} alignOffset={offset.align} className="block w-[300px] p-0 text-[12px]" data-testid="lead-hover">
+        {/* The title in full (18.07): it wraps rather than give way to the progress beside it. */}
+        <div className="flex items-start gap-2 border-b border-hairline px-3 pt-2.5 pb-2">
+          <span className="min-w-0 flex-1 break-words font-medium">{title}</span>
+          <span className="shrink-0 whitespace-nowrap font-mono text-muted-foreground">{head}</span>
         </div>
         <ul className="flex flex-col gap-1.5 px-3 py-2">
           {run ? <>
             {open.map((piece) => {
               const { icon: Icon, className } = PIECE_STATE_STYLE[piece.state];
-              const needsYou = (piece.worker && waiting.has(piece.worker.sessionId)) || piece.state === "blocked";
+              const needsYou = (piece.worker && waiting.has(piece.worker.sessionId)) || (piece.state === "blocked" && !piece.toLead);
               return (
                 <li key={piece.id} className="flex min-w-0 items-center gap-2">
                   <Icon aria-hidden className={cn("size-3.5 shrink-0", className)} />
@@ -235,7 +236,9 @@ export function LeadHoverCard({ family, summary, title, children }: { family: Le
             );
           })}
         </ul>
-        <div className="border-t border-hairline px-3 py-1.5 text-[11px] text-faint">{run ? "Click to open the run · the chevron unfolds it" : "Click to open the lead · the chevron unfolds it"}</div>
+        <div className="flex h-8 items-center border-t border-hairline px-3 text-[11.5px] text-faint">
+          <span>{run ? "Click to open the run" : "Click to open the lead"} · <ChevronRight role="img" aria-label="the chevron" className="inline size-3 align-[-2px]" /> to unfold</span>
+        </div>
       </TooltipContent>
     </Tooltip>
   );
@@ -268,7 +271,7 @@ export function QueuedPieceRow({ piece, run }: { piece: RunPiece; run: Run }) {
   const title = [piece.title, PIECE_STATE_LABEL.queued, waitsFor.length ? `waits for ${waitsFor.join(", ")}` : null].filter(Boolean).join(" · ");
   return (
     <li data-queued-piece={piece.id}>
-      <div title={title} className="relative -mx-2 flex min-h-7 items-center gap-2 py-1 pl-[calc(1rem+var(--indent,0px))] pr-3">
+      <div title={title} className="relative flex min-h-7 items-center gap-2 rounded-md py-0.5 pl-[calc(1rem+var(--indent,0px))] pr-2.5">
         {/* It hangs from its lead's glyph by the same line as the workers. */}
         <span aria-hidden className="pointer-events-none absolute inset-y-0 left-[calc(var(--lead-indent,0px)+1rem+7px)] border-l border-hairline" />
         <span className="flex min-w-0 flex-1 items-center gap-2">

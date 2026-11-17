@@ -50,13 +50,22 @@ describe("Settings → Experimental: session cost (PRO-273)", () => {
   });
 });
 
+describe("Settings → Experimental: no Machines switch (PRO-360)", () => {
+  it("offers no Machines switch: Machines is on for everyone, in Settings → Machines", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByRole("switch", { name: "Machines" })).toBeNull();
+    expect(screen.getByTestId("experimental-settings").textContent).not.toContain("Settings → Machines");
+  });
+});
+
 describe("Settings → Experimental (#644)", () => {
   it("offers Native Codex off by default and says what it changes in plain words", async () => {
     render(<ExperimentalTab />);
     await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
     expect(toggle().getAttribute("aria-checked")).toBe("false");
     const text = screen.getByTestId("experimental-settings").textContent ?? "";
-    for (const said of ["compacting its context", "The chat is the main view", "Codex's own terminal for good", "Codex 0.164.0 or newer", "Existing sessions and other agents are not changed"]) {
+    for (const said of ["connect to Codex directly", "shows when it compacts", "Codex 0.164.0 or newer", "Codex’s own terminal"]) {
       expect(text).toContain(said);
     }
   });
@@ -99,7 +108,7 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
     expect(runs().getAttribute("aria-checked")).toBe("false");
     const text = screen.getByTestId("experimental-settings").textContent ?? "";
-    for (const said of ["each piece goes to a worker session on its own branch", "you approve the lead's plan before any worker starts", "Settings → Orchestrator", "The terminalx runs commands work either way"]) {
+    for (const said of ["splitting one goal into pieces for worker sessions", "the Run view", "Settings → Orchestrator"]) {
       expect(text).toContain(said);
     }
   });

@@ -4,6 +4,7 @@ import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL, hostDisplayNames } from "../store/host-name";
 import type { StoredHost } from "../store/hosts";
+import { connectionWords, type ConnectionState } from "./connection-view";
 
 /**
  * The one list of machines on the phone (#987): every machine paired here,
@@ -55,8 +56,8 @@ export interface MachineInput {
   accountHosts: readonly AccountHost[];
   prefs: AccountMachinePrefs;
   activeHostId: string | null;
-  connectionStage: string;
-  connectionAttempt: number;
+  /** The one connection state every screen shows (#983), for the machine in use. */
+  connection: ConnectionState;
   now: number;
 }
 
@@ -122,11 +123,13 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     const lastSeen = Math.max(account?.lastSeenAt ? Date.parse(account.lastSeenAt) || 0 : 0, host.lastConnectedAt);
     const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account) };
     if (active) {
-      const connected = input.connectionStage === "connected";
-      return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: connectionLabel(input.connectionStage, input.connectionAttempt), tone: connected ? "connected" : input.connectionStage === "disconnected-on-mac" || input.connectionStage === "cant-connect" ? "attention" : "unknown" };
+      const { connection } = input;
+      const connected = connection === "connected" || connection === "updating";
+      const state = connection === "held" ? HELD_LINE : connectionWords(connection) ?? connectionWords("connecting")!;
+      return { ...common, kind: "paired", host, account, active, connectBlocked: null, state, tone: connected ? "connected" : connection === "held" || connection === "waiting" ? "attention" : "unknown" };
     }
     if (offline) return { ...common, kind: "paired", host, account, active, connectBlocked: OFFLINE_REASON, state: offlineLine(lastSeen, input.now), tone: "offline" };
-    if (host.disconnectedOnMacAt) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: connectionLabel("disconnected-on-mac", 0), tone: "attention" };
+    if (host.disconnectedOnMacAt) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: HELD_LINE, tone: "attention" };
     if (live) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: "Online · tap to switch", tone: "online" };
     if (account) return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: lastSeen > 0 ? `Last seen ${ago(lastSeen, input.now)}` : "Not seen recently", tone: "unknown" };
     return { ...common, kind: "paired", host, account, active, connectBlocked: null, state: host.lastConnectedAt > 0 ? `Last connected ${ago(host.lastConnectedAt, input.now)}` : "Not connected yet", tone: "unknown" };
@@ -150,14 +153,8 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
   return { paired, available: listed.filter((machine) => !machine.hidden), hidden: listed.filter((machine) => machine.hidden) };
 }
 
-export function connectionLabel(stage: string, attempt: number): string {
-  if (stage === "connected") return "Connected";
-  if (stage === "connecting") return "Connecting…";
-  if (stage === "cant-connect") return `Can’t connect · attempt ${attempt}`;
-  if (stage === "disconnected-on-mac") return "Disconnected on that machine · tap to reconnect";
-  if (stage === "unreachable") return "Can’t reach it · retrying";
-  return "Reconnecting…";
-}
+/** A machine disconnected on its own side: the shared words, and what a tap does. */
+const HELD_LINE = `${connectionWords("held")} · tap to reconnect`;
 
 function offlineLine(lastSeen: number, now: number): string {
   return lastSeen > 0 ? `Offline · last seen ${ago(lastSeen, now)}` : "Offline";
@@ -178,7 +175,8 @@ export function ago(at: number, now: number): string {
   return unit(Math.floor(days / 365), "year");
 }
 
-function iconFor(name: string, account: AccountHost | null): MachineIcon {
+/** A machine's mark: a server for SSH or Linux, a laptop by its name, else a desktop. */
+export function iconFor(name: string, account: AccountHost | null): MachineIcon {
   if (account?.environmentKind === "ssh" || account?.platform === "linux") return "server";
   return /book|laptop/i.test(name) ? "laptop" : "desktop";
 }

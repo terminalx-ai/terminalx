@@ -1,11 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useShortcut } from "@/lib/hotkeys";
-import { openPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { openPeer, peerEditor, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { moveTabToPane, otherPane } from "@/lib/tabActions";
 import { paneRatio, panesOf, saveTabLayout, selectPaneTab, tabKey } from "@/lib/tabLayouts";
 import { tabViewIn } from "@/lib/tabFront";
-import { useTabViews } from "@/lib/tabViews";
+import { toggleTabView, useTabViews } from "@/lib/tabViews";
+import { isTerminalTab } from "@/lib/tabFront";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import { useSessionStore } from "@/lib/sessions";
+import { Kbd } from "@/components/ui/tooltip";
+import { MessageSquare, SquareTerminal } from "@/icons";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import type { TabEntry } from "@/types/session";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { SessionEntry } from "@/types/session";
@@ -20,18 +27,50 @@ import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
 
 /** Stable, keyed tab bodies share a grid: moving a tab never remounts its chat,
  * composer or xterm. Both visible terminals observe their own changing boxes. */
-export function WorkspacePanes({ session, selected, strip, selectionRequested, continuationOpen }: {
-  session: SessionEntry;
-  selected: SelectedSessionTab | null;
-  strip: boolean;
-  selectionRequested: boolean;
-  continuationOpen: boolean;
-}) {
+/**
+ * The switch at the right end of a pane's tab strip (PRO-381, screen 03.14):
+ * "⇧⌘T terminal view" over a chat, and over its terminal view which agent
+ * runs there ("Claude Code · same process"), which switches back. A tab that
+ * is a terminal (#437) offers it only when it held a conversation.
+ */
+export function TerminalViewSwitch({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
+  const views = useTabViews();
+  const keys = useShortcutKeys("session.toggleTerminalView");
+  const agent = useSessionStore().harnesses.find((harness) => harness.id === tab.harness)?.name ?? cloudAgentLabel(tab.harness);
+  const terminal = isTerminalTab(tab);
+  if (terminal && !tab.providerSessionId && !tab.history?.length) return null;
+  const on = tabViewIn(views.views, tab) === "terminal";
+  const label = terminal ? (on ? "Show the last conversation" : "Back to the terminal") : on ? "Back to chat" : "Show terminal view";
+  return (
+    <button type="button" data-testid="strip-terminal-view" aria-label={label} title={label} aria-pressed={on} disabled={!!views.switching[tab.id]}
+      onClick={() => void toggleTabView(session, tab)}
+      className={cn("flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[12px] text-faint outline-none hover:bg-veil-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60")}>
+      {/* A narrow strip keeps its room for the tabs: the switch is then its keys, or an icon, alone. */}
+      {on ? <><MessageSquare className="size-3.5 @[560px]/strip:hidden" aria-hidden /><span className="hidden @[560px]/strip:inline">{agent} · same process</span></>
+        : <>{keys.length ? <Kbd>{keys.join("")}</Kbd> : <SquareTerminal className="size-3.5 @[560px]/strip:hidden" aria-hidden />}<span className="hidden @[560px]/strip:inline">terminal view</span></>}
+    </button>
+  );
+}
+
+/** Shared with the header so switch placement follows the strips actually rendered. */
+export function useWorkspacePaneLayout(session: SessionEntry, selected: SelectedSessionTab | null, strip: boolean) {
   const row = useTabRow(session);
   const keys = row.tabs.map((tab) => tab.key);
   const selectedKey = selected ? tabKey(selected.kind, selected.id) : null;
   const panes = panesOf(row.layout, keys, selectedKey);
   const split = panes.length === 2;
+  return { row, keys, selectedKey, panes, split, showStrip: strip || split };
+}
+
+export function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen }: {
+  session: SessionEntry;
+  selected: SelectedSessionTab | null;
+  strip: boolean;
+  layout: ReturnType<typeof useWorkspacePaneLayout>;
+  selectionRequested: boolean;
+  continuationOpen: boolean;
+}) {
+  const { row, keys, selectedKey, panes, split, showStrip } = layout;
   const focused = panes.find((pane) => pane.tabs.includes(selectedKey ?? "")) ?? panes.find((pane) => pane.id === row.layout.focusedPane) ?? panes[0];
   const root = useRef<HTMLDivElement>(null);
   const [dragTarget, setDragTarget] = useState<"left" | "right" | null>(null);
@@ -93,7 +132,6 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
     const box = root.current!.getBoundingClientRect();
     return Math.max(0.2, Math.min(0.8, (x - box.left) / box.width));
   };
-  const showStrip = strip || split;
   return (
     <div ref={root} data-testid="workspace-panes" className="relative grid min-h-0 min-w-0 flex-1 overflow-hidden"
       style={{ gridTemplateColumns: split ? `minmax(0, ${ratio}fr) 5px minmax(0, ${1 - ratio}fr)` : "minmax(0, 1fr)", gridTemplateRows: showStrip ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)" }}>
@@ -101,7 +139,11 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
         <div key={`strip-${pane.id}`} data-pane-id={pane.id} data-pane-focused={pane.id === focused.id} style={{ gridColumn: index * 2 + 1, gridRow: 1 }} className={cn("min-w-0", split && pane.id === focused.id && "bg-veil-raised")}>
           <WorkspaceTabStrip session={session} selected={row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey)) ?? null}
             paneRow={{ ...row, tabs: row.tabs.filter((tab) => pane.tabs.includes(tab.key)) }} paneDrag={paneDrag}
-            trailing={strip && index === 0 ? <TabActions session={session} selected={selected} /> : undefined} />
+            trailing={strip && index === 0 ? <TabActions session={session} selected={selected} /> : undefined}
+            end={(() => {
+              const shown = row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey));
+              return shown?.kind === "agent" ? <TerminalViewSwitch session={row.sessions.find((owner) => owner.id === shown.sessionId) ?? session} tab={shown.tab} /> : null;
+            })()} />
         </div>
       ))}
       {split && <div role="separator" aria-label="Resize tab panes" aria-orientation="vertical" aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round(ratio * 100)} tabIndex={0}
@@ -130,7 +172,7 @@ export function WorkspacePanes({ session, selected, strip, selectionRequested, c
           </> : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
-          </> : tab.kind === "review" ? <ReviewTab entry={tab.editor} visible={active} focused={active && pane.id === focused.id} embedded />
+          </> : tab.kind === "review" ? <ReviewTab entry={peerEditor(tab)} visible={active} focused={active && pane.id === focused.id} embedded />
           : <BrowserView session={session} page={tab.page} active={active} />}
         </div>;
       })}

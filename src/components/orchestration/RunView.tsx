@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -12,7 +13,7 @@ import { agent as agentApi, errorMessage, fs, orchestration } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { EFFORT_LABEL, effortChoices, modeLabel, modelForTab, modelLabel, modelOptionText, PERMISSION_MODES, useModels } from "@/lib/models";
 import {
-  blockedSubtitle, budgetText, capAt, checksFrom, dollarsText, donePieces, mergeButton, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, pieceCheck, pieceMode, pieceNumbers, skippedWith,
+  AUTO_STEP_LABEL, blockedSubtitle, budgetText, goesToLead, waitsForReset, capAt, checksFrom, dollarsText, donePieces, mergeButton, pointsText, checkText, conflictReasons, conflictsWith, costText, currentMerge, durationText, estimateText, fellShort, GATE_LABEL, GATE_ORDER, gaveUp, holdText, mainWindow, MERGE_STATE_LABEL, mergeNote, mergeRows, mergeSubtitle, noteRun, numberList, openDependencies, pieceCheck, pieceMode, pieceNumbers, shownPieceState, skippedWith,
   planOf, raisesMode, readOnlyPieces, refusalOf, requestOrchestratorSettings, resetClock, reviewTokens, RUN_STATE_LABEL, TIER_DOT, tokensText, TRY_OUTCOME_LABEL, TRY_STEP_LABEL, useRun, verifyingText,
   shortCommit, windowLine, windowName, withoutPiece, type MergeRow, type MergeRowState,
 } from "@/lib/orchestration";
@@ -24,7 +25,7 @@ import { familyNeeds, modelTier, pieceSpend, runSpend, type Need } from "@/lib/r
 import { formatCost } from "@/components/session/SessionCost";
 import { SESSION_STATUSES } from "@terminalx/portable/sessionStatus";
 import { relativeTime } from "@/lib/time";
-import type { Cap, CommandRun, GateResult, OrchestratorLimits, PieceTry, Run, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
+import type { Cap, CommandRun, GateResult, OrchestratorLimits, PieceTry, Run, RunEvent, RunLimits, RunPiece, RunPlan, RunPlanPiece, RunReview, RunVerification, RunVerifier, Tier } from "@/types/orchestration";
 import type { SessionEntry } from "@/types/session";
 
 export { PLAN_A_RUN_PROMPT };
@@ -32,15 +33,40 @@ export { PLAN_A_RUN_PROMPT };
 const kicker = "text-[10.5px] font-medium uppercase tracking-[.08em] text-faint";
 const chip = "inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-[11px] text-muted-foreground";
 const code = "rounded bg-veil-raised px-1 font-mono text-[12px]";
+/** A boxed value in a row of limits (18.02): Budget, At once, Workers run in. */
+const valueChip = "inline-flex h-7 items-center rounded-md border border-hairline px-2 text-xs";
 const field = "w-full rounded-md border border-hairline bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
-/** A session's Run view: the run it leads, or how to start one. */
-export function RunView({ session, onShowChat }: { session: SessionEntry; onShowChat: () => void }) {
+/** The open piece's panel is the window's right column (18.01–18.04) once the Run view and it have this much room together. */
+const PIECE_COLUMN_AT = 900;
+
+/** Whether the run view and the column beside it are wide enough for the piece to open in the column. Their sum
+ * does not change as the panel moves between them, so the choice never flips on its own move. */
+function useWideBeside(view: HTMLElement | null, column: HTMLElement | null | undefined): boolean {
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    if (!view || !column) { setWide(false); return; }
+    const measure = () => setWide(view.getBoundingClientRect().width + column.getBoundingClientRect().width >= PIECE_COLUMN_AT);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(view);
+    observer.observe(column);
+    return () => observer.disconnect();
+  }, [view, column]);
+  return wide;
+}
+
+/** A session's Run view: the run it leads, or how to start one. `pieceColumn` is the window's right column, beside the
+ * title bar, where an open piece is shown when there is room (PRO-383); without it the piece opens under the table. */
+export function RunView({ session, onShowChat, pieceColumn }: { session: SessionEntry; onShowChat: () => void; pieceColumn?: HTMLElement | null }) {
   const run = useRun(session.id);
+  const [view, setView] = useState<HTMLDivElement | null>(null);
+  const wide = useWideBeside(view, pieceColumn);
   if (run === undefined) return <div role="status" aria-label="Reading the run" className="flex min-h-0 flex-1" data-testid="run-view" />;
   return (
-    <div className="@container/run flex min-h-0 flex-1 flex-col bg-chat" data-testid="run-view" data-run-state={run?.state ?? "none"}>
-      {run ? <RunBoard key={run.id} run={run} lead={session} onShowChat={onShowChat} /> : <NoRun session={session} onShowChat={onShowChat} />}
+    <div ref={setView} className="@container/run flex min-h-0 flex-1 flex-col bg-chat" data-testid="run-view" data-run-state={run?.state ?? "none"}>
+      {run ? <RunBoard key={run.id} run={run} lead={session} onShowChat={onShowChat} column={wide ? pieceColumn ?? null : null} /> : <NoRun session={session} onShowChat={onShowChat} />}
     </div>
   );
 }
@@ -95,7 +121,7 @@ function useRunLedger(run: Run, lead: SessionEntry) {
   }, [run, byId, lead, workers, statuses]);
 }
 
-function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onShowChat: () => void }) {
+function RunBoard({ run, lead, onShowChat, column }: { run: Run; lead: SessionEntry; onShowChat: () => void; /** Where the open piece goes, when it has the window's right column. */ column: HTMLElement | null }) {
   const ledger = useRunLedger(run, lead);
   const [selected, setSelected] = useState<string | null>(run.pieces[0]?.id ?? null);
   const [editingPlan, setEditingPlan] = useState(false);
@@ -123,16 +149,38 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
     return save({ ...plan, pieces: plan.pieces.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)) });
   };
 
+  const detail = piece && (
+    <PieceDetail
+      key={piece.id}
+      run={run}
+      piece={piece}
+      number={numbers[piece.id]}
+      editable={editable}
+      column={column}
+      busy={!!busy}
+      cost={ledger.costOf(piece)}
+      act={act}
+      onShowChat={onShowChat}
+      onClose={() => setSelected(null)}
+      onSendBack={() => void act("sendBack", () => orchestration.sendBack(run.id, piece.id))}
+      onResolve={() => void act("resolve", () => orchestration.resolveInLead(run.id, piece.id))}
+      onSkip={() => void merge([piece.id])}
+      onSave={(patch) => change(piece.id, patch)}
+      onRemove={async () => { if (await save(withoutPiece(planOf(run), piece.id))) setSelected(null); }}
+    />
+  );
+
   return (
-    // Wide: the plan and the open piece side by side, each scrolling by itself. Narrow: one column that scrolls as a whole, the piece under the plan.
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-thin @[900px]/run:flex-row @[900px]/run:overflow-hidden">
-      {/* Its own container: the table's columns follow the room it has beside the open piece, not the view's (PRO-361). */}
-      <div className="@container/board flex min-w-0 shrink-0 flex-col @[900px]/run:min-h-0 @[900px]/run:flex-1 @[900px]/run:shrink @[900px]/run:overflow-y-auto scrollbar-thin">
+    // Wide: the open piece is the window's right column, from the top (PRO-383), and the run scrolls by itself here.
+    // Narrow: one column that scrolls as a whole, the piece under the plan.
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-thin">
+      {/* Its own container: the table's columns follow the room it has, not the window's (PRO-361). */}
+      <div className="@container/board flex min-w-0 shrink-0 flex-col">
         <header className="flex flex-wrap items-start gap-x-4 gap-y-3 px-6 pb-4 pt-6">
           <div className="min-w-0 flex-1 basis-[20rem]">
             <div className={cn(kicker, "flex items-center gap-1.5", waiting && "text-accent")}>
               {waiting && <ShieldAlert aria-hidden className="size-3.5" />}
-              <span data-testid="run-state">{RUN_STATE_LABEL[run.state]}</span>
+              <span data-testid="run-state">{waitsForReset(run) ? "Run paused until the window resets" : RUN_STATE_LABEL[run.state]}</span>
             </div>
             <h1 className="mt-0.5 break-words text-[19px] font-semibold leading-7 tracking-tight">{run.goal}</h1>
             <p className="mt-1 text-[13px] text-muted-foreground" data-testid="run-subtitle">{merging ? mergeSubtitle(run) : (!editable && blockedSubtitle(run)) || subtitle(run)}</p>
@@ -179,30 +227,24 @@ function RunBoard({ run, lead, onShowChat }: { run: Run; lead: SessionEntry; onS
         {merging
           ? <MergeTable run={run} selected={selected} onSelect={select} />
           : <PieceTable run={run} numbers={numbers} selected={selected} editable={editable} busy={!!busy} refused={error?.piece} costOf={ledger.costOf} onSelect={select} onChange={change} />}
+        {!editable && <RunEvents run={run} numbers={numbers} onSelect={select} />}
         <p className="flex items-start gap-2 px-6 py-4 text-xs text-faint">
           <Info aria-hidden className="mt-0.5 size-3.5 shrink-0" />
           <span data-testid="run-footnote">{merging ? mergeFootnote(run) : footnote(run)}</span>
         </p>
+        {/* What runs after each merge, for whoever approves the plan: under the plan, not in its two-row card (18.02). */}
+        {editable && (
+          <p className="-mt-2 flex items-start gap-2 px-6 pb-4 text-xs text-faint" data-testid="plan-integration-check">
+            <GitMerge aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+            <span className="min-w-0">
+              After each merge{" "}
+              {run.integrationCheck ? <code className={cn(code, "break-words text-muted-foreground")}><Unbroken text={run.integrationCheck} /></code> : "the project's own check command, when it has one,"}{" "}
+              runs in the lead's checkout.
+            </span>
+          </p>
+        )}
       </div>
-      {piece && (
-        <PieceDetail
-          key={piece.id}
-          run={run}
-          piece={piece}
-          number={numbers[piece.id]}
-          editable={editable}
-          busy={!!busy}
-          cost={ledger.costOf(piece)}
-          act={act}
-          onShowChat={onShowChat}
-          onClose={() => setSelected(null)}
-          onSendBack={() => void act("sendBack", () => orchestration.sendBack(run.id, piece.id))}
-          onResolve={() => void act("resolve", () => orchestration.resolveInLead(run.id, piece.id))}
-          onSkip={() => void merge([piece.id])}
-          onSave={(patch) => change(piece.id, patch)}
-          onRemove={async () => { if (await save(withoutPiece(planOf(run), piece.id))) setSelected(null); }}
-        />
-      )}
+      {detail}
     </div>
   );
 }
@@ -216,7 +258,7 @@ function subtitle(run: Run): string {
       return `The lead split this into ${count}. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.`;
     default: {
       // A run held up by a blocked piece, with nothing else running, says so (18.03); while workers run, the Needs you list names it.
-      const blocked = run.pieces.filter((piece) => piece.state === "blocked");
+      const blocked = run.pieces.filter((piece) => piece.state === "blocked" && !goesToLead(piece));
       if (blocked.length && run.state === "running" && !run.pieces.some((piece) => piece.state === "running")) {
         const numbers = pieceNumbers(run);
         const names = blocked.map((piece) => numbers[piece.id]).join(", ");
@@ -256,10 +298,10 @@ type Act = (name: string, work: () => Promise<Run | null>) => Promise<boolean>;
 /** The budget a run holds to, in the forms its workers' logins draw on. `null` when its runtime sends no limits. */
 function heldBudget(run: Run): string | null {
   if (!run.limits || !run.usage) return null;
-  // Dollars first (owner decision, PRO-361).
+  // A subscription's points first, as the run's summary leads with them (18.02, PRO-383).
   const parts = [
-    run.usage.apiKey ? dollarsText(run.limits.dollars) : null,
     run.usage.subscription ? pointsText(run.limits.points) : null,
+    run.usage.apiKey ? dollarsText(run.limits.dollars) : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : null;
 }
@@ -276,11 +318,13 @@ function LimitField({ label, value, min, max, step = 1, prefix, suffix, disabled
     if (draft.trim() !== "" && Number.isFinite(next) && next >= min && next <= max && next !== value) onSave(next);
   };
   return (
-    <label className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline px-2 font-mono text-xs focus-within:ring-2 focus-within:ring-ring/40">
+    <label className={cn(valueChip, "gap-1 font-mono focus-within:ring-2 focus-within:ring-ring/40")}>
       {prefix && <span className="text-faint">{prefix}</span>}
+      {/* A boxed value like the ones beside it (18.02): no stepper arrows, as wide as what it holds. */}
       <input
         type="number" inputMode="decimal" aria-label={label} min={min} max={max} step={step} disabled={disabled}
-        className="w-12 bg-transparent text-right tabular-nums outline-none disabled:opacity-60"
+        className="bg-transparent tabular-nums outline-none [appearance:textfield] disabled:opacity-60 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        style={{ width: `${Math.max(1, (draft ?? String(value)).length) + 0.5}ch` }}
         value={draft ?? String(value)}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
@@ -349,6 +393,8 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
   const pause = run.pause;
   const resetsAt = pause?.window?.resetsAt;
   const resumeAt = pause?.resumeAt;
+  // Paused on its own points, it goes on by itself (#1004): what the person can do stays, and nothing waits on them.
+  const byItself = waitsForReset(run);
   return (
     <section role="status" aria-label="Run paused" className="mx-6 mb-3 flex flex-col gap-2.5 rounded-lg bg-warning/10 px-3.5 py-3 hairline" data-testid="run-paused">
       <div className="flex items-start gap-2 text-[13px]">
@@ -356,7 +402,7 @@ function PausedNotice({ run, busy, act }: { run: Run; busy: boolean; act: Act })
         <div className="min-w-0 flex-1">
           <div className="font-medium">{pause?.window ? `Paused: the ${windowName(pause.window)} window` : pause?.kind === "dollars" ? "Paused: the dollar budget" : "Paused"}</div>
           <p className="mt-0.5 text-muted-foreground">{pause?.message ?? run.reason}</p>
-          <p className="mt-1 text-xs text-faint">Workers already in a turn finish it; no new piece starts until you let the run go on.</p>
+          <p className="mt-1 text-xs text-faint">{byItself ? "Workers already in a turn finish it; no new piece starts before the reset. You need do nothing." : "Workers already in a turn finish it; no new piece starts until you let the run go on."}</p>
           {run.pieces.some((piece) => piece.state === "done") && <p className="mt-1 text-xs text-faint" data-testid="run-paused-merge">Merging the accepted pieces asks no model, so Merge and Skip work while the run is paused. Having the lead resolve a conflict does not.</p>}
         </div>
       </div>
@@ -420,7 +466,7 @@ function MergeStrip({ run }: { run: Run }) {
       <span className="font-mono text-[12.5px]" data-testid="merge-into">{run.merge?.into || "the lead's branch"}</span>
       <span aria-hidden className="text-faint">·</span>
       <span className="text-muted-foreground">Integration check</span>
-      {run.integrationCheck ? <code className={cn(code, "max-w-full break-all")}>{run.integrationCheck}</code> : <span className="text-faint">the project's own check, when it has one</span>}
+      {run.integrationCheck ? <code className={cn(code, "max-w-full break-words")}><Unbroken text={run.integrationCheck} /></code> : <span className="text-faint">the project's own check, when it has one</span>}
       <span className="ml-auto text-xs text-faint">Nothing is pushed. No other branch is touched.</span>
     </section>
   );
@@ -488,8 +534,10 @@ function FinalChecks({ run }: { run: Run }) {
   );
 }
 
-/** Before a run starts: what it is expected to use, and what it runs with. */
+/** Before a run starts: what it is expected to use, and what it runs with (18.02): two rows. The budget's own
+ * limits open under it from its chip; a warning that the run may not fit is always shown. */
 function PlanSummary({ run, busy, act }: { run: Run; busy: boolean; act: Act }) {
+  const [limitsOpen, setLimitsOpen] = useState(false);
   const estimate = estimateText(run.estimate);
   const budget = heldBudget(run) ?? budgetText(run);
   const fit = run.fit ?? [];
@@ -507,32 +555,39 @@ function PlanSummary({ run, busy, act }: { run: Run; busy: boolean; act: Act }) 
       </div>
       {/* 18.02's limits row: the budget, how many workers at once, and the mode they run in. */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-hairline px-3.5 py-2.5 text-[13px]" data-testid="plan-limits">
-        <span className="flex items-center gap-2"><span className="text-muted-foreground">Budget</span>{budget ? <span className="inline-flex h-7 items-center rounded-md border border-hairline px-2 font-mono text-xs">{budget}</span> : <span className="text-faint">none set</span>}</span>
+        <span className="flex items-center gap-2">
+          <span className="text-muted-foreground">Budget</span>
+          <button
+            type="button" aria-expanded={limitsOpen} aria-label={`Budget: ${budget ?? "none set"}. Change this run's limits`} title="Change this run's budget and window level"
+            className={cn(valueChip, "font-mono hover:bg-veil-card", !budget && "font-sans text-faint")}
+            onClick={() => setLimitsOpen((on) => !on)}
+          >
+            {budget ?? "none set"}
+          </button>
+        </span>
         <span className="flex items-center gap-2">
           <span className="text-muted-foreground">At once</span>
           <LimitField label="Workers at once in this run" value={limitsOf(run).workers} min={1} max={50} disabled={busy} onSave={(workers) => void act("limits", () => orchestration.setLimits(run.id, { ...limitsOf(run), workers }))} />
         </span>
         <span className="flex items-center gap-2">
           <span className="text-muted-foreground">Workers run in</span>
-          <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-hairline px-2 text-xs" title={modeLabel(run.workerMode)}><ShieldOff aria-hidden className="size-3.5 text-accent" />{modeShort(run.workerMode)}</span>
+          <span className={cn(valueChip, "gap-1.5")} title={modeLabel(run.workerMode)}><ShieldOff aria-hidden className="size-3.5 text-accent" />{modeShort(run.workerMode)}</span>
         </span>
         <span className="ml-auto flex items-center gap-1.5 text-xs text-add"><CircleCheck aria-hidden className="size-3.5" />No shared files</span>
       </div>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-hairline px-3.5 py-2.5 text-[13px]" data-testid="plan-integration-check">
-        <GitMerge aria-hidden className="size-4 shrink-0 text-faint" />
-        <span className="text-muted-foreground">After each merge</span>
-        {run.integrationCheck ? <code className={cn(code, "max-w-full break-all")}>{run.integrationCheck}</code> : <span className="text-muted-foreground">the project's own check command, when it has one</span>}
-        <span className="text-xs text-faint">run by TerminalX in the lead's checkout</span>
-      </div>
-      <div className="flex flex-col gap-2 border-t border-hairline px-3.5 py-2.5">
-        <LimitsEditor run={run} busy={busy} act={act} workers={false} />
-        {windows.length > 0 && (
-          <p className="text-xs text-faint" data-testid="run-windows">{windows.map((window) => `${windowName(window)} at ${Math.round(window.percent)}%${window.resetsAt ? `, resets ${resetClock(window.resetsAt)}` : ""}`).join(" · ")}. A run's points are the change in the window while it runs; the window is shared with everything else you run.</p>
-        )}
-        {fit.map((warning) => (
-          <p key={warning} role="alert" className="flex items-start gap-1.5 text-xs text-warning"><TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{warning}</p>
-        ))}
-      </div>
+      {(limitsOpen || fit.length > 0) && (
+        <div className="flex flex-col gap-2 border-t border-hairline px-3.5 py-2.5">
+          {limitsOpen && <>
+            <LimitsEditor run={run} busy={busy} act={act} workers={false} />
+            {windows.length > 0 && (
+              <p className="text-xs text-faint" data-testid="run-windows">{windows.map((window) => `${windowName(window)} at ${Math.round(window.percent)}%${window.resetsAt ? `, resets ${resetClock(window.resetsAt)}` : ""}`).join(" · ")}. A run's points are the change in the window while it runs; the window is shared with everything else you run.</p>
+            )}
+          </>}
+          {fit.map((warning) => (
+            <p key={warning} role="alert" className="flex items-start gap-1.5 text-xs text-warning"><TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{warning}</p>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -544,7 +599,7 @@ function RunSummary({ run, lead, spend, unpriced }: { run: Run; lead: SessionEnt
   const skipped = run.pieces.filter((piece) => piece.state === "skipped").length;
   const left = run.pieces.length - done.size - skipped;
   return (
-    <section aria-label="Run summary" className="mx-6 grid grid-cols-1 gap-3 @[600px]/board:grid-cols-3">
+    <section aria-label="Run summary" className="mx-6 grid grid-cols-1 gap-3 @[600px]/board:grid-cols-[0.8fr_1fr_1.1fr]">
       <div className="rounded-lg bg-well px-3.5 py-3 hairline" data-testid="run-pieces">
         <div className="text-[11px] text-faint">Pieces</div>
         <div className="mt-1 text-[13px] text-muted-foreground"><span className="text-xl font-semibold text-foreground" data-testid="run-done">{done.size}</span> of {run.pieces.length} done</div>
@@ -560,8 +615,9 @@ function RunSummary({ run, lead, spend, unpriced }: { run: Run; lead: SessionEnt
   );
 }
 
-/** What the run has spent (PRO-280, PRO-361): dollars first, against its dollar budget, and the
- * points of the subscription window it draws on most as a second line when one applies.
+/** What the run has spent (PRO-280, PRO-361, PRO-383). A run on a subscription leads with its points of the window
+ * it draws on most, against its points budget, and that window's level and reset (18.01); its dollars come under them.
+ * A run on an API key alone leads with dollars against its dollar budget.
  * `spend` is what its workers' tries cost so far as their sessions record it (PRO-273), every try included. */
 function SpendCard({ run, spend, unpriced }: { run: Run; spend: number | null; unpriced: boolean }) {
   const limits = limitsOf(run);
@@ -576,29 +632,39 @@ function SpendCard({ run, spend, unpriced }: { run: Run; spend: number | null; u
   const points = capAt(limits.points);
   const ceiling = capAt(limits.ceiling);
   const estimate = estimateText(run.estimate);
+  // A subscription's dollars are what its tokens would cost on an API key: no dollar budget applies to them.
+  const notBilled = !!run.usage?.subscription && !run.usage.apiKey;
   const noLimitChip = <span className="ml-1 rounded bg-veil-strong px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground" data-testid="run-no-limit">No limit</span>;
+  const amount = (big: boolean) => <span className={cn(big ? "text-xl font-semibold" : "font-medium", over ? "text-destructive" : "text-foreground")}>${dollars.toFixed(2)}{unpriced ? "+" : ""}</span>;
+  const against = allowed !== null && !notBilled ? ` of ${dollarsText(allowed)}` : noLimit && !notBilled ? <> spent{noLimitChip}</> : planned ? ` · budget ${planned}` : notBilled ? " API-equivalent, not billed" : " spent";
+  const pointsOver = window && points !== null && window.points >= points;
   return (
     <div className="rounded-lg bg-well px-3.5 py-3 hairline" data-testid="run-budget">
-      <div className="text-[11px] text-faint">Spend</div>
-      <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-spend">
-        <span className={cn("text-xl font-semibold", over ? "text-destructive" : "text-foreground")}>${dollars.toFixed(2)}{unpriced ? "+" : ""}</span>
-        {allowed !== null ? ` of ${dollarsText(allowed)}` : noLimit ? <> spent{noLimitChip}</> : planned ? ` · budget ${planned}` : " spent"}
-      </div>
-      {allowed !== null && allowed > 0 && (
-        <div className="mt-2 h-1 overflow-hidden rounded-full bg-veil-strong" aria-hidden>
-          <div className={cn("h-full rounded-full", over ? "bg-destructive" : "bg-accent")} style={{ width: `${Math.min(100, (dollars / allowed) * 100)}%` }} />
+      <div className="text-[11px] text-faint">{window ? "Budget" : "Spend"}</div>
+      {window ? <>
+        <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-points">
+          subscription <span className={cn("text-xl font-semibold", pointsOver ? "text-destructive" : "text-foreground")}>{Math.round(window.points)}</span>{points !== null ? ` of ${points} points` : <> points used{noLimitChip}</>}
         </div>
-      )}
-      {/* A subscription's points come second (owner decision, PRO-361): the window it draws on most, and when it resets. */}
-      {window && (
-        <div className="mt-2 text-[11.5px] text-muted-foreground" data-testid="run-points">
-          <span className="font-medium text-foreground">{Math.round(window.points)}</span>{points !== null ? ` of ${points} points` : <> points used{noLimitChip}</>} · {windowLine(window)} · {ceiling !== null ? `pauses past ${ceiling}%` : "window level off"}
+        {points !== null && points > 0 && (
+          <div className="mt-2 h-1 overflow-hidden rounded-full bg-veil-strong" aria-hidden>
+            <div className={cn("h-full rounded-full", pointsOver ? "bg-destructive" : "bg-accent")} style={{ width: `${Math.min(100, (window.points / points) * 100)}%` }} />
+          </div>
+        )}
+        {/* The window and its reset (18.01); where the run pauses is its title, and said here only when it is off. */}
+        <div className="mt-2 text-[11.5px] text-muted-foreground" data-testid="run-window" title={ceiling !== null ? `The run pauses past ${ceiling}% of the window` : undefined}>{windowLine(window)}{ceiling === null ? " · window level off" : ""}</div>
+        <div className="mt-1.5 text-[11px] text-faint" data-testid="run-spend">{amount(false)}{against}{over ? " · over budget" : ""}{unpriced ? " · a model's tokens have no price" : ""}</div>
+      </> : <>
+        <div className="mt-1 text-[13px] text-muted-foreground" data-testid="run-spend">{amount(true)}{against}</div>
+        {allowed !== null && allowed > 0 && (
+          <div className="mt-2 h-1 overflow-hidden rounded-full bg-veil-strong" aria-hidden>
+            <div className={cn("h-full rounded-full", over ? "bg-destructive" : "bg-accent")} style={{ width: `${Math.min(100, (dollars / allowed) * 100)}%` }} />
+          </div>
+        )}
+        <div className="mt-1.5 text-[11px] text-faint">
+          {over ? "Over budget" : notBilled ? "API-equivalent, not billed" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}
+          {unpriced ? " · a model's tokens have no price" : ""}
         </div>
-      )}
-      <div className="mt-1.5 text-[11px] text-faint">
-        {over ? "Over budget" : run.usage?.subscription && !run.usage.apiKey ? "API-equivalent, not billed" : estimate ? `Estimated ${estimate} API-equivalent` : "The plan carries no estimate"}
-        {unpriced ? " · a model's tokens have no price" : ""}
-      </div>
+      </>}
     </div>
   );
 }
@@ -613,7 +679,7 @@ function LeadCard({ run, lead }: { run: Run; lead: SessionEntry }) {
       <div className="text-[11px] text-faint">Lead</div>
       <div className="mt-1.5 flex min-w-0 items-center text-[13px]">
         <span aria-hidden className={cn("mr-1.5 inline-block size-1.5 shrink-0 rounded-full bg-current", modelTier(agent, tab?.model).className)} />
-        <span className="min-w-0 truncate"><ModelName piece={{ agent, model: tab?.model ?? "", effort: tab?.effort ?? undefined }} /></span>
+        <span className="min-w-0 truncate"><ModelName dot={false} piece={{ agent, model: tab?.model ?? "", effort: tab?.effort ?? undefined }} /></span>
       </div>
       <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-faint" data-testid="run-workers">
         <span>{running} running</span>·<span>{limitsOf(run).workers} workers at a time</span>·
@@ -660,8 +726,8 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
   // The plan's columns before it starts; the run's once it has. They follow the board's own width (the
   // room beside an open piece): a column goes before a title is squeezed, and a title wraps, never cut (PRO-361).
   const columns = editable
-    ? "grid-cols-[minmax(0,1fr)_13.5rem] @[720px]/board:grid-cols-[minmax(10rem,1.4fr)_13.5rem_minmax(0,1fr)_3.5rem_5.5rem]"
-    : "grid-cols-[minmax(0,1fr)_6.5rem_1.75rem] @[540px]/board:grid-cols-[minmax(10rem,1.5fr)_minmax(7.5rem,1fr)_6.5rem_3.5rem_1.75rem] @[704px]/board:grid-cols-[minmax(10rem,1.7fr)_minmax(7.5rem,1fr)_6rem_2.75rem_3.5rem_minmax(3.5rem,1fr)_1.75rem]";
+    ? "grid-cols-[minmax(0,1fr)_13.5rem] @[720px]/board:grid-cols-[minmax(10rem,2.5fr)_10.5rem_minmax(0,1fr)_3rem_5.5rem] @[720px]/board:gap-x-3"
+    : "grid-cols-[minmax(0,1fr)_6.5rem_1.75rem] @[540px]/board:grid-cols-[minmax(10rem,1.5fr)_minmax(7.5rem,1fr)_6.5rem_3.5rem_1.75rem] @[704px]/board:grid-cols-[minmax(10rem,1fr)_8rem_5.25rem_2.25rem_3rem_minmax(4rem,0.25fr)_1.75rem] @[704px]/board:gap-x-3";
   const wide = editable ? "hidden @[720px]/board:block" : "hidden @[704px]/board:block";
   const mid = "hidden @[540px]/board:block";
   const heads = editable ? [["Piece", ""], ["Model and effort", ""], ["Done when", wide], ["After", wide], ["Estimate", wide]] : [["Piece", ""], ["Model", mid], ["State", ""], ["Tries", wide], ["Cost", mid], ["Report", wide], ["", ""]];
@@ -672,7 +738,10 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
       </div>
       {run.pieces.map((piece) => {
         const warning = modeWarning(run, piece);
+        // The plan's After column names every piece it depends on; a started run's row only those not done (PRO-383).
         const after = piece.dependsOn.map((id) => numbers[id]).filter(Boolean).join(", ");
+        const waitsFor = openDependencies(run, piece).map((dep) => numbers[dep.id]).filter(Boolean).join(", ");
+        const shown = shownPieceState(run, piece);
         return (
           <div
             key={piece.id}
@@ -680,6 +749,7 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
             aria-selected={selected === piece.id}
             data-piece={piece.id}
             data-piece-state={piece.state}
+            data-shown-state={shown}
             className={cn("grid cursor-default items-center gap-x-4 border-b border-hairline px-6 py-2", columns, selected === piece.id ? "bg-selected" : "hover:bg-veil-card", refused === piece.id && "shadow-[inset_2px_0_0_var(--destructive)]")}
             onClick={() => onSelect(piece.id)}
           >
@@ -703,10 +773,10 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
               <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{after || "–"}</div>
               <div role="cell" className={cn("font-mono text-xs", wide)}>{estimateText(piece.estimate) ?? <span className="text-faint">–</span>}</div>
             </> : <>
-              <div role="cell"><PieceStateMark state={piece.state} /></div>
+              <div role="cell"><PieceStateMark state={shown} /></div>
               <div role="cell" className={cn("font-mono text-xs text-muted-foreground", wide)}>{piece.tries?.length || piece.attempts || "–"}</div>
               <div role="cell" data-testid="piece-cost" className={cn("font-mono text-xs", mid)}>{costOf(piece) ?? <span className="text-faint">–</span>}</div>
-              <div role="cell" title={piece.note} className={cn("min-w-0 truncate text-xs", piece.state === "blocked" || piece.state === "failed" ? "text-destructive" : "text-muted-foreground", wide)} data-testid="piece-report">{reportLine(piece, after, limitsOf(run))}</div>
+              <div role="cell" title={piece.note} className={cn("min-w-0 truncate text-xs", piece.state === "blocked" || piece.state === "failed" ? "text-destructive" : "text-muted-foreground", wide)} data-testid="piece-report">{reportLine(piece, waitsFor, limitsOf(run))}</div>
               <div role="cell" className="flex justify-end">
                 {piece.worker && (
                   <Button variant="ghost" size="icon-xs" aria-label={`Open the worker of ${piece.title}`} title="Open worker" onClick={(event) => { event.stopPropagation(); selectSession(piece.worker!.sessionId); }}>
@@ -722,19 +792,22 @@ function PieceTable({ run, numbers, selected, editable, busy, refused, costOf, o
   );
 }
 
-/** What a row says of its piece: what it waits on while it is checked, else its worker's line, and that a verifier passed it. */
-function reportLine(piece: RunPiece, after: string, limits: RunLimits): string {
+/** What a row says of its piece: what it waits on while it is checked, else its worker's line, and that a verifier passed it.
+ * `waitsFor` names only the pieces it depends on that are not done. */
+function reportLine(piece: RunPiece, waitsFor: string, limits: RunLimits): string {
   if (piece.state === "verifying") return verifyingText(piece);
   const check = pieceCheck(piece);
   const read = piece.state === "done" && check?.outcome === "passed" && check.review ? (check.review.voters === 1 ? "verifier passed" : `${check.review.verifiers.filter((verifier) => verifier.verdict === "pass").length} of ${check.review.voters} verifiers passed`) : "";
-  const queued = piece.state === "queued" ? (piece.queuedFor ? holdText({ limits }, piece.queuedFor) : after ? `Waits for ${after}` : "") : "";
+  const queued = piece.state === "queued" ? (piece.queuedFor ? holdText({ limits }, piece.queuedFor) : waitsFor ? `Waits for ${waitsFor}` : "") : "";
   return [piece.note ?? queued, read].filter(Boolean).join(", ");
 }
 
-/** A model and effort as a row names them, marked with its tier's colour when it has a tier. */
-function ModelName({ piece }: { piece: Pick<RunPiece, "agent" | "model" | "effort"> & { tier?: Tier } }) {
+/** A model and effort as a row names them, marked with its tier's colour: the tier a worker ran at, else its model's
+ * family, so a queued piece has its dot too (PRO-383). `dot={false}` where the caller draws its own. */
+function ModelName({ piece, dot = true }: { piece: Pick<RunPiece, "agent" | "model" | "effort"> & { tier?: Tier }; dot?: boolean }) {
+  const colour = piece.tier ? TIER_DOT[piece.tier] : piece.model ? modelTier(piece.agent, piece.model).className : null;
   return <>
-    {piece.tier && <span aria-hidden className={cn("mr-1.5 inline-block size-1.5 rounded-full bg-current align-middle", TIER_DOT[piece.tier])} />}
+    {dot && colour && <span aria-hidden data-testid="model-dot" className={cn("mr-1.5 inline-block size-1.5 rounded-full bg-current align-middle", colour)} />}
     <span>{piece.model ? modelLabel(piece.agent, piece.model) : `${piece.agent === "codex" ? "Codex" : "Claude"} default`}</span>{" "}
     <span className="text-muted-foreground">{piece.effort ? EFFORT_LABEL[piece.effort] ?? piece.effort : "Default"}</span>
   </>;
@@ -769,24 +842,80 @@ function gateFailureLine(gate: GateResult): string {
 }
 
 /** One command of the command gate: what was run, how it ended, and for one that failed the end of what it printed. */
-function CommandCard({ command, label }: { command: CommandRun; label?: string }) {
+function CommandCard({ command, label, passedOver = false }: { command: CommandRun; label?: string; /** It failed here and on the base alike, so the gate passed over it (#1004). */ passedOver?: boolean }) {
   const lines = (command.output ?? "").split("\n").filter((line) => line.trim()).slice(-12);
   return (
-    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : "failed"}>
+    <div className="mt-2 rounded-lg bg-well px-3 py-2.5 hairline" data-testid="done-check" data-check={command.passed ? "passed" : passedOver ? "onBase" : "failed"}>
       <div className="flex items-center gap-2 text-xs">
         <Terminal aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="text-muted-foreground">{label ?? (command.project ? "Project check" : "Done-check")}</span>
-        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : "text-destructive")}>
-          {command.passed ? `passed · ${durationText(command.millis)}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
+        <span className={cn("ml-auto shrink-0", command.passed ? "text-add" : passedOver ? "text-warning" : "text-destructive")}>
+          {command.passed ? `passed · ${durationText(command.millis)}` : passedOver ? `fails on the base too · exit ${command.exitCode}` : command.exitCode != null ? `failed · exit ${command.exitCode}` : "failed · did not finish"}
         </span>
       </div>
-      <div className="mt-1 break-all font-mono text-xs">{command.run}</div>
+      <div className="mt-1 break-words font-mono text-xs"><Unbroken text={command.run} /></div>
+      {command.onBase && <OnBaseLine base={command.onBase} passedOver={passedOver} />}
       {lines.length > 0 && (
         <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[17px] text-muted-foreground scrollbar-thin">
           {lines.map((line, index) => <div key={index}>{line.split(/(FAILED|panicked|error(?=[:\[]))/).map((part, at) => (at % 2 ? <span key={at} className="text-destructive">{part}</span> : part))}</div>)}
         </pre>
       )}
     </div>
+  );
+}
+
+/** How a failed command came out on the commit the result started from (#1004), and what that made of the failure. */
+function OnBaseLine({ base, passedOver }: { base: CommandRun; passedOver: boolean }) {
+  const same = passedOver;
+  const how = base.passed ? "passed" : base.exitCode != null ? `failed · exit ${base.exitCode}` : "did not finish";
+  return (
+    <p className={cn("mt-1.5 text-xs", same ? "text-muted-foreground" : "text-destructive")} data-testid="done-check-base" data-same={same}>
+      On the base: {how}. {same ? "The same failure is already there, so it is not this piece's." : base.passed ? "Only this piece's change fails it." : "It fails otherwise there: this failure is the piece's own."}
+    </p>
+  );
+}
+
+/** A blocked piece the run hands to the lead by itself (#1004): why, and why it is not there yet. */
+function ToLeadNote({ piece }: { piece: RunPiece }) {
+  const toLead = piece.toLead!;
+  return (
+    <p className="flex items-start gap-2 rounded-lg bg-well px-3 py-2 text-xs text-muted-foreground hairline" data-testid="piece-to-lead">
+      <Sparkles aria-hidden className="mt-0.5 size-3.5 shrink-0 text-accent" />
+      <span className="min-w-0 flex-1">
+        Goes to the lead by itself{toLead.for === "review" ? ", to review the diff" : ", to finish"}: <Prose text={toLead.stuck} />. {toLead.waits ?? "It is handed over at the next read of the run."} You can still decide otherwise below.
+      </span>
+    </p>
+  );
+}
+
+/** What the run did by itself (#1004), newest first: where a stop needed no person, the step it took and why. */
+function RunEvents({ run, numbers, onSelect }: { run: Run; numbers: Record<string, number>; onSelect: (id: string) => void }) {
+  const [all, setAll] = useState(false);
+  const events = [...(run.events ?? [])].reverse();
+  if (!events.length) return null;
+  const shown = all ? events : events.slice(0, 5);
+  return (
+    <section aria-label="What the run decided" className="mx-6 mt-4" data-testid="run-events">
+      <div className={cn(kicker, "mb-2")}>What the run decided</div>
+      <ol className="flex flex-col divide-y divide-hairline rounded-lg bg-well hairline">
+        {shown.map((event, index) => <RunEventRow key={`${event.at}-${index}`} event={event} number={event.piece ? numbers[event.piece] : undefined} onSelect={onSelect} />)}
+      </ol>
+      {events.length > shown.length && <Button size="xs" variant="ghost" className="mt-1" onClick={() => setAll(true)}>Show all {events.length}</Button>}
+    </section>
+  );
+}
+
+function RunEventRow({ event, number, onSelect }: { event: RunEvent; number?: number; onSelect: (id: string) => void }) {
+  return (
+    <li className="flex min-w-0 items-start gap-3 px-3 py-2 text-xs" data-testid="run-event" data-step={event.step}>
+      <span className="w-24 shrink-0 text-faint" title={new Date(event.at).toLocaleString()}>{relativeTime(event.at)}</span>
+      <span className="min-w-0 flex-1">
+        <span className="font-medium text-foreground">{AUTO_STEP_LABEL[event.step]}</span>
+        {event.piece && number != null && <> · <button type="button" className="text-muted-foreground underline-offset-2 hover:underline" onClick={() => onSelect(event.piece!)}>piece {number}</button></>}
+        <span className="block text-muted-foreground"><Prose text={event.message} /></span>
+        {event.stuck && <span className="mt-0.5 block break-words text-faint"><Prose text={event.stuck} /></span>}
+      </span>
+    </li>
   );
 }
 
@@ -838,7 +967,8 @@ function Checks({ piece }: { piece: RunPiece }) {
   if (at < 0) return null;
   const check = tries[at].verification!;
   const failed = check.gates.find((gate) => !gate.passed);
-  const commands = check.gates.flatMap((gate) => gate.commands ?? []);
+  // A command that failed in a gate that passed is a failure the base has too, passed over (#1004).
+  const commands = check.gates.flatMap((gate) => (gate.commands ?? []).map((command) => ({ command, passedOver: gate.passed && !command.passed })));
   const outside = failed?.gate === "scope" ? (failed.detail ?? "").split("\n").filter((line) => line.startsWith("- ")).map((line) => line.slice(2)) : [];
   // The gate under way: the first that has not run, while nothing has failed and the check is open.
   const next = !failed && !check.outcome ? GATE_ORDER.find((gate) => !check.gates.some((ran) => ran.gate === gate) && (gate !== "review" || !!check.review)) : undefined;
@@ -871,7 +1001,7 @@ function Checks({ piece }: { piece: RunPiece }) {
             <span>The change is outside this piece's files. A worker may not edit another piece's files.</span>
           </p>
         )}
-        {commands.map((command, index) => <CommandCard key={index} command={command} />)}
+        {commands.map(({ command, passedOver }, index) => <CommandCard key={index} command={command} passedOver={passedOver} />)}
         {check.review && <ReviewCard agent={piece.agent} review={check.review} check={check} />}
         {check.outcome === "passed" && !check.review && <p className="mt-2 text-[11.5px] leading-[17px] text-faint">Accepted without a model: the checks above were enough.</p>}
         {check.outcome === "inconclusive" && <p className="mt-2 text-[12.5px] leading-[18px] text-warning">{check.failure}</p>}
@@ -1025,6 +1155,14 @@ function Lines({ lines, empty }: { lines: string[]; empty: string }) {
   return lines.length === 1 ? <>{lines[0]}</> : <ul className="list-disc pl-4">{lines.map((line) => <li key={line}>{line}</li>)}</ul>;
 }
 
+/**
+ * A path, branch or command that may wrap only where a reader would break it: after a `/` and at its spaces,
+ * never in the middle of a name (PRO-383). Its container keeps `break-words` for a single name wider than the line.
+ */
+function Unbroken({ text }: { text: string }) {
+  return <>{text.split(/(?<=\/)/).map((part, index) => <span key={index}>{index > 0 && <wbr />}{part}</span>)}</>;
+}
+
 /** Text with `code` in backticks, as reports and notes write it. */
 function Prose({ text }: { text: string }) {
   return <>{text.split(/`([^`]+)`/).map((part, index) => (index % 2 ? <code key={index} className={code}>{part}</code> : part))}</>;
@@ -1063,14 +1201,14 @@ function ReportSections({ attempt }: { attempt: PieceTry }) {
           <ul className="flex flex-col gap-0.5 font-mono text-[12px]" data-testid="piece-changed">
             {changes.map((change) => (
               <li key={change.path} className="flex min-w-0 items-baseline gap-2">
-                <span className="min-w-0 break-all">{change.path}</span>
+                <span className="min-w-0 break-words"><Unbroken text={change.path} /></span>
                 {change.added != null && <span className="shrink-0 text-add">+{change.added}</span>}
                 {!!change.removed && <span className="shrink-0 text-destructive">−{change.removed}</span>}
               </li>
             ))}
           </ul>
         ) : <span className="text-muted-foreground" data-empty>No file</span>}
-        {where && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{where}</div>}
+        {where && <div className="mt-1.5 break-words font-mono text-[11.5px] text-faint"><Unbroken text={where} /></div>}
       </Section>
       <Section title="Not done"><ReportList lines={report?.notDone} empty="Nothing" /></Section>
       <Section title="Could not read"><ReportList lines={report?.couldNotRead} empty="Nothing" /></Section>
@@ -1098,7 +1236,7 @@ function OutsideWarning({ run, piece }: { run: Run; piece: RunPiece }) {
       <div className="min-w-0">
         <div>The fix is outside this piece's files. A worker may not edit another piece's files.</div>
         <ul className="mt-1 text-muted-foreground">
-          {outside.map((file) => <li key={file.path} className="break-all"><code className={code}>{file.path}</code>{file.owner ? ` · piece ${numbers[file.owner] ?? file.owner} owns it` : ""}</li>)}
+          {outside.map((file) => <li key={file.path} className="break-words"><code className={code}><Unbroken text={file.path} /></code>{file.owner ? ` · piece ${numbers[file.owner] ?? file.owner} owns it` : ""}</li>)}
         </ul>
       </div>
     </div>
@@ -1166,11 +1304,13 @@ function BlockedActions({ run, piece, busy, act }: { run: Run; piece: RunPiece; 
 }
 
 /** One piece: once it has a worker, what it reported and where that stands, then its brief as its worker is sent it. */
-function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
+function PieceDetail({ run, piece, number, editable, column, busy, cost, act, onShowChat, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
   run: Run;
   piece: RunPiece;
   number: number;
   editable: boolean;
+  /** It is the window's full-height right column (PRO-383), its header level with the title bar. */
+  column: HTMLElement | null;
   busy: boolean;
   cost: string | null;
   act: Act;
@@ -1182,7 +1322,9 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
   onSave: (patch: Partial<RunPlanPiece>) => Promise<boolean>;
   onRemove: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  // Keep the edit above the portal boundary: changing columns remounts its contents.
+  const [draft, setDraft] = useState<BriefDraft | null>(null);
+  const inColumn = !!column;
   const mode = pieceMode(run, piece);
   const brief = piece.brief;
   const tries = piece.tries ?? [];
@@ -1199,22 +1341,23 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
   const workerTries = tries.filter((attempt) => attempt.step !== "lead").length;
   // The worker it has, or the last one a try had: a blocked or done piece keeps its worker on its try.
   const worker = piece.worker ?? [...tries].reverse().find((attempt) => attempt.worker && attempt.step !== "lead")?.worker;
-  return (
-    <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" data-piece-state={piece.state} className={cn("flex w-full shrink-0 flex-col border-t border-hairline bg-background @[900px]/run:min-h-0 @[900px]/run:border-l @[900px]/run:border-t-0", unmerged || stuck ? "@[900px]/run:w-[clamp(19rem,30%,26.5rem)]" : "@[900px]/run:w-[clamp(18rem,28%,24rem)]")}>
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-hairline px-4">
+  const content = (
+    <aside aria-label={`Piece ${number}: ${piece.title}`} data-testid="piece-detail" data-piece-state={piece.state} className={cn("flex shrink-0 flex-col bg-background", inColumn ? "h-full min-h-0 w-[420px] border-l border-hairline" : "w-full border-t border-hairline")}>
+      <header data-tauri-drag-region className={cn("flex shrink-0 items-center gap-2 border-b border-hairline px-4", inColumn ? "h-(--titlebar-h)" : "h-10")}>
         <span className="grid size-5 shrink-0 place-items-center rounded-[5px] bg-veil-raised text-[11px] text-muted-foreground">{number}</span>
         <h2 className="min-w-0 truncate text-[13px] font-medium" title={piece.title}>{piece.title}</h2>
-        <span className="shrink-0 text-xs text-faint">{editable ? "brief" : "piece"}</span>
+        {/* A plan's piece is its brief (18.02); a started one's panel needs no word for what it is. */}
+        {editable && <span className="shrink-0 text-xs text-faint">brief</span>}
         <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close piece" onClick={onClose}><X /></Button>
       </header>
-      {editing && editable ? (
-        <BriefForm piece={piece} run={run} busy={busy} onCancel={() => setEditing(false)} onSave={async (patch) => { if (await onSave(patch)) setEditing(false); }} />
+      {draft && editable ? (
+        <BriefForm draft={draft} onChange={setDraft} piece={piece} run={run} busy={busy} onCancel={() => setDraft(null)} onSave={async (patch) => { if (await onSave(patch)) setDraft(null); }} />
       ) : <>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 scrollbar-thin">
           {/* A piece whose merge stopped opens on that: its result was accepted, which its tries below still say. */}
           {unmerged && <MergePanel run={run} piece={piece} />}
           <div className={cn("mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5", unmerged && "hidden")}>
-            {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={piece.state} />}
+            {editable ? (piece.kind ? <span className={chip}>{piece.kind}</span> : null) : <PieceStateMark state={shownPieceState(run, piece)} />}
             {!editable && piece.state === "done" && pieceCheck(piece)?.outcome === "passed" && <span className="text-xs text-muted-foreground" data-testid="piece-check-passed">· {pieceCheck(piece)?.review ? "checked and read" : "check passed"}</span>}
             {!editable && (workerTries > 1 || gaveUp(piece) || stuck) && <span className="text-xs text-muted-foreground" data-testid="piece-tries-used">· {workerTries} of {maxTries} tries used</span>}
             <span className="ml-auto text-[13px]"><ModelName piece={piece} /></span>
@@ -1227,7 +1370,7 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
             <Section title="Result">
               <Prose text={last?.report?.result || piece.note || "No report."} />
               {/* A result reported before reports were kept (an older runtime) has its branch, and nothing more to show. */}
-              {!last && piece.branch && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{piece.branch}</div>}
+              {!last && piece.branch && <div className="mt-1.5 break-words font-mono text-[11.5px] text-faint"><Unbroken text={piece.branch} /></div>}
             </Section>
             {last && <ReportSections attempt={last} />}
             <Checks piece={piece} />
@@ -1247,9 +1390,9 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
             {tries.length > 0 && <Section title="Tries"><Tries piece={piece} /></Section>}
             <Checks piece={piece} />
             <Section title="Where it stands">
-              {piece.note ?? (piece.state === "queued" ? (piece.queuedFor ? `${holdText({ limits: limitsOf(run) }, piece.queuedFor)}.` : piece.dependsOn.length ? `Waits for ${numberList(piece.dependsOn.map((id) => pieceNumbers(run)[id]).filter(Boolean))}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
+              {piece.note ?? (piece.state === "queued" ? (piece.queuedFor ? `${holdText({ limits: limitsOf(run) }, piece.queuedFor)}.` : openDependencies(run, piece).length ? `Waits for ${numberList(openDependencies(run, piece).map((dep) => pieceNumbers(run)[dep.id]).filter(Boolean))}.` : "Not started yet.") : piece.state === "running" ? "Its worker is working." : "No report.")}
               {piece.state === "verifying" && <div className="mt-1 text-info">{verifyingText(piece)}. Nothing that depends on it starts until it has passed.</div>}
-              {piece.branch && <div className="mt-1.5 break-all font-mono text-[11.5px] text-faint">{piece.branch}</div>}
+              {piece.branch && <div className="mt-1.5 break-words font-mono text-[11.5px] text-faint"><Unbroken text={piece.branch} /></div>}
             </Section>
             {last && piece.state !== "running" && piece.state !== "queued" && <>
               <Section title="Worker's last report"><Prose text={last.report!.result} /></Section>
@@ -1271,7 +1414,7 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
                 {piece.doneChecks.map((check, index) => (
                   <li key={index} className="flex items-start gap-2">
                     {check.type === "command"
-                      ? <><Terminal aria-label="Command" className="mt-1 size-3.5 shrink-0 text-faint" /><code className={cn(code, "break-all")}>{check.run}</code></>
+                      ? <><Terminal aria-label="Command" className="mt-1 size-3.5 shrink-0 text-faint" /><code className={cn(code, "break-words")}><Unbroken text={check.run} /></code></>
                       : <><ScanSearch aria-label={check.type === "vote" ? "Vote" : "Review"} className="mt-1 size-3.5 shrink-0 text-faint" /><span>{check.text}{check.type === "vote" && <span className="text-faint"> · vote{check.threshold && check.voters ? `, ${check.threshold} of ${check.voters}` : ""}</span>}</span></>}
                   </li>
                 ))}
@@ -1293,16 +1436,24 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
         </div>
         <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-hairline px-4 py-3">
           {editable ? <>
-            <Button variant="outline" disabled={busy} onClick={() => setEditing(true)}><Pencil />Edit brief</Button>
+            <Button variant="outline" disabled={busy} onClick={() => setDraft(briefDraft(piece))}><Pencil />Edit brief</Button>
             <Button variant="outline" disabled={busy || run.pieces.length < 2} title={run.pieces.length < 2 ? "A run needs at least one piece. Discard the plan instead." : undefined} onClick={onRemove}><Trash2 />Remove piece</Button>
           </> : unmerged ? <>
             <Button size="sm" variant="accent" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onSendBack}><CornerUpLeft />Send back to worker</Button>
             {unmerged.state === "conflict" && <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay || paused} title={asksModel} onClick={onResolve}><Sparkles />Resolve in lead</Button>}
             <Button size="sm" variant="outline" disabled={busy || !!run.mergeUnderWay} onClick={onSkip}><SkipForward />Skip</Button>
           </> : stuck ? (
-            <BlockedActions run={run} piece={piece} busy={busy} act={act} />
+            <div className="flex w-full flex-col gap-2.5">
+              {piece.toLead && <ToLeadNote piece={piece} />}
+              <BlockedActions run={run} piece={piece} busy={busy} act={act} />
+            </div>
           ) : piece.state === "lead" && !["stopped", "done"].includes(run.state) ? <>
-            <Button size="sm" variant="accent" disabled={busy} title="Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass." onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
+            {piece.tries?.at(-1)?.heldToOwns && (
+              <p className="w-full text-xs text-muted-foreground" data-testid="piece-held-to-owns">
+                The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.
+              </p>
+            )}
+            <Button size="sm" variant="accent" disabled={busy} title={piece.tries?.at(-1)?.heldToOwns ? "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass; files it changed outside the piece become the piece's." : "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass."} onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
               {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Check and finish
             </Button>
             <Button size="sm" variant="outline" onClick={onShowChat}><Sparkles />Open lead chat</Button>
@@ -1323,6 +1474,7 @@ function PieceDetail({ run, piece, number, editable, busy, cost, act, onShowChat
       </>}
     </aside>
   );
+  return column ? createPortal(content, column) : content;
 }
 
 /** One conflicting place as git marks it: the lead's side, the piece's side, and the marks between. */
@@ -1338,7 +1490,7 @@ function ConflictExcerpt({ path, line, excerpt }: { path: string; line?: number;
           const tone = mark ? "text-faint" : side === "ours" ? "bg-add/10" : side === "theirs" ? "bg-destructive/10" : "";
           if (mark === "=======") side = "theirs";
           if (mark === ">>>>>>>") side = null;
-          return <div key={index} className={cn("whitespace-pre-wrap break-words", tone)}>{text || " "}</div>;
+          return <div key={index} className={cn("w-max min-w-full whitespace-pre", tone)}>{text || " "}</div>;
         })}
       </pre>
     </div>
@@ -1393,16 +1545,19 @@ function MergePanel({ run, piece }: { run: Run; piece: RunPiece }) {
 
 const split = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean);
 
-function BriefForm({ run, piece, busy, onCancel, onSave }: { run: Run; piece: RunPiece; busy: boolean; onCancel: () => void; onSave: (patch: Partial<RunPlanPiece>) => void }) {
-  const [draft, setDraft] = useState(() => ({
-    title: piece.title, goal: piece.brief.goal, why: piece.brief.why, scope: piece.brief.scope, outOfScope: piece.brief.outOfScope,
-    known: piece.brief.known.join("\n"), readFirst: piece.brief.readFirst.join("\n"), limits: piece.brief.limits.join("\n"), owns: piece.owns.join("\n"),
-    commands: piece.doneChecks.filter((check) => check.type === "command").map(checkText).join("\n"),
-    reviews: piece.doneChecks.filter((check) => check.type === "review").map(checkText).join("\n"),
-    reviewOnly: !!piece.reviewOnly, reviewOnlyReason: piece.reviewOnlyReason ?? "",
-    permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
-  }));
-  const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) => setDraft((before) => ({ ...before, [key]: value }));
+const briefDraft = (piece: RunPiece) => ({
+  title: piece.title, goal: piece.brief.goal, why: piece.brief.why, scope: piece.brief.scope, outOfScope: piece.brief.outOfScope,
+  known: piece.brief.known.join("\n"), readFirst: piece.brief.readFirst.join("\n"), limits: piece.brief.limits.join("\n"), owns: piece.owns.join("\n"),
+  commands: piece.doneChecks.filter((check) => check.type === "command").map(checkText).join("\n"),
+  reviews: piece.doneChecks.filter((check) => check.type === "review").map(checkText).join("\n"),
+  reviewOnly: !!piece.reviewOnly, reviewOnlyReason: piece.reviewOnlyReason ?? "",
+  permissionMode: piece.permissionMode ?? "", readsUntrusted: piece.readsUntrusted,
+});
+
+type BriefDraft = ReturnType<typeof briefDraft>;
+
+function BriefForm({ run, piece, draft, onChange, busy, onCancel, onSave }: { run: Run; piece: RunPiece; draft: BriefDraft; onChange: (draft: BriefDraft) => void; busy: boolean; onCancel: () => void; onSave: (patch: Partial<RunPlanPiece>) => void }) {
+  const set = <K extends keyof typeof draft>(key: K, value: (typeof draft)[K]) => onChange({ ...draft, [key]: value });
   const text = (key: "title" | "goal" | "why" | "scope" | "outOfScope" | "known" | "readFirst" | "limits" | "owns" | "commands" | "reviews" | "reviewOnlyReason", label: string, hint?: string, rows = 2) => (
     <label className="flex flex-col gap-1 text-xs text-muted-foreground">{label}
       {rows === 1

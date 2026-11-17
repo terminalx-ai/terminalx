@@ -42,8 +42,8 @@ Usage: terminalx-serve [options]
 Options:
   --project-root <dir>   Register <dir> as a project and run agents in it
   --data-dir <dir>       State directory (sessions, transcripts, sockets);
-                         required unless $TERMINALX_HOME is set, so the
-                         runtime never takes over the desktop app's ~/.raccoon
+                         defaults to $TERMINALX_HOME, else ~/.terminalx/data,
+                         never the desktop app's ~/.raccoon
   --runtime-kind <kind>  local (default) or cloud-workspace; cloud-workspace
                          requires --project-root
   --relay-link <file>    Register with the relay as a host and serve the
@@ -201,10 +201,15 @@ pub fn main() -> i32 {
         println!("{}", crate::local_runtime::handover::formats());
         return 0;
     }
+    // What a person runs on a headless server: service, pair, devices,
+    // login, logout and update (PRO-353).
+    if let Some(code) = crate::serve_cli::run(&args) {
+        return code;
+    }
     let options = match parse(&args) {
         Ok(Command::Serve(options)) => options,
         Ok(Command::Help) => {
-            println!("{USAGE}");
+            println!("{USAGE}\n\n{}", crate::serve_cli::USAGE);
             return 0;
         }
         Ok(Command::Version) => {
@@ -282,8 +287,20 @@ fn run(options: Options) -> Result<()> {
         std::env::set_var("TERMINALX_HOME", &dir);
     } else if crate::store::state_home_env().is_none() {
         // The default home belongs to the desktop app: its socket, control
-        // token and tab statuses would all be taken over.
-        bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
+        // token and tab statuses would all be taken over. The app always
+        // names a home for the runtime it launches; anything else is a
+        // headless install, whose home is ~/.terminalx/data (PRO-353).
+        if std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() == Ok("1") {
+            bail!("pass --data-dir (or set TERMINALX_HOME); terminalx-serve will not share the desktop app's ~/.raccoon");
+        }
+        let dir = crate::serve_cli::default_data_dir()?;
+        crate::serve_cli::check_socket_room(&dir)?;
+        // It holds the control token, the sockets and the host key's folder:
+        // only this user may enter it.
+        crate::machine_host::private_dir(&crate::serve_cli::install_root()?)?;
+        crate::machine_host::private_dir(&dir)?;
+        let dir = std::fs::canonicalize(&dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
+        std::env::set_var("TERMINALX_HOME", &dir);
     }
     let data_dir = crate::store::root().context("open the state directory")?;
     #[cfg(unix)]
@@ -371,11 +388,29 @@ fn run(options: Options) -> Result<()> {
     );
     // The relay host: from the bootstrap in a cloud workspace, or from a
     // link file in development and tests.
-    let link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
+    let mut link: Option<Arc<dyn crate::remote::host::RuntimeLink>> = match (&options.relay_link, &cloud) {
         (Some(path), _) => Some(Arc::new(crate::remote::host::FileLink::open(path).context("open the relay link")?)),
         (None, Some((cloud, origin))) => Some(Arc::new(crate::remote::bootstrap_link::BootstrapLink::new(cloud.clone(), origin))),
         (None, None) => None,
     };
+    // A local runtime hosts operating computers while the switch is on
+    // (PRO-341): it opens nothing until then.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        let parts = crate::machine_host::Parts {
+            sink: runtime.sink.clone(),
+            terminals: runtime.terminals.clone(),
+            sessions: runtime.manager.clone(),
+            // With a relay link the agent tabs are the relay route's
+            // (`start_cloud_agents`, below): one per state directory.
+            agents: link.is_none().then(|| machine_agents(&runtime, &data_dir)),
+        };
+        let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
+        let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
+        // One key answers on every route of a machine.
+        if let (Some(relay), true) = (link.take(), options.serves_machine()) {
+            link = Some(crate::machine_host::KeyedLink::wrap(&machine, relay));
+        }
+    }
     // The self-test checks the local runtime only.
     let mut agents = None;
     // A root serves one workspace; none, on a local runtime, its machine.
@@ -416,6 +451,9 @@ fn run(options: Options) -> Result<()> {
                             // An explicitly configured relay server is a
                             // standing service, not a detached desktop owner.
                             options.relay_link.is_some()
+                                // Hosting operating computers is a standing
+                                // service, and a connected computer is a client.
+                                || crate::machine_host::installed().is_some_and(|host| host.keeps_runtime())
                                 || runtime.manager.has_background_work()
                                 || local_vm_busy()
                                 || runtime.manager.idle_process_roots().is_none()
@@ -628,6 +666,10 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
     }
     manager.follow_pane_exits();
+    // Automatic account switching (#981) goes on with the desktop window closed.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        manager.start_account_switching();
+    }
     #[cfg(unix)]
     let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     // Terminals first, then the tabs whose CLIs run in them; the hooks those
@@ -843,7 +885,7 @@ fn start_cloud_agents(
     cloud: Option<&(Arc<crate::cloud_bootstrap::Bootstrapped>, String)>,
     relay_link: Option<&std::path::Path>,
 ) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
-    use crate::cloud_agents::{api::HttpMailboxApi, CloudAgents, Identity, ManagerOps};
+    use crate::cloud_agents::{api::HttpMailboxApi, Identity, ManagerOps};
     let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.map(str::to_string) });
     let mut generation = 0;
     let api: Option<(Arc<HttpMailboxApi>, Identity)> = match (cloud, relay_link) {
@@ -866,9 +908,7 @@ fn start_cloud_agents(
     };
     let http = api.as_ref().map(|(http, _)| http.clone());
     let api = api.map(|(http, identity)| (http as Arc<dyn crate::cloud_agents::api::MailboxApi>, identity));
-    let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
-    agents.mark_interrupted_turns(&runtime.interrupted);
-    agents.start();
+    let agents = open_agents(ops, runtime.sink.clone(), &runtime.interrupted, data_dir, api, generation)?;
     // A machine's pipelines already run as its own (`runs_local_work`).
     if root.is_some() {
         start_issue_pipelines(runtime, &agents);
@@ -889,6 +929,36 @@ fn start_cloud_agents(
         start_scheduled_runs(runtime, root, data_dir, http, &agents);
     }
     Ok(agents)
+}
+
+/// The agent tabs in `data_dir`, open and started: through `api`'s mailbox
+/// when there is one, otherwise as live calls with receipts kept here.
+fn open_agents(
+    ops: Arc<crate::cloud_agents::ManagerOps>,
+    sink: Arc<BroadcastSink>,
+    interrupted: &[(String, String)],
+    data_dir: &std::path::Path,
+    api: Option<(Arc<dyn crate::cloud_agents::api::MailboxApi>, crate::cloud_agents::Identity)>,
+    generation: u64,
+) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
+    use crate::cloud_agents::CloudAgents;
+    let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(sink), api, generation)?;
+    agents.mark_interrupted_turns(interrupted);
+    agents.start();
+    Ok(agents)
+}
+
+/// What a machine's direct listener opens its agent tabs with when it builds
+/// its own RPC (no relay link): every project of the machine, no mailbox.
+/// They open when hosting is first on, maybe hours after this runtime
+/// started, so they mark no turn interrupted: `Runtime::interrupted` is what
+/// was mid-turn at startup, and those tabs may have run again since.
+fn machine_agents(runtime: &Runtime, data_dir: &std::path::Path) -> crate::machine_host::OpenAgents {
+    let (manager, sink, data_dir) = (runtime.manager.clone(), runtime.sink.clone(), data_dir.to_path_buf());
+    Arc::new(move || {
+        let ops = Arc::new(crate::cloud_agents::ManagerOps { manager: manager.clone(), root: None });
+        open_agents(ops, sink.clone(), &[], &data_dir, None, 0)
+    })
 }
 
 /// Carry a session started from an issue on to a pull request and a review
@@ -1012,12 +1082,18 @@ fn start_relay_host(
     let sink = runtime.sink.clone();
     let terminals = runtime.terminals.clone();
     let manager = runtime.manager.clone();
+    let serves_machine = root.is_none();
     let root = root.map(PathBuf::from);
     let devices = data_dir.join("run").join("remote-devices.json");
     tokio::spawn(async move {
         let served = match root {
             Some(root) => crate::remote::host::serve_workspace(link, root, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
-            None => crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone()).await,
+            None => {
+                // The relay admits the machine's paired computers and passes
+                // on its phones (PRO-341).
+                let routes = crate::machine_host::installed().map(|machine| machine.clone() as Arc<dyn crate::remote::host::MachineRoutes>);
+                crate::remote::host::serve_machine(link, sink, terminals, Some(manager), Some(devices), agents.clone(), routes).await
+            }
         };
         let host = match served {
             Ok(host) => host,
@@ -1026,6 +1102,12 @@ fn start_relay_host(
                 return;
             }
         };
+        // The machine's direct listener serves this same RPC.
+        // Paired computers get relay access through its registration (PRO-345).
+        if let (true, Some(machine)) = (serves_machine, crate::machine_host::installed()) {
+            machine.use_relay(&host);
+            machine.use_rpc(host.rpc());
+        }
         let mut status = host.status();
         loop {
             let current = status.borrow_and_update().clone();

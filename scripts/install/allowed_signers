@@ -1,0 +1,3 @@
+# The key TerminalX runtime releases are signed with (SHA256SUMS.sig).
+# Kept equal to RUNTIME_SIGNING_KEY in src-tauri/src/serve_cli/mod.rs.
+release@terminalx namespaces="terminalx-runtime" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ17UcQnKdE/Sp6oQBa8SGenmiS0ufw6xO8CrY6J/MEU

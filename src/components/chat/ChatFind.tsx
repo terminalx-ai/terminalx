@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, CaseSensitive, Search, Terminal, X } from "@/icons";
+import { ArrowDown, ArrowUp, CaseSensitive, Search, X } from "@/icons";
+import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { SearchToggle } from "@/components/editor/SearchControls";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -139,24 +140,24 @@ export function useChatFind({ root, scroller, transcript, footerHeight }: {
     };
   }, [scroller, open, query, matchCase, includeToolOutput, activeId, occurrence, footerHeight, name]);
 
-  const bar = open ? <div role="search" aria-label="Find in chat" className="z-20 border-b border-hairline bg-chat px-3 py-2 text-xs">
+  // A compact card floating at the transcript's top right, over the reading rather than pushing it down.
+  const bar = open ? <div role="search" aria-label="Find in chat" className="absolute right-4 top-3 z-20 flex h-10 w-[min(480px,calc(100%-2rem))] items-center gap-1 rounded-lg bg-chat px-2 text-xs shadow-surface hairline" data-testid="chat-find">
     <style>{`::highlight(${name}) { background-color: #e4b64866; color: inherit; } ::highlight(${name}-active) { background-color: #e4b648; color: #171717; }`}</style>
     {rects.length > 0 && createPortal(rects.map((rect, i) => <span key={i} aria-hidden data-chat-search-highlight className="pointer-events-none fixed z-20" style={{ top: rect.top, left: rect.left, width: rect.width, height: rect.height, background: rect.active ? "#e4b64888" : "#e4b64844", outline: rect.active ? "1px solid #b78719" : undefined }} />), document.body)}
-    <div className="mx-auto flex max-w-3xl items-center gap-1">
-      <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md bg-well px-2 ring-ring/30 focus-within:ring-2">
-        <Search className="size-3.5 shrink-0 text-faint" aria-hidden />
-        <input ref={input} value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }}
-          onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); move(event.shiftKey); } }}
-          aria-label="Find in chat" placeholder="Find in chat…" spellCheck={false} autoComplete="off"
-          className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-faint" />
-        <span role="status" className="shrink-0 tabular-nums text-faint">{query.trim() ? matches.length ? `${current + 1} of ${matches.length}${matches.length === MAX_CHAT_MATCHES ? "+" : ""}` : "No matches" : ""}</span>
-        <SearchToggle label="Match case" pressed={matchCase} onClick={() => { setMatchCase(!matchCase); setSelected(0); }}><CaseSensitive className="size-3.5" /></SearchToggle>
-        <SearchToggle label="Include tool output" pressed={includeToolOutput} onClick={() => { setIncludeToolOutput(!includeToolOutput); setSelected(0); }}><Terminal className="size-3.5" /></SearchToggle>
-      </div>
-      <WithTooltip label="Previous match" keys={keycaps("mod+shift+g")}><Button variant="ghost" size="icon-xs" aria-label="Previous match" disabled={!matches.length} onClick={() => move(true)}><ArrowUp /></Button></WithTooltip>
-      <WithTooltip label="Next match" keys={keycaps("mod+g")}><Button variant="ghost" size="icon-xs" aria-label="Next match" disabled={!matches.length} onClick={() => move(false)}><ArrowDown /></Button></WithTooltip>
-      <WithTooltip label="Close find" keys={keycaps("escape")}><Button variant="ghost" size="icon-xs" aria-label="Close find" onClick={close}><X /></Button></WithTooltip>
-    </div>
+    <Search className="ml-0.5 size-3.5 shrink-0 text-faint" aria-hidden />
+    <input ref={input} value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }}
+      onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); move(event.shiftKey); } }}
+      aria-label="Find in chat" placeholder="Find in chat…" spellCheck={false} autoComplete="off"
+      className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-faint" />
+    <span role="status" className="shrink-0 tabular-nums text-faint">{query.trim() ? matches.length ? `${current + 1} of ${matches.length}${matches.length === MAX_CHAT_MATCHES ? "+" : ""}` : "No matches" : ""}</span>
+    <WithTooltip label="Previous match" keys={keycaps("mod+shift+g")}><Button variant="ghost" size="icon-xs" aria-label="Previous match" disabled={!matches.length} onClick={() => move(true)}><ArrowUp /></Button></WithTooltip>
+    <WithTooltip label="Next match" keys={keycaps("mod+g")}><Button variant="ghost" size="icon-xs" aria-label="Next match" disabled={!matches.length} onClick={() => move(false)}><ArrowDown /></Button></WithTooltip>
+    <SearchToggle label="Match case" pressed={matchCase} onClick={() => { setMatchCase(!matchCase); setSelected(0); }}><CaseSensitive className="size-3.5" /></SearchToggle>
+    <label className={cn("flex h-6 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-muted-foreground hover:bg-veil-raised", includeToolOutput && "bg-veil-raised text-foreground")}>
+      <input type="checkbox" className="size-3.5 accent-accent" checked={includeToolOutput} onChange={() => { setIncludeToolOutput(!includeToolOutput); setSelected(0); }} />
+      Tool output
+    </label>
+    <WithTooltip label="Close find" keys={keycaps("escape")}><Button variant="ghost" size="icon-xs" aria-label="Close find" onClick={close}><X /></Button></WithTooltip>
   </div> : null;
   return { bar, disclosures, hasMatch: !!active };
 }

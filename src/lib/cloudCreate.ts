@@ -53,6 +53,8 @@ export interface CreateForm {
   effort: string;
   mode: string;
   accessMode: "private" | "organization";
+  /** How long it may sit idle before it stops itself, 0 for never (PRO-410); absent or null takes the provider's default. */
+  idleSuspendMinutes?: number | null;
 }
 
 export type FormErrors = Partial<Record<"name" | "provider" | "repositories" | "prompt" | "agent" | `ref:${number}`, string>>;
@@ -156,6 +158,36 @@ export interface PendingCreate {
 
 export type CreateStep = "checking" | "quoting" | "creating";
 
+/** "Boat", "Boat and Hetzner", "Boat, Hetzner and Docker". */
+export function listedNames(names: readonly string[]): string {
+  return names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/**
+ * Refused on this computer: the organization's provider is connected, but its
+ * new machines are paused (PRO-112, PRO-372). The detail names the providers.
+ */
+export const PROVIDER_CREATION_PAUSED = "cloud_provider_creation_paused";
+
+/**
+ * New machines were allowed on the provider, and the server still does not
+ * offer it for new workspaces (its own capability, not the organization's
+ * setting). The detail names the provider.
+ */
+export const PROVIDER_NOT_OFFERED = "cloud_provider_not_offered_for_create";
+
+/** The server's refusal of a create on a provider whose new machines are paused for the organization (PRO-372). */
+export const SERVER_CREATION_DISABLED = "cloud_provider_creation_disabled";
+
+/** Where an organization's compute provider is connected, paused and allowed. */
+const COMPUTE_PLACE = "Settings → Organizations, under Cloud compute";
+
+/** "Boat is connected, but new machines are paused for this organization." The detail lists the providers' names. */
+export function creationPausedText(detail: string | null): string {
+  // No provider's name has " and " in it, so it marks a list of several.
+  return `${detail ?? "The compute provider"} ${detail?.includes(" and ") ? "are" : "is"} connected, but new machines are paused for this organization.`;
+}
+
 export class CreateRefused extends Error {
   constructor(
     public readonly code: string,
@@ -184,7 +216,7 @@ export async function quoteCreate(
   }
   options.onStep?.("quoting");
   const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
-  const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults }, options.orgId ?? null);
+  const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults, idleSuspendMinutes: form.idleSuspendMinutes ?? setup.defaults.idleSuspendMinutes }, options.orgId ?? null);
   const launch = await personLaunchInput(form);
   const idempotencyKey = options.newKey?.() ?? crypto.randomUUID();
   return {
@@ -427,7 +459,7 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later, or ask an owner or admin to raise the limit.",
   cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
-  cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
+  cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location, machine size or idle time.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",
   // Offered because the app still held an owner's or admin's role: it changed since.
   organization_admin_required: ROLE_REFUSED_WORKSPACE,
@@ -491,6 +523,16 @@ export function createErrorMessage(code: string, detail: string | null = null, m
       ? `${agent} has no working login for this organization (none is connected, or it was revoked), so it can't run a first prompt. Connect one in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`
       : `${agent} has no login your workspaces can use, so it can't run a first prompt: either none is connected for this organization, or the one stored is limited to workspaces only owners and admins can drive. An owner or admin can see which in ${AGENT_LOGIN_PLACE}. Or create the workspace without a prompt.`;
   }
+  if (code === PROVIDER_CREATION_PAUSED) {
+    const paused = creationPausedText(detail);
+    return manages ? `${paused} Allow them in ${COMPUTE_PLACE}.` : `${paused} An owner or admin can allow them in ${COMPUTE_PLACE}.`;
+  }
+  if (code === SERVER_CREATION_DISABLED) return createErrorMessage(PROVIDER_CREATION_PAUSED, detail, manages);
+  if (code === PROVIDER_NOT_OFFERED)
+    return `New machines are allowed for this organization, but ${detail ?? "the compute provider"} isn't offered for new workspaces right now. Try again later.`;
+  // Only an owner or admin connects one; anyone else is told who can.
+  if (code === "cloud_provider_connection_required" && manages === false)
+    return `No compute provider is connected for this organization. An owner or admin connects one in ${COMPUTE_PLACE}.`;
   const message = MESSAGES[code] ?? `The workspace could not be created (${code}).`;
   return detail && code.startsWith("cloud_workspace_repository") ? `${message} (${detail.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")})` : message;
 }

@@ -1,5 +1,5 @@
 import { canonicalProject, sidebarProjectOf } from "@/lib/sidebarView";
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { isUnread, sessionColumn, type DashboardSession } from "@/lib/dashboard";
 import { getAccount, useAccount } from "@/lib/account";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
@@ -9,7 +9,8 @@ import { isArchived } from "@/lib/cloudLifecycle";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
-import { cloudProjectKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { allMachineSessions, getMachineCatalog, subscribeMachineCatalog, type MachineSessionRow } from "@/lib/machineCatalog";
+import { cloudProjectKey, cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey } from "@/types/target";
 
 /**
  * The sidebar's session filter (PRO-23): everything, only sessions with an
@@ -20,7 +21,8 @@ import { cloudProjectKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/ty
  *
  * Cloud sessions are read from the same projection as the dashboard: the
  * catalog and this desktop's caches. Filtering never attaches to, resumes or
- * wakes a workspace.
+ * wakes a workspace. The sessions of paired machines count too, as their
+ * catalog last knew them (PRO-346).
  *
  * The choice is kept per window and person (prefs), so it survives a relaunch and one
  * account's filter is never applied to another's sidebar.
@@ -78,6 +80,39 @@ export function workspacesNeedingYou(catalog: CloudCatalogState, orgIds: readonl
   );
 }
 
+/**
+ * A machine session as the dashboard's rules read it: a tab waits while it
+ * asks or has approvals pending, works while it runs, and is a finished
+ * answer only while nobody has read it (as a cloud row's, `cloudDashboard`).
+ */
+export function machineDashboardSession(row: MachineSessionRow): DashboardSession {
+  return {
+    id: row.key,
+    projectPath: machineProjectKey(row.machineId, row.projectId),
+    cwd: row.worktreeName ?? row.projectId,
+    worktreeName: row.worktreeName,
+    branch: row.branch,
+    title: row.title,
+    modified: row.modified,
+    created: row.created,
+    lastMessageAt: row.lastMessageAt,
+    hasMessages: row.hasMessages,
+    archived: row.archived,
+    tabs: row.tabs.map((tab) => ({
+      harness: tab.harness,
+      status: tab.status === "waiting" || tab.pendingApprovals > 0 ? "waiting" : tab.status === "in_progress" ? "in_progress" : tab.status === "completed" && tab.unread ? "completed" : "idle",
+      markedUnread: tab.unread,
+      lastMessageAt: tab.lastMessageAt,
+    })),
+  };
+}
+
+/** The paired machines' sessions, as their catalog knows them; none while no machine is paired. */
+function useMachineSessions(): MachineSessionRow[] {
+  const catalog = useSyncExternalStore(subscribeMachineCatalog, getMachineCatalog, getMachineCatalog);
+  return useMemo(() => (Object.keys(catalog.machines).length ? allMachineSessions() : []), [catalog]);
+}
+
 export interface SidebarFilterState {
   filter: SidebarFilter;
   /** Something other than "all" is chosen. */
@@ -105,13 +140,15 @@ export function useSidebarFilter(): SidebarFilterState {
   const filter: SidebarFilter = (prefs.sidebarFilters[filterOwner(status)] as SidebarFilter | undefined) ?? "all";
   const selected = store.selectedSessionId;
   const { visibleIds } = useOrganizationVisibility();
+  const machineRows = useMachineSessions();
   return useMemo(() => {
     if (filter === "all" && !project) return { ...EVERYTHING, count: 0 };
     const sessions = new Set<string>();
     const projects = new Set<string>();
     const workspaces = new Set<string>();
     let count = 0;
-    for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId))] as DashboardSession[]) {
+    const machines = machineRows.map(machineDashboardSession);
+    for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId)), ...machines] as DashboardSession[]) {
       const projectPath = sidebarProjectOf(session, store.chatsPath);
       const passes = (!project || projectPath === project) && sessionPassesFilter(filter, session);
       if (passes && (!session.archived || store.showArchived)) count++;
@@ -162,5 +199,5 @@ export function useSidebarFilter(): SidebarFilterState {
       count,
       empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty || "No sessions in this project.",
     };
-  }, [filter, project, selected, store.sessions, store.chatsPath, store.showArchived, cloud, catalog, status, visibleIds]);
+  }, [filter, project, selected, store.sessions, store.chatsPath, store.showArchived, cloud, catalog, status, visibleIds, machineRows]);
 }

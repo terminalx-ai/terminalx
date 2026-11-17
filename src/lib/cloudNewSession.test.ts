@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
-import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
+import type { AccountStatus, CloudProviderSummary, CloudWorkspaceListItem, CloudWorkspaceQuota } from "@/lib/api";
 
 // CS-13 subset (PRO-61): `+` on a cloud project. Reuse the latest running
 // workspace, else wake a stopped one exactly once, else create one only after
@@ -49,6 +49,8 @@ const connections = await import("./cloudConnections");
 const cloudSessions = await import("./cloudSessions");
 const sessions = await import("./sessions");
 const { resetCloudAgents } = await import("./cloudAgents");
+const { DESCRIPTORS, learnDescriptors } = await import("@/test/cloudProviderDescriptors");
+const { rememberCloudProviders } = await import("./cloudProviders");
 
 const ORG = "org-a";
 const connected: WorkspaceConnectionState = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities: ["session/1", "session/2", "session-repository/1"], authority: "manage" };
@@ -121,7 +123,7 @@ function signIn() {
   };
 }
 
-async function place(workspaces: CloudWorkspaceListItem[], quota: { used: number; limit: number } | null = { used: workspaces.length, limit: 2 }) {
+async function place(workspaces: CloudWorkspaceListItem[], quota: CloudWorkspaceQuota | null = { used: workspaces.length, limit: 2 }) {
   await catalog.ingestCloudList({ workspaces, quota }, ORG);
 }
 
@@ -427,6 +429,31 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  it("with no limit, is never refused before the server is asked, however many are in use (PRO-371)", async () => {
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    // The server leaves `limit` out; a null means the same. Compared as numbers, 60 >= null would refuse every create.
+    for (const quota of [{ used: 60, running: { used: 60 }, total: { used: 75 } }, { used: 60, limit: null, running: { used: 60, limit: null } }]) {
+      await place([], quota);
+      const prepared = await flow.prepareCloudCreate(target, request);
+      expect(prepared.quota).toEqual(quota);
+      expect(prepared.quote.activeHourlyMicros).toBe(120_000);
+    }
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledTimes(2);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  // PRO-372: the organization's provider was connected in the web console, with new machines paused.
+  it("says new machines are paused, not that a provider is needed, when the only provider is connected but paused", async () => {
+    await place([], { used: 0, limit: 2 });
+    mocks.api.cloudProviders.mockResolvedValue({
+      providers: [{ id: "box", displayName: "Boat", availability: "disabled-for-create", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: "fp" } }],
+    });
+    const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Boat" });
+    expect(mocks.api.cloudWorkspaceQuote).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
   it("asks a new workspace for a native Codex first tab only for Codex, and only when Settings → Experimental says so (#745)", async () => {
     await place([], { used: 0, limit: 5 });
     const target = { key: `cloud:${ORG}:github.com/acme/web`, orgId: ORG, identity: "github.com/acme/web", fullName: "acme/web", selected: true, pinned: false, blank: false, workspaces: [] } as never;
@@ -510,6 +537,8 @@ describe("every organization live (CS-18)", () => {
       ],
     };
     await catalog.ingestCloudList({ workspaces: [], quota: { used: 0, limit: 2 } }, ORG_B);
+    // Provider names come from the descriptors the server publishes (PRO-415).
+    learnDescriptors();
   });
 
   it("creates in another organization without switching: every call names it, and its provider comes from its flags", async () => {
@@ -538,29 +567,63 @@ describe("every organization live (CS-18)", () => {
     mocks.status = {
       ...mocks.status,
       organizations: mocks.status.organizations!.map((org) =>
-        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.machine0-byok-pilot.v1": true, "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.box.v1": true, "cloud.workspaces.provider.machine0.v1": true } } } : org,
       ),
     };
     mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
-      if (provider === "machine0") throw { code: "cloud_provider_connection_required" };
+      if (provider === "box") throw { code: "cloud_provider_connection_required" };
       return { defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 30, retentionDays: 7, networkPolicy: "open" } };
     });
     const prepared = await flow.prepareCloudCreate(target, request);
-    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
-    expect(prepared.form.provider).toBe("box");
-    expect(prepared.providerLabel).toBe("Box");
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box", "machine0"]);
+    expect(prepared.form.provider).toBe("machine0");
+    expect(prepared.providerLabel).toBe("Machine0");
   });
 
-  it("skips Machine0 when the server hides it, even where its provider flag is on", async () => {
+  // PRO-372: an organization made in the web console, not the active one, whose Boat connection has new machines paused.
+  it("says new machines are paused there, not that the provider is unavailable, when the server refuses its setup for that", async () => {
     mocks.status = {
       ...mocks.status,
       organizations: mocks.status.organizations!.map((org) =>
-        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.machine0-byok-pilot.v1": false, "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.box.v1": true, "cloud.workspaces.provider.hetzner.v1": true } } } : org,
+      ),
+    };
+    mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
+      throw { code: provider === "box" ? "cloud_provider_creation_disabled" : "cloud_provider_connection_required" };
+    });
+    await expect(flow.prepareCloudCreate(target, request)).rejects.toMatchObject({ code: "cloud_provider_creation_paused", detail: "Boat" });
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box", "hetzner"]);
+    expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
+  });
+
+  // PRO-415: the organization's provider flags are the server's answer, and
+  // the descriptors order them. The flags reach the webview sorted by key
+  // (the account status keeps them in a sorted map), so a provider whose id
+  // sorts first is not thereby first: a described one with a later order,
+  // and one the app has no descriptor for, come after Boat.
+  it("tries the providers the organization's flags turn on in the descriptors' order, not the flags' key order", async () => {
+    const acme = { ...DESCRIPTORS["local-docker"]!, id: "acme-cloud", label: "Acme Cloud", order: 90, billedByProvider: true };
+    rememberCloudProviders([...Object.values(DESCRIPTORS), acme].map((descriptor) => ({ id: descriptor.id, descriptor }) as CloudProviderSummary));
+    const flags = (ids: string[]) => Object.fromEntries(ids.map((id) => [`cloud.workspaces.provider.${id}.v1`, true]));
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { ...flags(["aaa-unknown", "acme-cloud", "box"]), "cloud.workspaces.provider.machine0.v1": false } } } : org,
       ),
     };
     const prepared = await flow.prepareCloudCreate(target, request);
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box"]);
     expect(prepared.form.provider).toBe("box");
+
+    mocks.api.cloudWorkspaceSetup.mockClear();
+    mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
+      if (provider !== "aaa-unknown") throw { code: "cloud_provider_connection_required" };
+      return { defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 30, retentionDays: 7, networkPolicy: "open" } };
+    });
+    const last = await flow.prepareCloudCreate(target, request);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box", "acme-cloud", "aaa-unknown"]);
+    expect(last.form.provider).toBe("aaa-unknown");
+    expect(last.providerLabel).toBe("aaa-unknown");
   });
 
   it("creates on Hetzner in an organization that offers only Hetzner (PRO-10)", async () => {
@@ -574,7 +637,7 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["hetzner"]);
     expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "hetzner" }), ORG_B);
     expect(prepared.form.provider).toBe("hetzner");
-    expect(prepared.providerLabel).toBe("Hetzner");
+    expect(prepared.providerLabel).toBe("Hetzner Cloud");
   });
 
   it.each(["organization_admin_required", "cloud_workspace_network_unavailable", "cloud_workspace_rate_limited"])("shows the real setup error (%s) instead of trying the next provider", async (code) => {

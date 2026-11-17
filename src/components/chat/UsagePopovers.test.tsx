@@ -4,13 +4,19 @@ import type { TabEntry } from "@/types/session";
 import type { Turn } from "@/lib/transcript";
 import { ContextPopover, sessionEstimate, TurnDetailsPopover } from "./UsagePopovers";
 
-const { check } = vi.hoisted(() => ({ check: vi.fn(async () => ({ state: "ready", loginMethod: "Claude account", plan: "max" })) }));
+const { check, readiness, status } = vi.hoisted(() => ({
+  check: vi.fn(async () => ({ state: "ready", loginMethod: "Claude account", plan: "max" })),
+  readiness: vi.fn(async () => ({ state: "ready", loginMethod: "Claude account", plan: "pro" })),
+  status: { accounts: undefined as unknown },
+}));
 vi.mock("@/lib/agentReadiness", () => ({ checkAgentReadiness: check }));
-vi.mock("@/lib/status", () => ({ useStatus: () => ({ usage: { windows: [
+vi.mock("@/lib/agentAccounts", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/agentAccounts")>()), agentAccounts: { readiness } }));
+const localWindows = [
   { agent: "claude", key: "five", label: "5 hours", usedPercent: 42, resetsAt: Date.now() + 3600000, updatedAt: Date.now(), stale: false },
   { agent: "codex", key: "week", label: "Codex weekly", usedPercent: 81, resetsAt: null, updatedAt: Date.now(), stale: false },
-] } }) }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+];
+vi.mock("@/lib/status", () => ({ useStatus: () => ({ usage: { windows: localWindows, accounts: status.accounts } }) }));
+afterEach(() => { cleanup(); vi.clearAllMocks(); status.accounts = undefined; });
 const tab = { id: "tab", harness: "claude", model: "opus", requestedModel: "sonnet", effort: "high" } as TabEntry;
 const turn: Turn = {
   key: "t1", seq: 1, agent: "claude", model: "claude-sonnet-4-6", ts: "2026-11-07T10:00:00Z", work: [], toolCount: 0, editedFiles: 0, live: false,
@@ -75,6 +81,42 @@ describe("context popover", () => {
     view.rerender(<ContextPopover {...base} local={false} compacting onCompact={compact} />);
     expect((screen.getByRole("button", { name: "Compacting…" }) as HTMLButtonElement).disabled).toBe(true);
     expect(compact).not.toHaveBeenCalled();
+  });
+
+  it("with one account names none and reads This Mac's login, as before", async () => {
+    render(<ContextPopover {...base} />);
+    const dialog = await openContext();
+    await waitFor(() => expect(dialog.textContent).toContain("Claude account usage"));
+    expect(within(dialog).queryByText("Account")).toBeNull();
+    expect(within(dialog).queryByText(/Other Claude accounts/)).toBeNull();
+    expect(check).toHaveBeenCalledWith("claude");
+    expect(readiness).not.toHaveBeenCalled();
+  });
+
+  it("names the tab's account, shows its own windows, then each other account under its label", async () => {
+    const window = (usedPercent: number) => ({ agent: "claude", key: "five_hour", label: "5h", usedPercent, resetsAt: Date.now() + 3600000, updatedAt: Date.now(), stale: false });
+    status.accounts = [
+      { agent: "claude", accountId: "local", label: "This Mac's login", windows: [localWindows[0]], error: null, unavailable: false },
+      { agent: "claude", accountId: "aaaa1111bbbb2222", label: "Work · Max", windows: [window(12)], error: null, unavailable: false },
+      { agent: "claude", accountId: "cccc3333dddd4444", label: "Home · Pro", windows: [], error: "Claude OAuth usage request failed with HTTP 401", unavailable: true },
+      { agent: "claude", accountId: "api-key", label: "API key", windows: [], error: null, unavailable: true },
+      { agent: "codex", accountId: "local", label: "This Mac's login", windows: [localWindows[1]], error: null, unavailable: false },
+    ];
+    render(<ContextPopover {...base} tab={{ ...tab, launchedAccount: "aaaa1111bbbb2222" } as TabEntry} />);
+    const dialog = await openContext();
+    await waitFor(() => expect(dialog.textContent).toContain("pro"));
+    expect(readiness).toHaveBeenCalledWith("claude", "aaaa1111bbbb2222");
+    expect(check).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain("Claude usage · Work · Max");
+    const others = within(dialog).getByLabelText("Other Claude accounts");
+    expect(within(others).getByLabelText("This Mac's login").textContent).toContain("42% used");
+    expect(within(others).getByLabelText("Home · Pro").textContent).toContain("Usage unavailable");
+    expect(within(others).getByLabelText("API key").textContent).toContain("No subscription usage windows");
+    // The tab's own windows come first, read with its own account.
+    const own = dialog.textContent!.slice(0, dialog.textContent!.indexOf("Other Claude accounts"));
+    expect(own).toContain("12% used");
+    expect(own).not.toContain("42% used");
+    expect(dialog.textContent).not.toContain("Codex weekly");
   });
 
   it("distinguishes missing prices from zero and excludes unfinished turns", () => {

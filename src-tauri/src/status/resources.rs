@@ -202,6 +202,15 @@ fn parse_vm_available(input: &str) -> Option<u64> {
     Some(pages.saturating_mul(page_size))
 }
 
+/// This Mac's memory as `(total, available)` in bytes, as Activity Monitor
+/// counts what is free (free, inactive and speculative pages), for a
+/// machine's `lifecycle.resources` (PRO-350).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn host_memory() -> Option<(u64, u64)> {
+    let sample = host_sample();
+    Some((sample.total_bytes?, sample.available_bytes?))
+}
+
 fn host_sample() -> HostSample {
     let available_bytes = Command::new("/usr/bin/vm_stat")
         .output()

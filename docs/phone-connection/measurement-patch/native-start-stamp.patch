@@ -1,0 +1,24 @@
+--- a/mobile/ios/TerminalX/AppDelegate.swift
++++ b/mobile/ios/TerminalX/AppDelegate.swift
+@@ -1,4 +1,5 @@
+ internal import Expo
++import Darwin
+ import React
+ import ReactAppDependencyProvider
+ 
+@@ -13,6 +14,15 @@
+     _ application: UIApplication,
+     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+   ) -> Bool {
++    // Measurement patch (#989): stamp process start and launch for the JS marks.
++    var info = kinfo_proc()
++    var size = MemoryLayout<kinfo_proc>.stride
++    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
++    if sysctl(&mib, 4, &info, &size, nil, 0) == 0 {
++      let start = info.kp_proc.p_starttime
++      UserDefaults.standard.set(Double(start.tv_sec) * 1000 + Double(start.tv_usec) / 1000, forKey: "TXProcessStartMs")
++    }
++    UserDefaults.standard.set(Date().timeIntervalSince1970 * 1000, forKey: "TXDidFinishLaunchingMs")
+     let delegate = ReactNativeDelegate()
+     let factory = ExpoReactNativeFactory(delegate: delegate)
+     delegate.dependencyProvider = RCTAppDependencyProvider()

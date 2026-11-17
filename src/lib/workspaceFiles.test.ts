@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "@terminalx/portable/workspace";
 
-vi.mock("@/lib/api", () => ({ fs: {}, api: {} }));
+const localFs = vi.hoisted(() => ({ writeText: vi.fn(async () => 2), createText: vi.fn(async () => 1) }));
+vi.mock("@/lib/api", () => ({ fs: localFs, api: {} }));
 
-const { cloudFileSource } = await import("./workspaceFiles");
+const { cloudFileSource, localFileSource } = await import("./workspaceFiles");
+
+describe("localFileSource.writeText", () => {
+  it("creates exclusively when the base says the file must not exist, and overwrites otherwise", async () => {
+    const source = localFileSource("/repos/alpha");
+    expect(await source.writeText("docs/new.md", "", null)).toEqual({ version: "1" });
+    expect(localFs.createText).toHaveBeenCalledWith("/repos/alpha/docs/new.md", "");
+    expect(localFs.writeText).not.toHaveBeenCalled();
+    expect(await source.writeText("docs/new.md", "text", undefined)).toEqual({ version: "2" });
+    expect(localFs.writeText).toHaveBeenCalledWith("/repos/alpha/docs/new.md", "text");
+  });
+});
 
 const connected: WorkspaceConnectionState = {
   state: "connected",
@@ -61,5 +73,42 @@ describe("Git badges of a cloud workspace's file tree", () => {
       { path: "app/a.ts", status: "modified" },
       { path: "libs/core/a.ts", status: "modified" },
     ]);
+  });
+});
+
+describe("a machine session's files, rooted at its worktree (PRO-347)", () => {
+  const asked: { method: string; params: Record<string, unknown> }[] = [];
+  const source = () =>
+    cloudFileSource(
+      "machine:m:p/wt/read",
+      client((method, params) => {
+        asked.push({ method, params });
+        if (method === "fs.list") return { path: params.path, entries: [{ name: "src", path: `${params.path}/src`, kind: "directory" }, { name: "x", path: "elsewhere/x", kind: "file" }] };
+        if (method === "git.status") return { repository: true, repo: params.repo, files: [file("src/a.ts")] };
+        throw { code: "method_not_found" };
+      }),
+      false,
+      "wt/read",
+    );
+
+  it("asks the runtime for paths under the worktree and gives back paths relative to it", async () => {
+    asked.length = 0;
+    const files = source();
+    const top = await files.listDir("");
+    const below = await files.listDir("src");
+    expect(asked.filter((call) => call.method === "fs.list").map((call) => call.params.path)).toEqual(["wt/read", "wt/read/src"]);
+    expect(top.find((entry) => entry.name === "src")?.path).toBe("src");
+    expect(below.find((entry) => entry.name === "src")?.path).toBe("src/src");
+    // One the runtime named outside the worktree is listed by its name only, never by the runtime's path.
+    expect(top.find((entry) => entry.name === "x")?.path).toBe("x");
+    files.dispose();
+  });
+
+  it("reads Git badges from the worktree's own repository, with its paths as they are", async () => {
+    asked.length = 0;
+    const files = source();
+    expect(await files.changes!()).toEqual([{ path: "src/a.ts", status: "modified" }]);
+    expect(asked.filter((call) => call.method === "git.status").map((call) => call.params.repo)).toEqual(["wt/read"]);
+    files.dispose();
   });
 });

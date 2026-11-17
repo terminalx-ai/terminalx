@@ -45,6 +45,21 @@
 //! machine and its projects, a session created in each, the session list
 //! naming each one's project, and file calls held to the project they name.
 //!
+//! PRO-341 (`a_paired_computer_operates_…`): a local runtime with
+//! "Let other computers operate this Mac" on answers the relay with the
+//! machine's one host key, the same key as its direct listener; a computer
+//! known only to the machine's registry is admitted by its relay device id
+//! and token with full rights; revoking it closes the connection and revokes
+//! its relay device (PRO-345), so its next connection is refused at the relay
+//! and never reaches the window's phone route.
+//!
+//! PRO-345 (`the_machine_supervisor_gets_relay_access_…`): the desktop's
+//! machine supervisor connects directly, asks for `machine.relayAccess`, uses
+//! the invite once to provision a resume credential, reconnects through the
+//! relay with it when no direct address answers, moves back to a direct route
+//! on a new link, and ends in `accessRemoved` when the machine refuses its
+//! device token on the relay link.
+//!
 //! PRO-24 (`cloud_files_…`): files in bounded parts, change notifications,
 //! a save refused after an agent's edit and made after a reconnect, a staged
 //! large write, bounded search, symlink escapes and a participant's limits.
@@ -1954,5 +1969,301 @@ async fn a_machine_serves_two_projects_over_one_connection() {
     assert_eq!(desk.refused("fs.read", json!({ "path": "README.md" })).await, "invalid_params");
     let status = desk.ok("git.status", json!({ "projectId": ids[1] })).await;
     assert_eq!(status["branch"], "main", "{status}");
+    drop(serve);
+}
+
+/// PRO-341: the relay half of a machine that hosts operating computers. The
+/// computer's relay credential comes from a link attachment here, standing
+/// in for PRO-342's pairing; after a restart the runtime knows the device only
+/// from its registry of paired computers.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn a_paired_computer_operates_a_machine_through_the_relay() {
+    use common::agent::{wait_until, AgentWorld, Serve};
+    use common::machine::{allow, computer, connect, free_port, host_key, listening, pair, status};
+
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let port = free_port();
+    allow(&world.data, true);
+    // The project the machine knows, as its window registered it.
+    let project = world.project.to_string_lossy().into_owned();
+    std::fs::write(world.data.join("projects.json"), json!({ "projects": [{ "path": project, "name": "project", "kind": "git" }] }).to_string()).unwrap();
+    let start = || {
+        let mut command = world.machine_command();
+        command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string()).args(["--runtime-kind", "local", "--relay-link"]).arg(&link);
+        let serve = Serve::start(command, &world.data);
+        wait_until("relay registration", || serve.lines.lock().unwrap().iter().rev().find(|line| line["type"] == "relay" && line["status"]["state"] == "registered").cloned());
+        serve
+    };
+
+    // The computer gets a relay credential for this machine.
+    write_link(&link, &secret, &relay_token, &harness.director, json!([attachment("att-desk", "computer-desk", &token, "runtime")]));
+    let serve = start();
+    // A server first started with a link keeps the link's key as the machine's.
+    assert_eq!(host_key(&world.data).host_id(), relay_host_id, "one key on every route");
+    let mut desk = Client::start(source(&harness, &link_dir.path().join("link.json.attachments"), "att-desk", "computer-desk", &relay_host_id));
+    desk.connected().await;
+    let want = json!({ "protocol": raccoon_lib::remote::protocol::PROTOCOL, "want": raccoon_lib::remote::protocol::served(true) });
+    desk.ok("rpc.hello", want.clone()).await;
+    assert_eq!(desk.ok("machine.describe", json!({})).await["machineId"], json!(relay_host_id));
+    drop(serve);
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+
+    // Now only the machine's registry knows it: the link lists no attachment
+    // and the relay host's own device list is gone.
+    write_link(&link, &secret, &relay_token, &harness.director, json!([]));
+    std::fs::remove_file(world.data.join("run/remote-devices.json")).unwrap();
+    pair(&world.data, "desk", &token, Some("computer-desk"));
+    let serve = start();
+    desk.connected().await;
+    let hello = desk.ok("rpc.hello", want.clone()).await;
+    let granted: Vec<&str> = hello["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(granted.contains(&"machine/1") && granted.contains(&"pty/1"), "full operating rights: {hello}");
+    assert_eq!(desk.ok("machine.describe", json!({})).await["machineId"], json!(relay_host_id));
+    assert!(desk.ok("session.list", json!({})).await["sessions"].is_array());
+    let created = desk.ok("pty.create", json!({ "cols": 80, "rows": 24, "projectId": raccoon_lib::remote::machine::project_id(&project), "clientRequestId": "pro341-shell" })).await;
+    assert!(created["ptyId"].is_string(), "{created}");
+    let connected = wait_until("the computer to show as connected", || {
+        let status = status(&serve);
+        (status["computers"][0]["connected"] == true).then_some(status)
+    });
+    assert_eq!(connected["machineId"], json!(relay_host_id));
+    assert_eq!(connected["computers"][0]["id"], "desk");
+
+    // Losing the relay control connection closes the computer's data leg too,
+    // as it does every attached device's; it resumes once the host is back.
+    harness.post("/restart-cell", json!({}));
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.connected().await;
+    let again = desk.ok("rpc.hello", want.clone()).await;
+    assert!(again["capabilities"].as_array().is_some_and(|granted| granted.iter().any(|name| name == "machine/1")), "{again}");
+
+    // The direct listener answers with the same key and the same credential.
+    let listening = listening(&serve);
+    assert!(listening.ends_with(&format!(":{port}")), "{listening}");
+    let keypair = host_key(&world.data);
+    let mut direct = computer(connect(port, &keypair.public_key_b64(), &token).await);
+    assert_eq!(direct.call("rpc.hello", want).await["ok"], true);
+    assert_eq!(direct.call("machine.describe", json!({})).await["result"]["machineId"], json!(relay_host_id));
+    drop(direct);
+
+    // A window takes this machine's phones.
+    let attachment = serve.control("runtime.attach", json!({ "protocol": 1 }));
+    let route = world.data.join("run/phones.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&route).unwrap();
+    std::fs::set_permissions(&route, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    serve.control("runtime.machineHost.phoneRoute", json!({ "epoch": attachment["epoch"], "lease": attachment["lease"], "socket": route }));
+
+    // Revoked, the computer is closed out, and its relay device is revoked
+    // (`device-revoke`, PRO-345): the relay refuses its resume credential, so
+    // nothing of it reaches the window's phone route.
+    serve.control("runtime.machineHost.revoke", json!({ "epoch": attachment["epoch"], "lease": attachment["lease"], "id": "desk" }));
+    desk.state(|state| !matches!(state, ClientState::Connected { .. })).await;
+    listener.set_nonblocking(true).unwrap();
+    let quiet_until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < quiet_until {
+        match listener.accept() {
+            Ok(_) => panic!("a revoked computer's relay connection reached the phone route"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => panic!("{error}"),
+        }
+    }
+    desk.supervisor.stop();
+    drop(serve);
+}
+
+/// Every machine state until `wanted`, within 90 s.
+async fn until(
+    states: &mut mpsc::UnboundedReceiver<raccoon_lib::remote::machine_client::MachineConnectionState>,
+    what: &str,
+    wanted: Box<dyn Fn(&raccoon_lib::remote::machine_client::MachineConnectionState) -> bool + Send>,
+) -> Vec<raccoon_lib::remote::machine_client::MachineConnectionState> {
+    let mut since = Vec::new();
+    let found = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let state = states.recv().await.expect("the supervisor runs");
+            since.push(state.clone());
+            if wanted(&state) {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "never {what}; saw {since:?}");
+    since
+}
+
+/// The operating computer's record and Keychain for the PRO-345 relay test,
+/// in memory, as `machines::connect::StoreEnv` keeps them on disk.
+struct Kept {
+    target: Mutex<raccoon_lib::remote::machine_client::Target>,
+    saved: Mutex<Vec<raccoon_lib::remote::machine_client::RelayInfo>>,
+    dropped: Mutex<u32>,
+}
+
+impl raccoon_lib::remote::machine_client::MachineEnv for Kept {
+    fn target(&self) -> anyhow::Result<raccoon_lib::remote::machine_client::Target> {
+        Ok(self.target.lock().unwrap().clone())
+    }
+    fn signed_in_user(&self) -> Option<String> {
+        Some("user-pro345".into())
+    }
+    fn described(&self, _described: &Value, route: &raccoon_lib::remote::machine_client::RouteUsed) {
+        self.target.lock().unwrap().last_route = Some(route.clone());
+    }
+    fn save_relay(&self, credential: &raccoon_lib::remote::machine_client::RelayCredential) -> anyhow::Result<()> {
+        self.saved.lock().unwrap().push(credential.info.clone());
+        self.target.lock().unwrap().relay = Some(credential.clone());
+        Ok(())
+    }
+    fn drop_relay(&self) {
+        *self.dropped.lock().unwrap() += 1;
+        self.target.lock().unwrap().relay = None;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs terminalx-saas, bun and Redis: scripts/remote-runtime/e2e.sh"]
+async fn the_machine_supervisor_gets_relay_access_reconnects_through_the_relay_and_moves_back_direct() {
+    use common::agent::{wait_until, AgentWorld, Serve};
+    use common::machine::{allow, free_port, host_key, listening, pair};
+    use raccoon_lib::remote::machine_client::{
+        MachineConnectionState, MachineConnectionView, MachineRoute, MachineSupervisor, NetDialer, OnState, RouteKind, Target, Zeroizing,
+    };
+
+    let harness = Harness::start();
+    let world = AgentWorld::new();
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let relay_host_id = relay_host_id_for_secret(secret);
+    let relay_token = harness.post("/runtime-token", json!({ "relayHostId": relay_host_id, "runtimeGeneration": 7 }))["relayToken"].as_str().unwrap().to_string();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    write_link(&link, &secret, &relay_token, &harness.director, json!([]));
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    allow(&world.data, true);
+    // Paired by code: the machine has not given this computer a relay device yet.
+    pair(&world.data, "desk", &token, None);
+    let start = |port: u16| {
+        let mut command = world.machine_command();
+        command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string()).args(["--runtime-kind", "local", "--relay-link"]).arg(&link);
+        let serve = Serve::start(command, &world.data);
+        wait_until("relay registration", || serve.lines.lock().unwrap().iter().rev().find(|line| line["type"] == "relay" && line["status"]["state"] == "registered").cloned());
+        listening(&serve);
+        serve
+    };
+    let endpoint = |port: u16| format!("ws://127.0.0.1:{port}/machine/1");
+    let first_port = free_port();
+    let serve = start(first_port);
+    let keypair = host_key(&world.data);
+    assert_eq!(keypair.host_id(), relay_host_id, "one key on every route");
+
+    let kept = Arc::new(Kept {
+        target: Mutex::new(Target {
+            machine_id: relay_host_id.clone(),
+            public_key_b64: keypair.public_key_b64(),
+            direct_endpoints: vec![endpoint(first_port)],
+            route: MachineRoute::RelayAndNearby,
+            last_route: None,
+            last_seen_at: None,
+            device_token: Zeroizing::new(token.clone()),
+            client_secret: Zeroizing::new([5u8; 32]),
+            label: "Test MacBook".into(),
+            platform: "macos".into(),
+            relay: None,
+        }),
+        saved: Mutex::new(Vec::new()),
+        dropped: Mutex::new(0),
+    });
+    let (events, mut client) = mpsc::unbounded_channel();
+    let (states_tx, mut states) = mpsc::unbounded_channel::<MachineConnectionState>();
+    let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
+        let _ = states_tx.send(view.state.clone());
+    });
+    let supervisor = MachineSupervisor::start(&relay_host_id, kept.clone(), Arc::new(NetDialer), events, on_state);
+    // Direct first; relay access comes with it, and the invite is used once.
+    until(&mut states, "direct", Box::new(|state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    wait_until("a relay credential", || (!kept.saved.lock().unwrap().is_empty()).then_some(()));
+    let info = kept.saved.lock().unwrap()[0].clone();
+    assert_eq!(info.relay_host_id, relay_host_id);
+    assert_eq!(info.user_id, "user-pro345");
+    assert!(info.relay_device_id.starts_with("computer-"), "{info:?}");
+    let registry = std::fs::read_to_string(world.data.join("machine-host/paired-computers.json")).unwrap_or_default();
+    assert!(registry.contains(&info.relay_device_id), "the machine keeps the computer's relay device");
+    assert!(!registry.contains(kept.target.lock().unwrap().relay.as_ref().unwrap().resume_token.as_str()), "never the resume token");
+
+    // The runtime comes back on another port: the address this computer knows
+    // is dead, so it reconnects through the relay with the resume credential.
+    drop(serve);
+    let second_port = free_port();
+    let serve = start(second_port);
+    let reached = until(&mut states, "the relay", Box::new(|state| matches!(state, MachineConnectionState::Relay { .. }))).await;
+    assert!(reached.iter().any(|state| matches!(state, MachineConnectionState::Reconnecting { .. })), "{reached:?}");
+    assert_eq!(*kept.dropped.lock().unwrap(), 0, "the relay took the credential");
+    let mut relay_link = None;
+    while let Ok(event) = client.try_recv() {
+        if let ClientEvent::State(ClientState::Connected { link, .. }) = event {
+            relay_link = link;
+        }
+    }
+    assert!(supervisor.send(json!({ "id": "web-describe", "method": "machine.describe", "params": {} })));
+
+    // The machine's new address is learned; a nudge probes it and the
+    // connection moves back to it on a new link, with nothing in between.
+    kept.target.lock().unwrap().direct_endpoints = vec![endpoint(second_port)];
+    supervisor.nudge();
+    let moved = until(&mut states, "direct again", Box::new(|state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    assert!(
+        moved.iter().all(|state| matches!(state, MachineConnectionState::Relay { .. } | MachineConnectionState::Direct { .. })),
+        "nothing between the relay and the direct route: {moved:?}"
+    );
+    let mut direct_link = None;
+    let mut answered = false;
+    while let Ok(event) = client.try_recv() {
+        match event {
+            ClientEvent::State(ClientState::Connected { link, .. }) => direct_link = link,
+            ClientEvent::State(other) => panic!("the web view was told {other:?} during the move"),
+            ClientEvent::Message(message) => answered |= message["id"] == "web-describe",
+        }
+    }
+    assert!(direct_link.is_some() && direct_link != relay_link, "a new link: {relay_link:?} then {direct_link:?}");
+    if !answered {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !answered {
+            match tokio::time::timeout_at(deadline, client.recv()).await.expect("the relay link's answer").unwrap() {
+                ClientEvent::Message(message) => answered = message["id"] == "web-describe",
+                ClientEvent::State(other) => panic!("the web view was told {other:?} during the move"),
+            }
+        }
+    }
+    assert!(matches!(supervisor.state(), MachineConnectionState::Direct { route, .. } if route.kind == RouteKind::Lan));
+
+    // On the relay link, the machine refusing the device token is "access
+    // removed" too: no direct address answers, the relay takes the resume
+    // credential, and the machine refuses the token behind it.
+    drop(serve);
+    {
+        let mut target = kept.target.lock().unwrap();
+        target.direct_endpoints = vec![endpoint(first_port)];
+        target.device_token = Zeroizing::new(uuid::Uuid::new_v4().simple().to_string());
+    }
+    let serve = start(free_port());
+    until(&mut states, "access removed", Box::new(|state| *state == MachineConnectionState::AccessRemoved)).await;
+    assert_eq!(*kept.dropped.lock().unwrap(), 0, "the relay credential was not what was refused");
+    assert!(kept.target.lock().unwrap().relay.is_some());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(states.try_recv().is_err(), "nothing retried after access was removed");
+    supervisor.stop();
     drop(serve);
 }

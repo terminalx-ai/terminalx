@@ -39,6 +39,7 @@
   --color-raised: var(--surface-raised);
   --color-add: var(--accent-add);
   --color-merged: var(--accent-merged);
+  --color-merged-foreground: var(--accent-merged-fg);
   --color-merge: var(--accent-merge);
   --color-merge-foreground: var(--accent-merge-fg);
   --color-command: var(--accent-command);
@@ -272,6 +273,24 @@
   overflow-wrap: anywhere;
   color: color-mix(in oklab, var(--foreground) 86%, transparent);
 }
+/* Pull request prose in the side panel (PRO-395, design 05.08): 12.5px, muted, not chat size. */
+.prose-pr .prose-chat {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+}
+.prose-pr .prose-chat pre,
+.prose-pr .prose-chat table {
+  font-size: 12px;
+}
+/* A review thread's comments (PRO-392): 13px in the diff, beside 12px code, not the transcript's 15px. */
+.review-prose .prose-chat {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.review-prose .prose-chat code:not(pre code) {
+  font-size: 12.5px;
+}
 /* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
 .prose-chat p,
 .prose-chat li,
@@ -366,9 +385,14 @@
   border-top: 1px solid var(--hairline);
   margin: 1em 0;
 }
+/* A table is as wide as its columns want, and never narrower than the transcript (#1009). Its wrapper scrolls
+   sideways when that is wider than the transcript; columns are not squeezed to fit, so an ETA, a PR number or a
+   status stays on one line. A column of prose is held to a readable measure by the cells' max-width and wraps
+   inside it. */
 .prose-chat table {
   border-collapse: collapse;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   font-size: 13px;
 }
 .prose-chat th,
@@ -377,6 +401,15 @@
   padding: 0.35em 0.6em;
   text-align: left;
   vertical-align: top;
+  max-width: 22em;
+  /* Words break only at the edge of that measure, not to make the table narrower. */
+  overflow-wrap: break-word;
+}
+/* A URL, a path or a hash breaks anywhere, so one cell cannot make its column wider than the measure. */
+.prose-chat td code,
+.prose-chat td a,
+.prose-chat th code,
+.prose-chat th a {
   overflow-wrap: anywhere;
 }
 .prose-chat th {
@@ -400,7 +433,7 @@
   border-bottom: 1px solid var(--hairline);
   color: var(--ink-muted) !important;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 .prose-chat [data-streamdown="code-block"] > [data-streamdown="code-block-header"] + div:not([data-streamdown]) {
   margin-top: -28px !important;
@@ -419,6 +452,19 @@
 .prose-chat [data-streamdown="code-block-actions"] svg {
   width: 13px;
   height: 13px;
+}
+/* Copy says so: a labelled button at the header's right, not a bare icon. */
+.prose-chat [data-streamdown="code-block-copy-button"] {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px !important;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.prose-chat [data-streamdown="code-block-copy-button"]::after {
+  content: "Copy";
 }
 .prose-chat [data-streamdown="code-block-body"] {
   border: 0 !important;
@@ -500,6 +546,11 @@ body:has([role="alertdialog"]) [data-star-reminder] {
    left every dialog appearing and vanishing at once. */
 @utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 @utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+/* A side sheet (`placement="right"`) slides in from the window's right edge instead. */
+@keyframes sheet-in { from { opacity: 0.6; transform: translateX(100%); } to { opacity: 1; transform: none; } }
+@keyframes sheet-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(40%); } }
+@utility animate-sheet-in { animation: sheet-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-sheet-out { animation: sheet-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
 @utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
 @utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
 

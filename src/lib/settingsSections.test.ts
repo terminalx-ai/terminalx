@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { noteExperimentalSettings } from "./experimentalSettings";
-import { SETTINGS_SECTIONS as PALETTE_SECTIONS, settingsSectionOffered } from "./settingsSections";
-import { SETTINGS_GROUPS, SETTINGS_SECTIONS } from "@/components/settings/settingsRegistry";
+import { SETTINGS_SECTIONS as PALETTE_SECTIONS, settingOffered, settingsSectionOffered } from "./settingsSections";
+import { SETTINGS_GROUPS, SETTINGS_SECTIONS, settingsInSection } from "@/components/settings/settingsRegistry";
 
 describe("sections behind an Experimental switch", () => {
   it("offers Orchestrator only while orchestration runs are on, and every other section always", () => {
@@ -12,6 +12,20 @@ describe("sections behind an Experimental switch", () => {
       noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true });
       expect(settingsSectionOffered("orchestrator")).toBe(true);
     } finally { noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false }); }
+  });
+});
+
+describe("Settings → Machines for everyone (PRO-342, PRO-360)", () => {
+  it("is offered, with every row findable, whatever the Experimental switches say", () => {
+    const rows = settingsInSection("machines");
+    expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.thisMac", "machines.pairingCode", "machines.yours", "machines.computers"]);
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
+    expect(settingsSectionOffered("machines")).toBe(true);
+    for (const row of rows) expect(settingOffered(row)).toBe(true);
+    // Experimental no longer has a Machines switch.
+    expect(settingsInSection("experimental").map((row) => row.id)).not.toContain("experimental.machines");
+    expect(PALETTE_SECTIONS.some((section) => section.id === "machines")).toBe(true);
+    expect(SETTINGS_SECTIONS.machines).toMatchObject({ title: "Machines", entry: "machines.allowOperating" });
   });
 });
 

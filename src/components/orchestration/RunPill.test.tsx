@@ -21,8 +21,23 @@ describe("the title bar's run pill (18.01, 18.03)", () => {
     expect(runPillOf(run("running", [piece("a", "running")]))?.text).toBe("1 worker running");
   });
 
-  it("says nothing of a run with nothing to say, or one that has ended", () => {
-    expect(runPillOf(null)).toBeNull();
+  it("asks nothing of the person for what the run decides on its own (#1004)", () => {
+    // A blocked piece the run hands to the lead by itself.
+    const toLead = { ...piece("b", "blocked"), toLead: { for: "noModelAbove" as const, stuck: "no model is left above it" } };
+    expect(runPillOf(run("running", [piece("a", "running"), toLead], { inTurn: 1 }))).toMatchObject({ kind: "running", text: "1 worker running" });
+    // Paused on its own points, it goes on by itself at the reset: said, not asked.
+    const resumeAt = new Date(2026, 10, 15, 16, 10).getTime();
+    const pill = runPillOf(run("needsYou", [piece("a", "queued")], { pause: { kind: "points", message: "Past its 25 points.", resumeAt, byItself: true } }));
+    expect(pill?.kind).toBe("waiting");
+    expect(pill?.text).toMatch(/^Goes on at (\w{3} )?16:10$/);
+    expect(pill?.why).toBe("Past its 25 points.\nIt goes on by itself when the window resets.");
+    // A reset the person asked for, or a window past the app's level, still needs them.
+    expect(runPillOf(run("needsYou", [piece("a", "queued")], { pause: { kind: "window", message: "Past 85%.", resumeAt } }))?.kind).toBe("needs");
+  });
+
+  it("says Idle for a session with no run (18.08), nothing while the run is read, and nothing of a run with nothing to say, or one that has ended", () => {
+    expect(runPillOf(null)).toMatchObject({ kind: "idle", text: "Idle" });
+    expect(runPillOf(undefined)).toBeNull();
     expect(runPillOf(run("running", [piece("a", "done"), piece("b", "queued")], { inTurn: 0 }))).toBeNull();
     expect(runPillOf(run("stopped", [piece("a", "blocked")]))).toBeNull();
     expect(runPillOf(run("done", [piece("a", "done")]))).toBeNull();

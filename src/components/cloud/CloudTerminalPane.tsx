@@ -7,6 +7,7 @@ import { TERMINAL_APPROVER_REASON, canDrive } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { cloudTerminalFactory, errorCode, takeControl, type CloudTerminal } from "@/lib/cloudTerminals";
 import { getInstance } from "@/lib/terminal";
+import { useMachinePlace } from "./workspacePlace";
 
 /**
  * One cloud shell (PRO-26): its xterm, and who controls its input. Shared by
@@ -56,11 +57,13 @@ export function CloudTerminalPane({
     }
   };
 
+  const machine = useMachinePlace();
   let notice: string | null = null;
-  if (terminal.gone === "runtime-restarted") notice = "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
+  if (terminal.gone === "runtime-restarted")
+    notice = machine ? `This terminal ended when TerminalX restarted on ${machine.name}. Input is not sent anywhere.` : "This terminal ended when the workspace runtime restarted. Input is not sent anywhere.";
   else if (terminal.gone === "closed") notice = "This terminal was closed.";
   else if (terminal.exited) notice = `The shell exited${terminal.exitCode === null ? "" : ` with code ${terminal.exitCode}`}.`;
-  else if (terminal.inputError) notice = `Input was not delivered: ${inputErrorText(terminal.inputError)}`;
+  else if (terminal.inputError) notice = `Input was not delivered: ${inputErrorText(terminal.inputError, false, machine?.name)}`;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-terminal">
@@ -125,7 +128,7 @@ export function viewerText(
   return "View only: this attachment cannot type into or resize terminals.";
 }
 
-export function inputErrorText(code: string, agent = false): string {
+export function inputErrorText(code: string, agent = false, machineName?: string): string {
   if (agent && code === "unavailable") return "the agent is not running.";
   switch (code) {
     case "lease_held":
@@ -133,13 +136,15 @@ export function inputErrorText(code: string, agent = false): string {
     case "not_controller":
       return "another device controls this terminal. Take control to type.";
     case "forbidden":
-      return "your access to this workspace does not allow typing in terminals (it needs a workspace admin, or a driver who can approve permissions).";
+      return machineName
+        ? `your access to ${machineName} does not allow typing in terminals.`
+        : "your access to this workspace does not allow typing in terminals (it needs a workspace admin, or a driver who can approve permissions).";
     case "unavailable":
       return "the shell has exited.";
     case "not_found":
       return "the terminal no longer exists.";
     case "not connected":
-      return "not connected to the workspace.";
+      return machineName ? `not connected to ${machineName}.` : "not connected to the workspace.";
     default:
       return code;
   }

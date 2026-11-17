@@ -1,19 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { usePrefs } from "@/lib/prefs";
+import { useReducedMotion } from "@/lib/reducedMotion";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/cn";
 import { PALETTE, SPRITE_H, SPRITE_W, drawSprite, drawStars, type FrameName } from "./sprite";
-
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const on = () => setReduced(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return reduced;
-}
 
 function fitCanvas(canvas: HTMLCanvasElement, w: number, h: number) {
   const dpr = window.devicePixelRatio || 1;

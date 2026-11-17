@@ -15,6 +15,7 @@ import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api, type PullRequest } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
+import { openFile } from "@/lib/editors";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
@@ -68,9 +69,11 @@ export function RightPanel({
   repositories,
   readOnlyReason,
   ports,
+  portsCount = 0,
   terminals = false,
   computer = false,
   browser = false,
+  dock,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -107,12 +110,16 @@ export function RightPanel({
   readOnlyReason?: string | null;
   /** A cloud workspace's Ports tab (PRO-28), drawn only while it is the tab shown; absent for anyone who may not use previews. */
   ports?: () => ReactNode;
+  /** Ports forwarded to this Mac now, shown on the tab ("Ports 3", 14.11); none shown at 0. */
+  portsCount?: number;
   /** A local session's panel: shells in its folder, docked below the tabs. */
   terminals?: boolean;
   /** A local session's panel: the Computer tab, a desktop to watch and that agents can use. */
   computer?: boolean;
   /** A local session's panel: the Browser tab, the workspace's pages beside the chat, shared with the agent. */
   browser?: boolean;
+  /** Terminals that are not this computer's, docked below the tabs instead (a machine session's, PRO-347). */
+  dock?: ReactNode;
 }) {
   const prefs = usePrefs();
   // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
@@ -176,6 +183,12 @@ export function RightPanel({
     };
   }, [cwd, gitSource, branch, labelMode, refreshTick, isGit]);
 
+  // A machine's file source can be rooted at its worktree, below the Git workspace.
+  const [gitWorkspace, gitRepository] = gitSource?.cloud ? gitSource.key.split("|") : [];
+  const fileBase = fileSource?.key === gitWorkspace ? "" : gitWorkspace && fileSource?.key.startsWith(`${gitWorkspace}/`) ? fileSource.key.slice(gitWorkspace.length + 1) : null;
+  const repository = gitRepository === "." ? "" : gitRepository;
+  const filePrefix = fileBase === null || repository === undefined ? null : !fileBase ? repository : repository === fileBase ? "" : repository.startsWith(`${fileBase}/`) ? repository.slice(fileBase.length + 1) : null;
+
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : tab === "changes" && labelMode === "base" ? null : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
@@ -236,6 +249,11 @@ export function RightPanel({
               )}
             >
               {t.label}
+              {t.id === "ports" && portsCount > 0 && (
+                <span className="ml-1 font-normal tabular-nums text-faint" data-testid="panel-ports-count">
+                  {portsCount}
+                </span>
+              )}
             </button>
           </WithTooltip>
         ))}
@@ -338,6 +356,9 @@ export function RightPanel({
                 key={refreshTick}
                 cwd={cwd}
                 source={gitSource}
+                onOpenFile={fileSource && filePrefix !== null ? (path) => {
+                  openFile(sessionId ?? `checkout:${cwd}`, cwd, filePrefix ? `${filePrefix}/${path}` : path, undefined, cwd, fileSource.key);
+                } : undefined}
                 events={events}
                 version={version}
                 baseRef={baseRef}
@@ -373,6 +394,7 @@ export function RightPanel({
         </div>
       </div>
       {terminals && sessionId && <TerminalDock sessionId={sessionId} cwd={cwd} />}
+      {dock}
     </aside>
   );
 }

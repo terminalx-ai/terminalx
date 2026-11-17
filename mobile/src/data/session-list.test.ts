@@ -1,26 +1,109 @@
 import { describe, expect, it } from "vitest";
-import { projectHueByName } from "@terminalx/portable/botFace";
+import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
-import { branchChats, chatRows, projectGroups, QUICK_CHATS, shortTime } from "./session-list";
+import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
   id, title: `Chat ${id}`, project: "terminalx", worktree: `branch-${id}`, modified: "2026-11-07T10:00:00Z",
   tabs: [{ id: `${id}-tab`, harness: "claude", status: "idle" }], ...fields,
 });
+/** A session whose Mac sent row facts: one tab per fact, in order. */
+const reported = (id: string, tabs: StatusTab[], facts: Omit<SessionStatusInput, "tabs"> = {}, fields: Partial<SessionSummary> = {}) => session(id, {
+  tabs: tabs.map((tab, index) => ({ id: `${id}-t${index}`, harness: "claude", status: tab.status })),
+  rowStatus: { tabs, ...facts }, ...fields,
+});
+const pr = (fields: Record<string, unknown>) => ({ branch: "feature", branchStatus: { branch: "feature", checked: true, headMatches: true, pr: { number: 781, state: "OPEN", draft: false, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", checks: "SUCCESS", inMergeQueue: false, ...fields } } });
+const one = (value: SessionSummary) => chatRows([value])[0];
 
-describe("the chat list", () => {
-  it("puts chats that wait on the reader first, then the most recent", () => {
+describe("a row's status", () => {
+  it("reads every shared rule in the sidebar's words, a question as Needs your answer", () => {
+    for (const status of SESSION_STATUSES) {
+      expect(rowStatus(status).words).toBe(status.id === "needs_answer" ? "Needs your answer" : statusText(status));
+    }
+  });
+
+  it("draws the design's mark for each rule", () => {
+    const marks = Object.fromEntries(SESSION_STATUSES.map((status) => [status.id, rowStatus(status).mark]));
+    expect(marks).toEqual({
+      needs_permission: "approval", needs_answer: "answer", review_plan: "approval", setup_failed: "failed", needs_attention: "answer",
+      stopping: "working", setting_up: "working", working: "working", background: "working",
+      merged: "done", merge_conflict: "failed", checks_failing: "failed", in_merge_queue: "done", draft: "idle", checks_running: "idle",
+      ready_to_merge: "done", open_pr: "idle", uncommitted: "idle", local_only: "idle", not_started: "idle", shares_branch: "idle", no_changes: "idle",
+    });
+  });
+
+  it("takes the status the Mac decided, as the desktop sidebar does, with the PR it is about", () => {
+    const cases: [SessionSummary, string, string][] = [
+      [reported("w", [{ status: "in_progress" }]), "Working", "working"],
+      [reported("q", [{ status: "waiting", activity: "needs_answer" }]), "Needs your answer", "answer"],
+      [reported("p", [{ status: "waiting", activity: "needs_permission" }]), "Needs approval", "approval"],
+      [reported("plan", [{ status: "waiting", activity: "review_plan" }]), "Needs approval", "approval"],
+      [reported("f", [{ status: "waiting", activity: "setup_failed" }]), "Needs you", "failed"],
+      [reported("m", [{ status: "idle" }], { ...pr({ state: "MERGED" }) }), "Merged", "done"],
+      [reported("c", [{ status: "idle" }], { ...pr({ checks: "FAILURE" }) }), "Checks failing · PR #781", "failed"],
+      [reported("r", [{ status: "idle" }], { ...pr({}) }), "Ready to merge · PR #781", "done"],
+      [reported("u", [{ status: "idle" }], { work: "uncommitted" }), "Uncommitted", "idle"],
+      [reported("n", [{ status: "completed" }]), "No changes", "idle"],
+    ];
+    for (const [value, words, mark] of cases) {
+      const row = one(value);
+      expect([row.status.words, row.status.mark]).toEqual([words, mark]);
+      expect(row.status.status).toEqual(sessionStatus(value.rowStatus!));
+    }
+  });
+
+  it("lets the most urgent tab win, and gives each tab its own status", () => {
+    const row = one(reported("mixed", [{ status: "completed" }, { status: "in_progress" }, { status: "waiting", activity: "needs_answer" }], { ...pr({ checks: "FAILURE" }) }));
+    expect(row.status.words).toBe("Needs your answer");
+    expect(row.needsYou).toBe(true);
+    expect(row.tabs.map((tab) => tab.status.words)).toEqual(["No changes", "Working", "Needs your answer"]);
+    // A tab whose turn finished shows Done's tick; the session's own row still reads the branch (22.04).
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["done", "working", "answer"]);
+    // A tap opens the tab that is waiting.
+    expect(row.tabId).toBe("mixed-t2");
+    const working = one(reported("w", [{ status: "idle" }, { status: "waiting", activity: "needs_permission" }, { status: "in_progress" }]));
+    expect([working.status.words, working.tabId]).toEqual(["Needs approval", "w-t1"]);
+  });
+
+  it("reads a waiting tab from an older Mac, which sends no row facts, as needing the person", () => {
+    const row = one(session("old", { tabs: [{ id: "a", harness: "claude", status: "idle" }, { id: "b", harness: "claude", status: "waiting" }] }));
+    expect([row.status.words, row.status.mark, row.needsYou, row.tabId]).toEqual(["Needs you", "answer", true, "b"]);
+  });
+
+  it("keeps an idle tab's mark idle, and a finished one-tab session's row on the branch's word", () => {
+    const row = one(reported("two", [{ status: "idle" }, { status: "completed" }]));
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["idle", "done"]);
+    expect(one(reported("n", [{ status: "completed" }])).status.mark).toBe("idle");
+  });
+
+  it("never shows the linked issue's state", () => {
+    const row = one(reported("i", [{ status: "idle" }], {}, { issueRef: "PRO-986" }));
+    expect(JSON.stringify([row.title, row.status.words, row.branch])).not.toMatch(/Backlog|PRO-986/);
+  });
+});
+
+describe("the session list", () => {
+  it("puts sessions that wait on the person first, then by last activity", () => {
     const rows = chatRows([
       session("old", { modified: "2026-11-01T10:00:00Z" }),
+      reported("asks", [{ status: "waiting", activity: "needs_answer" }], {}, { modified: "2026-10-01T10:00:00Z" }),
       session("new", { modified: "2026-11-07T10:00:00Z" }),
-      session("asks", { modified: "2026-10-01T10:00:00Z", tabs: [{ id: "t", harness: "claude", status: "waiting" }] }),
+      reported("approve", [{ status: "waiting", activity: "needs_permission" }], {}, { modified: "2026-10-05T10:00:00Z" }),
+      reported("works", [{ status: "in_progress" }], {}, { modified: "2026-11-02T10:00:00Z" }),
     ]);
-    expect(rows.map((row) => row.key)).toEqual(["asks", "new", "old"]);
-    expect(rows[0].state).toBe("needs");
+    expect(rows.map((row) => row.key)).toEqual(["approve", "asks", "new", "works", "old"]);
+  });
+
+  it("titles a row by the session and puts its branch on its own line", () => {
+    const row = one(session("s", { title: "Mobile question card", branch: "acme/979-mobile-answer-an-agents-question" }));
+    expect([row.title, row.branch]).toEqual(["Mobile question card", "acme/979-mobile-answer-an-agents-question"]);
+    // A drawn worktree name is not a branch to show, and a quick chat has none.
+    expect(one(session("d", { branch: "dc/calm-ember-panda" })).branch).toBeNull();
+    expect(one(session("q", { kind: "quick", project: QUICK_CHATS, branch: "main" })).branch).toBeNull();
   });
 
   it("names a row as the Mac's project list does: by branch, else by title", () => {
-    const named = (fields: Partial<SessionSummary>) => { const [row] = chatRows([session("s", { title: "Fix the login", ...fields })]); return [row.name, row.branched]; };
+    const named = (fields: Partial<SessionSummary>) => { const row = one(session("s", { title: "Fix the login", ...fields })); return [row.name, row.branched]; };
     expect(named({ branch: "dc/design-tweaks" })).toEqual(["dc/design-tweaks", true]);
     // The Mac says the branch has no real name: the title stands.
     expect(named({ branch: null })).toEqual(["Fix the login", false]);
@@ -31,35 +114,12 @@ describe("the chat list", () => {
     expect(named({ kind: "quick", project: QUICK_CHATS, branch: "main" })).toEqual(["Fix the login", false]);
   });
 
-  it("shows a reminder marked on the Mac, and a finished turn, as unread", () => {
-    const rows = chatRows([
-      session("seen"),
-      session("marked", { tabs: [{ id: "m", harness: "claude", status: "idle", markedUnread: true }] }),
-      session("finished", { tabs: [{ id: "f", harness: "codex", status: "completed" }, { id: "g", harness: "claude", status: "idle" }] }),
-    ]);
-    expect(Object.fromEntries(rows.map((row) => [row.key, row.unread]))).toEqual({ seen: false, marked: true, finished: true });
-    expect(branchChats(rows.find((row) => row.key === "finished")!.session).map((chat) => chat.unread)).toEqual([true, false]);
-  });
-
-  it("keeps what was last said as the preview while the chat works or waits", () => {
-    const [row] = chatRows([session("w", { lastReply: "Running the tests", tabs: [{ id: "t", harness: "claude", status: "in_progress" }] })]);
-    expect([row.state, row.preview]).toEqual(["working", "Running the tests"]);
-  });
-
-  it("previews what was last said on one line, else where the chat is", () => {
-    const [said, place] = chatRows([
-      session("said", { lastPrompt: "Fix it", lastReply: "Done.\n\nThe  tests pass.", modified: "2026-11-07T10:00:00Z" }),
-      session("place", { modified: "2026-11-06T10:00:00Z" }),
-    ]);
-    expect(said.preview).toBe("Done. The tests pass.");
-    expect(place.preview).toBe("terminalx · branch-place");
-  });
-
-  it("opens the conversation waiting on the reader, then the one working, then the first", () => {
-    const tabs = (...statuses: SessionSummary["tabs"][number]["status"][]) => statuses.map((status, index) => ({ id: `t${index}`, harness: "claude", status }));
-    expect(chatRows([session("a", { tabs: tabs("idle", "in_progress", "waiting") })])[0].tabId).toBe("t2");
-    expect(chatRows([session("a", { tabs: tabs("idle", "in_progress") })])[0].tabId).toBe("t1");
-    expect(chatRows([session("a", { tabs: tabs("completed", "idle") })])[0].tabId).toBe("t0");
+  it("dates each tab by its own last activity", () => {
+    const row = one(session("t", { tabs: [
+      { id: "a", harness: "claude", status: "idle", modified: "2026-11-07T09:00:00Z" },
+      { id: "b", harness: "codex", status: "idle" },
+    ] }));
+    expect(row.tabs.map((tab) => [tab.name, tab.time])).toEqual([["Claude Code", Date.parse("2026-11-07T09:00:00Z")], ["Codex", 0]]);
   });
 
   it("searches titles, projects, branches, agents and what was said, every word", () => {
@@ -73,23 +133,53 @@ describe("the chat list", () => {
     expect(chatRows(sessions, "branch-a login").map((row) => row.key)).toEqual(["a"]);
     expect(chatRows(sessions, "gemini")).toEqual([]);
   });
+});
 
-  it("colours a chat's face by its project, as the desktop does, and lets a quick chat pick its own", () => {
-    const [project, quick] = chatRows([session("p", { modified: "2026-11-07T10:00:00Z" }), session("q", { kind: "quick", project: QUICK_CHATS, modified: "2026-11-06T10:00:00Z" })]);
-    expect(project.color).toBe(projectHueByName("terminalx"));
-    expect(quick.color).toBeNull();
+describe("the list's sections and filters", () => {
+  const rows = chatRows([
+    reported("asks", [{ status: "waiting", activity: "needs_answer" }], {}, { project: "beta", modified: "2026-11-07T09:58:00Z" }),
+    reported("approve", [{ status: "waiting", activity: "review_plan" }], {}, { project: "alpha", modified: "2026-11-07T09:51:00Z" }),
+    reported("failed", [{ status: "waiting", activity: "setup_failed" }], {}, { project: "alpha", modified: "2026-11-07T09:00:00Z" }),
+    reported("works", [{ status: "in_progress" }, { status: "completed" }], {}, { project: "alpha", modified: "2026-11-07T10:00:00Z" }),
+    reported("bg", [{ status: "idle", activity: "background" }], {}, { project: "beta", modified: "2026-11-06T10:00:00Z" }),
+    reported("merged", [{ status: "idle" }], { ...pr({ state: "MERGED" }) }, { project: "beta", modified: "2026-11-07T09:08:00Z" }),
+    reported("quick", [{ status: "idle" }], {}, { kind: "quick", project: QUICK_CHATS, modified: "2026-11-07T11:00:00Z" }),
+  ]);
+  const shape = (filter: Parameters<typeof listSections>[1]) => listSections(rows, filter).map((section) => [section.title, section.data.map((row) => row.key)]);
+
+  it("lists what waits on the person first, across projects, and the rest by project", () => {
+    expect(shape("all")).toEqual([
+      ["Needs you", ["asks", "approve"]],
+      ["alpha", ["works", "failed"]],
+      ["beta", ["merged", "bg"]],
+      [QUICK_CHATS, ["quick"]],
+    ]);
+  });
+
+  it("filters to exactly the sessions waiting for an answer or an approval", () => {
+    expect(shape("needs")).toEqual([["", ["asks", "approve"]]]);
+  });
+
+  it("filters to the sessions whose agent works, by project", () => {
+    expect(shape("working")).toEqual([["alpha", ["works"]], ["beta", ["bg"]]]);
+  });
+
+  it("counts each filter", () => {
+    expect(filterCounts(rows)).toEqual({ all: 7, needs: 2, working: 2 });
+    expect(filterCounts([])).toEqual({ all: 0, needs: 0, working: 0 });
+    expect(listSections([], "all")).toEqual([]);
   });
 });
 
-describe("the chats by project", () => {
-  it("lists the most recently active project first, quick chats last, and counts what waits", () => {
+describe("the sessions by project", () => {
+  it("lists the most recently active project first, quick chats last", () => {
     const groups = projectGroups(chatRows([
       session("q", { kind: "quick", project: QUICK_CHATS, modified: "2026-11-07T12:00:00Z" }),
-      session("a", { project: "alpha", modified: "2026-11-01T10:00:00Z", tabs: [{ id: "t", harness: "claude", status: "waiting" }] }),
+      session("a", { project: "alpha", modified: "2026-11-01T10:00:00Z" }),
       session("b", { project: "beta", modified: "2026-11-05T10:00:00Z" }),
       session("c", { project: "alpha", modified: "2026-11-06T10:00:00Z" }),
     ]));
-    expect(groups.map((group) => [group.project, group.rows.length, group.needs])).toEqual([["alpha", 2, 1], ["beta", 1, 0], [QUICK_CHATS, 1, 0]]);
+    expect(groups.map((group) => [group.project, group.rows.map((row) => row.key)])).toEqual([["alpha", ["c", "a"]], ["beta", ["b"]], [QUICK_CHATS, ["q"]]]);
   });
 });
 
@@ -101,6 +191,26 @@ describe("when, as a chat list says it", () => {
     expect(shortTime(now - 3 * 3_600_000, now)).toBe("3h");
     expect(shortTime(now - 3 * 86_400_000, now)).toMatch(/^\p{L}+/u);
     expect(shortTime(0, now)).toBe("");
+  });
+
+  it("says days as days ago where there is room, as the Cloud list does (22.06)", () => {
+    const now = Date.UTC(2026, 10, 16, 10, 25);
+    expect(agoTime(now - 6 * 60_000, now)).toBe("6m");
+    expect(agoTime(now - 5 * 3_600_000, now)).toBe("5h");
+    expect(agoTime(now - 30 * 3_600_000, now)).toBe("1 day ago");
+    expect(agoTime(now - 2 * 86_400_000, now)).toBe("2 days ago");
+    expect(agoTime(now - 3 * 86_400_000 - 60_000, now)).toBe("3 days ago");
+    expect(agoTime(now - 8 * 86_400_000, now)).toBe(shortTime(now - 8 * 86_400_000, now));
+    expect(agoTime(0, now)).toBe("");
+  });
+
+  it("says the time in words for VoiceOver", () => {
+    expect(spokenTime(now - 20_000, now)).toBe("active now");
+    expect(spokenTime(now - 60_000, now)).toBe("active 1 minute ago");
+    expect(spokenTime(now - 52 * 60_000, now)).toBe("active 52 minutes ago");
+    expect(spokenTime(now - 12 * 3_600_000, now)).toBe("active 12 hours ago");
+    expect(spokenTime(now - 3 * 86_400_000, now)).toMatch(/^active \p{L}+/u);
+    expect(spokenTime(0, now)).toBe("");
   });
 });
 
@@ -115,5 +225,15 @@ describe("the chats a branch holds", () => {
       { id: "b", name: "Claude Code", harness: "claude", state: "needs", unread: false },
       { id: "c", name: "Codex", harness: "codex", state: "done", unread: true },
     ]);
+  });
+
+  it("names a tab by its generated title, and by its request's first words only until there is one", () => {
+    const names = (tabs: SessionSummary["tabs"]) => branchChats(session("s", { tabs })).map((chat) => chat.name);
+    const prompt = { id: "a", harness: "claude", title: "You are the owner's chief of staff for", status: "idle" as const };
+    expect(names([prompt])).toEqual(["You are the owner's chief of staff for"]);
+    expect(names([{ ...prompt, generatedTitle: "Triage the support inbox" }])).toEqual(["Triage the support inbox"]);
+    // Nothing made yet, or an older Mac: the tab's own title stands.
+    expect(names([{ ...prompt, generatedTitle: null }])).toEqual(["You are the owner's chief of staff for"]);
+    expect(names([{ id: "c", harness: "codex", status: "idle", generatedTitle: "PRO-123 Short generated names" }])).toEqual(["PRO-123 Short generated names"]);
   });
 });

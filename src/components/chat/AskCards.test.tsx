@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { PermissionCard, QuestionCard } from "./AskCards";
 import { setPrefs } from "@/lib/prefs";
@@ -152,6 +152,12 @@ const allowDeny = [{ id: "allow", label: "Allow", kind: "allow_once" as const },
 const editAsk = (toolName: string, input: unknown): PendingAsk => ({ kind: "permission", requestId: "edit", toolUseId: "", seq: 1, toolName, title: `${toolName} *** Begin Patch`, cwd: "/w/demo", input, options: allowDeny });
 const patchOf = (...body: string[]) => ["*** Begin Patch", ...body, "*** End Patch"].join("\n");
 const fileSections = () => screen.getAllByTestId("permission-diff-file");
+const titleOf = () => screen.getByTestId("permission-title").textContent;
+/** Opens every file folded to its header row (all but the first). */
+const openAll = () => fileSections().forEach((s) => {
+  const header = s.querySelector<HTMLButtonElement>("button[aria-expanded=false]");
+  if (header && header.parentElement === s) fireEvent.click(header);
+});
 const rowsOf = (section: HTMLElement, kind?: string) => [...section.querySelectorAll<HTMLElement>(kind ? `[data-kind="${kind}"]` : "[data-kind]")];
 
 it("shows an apply_patch approval as each file's name, its counts and the changed lines (PRO-156)", () => {
@@ -174,7 +180,14 @@ it("shows an apply_patch approval as each file's name, its counts and the change
     "+new",
   );
   render(<PermissionCard ask={editAsk("apply_patch", { command })} onAnswer={vi.fn()} />);
-  expect(screen.getByText("Waiting for permission to edit 4 files")).toBeTruthy();
+  expect(titleOf()).toBe("Edit 4 files");
+  // One line: the label, what is asked and its counts, then the mode and project at its end.
+  expect(screen.getByTestId("ask-header").textContent).toBe("ApprovalEdit 4 files+6 −2");
+  // The first file is open; the others are folded to their header, saying how much each holds.
+  expect(screen.getAllByTestId("permission-diff-folded").map((f) => f.textContent)).toEqual(["Show 2 lines", "Show 2 lines"]);
+  expect(rowsOf(fileSections()[1])).toEqual([]);
+  openAll();
+  expect(screen.queryByTestId("permission-diff-folded")).toBeNull();
   // The whole patch's counts by the heading, each file's on its own line.
   expect(screen.getAllByTestId("permission-diff-counts").map((c) => c.textContent)).toEqual(["+6 −2", "+3 −1", "+2", "+1 −1"]);
   expect(screen.getAllByTestId("permission-diff-path").map((p) => p.textContent)).toEqual(["src/slug.js", "test/slug.test.js", "src/legacy.js", "src/a.js → src/b.js"]);
@@ -189,7 +202,9 @@ it("shows an apply_patch approval as each file's name, its counts and the change
     ["add", "+    .replace(/[^a-z0-9]+/g, \"-\");"],
     ["ctx", " }"],
   ]);
-  expect(rowsOf(added, "add").map((r) => r.textContent)).toEqual(["+import { slugify } from \"../src/slug.js\";", "+test(\"dashes\", () => {});"]);
+  // A new file is numbered from line 1; an edit's request does not say where its lines are, so it has no numbers.
+  expect(rowsOf(added, "add").map((r) => r.textContent)).toEqual(["1+import { slugify } from \"../src/slug.js\";", "2+test(\"dashes\", () => {});"]);
+  expect(update.querySelector("[data-testid=permission-diff-line-no]")).toBeNull();
   expect(rowsOf(deleted)).toEqual([]);
   expect(rowsOf(renamed).map((r) => r.textContent)).toEqual(["−old", "+new"]);
   // The diff replaces the patch's useless first line.
@@ -199,17 +214,19 @@ it("shows an apply_patch approval as each file's name, its counts and the change
 
 it("names a single-file patch, with no total beside the heading (PRO-156)", () => {
   render(<PermissionCard ask={editAsk("apply_patch", { command: ["apply_patch", patchOf("*** Update File: README.md", "-hello", "+hello raccoon")] })} onAnswer={vi.fn()} />);
-  expect(screen.getByText("Waiting for permission to edit a file")).toBeTruthy();
+  expect(titleOf()).toBe("Edit a file");
   expect(screen.getAllByTestId("permission-diff-counts").map((c) => c.textContent)).toEqual(["+1 −1"]);
   expect(rowsOf(fileSections()[0]).map((r) => r.textContent)).toEqual(["−hello", "+hello raccoon"]);
 });
 
-it("folds a long file behind \"Show all N lines\" and keeps Allow first for Return (PRO-156)", () => {
+it("folds a long file behind \"Show all N lines\" and focuses Allow, last in the bar, for Return (PRO-156, PRO-382)", () => {
   const long = Array.from({ length: 40 }, (_, i) => `+line ${i + 1}`);
   const answer = vi.fn();
   render(<PermissionCard ask={editAsk("apply_patch", { command: patchOf("*** Add File: big.txt", ...long, "*** Update File: small.txt", "-a", "+b") })} onAnswer={answer} />);
   const [big, small] = fileSections();
   expect(rowsOf(big)).toHaveLength(12);
+  expect(rowsOf(small)).toHaveLength(0);
+  fireEvent.click(within(small).getByRole("button", { name: /small\.txt/ }));
   expect(rowsOf(small)).toHaveLength(2);
   const more = screen.getByRole("button", { name: "Show all 40 lines" });
   expect(more.getAttribute("aria-expanded")).toBe("false");
@@ -225,7 +242,7 @@ it("folds a long file behind \"Show all N lines\" and keeps Allow first for Retu
 
   fireEvent.click(more);
   expect(rowsOf(big)).toHaveLength(40);
-  expect(rowsOf(big).at(-1)?.textContent).toBe("+line 40");
+  expect(rowsOf(big).at(-1)?.textContent).toBe("40+line 40");
   expect(screen.getByRole("button", { name: "Show fewer lines" }).getAttribute("aria-expanded")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "Show fewer lines" }));
   expect(rowsOf(big)).toHaveLength(12);
@@ -246,12 +263,12 @@ it("quotes a patch it cannot read whole instead of drawing part of it (PRO-156)"
   render(<PermissionCard ask={editAsk("apply_patch", { command })} onAnswer={vi.fn()} />);
   expect(screen.queryByTestId("permission-diff")).toBeNull();
   expect(screen.getByTestId("permission-detail").textContent).toBe(command);
-  expect(screen.getByText("Waiting for permission to edit files")).toBeTruthy();
+  expect(titleOf()).toBe("Edit files");
 });
 
 it("shows Claude Code's Edit, MultiEdit and Write requests the same way (PRO-156)", () => {
   const { rerender } = render(<PermissionCard ask={editAsk("Edit", { file_path: "/w/demo/src/a.ts", old_string: "const a = 1;\nconst b = 2;", new_string: "const a = 1;\nconst b = 3;" })} onAnswer={vi.fn()} />);
-  expect(screen.getByText("Waiting for permission to edit a file")).toBeTruthy();
+  expect(titleOf()).toBe("Edit a file");
   expect(screen.getByTestId("permission-diff-path").textContent).toBe("src/a.ts");
   expect(screen.getByTestId("permission-diff-counts").textContent).toBe("+1 −1");
   expect(rowsOf(fileSections()[0]).map((r) => r.textContent)).toEqual([" const a = 1;", "−const b = 2;", "+const b = 3;"]);
@@ -263,10 +280,10 @@ it("shows Claude Code's Edit, MultiEdit and Write requests the same way (PRO-156
   expect(rowsOf(fileSections()[0]).map((r) => r.textContent)).toEqual(["Edit 1 of 2", "−a", "+b", "Edit 2 of 2 · every match", "−c", "+d"]);
 
   rerender(<PermissionCard ask={{ ...editAsk("Write", { file_path: "/w/demo/notes.md", content: "# Notes\n\nDone.\n" }), requestId: "write" }} onAnswer={vi.fn()} />);
-  expect(screen.getByText("Waiting for permission to write a file")).toBeTruthy();
+  expect(titleOf()).toBe("Write a file");
   expect(fileSections()[0].textContent).toContain("whole file");
   expect(screen.getByTestId("permission-diff-counts").textContent).toBe("+3");
-  expect(rowsOf(fileSections()[0], "add").map((r) => r.textContent)).toEqual(["+# Notes", "+ ", "+Done."]);
+  expect(rowsOf(fileSections()[0], "add").map((r) => r.textContent)).toEqual(["1+# Notes", "2+ ", "3+Done."]);
 });
 
 it("says an Edit applies at every match (PRO-156)", () => {
@@ -279,5 +296,43 @@ it("shows no diff to a reader the card's details are hidden from (PRO-156)", () 
   expect(screen.queryByTestId("permission-diff")).toBeNull();
   expect(screen.queryByTestId("permission-detail")).toBeNull();
   expect(screen.queryByText(/A=2/)).toBeNull();
-  expect(screen.getByText("Waiting for permission to edit files")).toBeTruthy();
+  expect(titleOf()).toBe("Edit files");
+});
+
+const threeWay: PendingAsk = { ...bypassAsk, reason: undefined, cwd: "/repos/tx-review-lab/.raccoon/worktrees/make-slugify", options: [
+  { id: "allow", label: "Allow", kind: "allow_once" },
+  { id: "terminalx:allow_session", label: "Allow for this session", kind: "allow_session" },
+  { id: "deny", label: "Deny", kind: "deny" },
+] };
+const barLabels = () => [...document.querySelectorAll<HTMLButtonElement>("[data-ask-actions] button")].map((b) => b.textContent);
+
+it("ends the bar on the primary Allow, after Deny and the session allowance, and says the agent waits (PRO-382)", () => {
+  render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} takesKeys />);
+  expect(barLabels()).toEqual(["DenyEsc", "Allow for this session", "Allow⏎"]);
+  expect(document.activeElement?.textContent).toBe("Allow⏎");
+  expect(screen.getByText("The agent waits until you decide.")).toBeTruthy();
+});
+
+it("puts the permission mode and project at the header's end and no session directory under the diff (PRO-382)", () => {
+  render(<PermissionCard ask={threeWay} onAnswer={vi.fn()} meta="Ask every time · tx-review-lab" />);
+  expect(screen.getByTestId("ask-meta").textContent).toBe("Ask every time · tx-review-lab");
+  expect(screen.getByTestId("permission-title").textContent).toBe("Run a command");
+  expect(screen.queryByText(/Session directory/)).toBeNull();
+});
+
+it("denies on Escape where the card's view has the keys, and only there (PRO-382)", () => {
+  const answer = vi.fn();
+  const { rerender } = render(<PermissionCard ask={threeWay} onAnswer={answer} />);
+  fireEvent.keyDown(document.activeElement ?? window, { key: "Escape" });
+  expect(answer).not.toHaveBeenCalled();
+  // No Esc hint where Escape does not answer.
+  expect(barLabels()[0]).toBe("Deny");
+  rerender(<PermissionCard ask={threeWay} onAnswer={answer} takesKeys />);
+  fireEvent.keyDown(document.activeElement ?? window, { key: "Escape" });
+  expect(answer).toHaveBeenCalledWith("deny");
+  answer.mockClear();
+  // Someone who may not answer: Escape answers nothing.
+  rerender(<PermissionCard ask={threeWay} onAnswer={answer} takesKeys blockedReason="Only approvers can answer" />);
+  fireEvent.keyDown(document.activeElement ?? window, { key: "Escape" });
+  expect(answer).not.toHaveBeenCalled();
 });

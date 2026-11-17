@@ -249,8 +249,9 @@ export function BranchPanel({
           )}
         </header>
 
-        {/* Merged: what clean-up does with this workspace comes first, as the branch's last step. */}
-        <MergedWorkspaceStep cwd={cwd} />
+        {/* Merged: what clean-up does with this workspace, as the branch's last step. In the Branch tab the pull request
+            section says it, under the merged card's WHAT NEXT (design 05.12). */}
+        {!inline && <MergedWorkspaceStep cwd={cwd} />}
 
         {localOnly && (
           <div className="flex flex-wrap items-center gap-2" data-testid="local-git-actions">
@@ -460,7 +461,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
                 ) : (
                   <>
                     <span className="min-w-0 flex-1 truncate text-xs" title={`${row.commit.subject}\n${row.commit.author} · ${relativeTime(row.commit.date)}`}>
-                      <span className="font-mono text-foreground">#{row.commit.shortSha}</span>
+                      <span className="font-mono text-foreground">{row.commit.shortSha}</span>
                       <span className="text-faint"> {row.commit.subject}</span>
                     </span>
                     {i === newestBase && (

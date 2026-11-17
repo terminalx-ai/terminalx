@@ -9,7 +9,7 @@ import { Markdown } from "./Markdown";
 vi.mock("react-native", () => vi.importActual("react-native-web"));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("./theme", () => ({ useTheme: () => ({ palette: {
-  ink: "#222222", muted: "#777777", accent: "#a96f27", raised: "#eeeeee", border: "#cccccc",
+  ink: "#222222", muted: "#777777", accent: "#a96f27", raised: "#eeeeee", border: "#cccccc", card: "#ffffff", page: "#fafafa",
 } }) }));
 
 let root: Root;
@@ -38,7 +38,7 @@ it("draws bold and inline code, headings, nested lists, and selectable code bloc
   expect(container.textContent).toContain("A quote");
 });
 
-it("puts a formatted, aligned table in its own horizontal scroller", async () => {
+it("puts a formatted, aligned table in its own horizontal scroller card", async () => {
   await render("| Name | Count | Details |\n| --- | ---: | --- |\n| **Answer** | 42 | `value` |\n| Other | 1 | Long detail |");
   const table = container.querySelector('[aria-label="Markdown table"]');
   expect(table && getComputedStyle(table).overflowX).toBe("auto");

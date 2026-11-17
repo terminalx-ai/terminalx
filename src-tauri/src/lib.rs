@@ -7,6 +7,7 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_accounts;
 mod agent_data;
 mod agent_keys;
 #[cfg(feature = "desktop")]
@@ -72,6 +73,7 @@ mod organization_workspace_config;
 pub mod computer;
 mod control;
 mod cloud_control;
+mod machine_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
@@ -149,12 +151,22 @@ mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
 mod machine_name;
+mod direct_endpoints;
+mod pairing_fingerprint;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+#[cfg(feature = "desktop")]
+mod machines;
+/// The operating computer's side of pairing by code (`machines/pair.rs`),
+/// outside the desktop feature: it needs only `machine_wire` and
+/// `relay_e2ee`, and the two-machine tests (PRO-358) pair with it against
+/// real runtimes. The desktop reaches it as `machines::pair`.
+#[path = "machines/pair.rs"]
+pub mod machine_pair;
 pub mod power;
 mod project_start;
 mod project_templates;
@@ -174,8 +186,11 @@ mod quit;
 mod native_menu;
 #[cfg(feature = "desktop")]
 mod chat_windows;
-mod relay_e2ee;
+pub mod relay_e2ee;
 pub mod remote;
+pub mod machine_account;
+pub mod machine_host;
+pub mod machine_wire;
 mod session;
 mod sidebar_activity;
 mod session_archive;
@@ -186,6 +201,7 @@ mod workspace_setup;
 mod action_runner;
 mod stray_processes;
 pub mod serve;
+pub mod serve_cli;
 pub mod sink;
 mod recovery;
 mod reply_block;
@@ -296,6 +312,34 @@ fn offer_settings_link(app: &tauri::AppHandle, link: desktop_links::SettingsLink
     }
 }
 
+/// Tells the webview a tab link (PRO-381) is waiting, as for a setting link.
+#[cfg(feature = "desktop")]
+const TAB_LINK_REQUESTED: &str = "tab_link_requested";
+
+#[cfg(feature = "desktop")]
+fn offer_tab_link(app: &tauri::AppHandle, link: desktop_links::TabLink) {
+    app.state::<desktop_links::PendingTabLink>().set(link);
+    if let Err(error) = app.emit(TAB_LINK_REQUESTED, ()) {
+        log::warn!("tell the webview about a tab link: {error}");
+    }
+}
+
+/// The tab link waiting for the webview, once: `{ sessionId, tabId }`, or null.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_take(pending: tauri::State<'_, desktop_links::PendingTabLink>) -> Option<desktop_links::TabLink> {
+    pending.take()
+}
+
+/// The link that opens a chat tab, in this build's scheme: the tab menu's "Copy link to this tab".
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_for(app: tauri::AppHandle, session_id: String, tab_id: String) -> Result<String, String> {
+    desktop_links::DesktopLinks::for_identifier(&app.config().identifier)
+        .tab_link_url(&session_id, &tab_id)
+        .ok_or_else(|| "this tab has no link".to_owned())
+}
+
 /// The setting link waiting for the webview, once: `{ id, enable }` and
 /// nothing else of the URL, or null when none is.
 #[cfg(feature = "desktop")]
@@ -324,6 +368,7 @@ pub fn run() {
     data_privacy::initialize();
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
+    let machines = Arc::new(machines::Machines::default());
     pairing.attach_models(codex_models.clone());
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
     let paired = pairing.clone();
@@ -338,6 +383,8 @@ pub fn run() {
     let workspace_config = Arc::new(organization_workspace_config::WorkspaceConfigService::new(account.clone()));
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
+    let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
+    let account_machines = Arc::new(machines::account::AccountPairing::new(machines.clone(), account.clone(), pairing.clone()));
     // The resource directory is only known once Tauri is up; the service
     // resolves the helper lazily, so it can be built before `setup`.
     let computer = Arc::new(computer::ComputerService::new(None));
@@ -395,8 +442,12 @@ pub fn run() {
         .manage(floating::Floating::default())
         .manage(state)
         .manage(desktop_links::PendingSettingsLink::default())
+        .manage(desktop_links::PendingTabLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
+        .manage(machines.clone())
+        .manage(machine_connections.clone())
+        .manage(account_machines)
         .setup(move |app| {
             #[cfg(unix)]
             match app.path().app_log_dir() {
@@ -408,6 +459,8 @@ pub fn run() {
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
             std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
+            // Agent account directories a crash left before they were listed (#980).
+            std::thread::spawn(agent_accounts::sweep);
             // Attachments are shown from the data folder, wherever
             // TERMINALX_HOME put it; the scope in tauri.conf.json only names
             // the default one.
@@ -424,6 +477,8 @@ pub fn run() {
             account.configure(&app.config().identifier)?;
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
+            machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
+            machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -435,6 +490,7 @@ pub fn run() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
                         else if let Some(link) = links.settings_link(&url) { offer_settings_link(&app_handle, link); }
+                        else if let Some(link) = links.tab_link(&url) { offer_tab_link(&app_handle, link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -446,6 +502,9 @@ pub fn run() {
                             } else if let Some(link) = links.settings_link(&url) {
                                 log::info!("received TerminalX settings link");
                                 offer_settings_link(&app_handle, link);
+                            } else if let Some(link) = links.tab_link(&url) {
+                                log::info!("received TerminalX tab link");
+                                offer_tab_link(&app_handle, link);
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -517,6 +576,21 @@ pub fn run() {
             agent_login_commands::agent_login_import_shell,
             agent_login_commands::agent_login_dismiss_shell,
             agent_login_commands::agent_login_tabs,
+            agent_accounts::commands::agent_accounts_list,
+            agent_accounts::commands::agent_accounts_add_start,
+            agent_accounts::commands::agent_accounts_add_finish,
+            agent_accounts::commands::agent_accounts_add_cancel,
+            agent_accounts::commands::agent_accounts_open_page,
+            agent_accounts::commands::agent_accounts_add_key,
+            agent_accounts::commands::agent_accounts_relabel,
+            agent_accounts::commands::agent_accounts_sign_in_again,
+            agent_accounts::commands::agent_accounts_remove,
+            agent_accounts::commands::agent_accounts_set_default,
+            agent_accounts::commands::agent_accounts_set_auto_switch,
+            agent_accounts::commands::agent_accounts_set_never_switch,
+            agent_accounts::commands::agent_accounts_switch_log,
+            agent_accounts::commands::agent_accounts_launch_choice,
+            agent_accounts::commands::agent_accounts_readiness,
             environment_commands::environment_list,
             environment_commands::environment_reveal,
             environment_commands::environment_copy,
@@ -548,6 +622,7 @@ pub fn run() {
             commands::organization_console_open,
             commands::account_sign_out,
             commands::organization_create,
+            commands::organization_computer_save,
             commands::organization_select,
             commands::organization_delete,
             commands::organization_members,
@@ -637,16 +712,24 @@ pub fn run() {
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
+            commands::cloud_workspace_idle_suspend,
+            commands::cloud_workspace_set_idle_suspend,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
-            cloud_remote::cloud_remote_attach_dev,
+            machines::connect::machine_remote_attach,
+            machines::connect::machines_connections,
+            machines::connect::machines_reconnect,
+            machines::connect::machines_remove,
+            machines::connect::machines_rename,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,
+            cloud_remote::cloud_port_settings,
+            cloud_remote::cloud_port_set_settings,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
@@ -668,12 +751,33 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            machines::machines_host_status,
+            machines::machines_set_allow_operating,
+            machines::machines_create_code,
+            machines::machines_approve,
+            machines::machines_decline,
+            machines::machines_revoke,
+            machines::machines_disconnect,
+            machines::machines_let_back,
+            machines::machines_activity,
+            machines::machines_inspect_code,
+            machines::machines_pair,
+            machines::machines_cancel_pairing,
+            machines::machines_list,
+            machines::machines_set_route,
+            machines::account::machines_account_list,
+            machines::account::machines_account_request,
+            machines::account::machines_account_cancel,
+            machines::account::machines_account_finish,
+            machines::machines_app_update_report,
             commands::pairing_retry_relay,
             commands::session_share_create,
             commands::session_share_status,
             commands::session_share_change,
             commands::session_join_pending,
             settings_link_take,
+            tab_link_take,
+            tab_link_for,
             commands::session_guest_join,
             commands::session_guest_send,
             commands::session_guest_leave,
@@ -750,6 +854,7 @@ pub fn run() {
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_latest_version,
             commands::agent_setup_start,
             commands::agent_setup_running,
             commands::list_skills,
@@ -876,6 +981,7 @@ pub fn run() {
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
+            commands::pr_delete_branch,
             commands::pr_ready,
             commands::pr_check_authority,
             commands::pr_check_log,
@@ -923,6 +1029,7 @@ pub fn run() {
             commands::read_whole_text_file,
             commands::export_file,
             commands::write_text_file,
+            commands::create_text_file,
             commands::file_mtime,
             commands::inspect_local_path,
             commands::open_local_path,
@@ -1068,6 +1175,7 @@ pub fn run() {
             commands::set_status_bar_settings,
             commands::status_usage_snapshot,
             commands::status_usage_refresh,
+            commands::tab_note_typing,
             commands::status_codex_reset,
             commands::status_resource_overview,
             native_menu::set_native_menu,
@@ -1130,6 +1238,10 @@ pub fn run() {
                 if chat_windows::is_chat_window(window.label()) {
                     let _ = window.app_handle().emit_to("main", "chat_window_closed", window.label());
                 }
+                // Its machine connections: a closed window runs no cleanup (PRO-345).
+                if let Some(remote) = window.try_state::<Arc<cloud_remote::CloudRemote>>() {
+                    remote.release_holder(window.label());
+                }
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
@@ -1160,6 +1272,7 @@ pub fn run() {
                 // A Codex sign-in still open: its CLI is killed and its home wiped before the app goes.
                 #[cfg(feature = "desktop")]
                 commands::shutdown_codex_sign_in();
+                agent_accounts::login::shutdown_all();
                 let state = app.state::<AppState>();
                 state.dictation.shutdown(&state.transcription.engine);
                 state.stats_usage.shutdown();

@@ -213,23 +213,20 @@ function OrganizationSection({
     }
   };
 
+  // The organization's row says it is the cloud and how many of its workspaces run; the tooltip has the limit where
+  // the organization has one (PRO-371: only the count where it has none).
+  const note = usage ? (
+    <span
+      className={cn("block min-w-0 truncate", usage.atLimit && "text-warning")}
+      data-testid="cloud-org-quota"
+      data-at-limit={usage.atLimit || undefined}
+    >
+      cloud · {usage.used} running
+    </span>
+  ) : "cloud";
+
   const actions = (
     <>
-      {/* Stays beside the header's actions: its tooltip says how many run, and the limit. */}
-      {usage && (
-        <WithTooltip label={usage.card.replace(/\n/g, " · ")}>
-          <span
-            tabIndex={0}
-            role="note"
-            aria-label={`${usage.label}. ${usage.card}`}
-            className={cn("shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint outline-none focus-visible:ring-2 focus-visible:ring-ring/40", usage.atLimit && "text-warning")}
-            data-testid="cloud-org-quota"
-            data-at-limit={usage.atLimit || undefined}
-          >
-            {usage.label}
-          </span>
-        </WithTooltip>
-      )}
       <RowActions persistent className={anyMenuOpen ? "not-sr-only" : undefined}>
         {/* Adding a repository only pins it to this sidebar, so a member may; a new project is created with its first session, so it says who can. */}
         {live && mayCreate !== null && (
@@ -343,6 +340,9 @@ function OrganizationSection({
     <ListSection
       id={`org:${org.id}`}
       label={name}
+      mark={<OrgMark name={name} />}
+      note={note}
+      description={usage?.card.replace(/\n/g, " · ")}
       title={temporary ? "Shown while selected; your sidebar preference is unchanged" : org.isPersonal ? `${org.name} (personal)` : org.name}
       forceOpen={temporary}
       actions={actions}
@@ -357,6 +357,15 @@ function OrganizationSection({
         </div>
       )}
     </ListSection>
+  );
+}
+
+/** An organization's mark on its row: its initial on the accent colour (02.04). */
+function OrgMark({ name }: { name: string }) {
+  return (
+    <span aria-hidden className="grid size-4 shrink-0 place-items-center rounded-[5px] bg-accent text-[10px] font-bold leading-none text-accent-foreground" data-testid="cloud-org-mark">
+      {(name.trim()[0] ?? "?").toUpperCase()}
+    </span>
   );
 }
 

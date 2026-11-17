@@ -96,6 +96,11 @@ User-facing webview choices are under `preferences`, for example:
     "reviewDiffLines": 400,
     "triesPerPiece": 3,
     "effortCeiling": "high",
+    "reaskVerifier": true,
+    "acceptBaseFailures": true,
+    "leadWhenLadderEnds": true,
+    "resumeAfterReset": true,
+    "leadTakesOver": true,
     "projects": { "/path/to/project": { "requireApproval": false, "pieceLimit": 12, "budgetPoints": 15 } }
   }
 }
@@ -112,7 +117,15 @@ blocked (`triesPerPiece`, 1 to 6) and the effort escalation raises it no higher 
 (`effortCeiling`: `low`, `medium`, `high`, `xhigh` or `max`). A project may answer for itself under
 `projects`, by its path, for approval, the piece limit, the worker mode, the diff threshold,
 the tries per piece, the effort ceiling, its routing rows and the three budget values; a setting it leaves out follows the app-wide
-value. Each budget value, and the window level, may be `"none"` for No limit. These are the person's to change, in Settings → Orchestrator: do not edit
+value. Each budget value, and the window level, may be `"none"` for No limit. Four switches,
+app-wide only and each on unless the person turned it off, say which stops a run decides by
+itself because no person's judgment is needed: `reaskVerifier` (ask a verifier that gave no
+verdict again, then hand the review to the lead), `acceptBaseFailures` (accept a piece whose
+only failing check fails the same way on the commit it started from), `leadWhenLadderEnds`
+(hand a piece to the lead when no model is left above its last try's) and `resumeAfterReset`
+(go on when the usage window the run's points were spent in resets). Off, the run waits for
+the person at that stop. `leadTakesOver` (app-wide only, on unless the person turned it off)
+lets a run's own lead take a blocked piece over itself, also in a run a person approved. These are the person's to change, in Settings → Orchestrator: do not edit
 them to get a plan accepted. `experimental.orchestratorRuns` shows the Run view and that
 settings page in the app; the `runs` commands work either way.
 
@@ -172,6 +185,29 @@ every 120 seconds, with rate-limit backoff and at least 1,000 points reserved fo
 other GitHub work. A first read can return agent status while the cache warms;
 read again to see the result. The existing tab `status` remains the agent's
 lifecycle state.
+
+### Adding and removing projects
+
+```text
+terminalx projects add <folder> --json
+terminalx projects remove <project> --json
+```
+
+`projects add` adds a local folder as a project, as the app's Add project does: the folder must
+exist and be a directory, a Git repository is added as one (`"kind": "git"`, else `"folder"`),
+and the sidebar lists it at once. A relative folder is resolved against the shell's working
+directory. The result is `{"project": {...}}` with the canonical `path`, which `sessions create
+--project` then accepts. The person's selected project is left as it is. Refusals:
+`not_found` (no such folder), `not_a_directory` (a file), `already_added` (it is a project
+already; nothing changed, use it as it is) and `invalid_project` (a local mirror of a cloud
+workspace, which is read-only). Create the folder or clone the repository first; add only a
+folder the person asked for or one you created for the task.
+
+`projects remove` takes the project's exact name or its path (part of a name is refused with
+`ambiguous_selector`) and does what the sidebar's Remove project does: the project's open
+conversations are archived (`"archivedSessions"` lists their ids; Show archived and `sessions
+unarchive` bring them back), the project leaves the list, and its folder on disk is not
+touched. Remove a project only when the person asked for it.
 
 ### Layered configuration
 
@@ -861,12 +897,19 @@ in this order and stop at the first that fails; the first four use no model:
    your branch merges into it without conflicts (`git merge-tree`).
 4. **Command checks.** Every `command` done-check, then the project's own check command if
    it has one and the piece changed files. TerminalX runs them in the worker's worktree. A
-   failure keeps the exit code and the last 100 lines. They are run unasked only where a
+   failure keeps the exit code and the last 100 lines. A command that fails is run again on
+   the commit the try started from, in a checkout of the app's own: when it fails there the
+   same way (the same failing tests, or for a run that names none the same exit code and last
+   lines), the failure was already on the base and is not the piece's. The gate passes over it
+   (`onBase` on the command says how it came out there), the commands after it run, and no try
+   is used. A command stops at its first failure (a test binary, the part after `&&`), so the
+   result then always goes to a verifier (step 5) for what it did not get to run. A failure the
+   base does not have stands, and the next try is told so. They are run unasked only where a
    person approved the plan, or the piece's worker runs in `bypassPermissions`; in a project
    that starts runs without approval and asks its workers before a command, they are left
    unrun (`facts.commandsNotRun`) and a verifier reads the result instead.
 5. **Review**, only when one of these holds: the piece has no `command` check, or its
-   commands were not run; the diff
+   commands were not run, or a failure the base has too was passed over; the diff
    touches a security area (the ones an issue pipeline runs its security pass for); the diff
    is over 400 changed lines (a setting, `reviewDiffLines`); the piece's kind is `refactor`;
    or the plan asks for one with a `review` or `vote` check.
@@ -896,14 +939,17 @@ pass, or fail with `file:line` evidence.
 
 A verifier waiting for a permission decision or question remains in verification. The run
 shows that the verifier needs you and links to its conversation. Answer there; the same
-verifier resumes, and the run consumes its eventual verdict. A stopped verifier or an
-invalid final reply still leaves the review inconclusive.
+verifier resumes, and the run consumes its eventual verdict. A verifier that stops, or ends
+its reply without a verdict block, is asked again in its own conversation (it still has the
+diff), up to two times (`askedAgain`). A verifier that is gone, or still gives none, leaves
+the review inconclusive.
 
 A result that fails any check is a try that fell short: the piece takes the next step below
 with what the check printed (or the verifier's evidence) as the failure text. You do not
 re-run the checks, rewrite the failure or brief the next worker. A review that nobody could
-answer (the verifier gave no verdict that can be read) leaves the piece `blocked` with that
-in its `note`: nothing says the result is wrong; read the diff yourself, or tell the person.
+answer (the verifier gave no verdict that can be read, after being asked again) is not a
+failure: nothing says the result is wrong. The piece is handed to you to review the diff
+yourself (see "A piece the run hands you"), with no person asked.
 
 Each try records its check under `verification`: `gates` (each one that ran, with `passed`,
 `detail`, and for the commands each `run`, `exitCode`, `millis` and, for one that failed,
@@ -929,9 +975,10 @@ conversation. A piece gets the run's `maxTries` tries (three unless Settings say
 
 Past three the last two steps alternate: the fourth try raises the effort on the model the
 third moved to, the fifth moves up a tier again, and so on. With one try per piece the piece
-is blocked after its first; with two it gets step 2 only. Once its tries are used, or at a
-move up when no model tier above it is installed, the piece is `blocked` and its `note` says
-what was tried and what failed last. The tries are also the most rounds of checking and
+is blocked after its first; with two it gets step 2 only. Once its tries are used, the piece is
+`blocked` and its `note` says what was tried and what failed last. At a move up when no model
+tier above it is installed (or it already ran on the top one), it is handed to you with the
+last worker's report, as a take-over would (see "A piece the run hands you"). The tries are also the most rounds of checking and
 fixing a piece gets: each try is checked once, and there is no further one unless the person
 widens the piece (below). A run keeps the tries and the ceiling it was created with: changing
 them in Settings affects runs created afterwards. The run does not fail on a blocked piece: it
@@ -940,17 +987,29 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
 
 #### A blocked piece
 
-- **Take over in lead.** `terminalx runs take-over <piece> --json` hands the piece to you:
+- **Take over in lead.** `terminalx runs take-over <piece> --json`, run from your own
+  conversation (no other session's), hands the piece to you, also in a run a person approved,
+  unless they turned off "Let the lead take over blocked pieces" in Settings → Orchestration
+  (then it is refused with `person_only`, and taking it over is theirs):
   you are sent its goal, what each try came to and where its work is, its worker's last
   report and the files it names outside the piece's own. The piece is `lead`. Finish it in
-  your own checkout (you are not held to its files), commit, then run
+  your own checkout, commit, then run
   `terminalx runs finish <piece> --json`: TerminalX runs the piece's command done-checks in
   your checkout, and when they pass the piece is `done` and what waits for it can start. It
   is already in your branch, so `runs merge` counts it as merged by hand. It returns `run`,
   `piece`, `commit` and `checks`. Like resolving a conflict in the lead, it counts toward the
   run's budget from the moment you are asked until the piece is settled. Nothing is merged
   while a piece is with you (`runs merge` is refused with `piece_with_lead`), so `finish`
-  counts only what you committed.
+  counts only what you committed since you took the piece over. When that is nothing because
+  you brought the piece's branch in just before, it counts what that branch changed since its
+  try started, once your branch holds its tip. A piece the person asked you to take over is
+  not held to its files. One you took over yourself in a run they approved is: `finish`
+  refuses a change outside the files it owns (both sides of a rename count) with
+  `person_only`, naming them, and nothing is checked. Widening it is theirs, so tell them
+  which files it needs and why: their own Check and finish in the Run view runs the checks
+  on what you committed and, when they pass, accepts those files as their widening (they
+  join the piece's `owns`, and its note says so). Once a piece is with you, its earlier worker's reports no
+  longer move it.
 - **Widen scope and retry.** `terminalx runs widen <piece> [--own <path>]... --json` adds
   files to what the piece owns and starts a fresh worker on its last try's model and effort
   (step `widened`), briefed with what went before. Without `--own` it takes the files the
@@ -959,8 +1018,8 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   `failed`. A try after a widening that falls short blocks the piece again: there is no
   ladder after it. A person approved the files each piece owns, so in a run they approved
   only they widen one (`person_only`); a catch-all such as `**` is refused (`invalid_path`).
-  So are taking a piece over and skipping one in a run they approved: from the CLI those are
-  for a run that asked for no approval.
+  So is skipping one in a run they approved: from the CLI that is for a run that asked for no
+  approval.
 - **Send a note to the worker.** `terminalx runs note <piece> --text <text> --json` sends the
   piece's last worker the note in its own session and worktree, as yours (a person's note
   says it is theirs). The piece is `running`
@@ -970,8 +1029,40 @@ stays `running` and waits on the person, who sees four choices in the Run view. 
   out with it (`skipped` lists them all). The run is done once every other piece is merged.
   It asks no model, so it works while the run is paused on its budget.
 
-The person's choice is told to you in your session. Do not act on a blocked piece yourself
-unless the person asks you to; a piece you took over is yours to finish or skip.
+The person's choice is told to you in your session. Taking a blocked piece over is yours to
+decide when it fits: its goal and done-checks stay as planned, you finish it in your checkout,
+and `runs finish` checks it. Widening its files or leaving it out changes what a person
+approved: in a run they approved, ask them. A piece you took over is yours to finish, or, in a
+run nobody approved, to skip.
+
+When a piece is taken over, TerminalX stops its earlier workers that are still in a turn.
+A report that comes afterwards from a worker the piece no longer belongs to (it was taken
+over, or a newer try runs) changes nothing: it is listed among the run's `events`
+(`ignoredStaleReport`) and the piece stays where it is.
+
+#### A piece the run hands you
+
+Some stops need no person's judgment, and the run takes the next step itself: the piece's
+goal and files stay as they were approved, so this is not the person's take-over, and
+`person_only` does not apply to it. A piece is handed to you when no verifier gave a verdict
+(review the diff: when it does what the piece asks, bring the worker's commit into your
+checkout as it is; when not, fix it there) or when no model is left above its last try's
+(finish it). The piece is `blocked` with `toLead` until you are free: you take one piece at a
+time, and `toLead.waits` says what it waits for. Then it is `lead`, and you are sent its
+brief as with `runs take-over`, saying the run handed it to you. Finish it the same way, with
+`terminalx runs finish <piece> --json`. In a run a person approved you are held to the files
+the piece owns, as with a take-over of your own: `finish` refuses a change outside them, since
+widening a piece is the person's. Taking the piece is not theirs to decide, so you need not
+tell them you have it; if it needs files outside its own, tell them which and why, and their
+Check and finish accepts them.
+
+Every step a run takes by itself is in the run's `events` (`runs show`), each with `at`,
+`step`, `piece`, `message` and, where the message does not say it, what was `stuck`; the
+person sees them in the Run view, and you are sent each in your session. The steps are
+`askedVerifierAgain`, `handedToLead`, `acceptedBaseFailure`, `waitsForReset`,
+`wentOnAfterReset`, `ignoredStaleReport` and `stoppedOldWorker`. Leaving a piece out (`skip`)
+and widening its files (`widen`) still change what a person approved: in a run they approved,
+only they do those.
 
 So after `wait` returns, read the run, not only the reports: `sessions report` still lists
 the worker that fell short with its `failed` report (or with a `done` report whose result
@@ -1063,9 +1154,12 @@ in `usage`.
   workers on both logins keeps both and stops on whichever comes first. It becomes
   `needsYou`, `reason` and `pause.message` say which limit (a window by name, with its reset
   time), and you are told once. Workers already in a turn finish it. `runs start` is then
-  refused with `needs_you`; what you asked for starts when the person resumes the run
-  (raising the budget alone does not), or by itself once the window has reset and been read
-  again, if they asked for that, and you are told. Tell the person and end your turn; do not get the work done another way.
+  refused with `needs_you`. A run that spent its own `points` of a window goes on by itself
+  once that window has reset and been read again (`pause.resumeAt`, with `pause.byItself`):
+  you are told so, and there is nothing to ask the person; end your turn. A run past the
+  `ceiling`, or its `dollars`, goes on when the person resumes it (raising the budget alone
+  does not), or after the reset if they asked for that, and you are told. Tell the person and
+  end your turn; do not get the work done another way.
 - **Stalls.** A worker in a turn with no tool call or file change for the stall time (10
   minutes unless the person changed it), no command or background task of its running, and
   its agent idle on the CPU, is `stalled`, and you are told once. A long build or test run is
@@ -1426,24 +1520,21 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading and creating issues need no confirmation. When the person asks to file an issue,
-`issues create --provider github|linear` validates and submits it using the configured provider
-credentials, then returns the created issue, including its identifier and URL. Creation needs
-no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
-failures are reported without automatically retrying creation; check the provider before
-retrying an uncertain result to avoid duplicates.
+GitHub and Linear issue operations require additional TerminalX approval only for
+issue deletion. Reading, creating, commenting, editing supported fields, assigning or
+unassigning, adding or removing labels, closing/reopening and workflow status transitions
+(including completed/canceled) execute directly using the configured provider credentials.
+They need no project setting or desktop window and never enter the confirmation queue,
+even while a deletion request is pending or after one expires. Authentication, repository/team
+access checks, validation and provider errors still apply. Failed writes are not automatically
+retried; check the provider before retrying an uncertain result to avoid duplicate issues or
+comments. The existing limit of 4000 characters or 40 lines for a comment, new issue title or
+description still applies; link to the details instead.
 
-Other issue writes show a pending request in the main window, whoever runs the command.
-The person chooses Review to see the reported session,
-project, target, action and complete text in a bounded, scrollable dialog. Background requests
-do not open the dialog or switch conversations. Only the explicit action button approves;
-Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
-40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
-`declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
-new issue title or description still applies; link to the details instead. A project can let comments and
-status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels and edits to existing Linear issues always ask.
+There is currently no issue-deletion command. Any future issue deletion must require an
+explicit human approval naming the provider and issue, regardless of agent permission mode.
+Refusal, timeout or an unavailable confirmation window must leave the issue intact.
+Closing an issue or moving it to a completed/canceled state is not deletion.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -1686,6 +1777,105 @@ own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeo
 report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
+### Paired machines
+
+A machine is another computer running TerminalX that this computer paired with (Settings →
+Machines). The same verbs work on it with
+`--machine <machine>`, where `<machine>` is its name (any case) or its id from `machines list`.
+The CLI never connects to the machine itself: the app carries each command over the one
+connection it already holds to it, directly or through the relay.
+
+```text
+terminalx machines list --json
+terminalx machines status <machine> --json
+terminalx machines add --code <code> [--fingerprint <fingerprint>] [--this-network] --json
+terminalx machines remove <machine> --yes --json
+terminalx projects list --machine <machine> --json
+terminalx sessions list --machine <machine> [--project <project>] [--archived] --json
+terminalx sessions list --all-machines [--archived] --json
+terminalx sessions create --machine <machine> --project <project> --prompt <text> [--agent <agent>] \
+  [--model <model>] [--effort <effort>] [--mode <mode>] [--title <text>] [--name <worktree>] \
+  [--base <branch>] [--worktree|--on-main] [--idempotency-key <key>] --json
+terminalx sessions rename <machine-session> --title <text> --json
+terminalx sessions archive|unarchive <machine-session>... --json
+terminalx tabs list <machine-session> --json
+terminalx send <machine-session> <text> [--tab <tab>] [--idempotency-key <key>] --json
+terminalx read <machine-session> [--tab <tab>] [--since <seq>] [--tail <count>] --json
+terminalx wait <machine-session> [--tab <tab>] [--timeout <seconds>] --json
+terminalx permissions list --machine <machine> --json
+terminalx permissions allow <request> [--option <option>] --machine <machine> --json
+terminalx permissions deny <request> --machine <machine> --json
+terminalx worktrees list --machine <machine> [--project <project>] --json
+terminalx worktrees delete <worktree> --machine <machine> [--project <project>] --dry-run|--yes \
+  [--sessions <id,id>] [--force] --json
+```
+
+**Keys.** `sessions create` answers with the session's key, `machine:<machine>:<project>:<session>`.
+Every command that names a session takes that key without `--machine`: the key says which
+machine. A session id (or a unique start of it), or one of its agent tab ids, works with
+`--machine`. A project is named by its key from `projects list --machine`, its id, its name or
+its path on the machine. Never build a key by hand.
+
+**A typical lead on another machine:**
+
+```text
+terminalx sessions create --machine "Mac mini" --project api --prompt "Fix the flaky test" --json
+terminalx wait machine:<m>:<p>:<s> --timeout 1800 --json
+terminalx read machine:<m>:<p>:<s> --tail 20 --json
+terminalx send machine:<m>:<p>:<s> "Also add a regression test" --json
+```
+
+**What each command does there.**
+
+- `machines list` and `machines status` show each machine's name, version, operating system,
+  route setting and connection `state` (`direct`, `relay`, `connecting`, `reconnecting`,
+  `offline`, `needsUpdate`, `updating`, `accessRemoved`, `disconnected`, or `idle` when this
+  window holds no connection). `status` adds `problem`: the error any command would get now.
+- `machines add --code` pairs in two steps, as the Add a machine dialog does. Without
+  `--fingerprint` it contacts nothing and answers `fingerprint_confirmation_required`, with the
+  machine's name and the `fingerprint` in `details`. Show that fingerprint to the person. Then
+  run the same command with `--fingerprint <fingerprint>`: the machine asks its person to
+  Allow this computer, and they should allow it only if the machine shows the same
+  fingerprint. The command waits (up to two minutes) for Allow, then answers with the machine.
+  A fingerprint that does not match the code is `pairing_fingerprint_mismatch`. `--this-network`
+  never uses the relay. A code for a machine already paired answers `alreadyPaired: true` and
+  pairs nothing.
+- `machines remove --yes` forgets the machine here: its connection, record and credentials. Its
+  sessions keep running there; pairing again needs a new code from it.
+- `sessions list --machine` lists that machine's sessions; `--all-machines` lists this
+  computer's sessions (`machine: null`) and then every paired machine's (each with `machine`:
+  its id and name), and `machines` says how each machine stands. A machine that is away is
+  listed from what it last said, with `fresh: false`. Without either flag, `sessions list` is
+  this computer's only, exactly as before.
+- `sessions create` runs in a new worktree the machine cuts beside its project (`--base` names
+  the branch it starts from), or in the project itself with `--on-main`, and sends the first
+  prompt there. `startError` says when the session was made but its prompt did not start. Pass
+  the same `--idempotency-key` when retrying after a timeout: the machine answers with the
+  session it already made. An issue start (`--issue`) is not offered here: start it from the
+  issue page in the app (Start on …), or give its text as `--prompt`.
+- `send` reaches the agent live: typed now, or queued there behind the running turn. Nothing is
+  queued on this computer while the machine is away; the command is refused instead. Pass
+  `--idempotency-key` so a repeat after a timeout returns the first answer.
+- `read` replays the tab's transcript from the machine. `wait` follows it and returns the same
+  `reason`s as for a local tab. Neither starts anything.
+- `permissions allow` without `--option` chooses the request's Allow; `--option` takes one of
+  the ids `permissions list --machine` prints.
+- `worktrees list` and `worktrees delete` are Settings → Storage on the machine: each worktree
+  has a `verdict`, and the machine checks a removal again before it removes anything.
+  `--dry-run` shows the worktree, its verdict and `wouldRemove`, whatever the verdict; `--force`
+  removes one whose verdict is not `eligible`.
+  Renaming a machine's worktree is not offered.
+
+**Out of scope.** Orchestration runs stay on this computer: a run's workers cannot run on a
+machine, and a worker of a run may not pair a machine or start a session on one (`forbidden`).
+The built-in browser, computer use, the Local VM, `sessions report`, `sessions usage`,
+`sessions status` and the issue and pipeline commands work on this computer only.
+
+**What gates it.** Pairing: any agent in a local session can operate the machines the person
+paired, through these commands, with the full rights pairing gave this computer there. With
+none paired there is nothing to reach. Every machine command answers `machines_disabled` while
+data privacy mode is on.
+
 ### This guide
 
 ```text
@@ -1875,10 +2065,33 @@ JSON failures have this shape:
 - `unsupported`: this app does not know the command; see `cloud status`.
 - Other `cloud_…` codes are the service's own answers (for example
   `cloud_workspace_concurrency_exceeded`: the organization is at its running limit).
+- `machine_unknown`: no paired machine has that name or id; see `machines list`.
+- `machine_offline`: the machine is not connected (no route answers, or its link was just lost
+  and TerminalX is reconnecting). It is answered at once, never as a timeout, and nothing was
+  sent. Check `machines status`, then run the command again once it is connected.
+- `machine_needs_update`, `machine_updating`: one of the two computers must update first, or
+  the machine is updating now (back in under a minute).
+- `machine_unsupported`: the machine is connected, but its TerminalX version does not serve
+  this command. Update TerminalX there; do not retry.
+- `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
+  in, or the person at it disconnected this computer. Ask the person; do not retry.
+- `machines_disabled`: data privacy mode is on, so this computer operates no machine. Tell the
+  person; do not retry.
+- `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
+  to the person, then repeat the command with `--fingerprint`.
+- `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.
+- `pairing_not_approved`, `pairing_code_inactive`, `pairing_another_computer`,
+  `pairing_pairing_paused`, `pairing_unreachable`, `pairing_invalid_code`: `machines add`
+  did not pair; `recovery` says what to do (`details.reason` is the reason).
+- `worktree_not_safe`, `worktree_not_removed`, `sessions_changed`: a machine's worktree was not
+  removed; the message says why.
+- `window_unavailable`: the app's window did not answer a machine command. Check the session
+  with `read` before repeating a `send`.
 - `internal`: report the message and stop rather than guessing at app state.
 
 All mutating commands act only through the running app. Version 1 exposes no arbitrary
 filesystem or git-write command; worktree deletion and browser profile deletion are the only
 destructive operations outside the browser page itself. Cloud commands use the app's signed-in
 account over this same local socket: there is no hosted endpoint, and the organization's
-cloud-provider key is never involved.
+cloud-provider key is never involved. Machine commands likewise go through the app's own
+connection to the machine; the CLI opens none.

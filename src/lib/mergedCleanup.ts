@@ -7,7 +7,7 @@ import { getCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { connectedCloudClient } from "@/lib/cloudConnections";
 import { forgetCloudSessions, managesOf, refreshCloudSessions } from "@/lib/cloudSessions";
 import { forgetWorkspaceSize } from "@/lib/workspaceSizes";
-import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey } from "@/types/target";
+import { cloudWorkspaceKey, isCloudKey, isLocalKey, parseCloudWorkspaceKey } from "@/types/target";
 
 /**
  * Removing a workspace by itself once its pull request has merged.
@@ -209,7 +209,7 @@ function hostOf(hostId: string): MergedHost {
 }
 
 function localOn(settings: MergedCleanupSettings): boolean {
-  return settings.enabled || Object.entries(settings.projects).some(([key, on]) => on && !isCloudKey(key));
+  return settings.enabled || Object.entries(settings.projects).some(([key, on]) => on && isLocalKey(key));
 }
 
 /**

@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -88,6 +88,8 @@ const SLOW_METHODS: &[&str] = &[
     "fs.search",
     // Lists every file of every repository.
     "mirror.manifest",
+    // Asks the relay for an invite (PRO-345).
+    "machine.relayAccess",
 ];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.
@@ -142,6 +144,10 @@ pub trait RuntimeLink: Send + Sync + 'static {
     /// Confirm a revocation was applied
     /// (`/v1/cloud-workspace-bootstrap/revocations/:id/complete`).
     fn complete_revocation(&self, attachment_id: &str) -> Result<()>;
+    /// The relay retired `runtime_generation` for a newer one (4101). A link
+    /// that keeps its token until it nears expiry asks the API again now, so
+    /// it learns whether it was superseded (PRO-368).
+    fn fenced(&self, _runtime_generation: u64) {}
 }
 
 /// A link read from a JSON file, for local development and tests. It is
@@ -325,6 +331,9 @@ struct HostState {
 
 enum ControlCommand {
     CreateInvite { device_id: String, respond: oneshot::Sender<Result<(String, i64)>> },
+    /// A control request the window makes through this registration
+    /// (PRO-368): sent as it is, answered with the relay's reply to its `reqId`.
+    Forward { frame: Value, req_id: String, respond: std::sync::mpsc::Sender<Result<Value>> },
     Revoke { device_id: String },
     InstallCredential { payload: Value, req_id: String, respond: oneshot::Sender<Result<Value>> },
     /// The runtime credential was revoked: stop serving.
@@ -363,6 +372,95 @@ pub struct RelayHost {
     state: Mutex<HostState>,
     status: tokio::sync::watch::Sender<HostStatus>,
     devices_path: Option<PathBuf>,
+    /// A machine's paired computers and phones (PRO-341).
+    routes: Mutex<Option<Arc<dyn MachineRoutes>>>,
+    /// The live registration and the director it came from, while registered.
+    registered: Mutex<Option<(Live, String)>>,
+    /// Set by [`RelayHost::stop`]: the host registers no more.
+    stopped: std::sync::atomic::AtomicBool,
+    stop: tokio::sync::Notify,
+    /// Told when the relay hints that this host's account pairing changed.
+    pairing_hint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// The control requests the window may make through a machine's
+/// registration (PRO-368): phone invites, credential installs and
+/// revocations, as it makes them on its own registration (`pairing::relay`).
+const FORWARDED_REQUESTS: &[&str] = &["invite-create", "device-revoke", "device-credential-install", "device-credential-install-status", "device-resume-confirm"];
+
+/// How long a forwarded request waits for the relay's reply. The window's
+/// caller gives up after 15 s (`RELAY_CONTROL_WAIT` in machine_host.rs); a
+/// later reply has nobody to go to.
+const FORWARDED_TTL: Duration = Duration::from_secs(20);
+
+/// Requests the window made through this registration, by `reqId`.
+type Forwarded = HashMap<String, (std::sync::mpsc::Sender<Result<Value>>, Instant)>;
+
+/// Forget forwarded requests the relay has not answered in [`FORWARDED_TTL`].
+fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
+    forwarded.retain(|_, (_, sent)| now.saturating_duration_since(*sent) < FORWARDED_TTL);
+}
+
+/// The relay's replies to them, each naming the request's `reqId`.
+const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
+
+/// A live registration, as the window needs it to use it (PRO-368).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registration {
+    pub relay_host_id: String,
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    /// The relay's generation for this registration (`host-hello-ack`).
+    pub generation: u64,
+    pub runtime_generation: u64,
+}
+
+/// A single-use relay invite for one device of this host, with where to use
+/// it (`machine.relayAccess`, docs/MACHINES.md "As built (PRO-345)").
+#[derive(Clone, Debug)]
+pub struct RelayInvite {
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    pub relay_host_id: String,
+    pub invite_token: String,
+    pub invite_expires_at: i64,
+}
+
+/// What a machine adds to its relay host (docs/MACHINES.md, "How PRO-341
+/// builds it"): the computers it paired are admitted by their relay device id
+/// and token, and a connection for any other device is a phone, which goes
+/// to the window.
+/// The machine refused a paired computer's device token or key on the relay.
+/// The `pairing_refused` reason: `code-inactive` (a token it does not know,
+/// a revoked or expired one) or `disconnected` (held off by the person, PRO-357).
+#[derive(Debug)]
+struct ComputerRefused(&'static str);
+
+impl std::fmt::Display for ComputerRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "device token refused ({})", self.0)
+    }
+}
+
+impl std::error::Error for ComputerRefused {}
+
+/// Each method may read the registry file, so the relay host calls them off
+/// its async tasks.
+pub trait MachineRoutes: Send + Sync + 'static {
+    /// Whether the relay device id is a paired computer's.
+    fn is_computer(&self, relay_device_id: &str) -> bool;
+    /// The paired computer with this relay device id, if `token` is its: its
+    /// id and its tracked connection, which `cancel` closes on revocation.
+    /// `client_key_b64` is the connection's E2EE client key: a computer is
+    /// admitted only with the key it paired with (docs/MACHINES.md rule 2).
+    /// `Ok(Err(reason))`: refused, with the `pairing_refused` reason.
+    fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>>;
+    /// The connection ended.
+    fn release_computer(&self, computer_id: &str, tracked: u64);
+    /// Pass a phone's relay connection to the window. Whether one took it.
+    fn forward_phone(&self, forwarded: crate::machine_wire::Forwarded) -> bool;
 }
 
 impl RelayHost {
@@ -382,7 +480,19 @@ impl RelayHost {
                 Err(error) => log::warn!("relay host: could not read the device list: {error}"),
             }
         }
-        Arc::new(Self { link, rpc, keypair, state: Mutex::new(state), status, devices_path })
+        Arc::new(Self {
+            link,
+            rpc,
+            keypair,
+            state: Mutex::new(state),
+            status,
+            devices_path,
+            routes: Mutex::new(None),
+            registered: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            stop: tokio::sync::Notify::new(),
+            pairing_hint: Mutex::new(None),
+        })
     }
 
     /// Whether the device list is on disk (or there is no disk to keep it on).
@@ -423,12 +533,126 @@ impl RelayHost {
         self.status.subscribe()
     }
 
+    /// A machine's computers and phones, beside the link's attachments.
+    pub fn set_routes(&self, routes: Arc<dyn MachineRoutes>) {
+        *self.routes.lock().unwrap() = Some(routes);
+    }
+
+    fn routes(&self) -> Option<Arc<dyn MachineRoutes>> {
+        self.routes.lock().unwrap().clone()
+    }
+
+    /// Whether the relay registration is live now.
+    pub fn is_registered(&self) -> bool {
+        self.registered.lock().unwrap().is_some()
+    }
+
+    /// The live registration, while there is one.
+    pub fn registration(&self) -> Option<Registration> {
+        let (live, director_url) = self.registered.lock().unwrap().clone()?;
+        let runtime_generation = match &*self.status.borrow() {
+            HostStatus::Registered { runtime_generation, .. } => *runtime_generation,
+            _ => return None,
+        };
+        Some(Registration {
+            relay_host_id: self.keypair.host_id(),
+            director_url,
+            cell_url: live.cell_url,
+            assignment_epoch: live.assignment_epoch,
+            generation: live.relay_generation,
+            runtime_generation,
+        })
+    }
+
+    /// Call `hint` whenever the relay says this host's account pairing
+    /// grants or revocations changed (`account-pairing-changed`).
+    pub fn on_pairing_hint(&self, hint: Arc<dyn Fn() + Send + Sync>) {
+        *self.pairing_hint.lock().unwrap() = Some(hint);
+    }
+
+    /// End the registration and every connection it carries, and register
+    /// no more (the switch went off, the machine signed out, PRO-368). The
+    /// control socket is closed with a close frame, so the relay lets the
+    /// window register again at once.
+    pub fn stop(&self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
+            let _ = live.commands.send(ControlCommand::Shutdown);
+        }
+        self.stop.notify_one();
+        self.close_all_connections();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait `delay`, or less when the host is stopped meanwhile.
+    async fn pause(&self, delay: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = self.stop.notified() => self.stop.notify_one(),
+        }
+    }
+
+    /// Send a control request the window makes (PRO-368) on this
+    /// registration. The receiver yields the relay's reply to its `reqId`
+    /// (or `control-error`); dropped unanswered when the registration ends.
+    pub fn forward_control(&self, frame: Value) -> Result<std::sync::mpsc::Receiver<Result<Value>>> {
+        let kind = frame["type"].as_str().unwrap_or_default();
+        if !FORWARDED_REQUESTS.contains(&kind) {
+            bail!("the relay request {kind:?} cannot be forwarded");
+        }
+        let req_id = frame["reqId"].as_str().filter(|id| valid_opaque_id(id)).ok_or_else(|| anyhow!("reqId is required"))?.to_string();
+        let Some((live, _)) = self.registered.lock().unwrap().clone() else { bail!("relay control is offline") };
+        let (respond, receive) = std::sync::mpsc::channel();
+        live.commands.send(ControlCommand::Forward { frame, req_id, respond }).map_err(|_| anyhow!("relay control is offline"))?;
+        Ok(receive)
+    }
+
+    /// A fresh single-use invite for `relay_device_id`, through the live
+    /// registration's `invite-create`. `None` while not registered.
+    pub async fn invite(&self, relay_device_id: &str) -> Result<Option<RelayInvite>> {
+        let Some((live, director_url)) = self.registered.lock().unwrap().clone() else { return Ok(None) };
+        if !valid_opaque_id(relay_device_id) {
+            bail!("invalid relay device id");
+        }
+        let (respond, receive) = oneshot::channel();
+        live.commands
+            .send(ControlCommand::CreateInvite { device_id: relay_device_id.to_string(), respond })
+            .map_err(|_| anyhow!("relay control is offline"))?;
+        let (invite_token, invite_expires_at) = tokio::time::timeout(CONNECT_TIMEOUT, receive).await??.context("create invite")?;
+        Ok(Some(RelayInvite {
+            director_url,
+            cell_url: live.cell_url.clone(),
+            assignment_epoch: live.assignment_epoch,
+            relay_host_id: self.keypair.host_id(),
+            invite_token,
+            invite_expires_at,
+        }))
+    }
+
+    /// End a device's relay credentials (`device-revoke`) and close its
+    /// relay connections. Nothing to send while not registered: the relay
+    /// then admits nobody for this host anyway.
+    pub fn revoke_device(&self, relay_device_id: &str) {
+        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
+            let _ = live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() });
+        }
+        for cancel in self.state.lock().unwrap().connections.remove(relay_device_id).unwrap_or_default() {
+            let _ = cancel.send(());
+        }
+    }
+
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
     /// until the link hands over a newer generation.
     pub async fn run(self: Arc<Self>) {
         let mut attempt = 0u32;
         let mut fenced: Option<u64> = None;
         loop {
+            if self.is_stopped() {
+                return;
+            }
             let session = match self.fetch_session().await {
                 Ok(session) => session,
                 Err(error) if error.downcast_ref::<Revoked>().is_some() => {
@@ -439,7 +663,7 @@ impl RelayHost {
                     log::warn!("relay host: runtime session unavailable: {error:#}");
                     attempt += 1;
                     self.status.send_replace(HostStatus::Retrying { attempt });
-                    tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+                    self.pause(protocol::backoff(attempt, jitter())).await;
                     continue;
                 }
             };
@@ -447,13 +671,16 @@ impl RelayHost {
                 Ok(identity) => identity,
                 Err(error) => {
                     log::error!("relay host: {error:#}");
-                    tokio::time::sleep(REFRESH_INTERVAL).await;
+                    self.pause(REFRESH_INTERVAL).await;
                     continue;
                 }
             };
             if fenced.is_some_and(|generation| identity.runtime_generation <= generation) {
-                tokio::time::sleep(REFRESH_INTERVAL).await;
+                self.pause(REFRESH_INTERVAL).await;
                 continue;
+            }
+            if self.is_stopped() {
+                return;
             }
             fenced = None;
             self.status.send_replace(HostStatus::Connecting);
@@ -466,6 +693,7 @@ impl RelayHost {
                 Err(error) if error.downcast_ref::<Fenced>().is_some() => {
                     log::warn!("relay host: generation {} was retired by a newer runtime", identity.runtime_generation);
                     fenced = Some(identity.runtime_generation);
+                    self.link.fenced(identity.runtime_generation);
                     self.status.send_replace(HostStatus::Fenced { runtime_generation: identity.runtime_generation });
                     self.close_all_connections();
                     continue;
@@ -476,8 +704,11 @@ impl RelayHost {
                 }
             }
             self.close_all_connections();
+            if self.is_stopped() {
+                return;
+            }
             self.status.send_replace(HostStatus::Retrying { attempt });
-            tokio::time::sleep(protocol::backoff(attempt, jitter())).await;
+            self.pause(protocol::backoff(attempt, jitter())).await;
         }
     }
 
@@ -485,7 +716,7 @@ impl RelayHost {
         log::warn!("relay host: the runtime credential was rejected; not serving");
         self.status.send_replace(HostStatus::Revoked);
         self.close_all_connections();
-        tokio::time::sleep(REFRESH_INTERVAL).await;
+        self.pause(REFRESH_INTERVAL).await;
     }
 
     async fn fetch_session(&self) -> Result<RelaySession> {
@@ -513,7 +744,13 @@ impl RelayHost {
         // Attachments are answered off the control task: an invite round-trips
         // through this same socket.
         let refresher = tokio::spawn(self.clone().refresh_loop(live.clone(), session.director_url.clone(), identity.runtime_generation));
+        *self.registered.lock().unwrap() = Some((live.clone(), session.director_url.clone()));
+        // Stopped while it registered: `stop` found no registration to close.
+        if self.is_stopped() {
+            let _ = live.commands.send(ControlCommand::Shutdown);
+        }
         let result = self.control_loop(&mut socket, &mut command_rx, &live).await;
+        *self.registered.lock().unwrap() = None;
         refresher.abort();
         result
     }
@@ -600,7 +837,9 @@ impl RelayHost {
     ) -> Result<()> {
         let mut invites = HashMap::<String, oneshot::Sender<Result<(String, i64)>>>::new();
         let mut installs = HashMap::<String, oneshot::Sender<Result<Value>>>::new();
+        let mut forwarded = Forwarded::new();
         loop {
+            forget_unanswered(&mut forwarded, Instant::now());
             tokio::select! {
                 command = commands.recv() => {
                     let Some(command) = command else { return Ok(()) };
@@ -622,8 +861,16 @@ impl RelayHost {
                             let req_id = uuid::Uuid::new_v4().simple().to_string();
                             socket.send(Message::Text(json!({ "type": "device-revoke", "reqId": req_id, "relayDeviceId": device_id }).to_string().into())).await?;
                         }
+                        ControlCommand::Forward { frame, req_id, respond } => {
+                            if forwarded.contains_key(&req_id) || installs.contains_key(&req_id) || invites.contains_key(&req_id) {
+                                let _ = respond.send(Err(anyhow!("duplicate relay request id")));
+                                continue;
+                            }
+                            socket.send(Message::Text(frame.to_string().into())).await?;
+                            forwarded.insert(req_id, (respond, Instant::now()));
+                        }
                         ControlCommand::InstallCredential { payload, req_id, respond } => {
-                            if installs.contains_key(&req_id) {
+                            if installs.contains_key(&req_id) || forwarded.contains_key(&req_id) {
                                 let _ = respond.send(Err(anyhow!("duplicate relay request id")));
                                 continue;
                             }
@@ -650,6 +897,13 @@ impl RelayHost {
                         _ => bail!("relay sent a non-text control message"),
                     };
                     let message: Value = serde_json::from_str(&text)?;
+                    // A reply to a request the window made through this registration.
+                    if FORWARDED_REPLIES.contains(&message["type"].as_str().unwrap_or_default()) {
+                        if let Some((respond, _)) = message["reqId"].as_str().and_then(|req_id| forwarded.remove(req_id)) {
+                            let _ = respond.send(Ok(message));
+                            continue;
+                        }
+                    }
                     match message["type"].as_str().unwrap_or("") {
                         "ping" => socket.send(Message::Text(json!({ "type": "pong", "t": message["t"] }).to_string().into())).await?,
                         "invite-created" => {
@@ -664,6 +918,12 @@ impl RelayHost {
                             }
                         }
                         "device-revoked" => {}
+                        "account-pairing-changed" => {
+                            let hint = self.pairing_hint.lock().unwrap().clone();
+                            if let Some(hint) = hint {
+                                hint();
+                            }
+                        }
                         "device-credential-installed" => {
                             let req_id = message["reqId"].as_str().unwrap_or_default().to_string();
                             if let Some(respond) = installs.remove(&req_id) {
@@ -677,6 +937,19 @@ impl RelayHost {
                             let host = self.clone();
                             let live = live.clone();
                             tokio::spawn(async move {
+                                // On a machine, a device that is neither attached
+                                // through the link nor a paired computer is a
+                                // phone. The registry is a file: read off this loop.
+                                if let Some(routes) = host.routes() {
+                                    let attached = host.state.lock().unwrap().devices.contains_key(&connection.relay_device_id);
+                                    let device = connection.relay_device_id.clone();
+                                    let lookup = routes.clone();
+                                    let computer = attached || tokio::task::spawn_blocking(move || lookup.is_computer(&device)).await.unwrap_or(true);
+                                    if !computer {
+                                        host.forward_phone(&routes, &live, &connection);
+                                        return;
+                                    }
+                                }
                                 if let Err(error) = host.serve_connection(live, connection).await {
                                     log::debug!("relay host: client connection ended: {error:#}");
                                 }
@@ -829,6 +1102,25 @@ impl RelayHost {
         Ok(())
     }
 
+    /// Pass a phone's relay connection to the window: it opens the data leg.
+    fn forward_phone(&self, routes: &Arc<dyn MachineRoutes>, live: &Live, connection: &ConnectionOpen) {
+        let forwarded = crate::machine_wire::Forwarded::Relay {
+            cell_url: live.cell_url.clone(),
+            relay_host_id: self.keypair.host_id(),
+            generation: live.relay_generation,
+            connection: crate::machine_wire::RelayConnection {
+                conn_id: connection.conn_id.clone(),
+                conn_ticket: connection.conn_ticket.clone(),
+                kind: connection.kind.clone(),
+                relay_device_id: connection.relay_device_id.clone(),
+                attach_deadline_ms: connection.attach_deadline_ms,
+            },
+        };
+        if !routes.forward_phone(forwarded) {
+            log::debug!("relay host: no window takes phones; a phone connection is dropped");
+        }
+    }
+
     fn close_all_connections(&self) {
         for (_, cancels) in self.state.lock().unwrap().connections.drain() {
             for cancel in cancels {
@@ -874,101 +1166,73 @@ impl RelayHost {
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
+        let (device, computer) = match self.admit(&connection.relay_device_id, token, &session.client_public_key_b64, cancel_tx).await {
+            Ok(admitted) => admitted,
+            Err(error) if error.is::<ComputerRefused>() => {
+                // As on the direct route: the reason, sealed, then `4401`, so
+                // a revoked computer stops retrying instead of taking the
+                // relay for unreachable (docs/MACHINES.md "As built (PRO-345)").
+                let reason = error.downcast_ref::<ComputerRefused>().map(|refused| refused.0).unwrap_or(crate::machine_wire::REFUSED_CODE_INACTIVE);
+                let refused = json!({ "type": "pairing_refused", "v": 1, "reason": reason });
+                let _ = send_sealed(&mut socket, &mut session, &refused).await;
+                let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 4401.into(), reason: "credential refused".into() };
+                let _ = socket.close(Some(frame)).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         // Whether it counts as use of the workspace is decided at `rpc.hello`:
         // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) =
-            Peer::for_installation(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), device.installation_key.clone());
-        // Slow mutations (Git network calls, agent prompts) answer from their
-        // own task, so this connection keeps reading, streaming and honouring
-        // a revocation meanwhile. Everything else is answered in order, which
-        // keeps terminal writes ordered.
-        let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
+        // A paired computer is the same peer on every route: its registry id,
+        // as the direct route names it (`machine_host::direct`). Under its
+        // relay device id it would lose its terminals' control and its write
+        // numbering each time it moved between the direct route and the relay.
+        let peer_id = computer.as_ref().map_or_else(|| connection.relay_device_id.clone(), |(computer_id, _)| computer_id.clone());
+        let (peer, notifications) = Peer::for_installation(peer_id, device.authority, device.user_id.clone(), device.installation_key.clone());
         log::info!("relay host: attachment {} connected ({:?})", device.attachment_id, device.authority);
-        let result = async {
-            loop {
-                tokio::select! {
-                    _ = cancel.recv() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    // The person lost access to the workspace (contract §21.5).
-                    _ = peer.closed() => {
-                        let _ = socket.close(None).await;
-                        return Ok(());
-                    }
-                    notification = notifications.recv() => {
-                        let Some(notification) = notification else { return Ok(()) };
-                        send_sealed(&mut socket, &mut session, &notification).await?;
-                    }
-                    answer = answers.recv() => {
-                        if let Some(answer) = answer {
-                            send_sealed(&mut socket, &mut session, &answer).await?;
-                        }
-                    }
-                    incoming = socket.next() => {
-                        crate::data_privacy::require_network()?;
-                        let Some(incoming) = incoming else { return Ok(()) };
-                        match incoming? {
-                            Message::Text(text) => {
-                                if text.len() > MAX_FRAME_BYTES * 2 {
-                                    bail!("client frame over the limit");
-                                }
-                                let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
-                                let request: Value = serde_json::from_slice(&plaintext)?;
-                                let response = match request["method"].as_str() {
-                                    Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
-                                    // Connecting can take seconds, so from its own
-                                    // task; answered in order with the stream's data.
-                                    Some("ports.open") => {
-                                        let rpc = self.rpc.clone();
-                                        let peer = peer.clone();
-                                        let ticket = crate::github_process::ticket();
-                                        tokio::spawn(async move {
-                                            let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
-                                            response.await;
-                                        });
-                                        continue;
-                                    }
-                                    Some(method) if SLOW_METHODS.contains(&method) => {
-                                        let answer = self.rpc.handle_owned(peer.clone(), request);
-                                        let answers = answers_tx.clone();
-                                        tokio::spawn(async move {
-                                            let _ = answers.send(answer.await);
-                                        });
-                                        continue;
-                                    }
-                                    _ => self.rpc.handle(&peer, &request).await,
-                                };
-                                send_sealed(&mut socket, &mut session, &response).await?;
-                            }
-                            Message::Binary(bytes) => {
-                                // Binary streams are not part of workspace RPC v1; the
-                                // frame is still authenticated so the counters stay aligned.
-                                let _ = session.open(&bytes, PayloadKind::Binary)?;
-                            }
-                            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
-                            Message::Close(_) => return Ok(()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        let result = serve_rpc(&mut socket, &mut session, &self.rpc, &peer, notifications, &mut cancel, |request| {
+            (request["method"] == "pairing.provisionRelay").then(|| {
+                let request = request.clone();
+                let (host, live, connection) = (self.clone(), live.clone(), connection.clone());
+                Box::pin(async move { host.provision_resume(&live, &connection, &request).await }) as futures_util::future::BoxFuture<'static, Value>
+            })
+        })
         .await;
-        self.rpc.disconnect(&peer);
         drop(cancel);
+        if let (Some((computer_id, tracked)), Some(routes)) = (&computer, self.routes()) {
+            routes.release_computer(computer_id, *tracked);
+        }
         if let Some(senders) = self.state.lock().unwrap().connections.get_mut(&connection.relay_device_id) {
             senders.retain(|sender| !sender.is_closed());
         }
         result
     }
 
-    fn admit(&self, relay_device_id: &str, token: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Device> {
+    /// The device, and the paired computer's tracked connection when it is one.
+    async fn admit(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<(Device, Option<(String, u64)>)> {
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let attached = self.state.lock().unwrap().devices.contains_key(relay_device_id);
+        if let (false, Some(routes)) = (attached, self.routes()) {
+            // A paired computer: full operating rights (decision 5). Its
+            // connection closes with every other one when the runtime loses
+            // its credential, is fenced or loses the control connection, and
+            // with its record when the machine revokes it.
+            {
+                let mut state = self.state.lock().unwrap();
+                let senders = state.connections.entry(relay_device_id.to_string()).or_default();
+                senders.retain(|sender| !sender.is_closed());
+                senders.push(cancel.clone());
+            }
+            let (device_id, token, key) = (relay_device_id.to_string(), token.to_string(), client_key_b64.to_string());
+            let (computer_id, tracked) = tokio::task::spawn_blocking(move || routes.admit_computer(&device_id, &token, &key, cancel))
+                .await??
+                .map_err(ComputerRefused)?;
+            let device = Device { token_hash: hash, authority: Authority::Manage, attachment_id: computer_id.clone(), user_id: None, installation_key: None };
+            return Ok((device, Some((computer_id, tracked))));
+        }
         let mut state = self.state.lock().unwrap();
         // The relay credential named the device; the token must be that
         // device's, so an invite cannot be used with another attachment's token.
@@ -979,7 +1243,7 @@ impl RelayHost {
         let senders = state.connections.entry(relay_device_id.to_string()).or_default();
         senders.retain(|sender| !sender.is_closed());
         senders.push(cancel);
-        Ok(device)
+        Ok((device, None))
     }
 
     /// Install a resume credential for the device of an invite connection,
@@ -1066,6 +1330,7 @@ pub async fn serve_machine(
     sessions: Option<crate::session::SessionManager>,
     devices_path: Option<PathBuf>,
     agents: Option<Arc<crate::cloud_agents::CloudAgents>>,
+    routes: Option<Arc<dyn MachineRoutes>>,
 ) -> Result<Arc<RelayHost>> {
     let generation = runtime_generation(&link).await;
     let identity = super::machine::Identity {
@@ -1078,6 +1343,10 @@ pub async fn serve_machine(
         rpc.set_agents(agents);
     }
     let host = RelayHost::new(link, rpc, devices_path);
+    // Before it registers, so no connection is answered without them.
+    if let Some(routes) = routes {
+        host.set_routes(routes);
+    }
     tokio::spawn(host.clone().run());
     Ok(host)
 }
@@ -1123,7 +1392,7 @@ impl std::fmt::Display for Fenced {
 
 impl std::error::Error for Fenced {}
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionOpen {
     conn_id: String,
@@ -1169,10 +1438,117 @@ async fn next_json(socket: &mut Socket) -> Result<Value> {
     }
 }
 
-async fn send_sealed(socket: &mut Socket, session: &mut E2eeSession, value: &Value) -> Result<()> {
+pub(crate) async fn send_sealed<S>(socket: &mut S, session: &mut E2eeSession, value: &Value) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
     let frame = session.seal(value.to_string().as_bytes(), PayloadKind::Text)?;
     socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await?;
     Ok(())
+}
+
+/// Serve workspace RPC to an authenticated peer on an E2EE socket until
+/// either side closes, `cancel` fires (a revocation) or the peer loses access.
+/// Every route of a host serves through here: the relay's data legs and a
+/// machine's direct listener (`machine_host`). `extra` answers the few
+/// requests a route serves itself, as the relay does `pairing.provisionRelay`.
+///
+/// Slow mutations (Git network calls, agent prompts) answer from their own
+/// task, so the connection keeps reading, streaming and honouring a
+/// revocation meanwhile. Everything else is answered in order, which keeps
+/// terminal writes ordered.
+pub(crate) async fn serve_rpc<S>(
+    socket: &mut S,
+    session: &mut E2eeSession,
+    rpc: &Arc<WorkspaceRpc>,
+    peer: &Arc<Peer>,
+    mut notifications: super::server::Notifications,
+    cancel: &mut mpsc::UnboundedReceiver<()>,
+    extra: impl Fn(&Value) -> Option<futures_util::future::BoxFuture<'static, Value>>,
+) -> Result<()>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = cancel.recv() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                // The person lost access to the workspace (contract §21.5).
+                _ = peer.closed() => {
+                    let _ = socket.close().await;
+                    return Ok(());
+                }
+                notification = notifications.recv() => {
+                    let Some(notification) = notification else { return Ok(()) };
+                    send_sealed(socket, session, &notification).await?;
+                }
+                answer = answers.recv() => {
+                    if let Some(answer) = answer {
+                        send_sealed(socket, session, &answer).await?;
+                    }
+                }
+                incoming = socket.next() => {
+                    crate::data_privacy::require_network()?;
+                    let Some(incoming) = incoming else { return Ok(()) };
+                    match incoming? {
+                        Message::Text(text) => {
+                            if text.len() > MAX_FRAME_BYTES * 2 {
+                                bail!("client frame over the limit");
+                            }
+                            let plaintext = session.open(&general_purpose::STANDARD.decode(text.as_bytes())?, PayloadKind::Text)?;
+                            let request: Value = serde_json::from_slice(&plaintext)?;
+                            if let Some(answer) = extra(&request) {
+                                let response = answer.await;
+                                send_sealed(socket, session, &response).await?;
+                                continue;
+                            }
+                            let response = match request["method"].as_str() {
+                                // Connecting can take seconds, so from its own
+                                // task; answered in order with the stream's data.
+                                Some("ports.open") => {
+                                    let rpc = rpc.clone();
+                                    let peer = peer.clone();
+                                    let ticket = crate::github_process::ticket();
+                                    tokio::spawn(async move {
+                                        let response = crate::github_process::with_ticket(ticket, || rpc.answer_port_open(&peer, &request));
+                                        response.await;
+                                    });
+                                    continue;
+                                }
+                                Some(method) if SLOW_METHODS.contains(&method) => {
+                                    let answer = rpc.handle_owned(peer.clone(), request);
+                                    let answers = answers_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = answers.send(answer.await);
+                                    });
+                                    continue;
+                                }
+                                _ => rpc.handle(peer, &request).await,
+                            };
+                            send_sealed(socket, session, &response).await?;
+                        }
+                        Message::Binary(bytes) => {
+                            // Binary streams are not part of workspace RPC v1; the
+                            // frame is still authenticated so the counters stay aligned.
+                            let _ = session.open(&bytes, PayloadKind::Binary)?;
+                        }
+                        Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
+                        Message::Close(_) => return Ok(()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    .await;
+    rpc.disconnect(peer);
+    result
 }
 
 pub(crate) fn websocket_config() -> WebSocketConfig {
@@ -1260,6 +1636,134 @@ mod tests {
         assert!(token_identity(&jwt(json!({ "sub": "x" }))).is_err());
         let legacy = token_identity(&jwt(json!({ "sub": "a", "cloudProfileId": "b", "organizationId": "c" }))).unwrap();
         assert_eq!(legacy.runtime_generation, 0);
+    }
+
+    /// PRO-341: a paired computer's relay connection closes with every
+    /// other one when the runtime loses its credential, is fenced or loses
+    /// the control connection (`close_all_connections`).
+    #[tokio::test]
+    async fn a_paired_computers_connection_closes_with_every_other() {
+        struct Link;
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] {
+                [3; 32]
+            }
+            fn session(&self) -> Result<RelaySession> {
+                bail!("not in this test")
+            }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn complete_revocation(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct Routes;
+        impl MachineRoutes for Routes {
+            fn is_computer(&self, relay_device_id: &str) -> bool {
+                relay_device_id == "relay-desk"
+            }
+            fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, _cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>> {
+                Ok((relay_device_id == "relay-desk" && token == "desk-token" && client_key_b64 == "desk-key").then(|| ("desk".to_string(), 1)).ok_or("code-inactive"))
+            }
+            fn release_computer(&self, _: &str, _: u64) {}
+            fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
+                false
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(Link), rpc, None);
+        host.set_routes(Arc::new(Routes));
+        let (cancel, mut cancelled) = mpsc::unbounded_channel();
+        let (device, computer) = host.admit("relay-desk", "desk-token", "desk-key", cancel).await.unwrap();
+        assert_eq!(device.authority, Authority::Manage);
+        assert_eq!(computer, Some(("desk".to_string(), 1)));
+        let (refused, _) = mpsc::unbounded_channel();
+        assert!(host.admit("relay-desk", "another-token", "desk-key", refused.clone()).await.is_err(), "another device's token");
+        assert!(host.admit("relay-desk", "desk-token", "another-key", refused).await.is_err(), "its token from another key");
+        host.close_all_connections();
+        assert!(cancelled.try_recv().is_ok(), "the computer is closed out with the rest");
+    }
+
+    /// A link for tests that never asks the API.
+    struct NoLink;
+    impl RuntimeLink for NoLink {
+        fn host_secret(&self) -> [u8; 32] {
+            [3; 32]
+        }
+        fn session(&self) -> Result<RelaySession> {
+            bail!("not in this test")
+        }
+        fn complete_attachment(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn complete_revocation(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// PRO-368: the window's relay requests go out on the runtime's control
+    /// connection, and each reply goes back to the request with its `reqId`,
+    /// `control-error` included; other requests' replies do not.
+    #[tokio::test]
+    async fn a_forwarded_request_gets_the_relays_reply_to_its_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v1/host/control", listener.local_addr().unwrap());
+        let (sent, mut relay_saw) = mpsc::unbounded_channel::<Value>();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let frame: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            sent.send(frame.clone()).unwrap();
+            // Another request's reply first: it is not this one's answer.
+            socket.send(Message::Text(json!({ "type": "control-error", "reqId": "req-other", "code": "invalid" }).to_string().into())).await.unwrap();
+            socket.send(Message::Text(json!({ "type": "invite-created", "reqId": frame["reqId"], "inviteToken": "t", "expiresAt": 1, "maxAttempts": 3 }).to_string().into())).await.unwrap();
+            let revoke: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            sent.send(revoke.clone()).unwrap();
+            socket.send(Message::Text(json!({ "type": "control-error", "reqId": revoke["reqId"], "code": "not_found" }).to_string().into())).await.unwrap();
+            // Held open until the test ends.
+            let _ = socket.next().await;
+        });
+        let (mut socket, _) = crate::data_privacy::connect(url.as_str(), None, true).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(root.path(), 1, Arc::new(crate::sink::BroadcastSink::new(8)), Arc::new(crate::pty::Terminals::new()), None).unwrap();
+        let host = RelayHost::new(Arc::new(NoLink), rpc, None);
+        assert!(host.forward_control(json!({ "type": "invite-create", "reqId": "req-1" })).is_err(), "offline before it registers");
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let live = Live { commands, cell_url: "ws://cell".into(), assignment_epoch: 1, relay_generation: 1 };
+        *host.registered.lock().unwrap() = Some((live.clone(), "http://director".into()));
+        // Only the window's control requests, each with its own id.
+        assert!(host.forward_control(json!({ "type": "conn-accept", "reqId": "req-1" })).is_err());
+        assert!(host.forward_control(json!({ "type": "invite-create" })).is_err());
+        let invite = host.forward_control(json!({ "type": "invite-create", "reqId": "req-1", "relayDeviceId": "phone-1" })).unwrap();
+        let duplicate = host.forward_control(json!({ "type": "invite-create", "reqId": "req-1", "relayDeviceId": "phone-2" })).unwrap();
+        let control = host.clone();
+        let running = tokio::spawn(async move { control.control_loop(&mut socket, &mut command_rx, &live).await });
+        let wait = |receive: std::sync::mpsc::Receiver<Result<Value>>| tokio::task::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(10)).unwrap());
+        assert!(wait(duplicate).await.unwrap().is_err(), "a second request with a pending id is refused");
+        let frame = relay_saw.recv().await.unwrap();
+        assert_eq!(frame["relayDeviceId"], "phone-1");
+        let reply = wait(invite).await.unwrap().unwrap();
+        assert_eq!((reply["type"].as_str(), reply["reqId"].as_str()), (Some("invite-created"), Some("req-1")));
+        let revoke = host.forward_control(json!({ "type": "device-revoke", "reqId": "req-2", "relayDeviceId": "phone-1" })).unwrap();
+        assert_eq!(relay_saw.recv().await.unwrap()["type"], "device-revoke");
+        let reply = wait(revoke).await.unwrap().unwrap();
+        assert_eq!((reply["type"].as_str(), reply["code"].as_str()), (Some("control-error"), Some("not_found")));
+        running.abort();
+        relay.abort();
+    }
+
+    #[test]
+    fn unanswered_forwarded_requests_are_forgotten() {
+        let sent = Instant::now();
+        let mut forwarded = Forwarded::new();
+        let (respond, _receive) = std::sync::mpsc::channel();
+        forwarded.insert("req-1".into(), (respond, sent));
+        forget_unanswered(&mut forwarded, sent + Duration::from_secs(5));
+        assert!(forwarded.contains_key("req-1"), "still waiting for the relay");
+        forget_unanswered(&mut forwarded, sent + FORWARDED_TTL);
+        assert!(forwarded.is_empty(), "nobody waits for it after the window gave up");
     }
 
     #[test]

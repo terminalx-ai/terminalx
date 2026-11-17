@@ -81,7 +81,7 @@ try {
   await dialog.evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished)));
   const box = await dialog.boundingBox();
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
-  // 580px in the design at 16px text; the app sizes dialogs in rem so they follow Settings › Appearance › Text size.
+  // 580px in the design at 16px text; the app sizes dialogs in rem so they follow Settings › General › Text size.
   assert.ok(box && Math.abs(box.width - 36.25 * rem) <= 1, `the dialog is 36.25rem wide (${box?.width} at ${rem}px)`);
   await capture("01-default");
 

@@ -65,10 +65,13 @@ try {
     await closing.waitFor();
     const closeText = (await closing.textContent()) ?? "";
     const stillOpen = (await tab(page, "claude tab").count()) === 1;
+    // PRO-381 (03.29): the tab whose close failed has its × in red.
+    const redClose = await strip.locator('[data-close-failed="true"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label")));
+    const closeButtons = await closing.getByRole("button").allTextContents();
 
     // A new Claude Code tab whose agent exits while starting.
     await page.getByRole("button", { name: "New tab" }).click();
-    await page.getByRole("menuitem", { name: "Claude Code" }).click();
+    await page.getByRole("menuitem", { name: "Claude Code chat" }).click();
     const opening = alerts.filter({ hasText: "Couldn't open a new Claude Code tab" });
     await opening.waitFor();
     const openText = (await opening.textContent()) ?? "";
@@ -89,12 +92,13 @@ try {
           return inner.width === 0 || (inner.left >= box.left - 0.5 && inner.right <= box.right + 0.5 && inner.top >= box.top - 0.5 && inner.bottom <= box.bottom + 0.5);
         }) && card.scrollWidth <= card.clientWidth;
       });
-      // The buttons of one card sit in a row without covering each other.
+      // The buttons of one card sit in one row (PRO-381) without covering each other.
+      const oneRow = cards.every((card) => new Set([...card.querySelectorAll("button")].filter((node) => node.textContent?.trim() && node.getAttribute("aria-label") !== "Close").map((node) => Math.round(node.getBoundingClientRect().top))).size <= 1);
       const buttonsApart = cards.every((card) => {
         const buttons = [...card.querySelectorAll("button")].map((node) => node.getBoundingClientRect()).filter((box) => box.width > 0);
         return buttons.every((a, i) => buttons.slice(i + 1).every((b) => !(a.top < b.bottom && b.top < a.bottom && a.left < b.right && b.left < a.right)));
       });
-      return { count: cards.length, boxes: boxes.map((box) => ({ left: box.left, top: box.top, width: box.width, height: box.height })), inView, overlap, contained, buttonsApart };
+      return { oneRow, count: cards.length, boxes: boxes.map((box) => ({ left: box.left, top: box.top, width: box.width, height: box.height })), inView, overlap, contained, buttonsApart };
     });
     if (shots) await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
     if (shots) await page.screenshot({ path: join(shots, `tab-errors-${colorScheme}.png`) });
@@ -113,19 +117,23 @@ try {
     await opening.getByRole("button", { name: "Try again" }).click();
     await opening.waitFor({ state: "detached" });
     const opened = await page.evaluate(() => window.__ASKED__.started.filter((id) => id.startsWith("new-")));
-    const tabsAtEnd = await strip.getByRole("tab").count();
+    // Open settings.json added a file tab beside the chats (PRO-402); count the agent tabs.
+    const tabsAtEnd = (await strip.getByRole("tab").allInnerTexts()).filter((name) => !name.includes("settings.json")).length;
 
     failed += report(`tab errors, ${colorScheme}`, {
       "a close that timed out says so, names the tab, and leaves it open": closeText.includes("Couldn't close the chat. Try again.") && closeText.includes("Claude Code didn't stop within 10 seconds, so “claude tab” is still open.") && stillOpen,
       "a tab that failed to start says why, with the agent's line in monospace": openText.includes("Couldn't open a new Claude Code tab: claude exited while starting") && openText.includes(LINE) && /mono/i.test(mono) && mono !== bodyFont,
-      "it offers Try again and Open settings.json beside Copy error": ["Try again", "Open settings.json", "Copy error"].every((label) => openButtons.includes(label)),
+      "it offers Try again and Open settings.json, and no Copy error (03.29)": ["Try again", "Open settings.json"].every((label) => openButtons.includes(label)) && !openButtons.includes("Copy error"),
+      "the close toast offers Try again alone": closeButtons.filter((label) => label.trim()).join("|") === "Try again",
+      "the tab whose close failed shows its × in red": redClose.length === 1 && redClose[0] === "Close claude tab (closing failed)",
+      "each toast keeps its actions on one row": layout.oneRow,
       "no empty tab is left behind": tabsAfterOpen === 2,
       "the two toasts sit inside the window, apart, and clip nothing": layout.count === 2 && layout.inView && !layout.overlap && layout.contained && layout.buttonsApart,
       "Open settings.json opens the named file and keeps the toast": inspected.at(-1) === "/Users/demo/.claude/settings.json" && keptAfterOpen,
       "Try again closes the tab once it can, and its toast goes": closedNow,
       "Try again opens the tab once its agent starts, and its toast goes": opened.length >= 2 && tabsAtEnd === 2,
       "no browser errors": errors.length === 0,
-    }, { closeText, stillOpen, openText, mono, bodyFont, openButtons, tabsAfterOpen, layout, inspected, keptAfterOpen, closedNow, opened, tabsAtEnd, errors });
+    }, { closeText, stillOpen, redClose, closeButtons, openText, mono, bodyFont, openButtons, tabsAfterOpen, layout, inspected, keptAfterOpen, closedNow, opened, tabsAtEnd, errors });
     await page.close();
   }
 } finally {
