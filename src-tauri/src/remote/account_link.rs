@@ -258,6 +258,8 @@ fn relay_session(grant: &RelaySessionGrant) -> RelaySession {
         attachments: Vec::new(),
         revocations: Vec::new(),
         collaboration: None,
+        // Account-linked machines do not negotiate the cloud v2 contract.
+        collaboration_v2: false,
     }
 }
 
