@@ -1,3 +1,4 @@
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { useEffect, useState, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ChevronDown, CircleCheck, Copy, FileJson, FileTerminal, Folder, FolderOpen, KeyRound, RefreshCw, Settings2, TriangleAlert, Trash2, Zap } from "@/icons";
@@ -151,20 +152,30 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
   }, [project.path, text, snapshot]);
 
   const patterns: PreviewPattern[] = preview?.patterns ?? [];
-  // An edit saves itself once the preview of exactly that text is in and every pattern in it is valid; there is no
-  // Save button (design 11.02). A list from .worktreeinclude is the repository's and is never saved here.
+  // Design 11.02 has no Save button. Leaving the field commits an edit; previewing
+  // alone never changes the policy used by workspace creation. If validation is still
+  // pending, only this exact draft may commit, and resuming editing cancels that intent.
   const valid = !loading && !!preview && !preview.error && !preview.fromIncludeFile && previewed === text && !patterns.some((item) => item.error);
-  // The draft stays the textarea's text after a save, so a line being started is not trimmed away under the cursor.
-  const [failed, setFailed] = useState<string | null>(null);
+  const [commit, setCommit] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Keep this editor mounted through validation and persistence, including a failed
+  // save. The shared boundary covers project/page navigation and leaving Settings.
+  const dirty = !preview?.fromIncludeFile && lines(text).join("\n") !== lines(stored).join("\n");
+  useSettingsLeaveGuard(dirty || saving);
   useEffect(() => {
-    if (!valid || draft === null || saving || draft === failed) return;
-    if (lines(draft).join("\n") === lines(stored).join("\n")) return;
-    const sent = draft;
+    if (!valid || commit === null || commit !== text || saving) return;
+    setCommit(null);
+    if (lines(commit).join("\n") === lines(stored).join("\n")) return;
     setSaving(true);
-    updateProject(project.path, { repositorySettings: { filesToCopy: lines(sent) } })
-      .catch((cause) => { setFailed(sent); setError(errorMessage(cause)); })
+    setSaveError(null);
+    updateProject(project.path, { repositorySettings: { filesToCopy: lines(commit) } })
+      .catch((cause) => setSaveError(errorMessage(cause)))
       .finally(() => setSaving(false));
-  }, [valid, draft, stored, project.path, saving, failed]);
+  }, [valid, commit, text, stored, project.path, saving]);
+
+  const commitDraft = () => {
+    if (draft !== null && !preview?.fromIncludeFile) setCommit(draft);
+  };
 
   const report = (cause: unknown) => setError(errorMessage(cause));
   // Design 11.12: every pattern is valid and none matches an ignored file.
@@ -206,8 +217,16 @@ export function RepositorySettingsPage({ project }: { project: Project }) {
             spellCheck={false}
             value={preview?.fromIncludeFile ? patterns.map((item) => item.pattern).join("\n") : text}
             readOnly={(draft === null && !preview && loading) || !!preview?.fromIncludeFile}
-            onChange={(event) => setDraft(event.target.value)}
+            aria-describedby="repository-copy-commit-help"
+            onFocus={() => setCommit(null)}
+            onBlur={commitDraft}
+            onChange={(event) => { setDraft(event.target.value); setCommit(null); }}
           />
+          {!preview?.fromIncludeFile && <p id="repository-copy-commit-help" className="mt-1 text-[12px] text-muted-foreground">Changes save when you leave this field after validation. New workspaces use the last saved patterns.</p>}
+          {saveError && <div className="mt-2">
+            <p role="alert" className="text-sm text-destructive">{saveError}</p>
+            {!preview?.fromIncludeFile && <Button size="sm" variant="outline" className="mt-2" disabled={saving} onClick={commitDraft}>Retry save</Button>}
+          </div>}
           {preview?.warning && <p role="status" className="mt-2 text-[12px] text-warning">{preview.warning}</p>}
           {patterns.filter((item) => item.error).map((item, index) => (
             <p key={`${index}:${item.pattern}`} role="alert" className="mt-2 break-words text-[12px] text-destructive"><span className="font-mono">{item.pattern}</span>: {item.error}</p>

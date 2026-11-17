@@ -1,10 +1,12 @@
+import { useState } from "react";
+import { SettingsLeaveGuardContext, useSettingsLeaveBoundary } from "./settingsLeaveGuard";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectPageForRow, RepositoriesTab, RepositorySettingsPage } from "./RepositoriesTab";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
 import type { Project } from "@/types/session";
 
-const mock = vi.hoisted(() => ({ preview: vi.fn(), update: vi.fn(), reveal: vi.fn(), copy: vi.fn(), remove: vi.fn(), projects: [] as Project[] }));
+const mock = vi.hoisted(() => ({ persist: vi.fn(), preview: vi.fn(), update: vi.fn(), reveal: vi.fn(), copy: vi.fn(), remove: vi.fn(), projects: [] as Project[] }));
 vi.mock("@/lib/api", () => ({ api: { repositoryFilesPreview: mock.preview }, errorMessage: (e: unknown) => String(e) }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: mock.projects, sessions: [], chatsPath: null, workspaces: {} }), updateProject: mock.update }));
 vi.mock("@/components/layout/SessionSidebar", () => ({ confirmRemoveProject: mock.remove, conversationLink: () => null }));
@@ -27,10 +29,34 @@ beforeEach(() => {
   mock.projects = [project, { path: "/folder", name: "Folder", kind: "folder" }];
   mock.preview.mockImplementation(async (_path, patterns) => result(patterns));
   mock.update.mockResolvedValue(project);
+  mock.persist.mockResolvedValue(undefined);
   mock.reveal.mockResolvedValue(undefined);
   mock.copy.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
+
+/** Navigation uses the same boundary as the settings sidebar and app shell. */
+function NavigationHarness() {
+  const boundary = useSettingsLeaveBoundary();
+  const [current, setCurrent] = useState(project);
+  const [destination, setDestination] = useState<string | null>(null);
+  mock.update.mockImplementation((_path, patch) => new Promise<Project>((resolve, reject) => {
+    mock.persist().then(() => {
+      const saved = { ...project, ...patch };
+      setCurrent(saved);
+      resolve(saved);
+    }, reject);
+  }));
+  return <SettingsLeaveGuardContext.Provider value={boundary.guards}>
+    {destination ? <p>Arrived at {destination}</p> : <>
+      <RepositorySettingsPage project={current} />
+      {["Scripts", "Another repository", "Back to app"].map((label) => <button key={label} onClick={() => {
+        if (boundary.canLeave()) setDestination(label);
+      }}>{label}</button>)}
+      {boundary.warning && <p>Navigation blocked until changes are saved</p>}
+    </>}
+  </SettingsLeaveGuardContext.Provider>;
+}
 
 describe("Project settings", () => {
   it("shows root and worktree folders as paths whose menu reveals or copies them, with no Change", async () => {
@@ -108,7 +134,7 @@ describe("Project settings", () => {
     expect(screen.getByRole("button", { name: "Refresh preview" })).toBeTruthy();
   });
 
-  it("saves an edit by itself once its preview is in and valid, and only the chosen repository's patterns", async () => {
+  it("commits a validated edit on blur, and only the chosen repository's patterns", async () => {
     render(<RepositorySettingsPage project={project} />);
     await screen.findByText(".env.local");
     const snapshot = mock.preview.mock.calls[0][2];
@@ -116,9 +142,91 @@ describe("Project settings", () => {
     await screen.findByText("config/local/app.json");
     expect(mock.preview).toHaveBeenLastCalledWith("/repo", [".env*", "config/local/**"], expect.any(String));
     expect(mock.preview.mock.calls.at(-1)?.[2]).toBe(snapshot);
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.blur(screen.getByRole("textbox"));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }));
     // The line being started stays under the cursor.
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(".env*\nconfig/local/**\n");
+  });
+
+  it("previews a paused intermediate glob without persisting it", async () => {
+    render(<RepositorySettingsPage project={project} />);
+    await screen.findByText(".env.local");
+    const textarea = screen.getByRole("textbox");
+    fireEvent.focus(textarea);
+    fireEvent.change(textarea, { target: { value: "*" } });
+    await screen.findByText("config/local/app.json");
+    expect(mock.preview).toHaveBeenLastCalledWith("/repo", ["*"], expect.any(String));
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.change(textarea, { target: { value: "*.local" } });
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(1));
+    expect(mock.update).toHaveBeenLastCalledWith("/repo", { repositorySettings: { filesToCopy: ["*.local"] } });
+  });
+
+  it("cancels a pending blur commit when editing resumes before validation", async () => {
+    let answer!: (value: RepositoryFilesPreview) => void;
+    render(<RepositorySettingsPage project={project} />);
+    await screen.findByText(".env.local");
+    mock.preview.mockImplementationOnce(() => new Promise<RepositoryFilesPreview>((resolve) => { answer = resolve; }));
+    const textarea = screen.getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "*" } });
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(answer).toBeDefined());
+    fireEvent.focus(textarea);
+    await act(async () => answer(result(["*"])));
+    expect(mock.update).not.toHaveBeenCalled();
+    fireEvent.blur(textarea);
+    await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(1));
+  });
+
+  it.each(["Scripts", "Another repository", "Back to app"])("prevents unmount via %s until a pending blur commit is validated and saved", async (destination) => {
+    let previewDone!: (value: RepositoryFilesPreview) => void;
+    let saveDone!: () => void;
+    render(<NavigationHarness />);
+    await screen.findByText(".env.local");
+    mock.preview.mockImplementationOnce(() => new Promise<RepositoryFilesPreview>((resolve) => { previewDone = resolve; }));
+    mock.persist.mockImplementationOnce(() => new Promise<void>((resolve) => { saveDone = resolve; }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**" } });
+    fireEvent.blur(screen.getByRole("textbox"));
+    fireEvent.click(screen.getByRole("button", { name: destination }));
+    expect(screen.getByText("Navigation blocked until changes are saved")).toBeTruthy();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("config/local/**");
+    await waitFor(() => expect(previewDone).toBeDefined());
+    await act(async () => previewDone(result(["config/local/**"])));
+    expect(mock.update).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: destination }));
+    expect(screen.queryByText(`Arrived at ${destination}`)).toBeNull();
+    await act(async () => saveDone());
+    fireEvent.click(screen.getByRole("button", { name: destination }));
+    expect(screen.getByText(`Arrived at ${destination}`)).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(mock.update).toHaveBeenCalledWith("/repo", { repositorySettings: { filesToCopy: ["config/local/**"] } });
+  });
+
+  it("keeps navigation guarded after a failed save until retry succeeds", async () => {
+    mock.persist.mockRejectedValueOnce(new Error("Cannot save"));
+    render(<NavigationHarness />);
+    await screen.findByText(".env.local");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**" } });
+    fireEvent.blur(screen.getByRole("textbox"));
+    await screen.findByRole("button", { name: "Retry save" });
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
+    expect(screen.getByRole("textbox")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
+    expect(screen.getByText("Arrived at Back to app")).toBeTruthy();
+  });
+
+  it("does not guard navigation for read-only include patterns", async () => {
+    mock.preview.mockResolvedValue(result(["config/local/**"], true));
+    render(<NavigationHarness />);
+    await screen.findByText("Patterns come from this repository's .worktreeinclude");
+    fireEvent.blur(screen.getByRole("textbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Back to app" }));
+    expect(screen.getByText("Arrived at Back to app")).toBeTruthy();
+    expect(mock.update).not.toHaveBeenCalled();
   });
 
   it("shows the repository include patterns read-only and never saves them", async () => {
@@ -128,6 +236,9 @@ describe("Project settings", () => {
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
     expect(textarea.readOnly).toBe(true);
     expect(textarea.value).toBe("config/local/**");
+    fireEvent.blur(textarea);
+    expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull();
+    expect(mock.update).not.toHaveBeenCalled();
     mock.preview.mockResolvedValue(result([".env*"]));
     fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
     await screen.findByText(".env.local");
@@ -153,6 +264,7 @@ describe("Project settings", () => {
     await waitFor(() => expect(answer).toBeDefined());
     mock.preview.mockResolvedValue({ ...result(), patterns: [{ pattern: "[", matches: [], error: "Unclosed character class" }] });
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "[" } });
+    fireEvent.blur(screen.getByRole("textbox"));
     await screen.findByRole("alert");
     await act(async () => answer(result(["slow"])));
     expect(screen.getByRole("alert").textContent).toBe("[: Unclosed character class");
@@ -160,16 +272,23 @@ describe("Project settings", () => {
     expect(screen.queryByText("config/local/app.json")).toBeNull();
   });
 
-  it("keeps the draft when saving fails and saves the next edit", async () => {
+  it("keeps the draft and explicitly retries unchanged text after a failed save", async () => {
     mock.update.mockRejectedValueOnce(new Error("Cannot save"));
     render(<RepositorySettingsPage project={project} />);
     await screen.findByText(".env.local");
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**" } });
+    fireEvent.blur(screen.getByRole("textbox"));
     expect((await screen.findByRole("alert")).textContent).toContain("Cannot save");
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("config/local/**");
     expect(mock.update).toHaveBeenCalledTimes(1);
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "config/local/**\n.env*" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh preview" }));
+    await screen.findByText("1 ignored file matches");
+    expect(screen.getByRole("alert").textContent).toContain("Cannot save");
+    expect(mock.update).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledTimes(2));
+    expect(mock.update.mock.calls[1]).toEqual(mock.update.mock.calls[0]);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry save" })).toBeNull());
   });
 
   it("reports unreadable previews and can refresh after recovery", async () => {

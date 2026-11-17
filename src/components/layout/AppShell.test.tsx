@@ -777,7 +777,7 @@ it.each(["app.nextSession", "app.previousSession", "app.settings"].flatMap((shor
   act(() => shortcuts.get(shortcut)!());
   expect(screen.getByLabelText(label)).toBe(editor);
   expect((editor as HTMLTextAreaElement).value).toBe("echo preserved");
-  expect(screen.getByText(/Save your script changes before leaving Settings/)).toBeTruthy();
+  expect(screen.getByText(/Save your changes before leaving Settings/)).toBeTruthy();
   expect(scriptSettings.step).not.toHaveBeenCalled();
   expect(scriptSettings.update).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: `Save ${kind} script` }));
