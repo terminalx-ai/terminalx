@@ -455,6 +455,15 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: 
     </>
   );
   const attentionInput = { tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state };
+  // Section-owned rows retain the workspace menu; ordinary projects keep
+  // main's flat session list and its recovery notice.
+  if (sessions.length && !extraActions) return <>
+    {rows}
+    {named && (resolveCloudAttention(node.item, attentionInput) || deletionLine(node.item)) && <li data-testid="cloud-workspace-notice" data-workspace={workspace.id}>
+      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
+      {deletionLine(node.item) && <p className="ml-6 text-[10px] text-faint">{deletionLine(node.item)}</p>}
+    </li>}
+  </>;
   if (!named) return rows;
   const selected = store.selectedCloudWorkspace === node.key;
   const extra = extraRepositories(node.item);

@@ -226,7 +226,7 @@ export function AgentDashboard() {
       additions, deletions,
       changes: additions === null || deletions === null ? null : additions + deletions,
       owner: session.ownerId ? owners.get(session.ownerId) ?? null : null,
-      ownerCell: isCloudDashboardSession(session) ? (session.ownerId ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={owners.get(session.ownerId) ?? "Owner unavailable"} /> : "Owner unavailable") : local ? "You" : undefined,
+      ownerCell: isCloudDashboardSession(session) ? (session.ownerId ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={owners.get(session.ownerId) ?? "Owner unavailable"} /> : "Owner unavailable") : undefined,
       locationCell: isCloudDashboardSession(session) ? <span className="inline-flex items-center gap-1">Cloud <PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} /></span> : undefined,
       updated: session.lastMessageAt ?? session.modified,
       created: session.created ?? null,

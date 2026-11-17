@@ -398,6 +398,8 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   await settle();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Display" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("button", { name: "Table" }));
+  fireEvent.keyDown(screen.getByRole("menu", { name: "Display" }), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(screen.queryByRole("row", { name: /Archived cloud work/ })).toBeNull();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Hiding archived" }), { button: 0, ctrlKey: false });
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));
@@ -414,9 +416,9 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();
   const row = await screen.findByRole("row", { name: /Archived cloud work/ });
-  expect(within(row).getByRole("img", { name: "Amy" })).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
   act(() => rememberPeople([{ userId: "amy", displayName: "Amy Updated" }]));
-  expect(within(row).getByRole("img", { name: "Amy Updated" })).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "View profile: Amy Updated" })).toBeTruthy();
   expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
   fireEvent.click(row);
   expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);
