@@ -85,6 +85,33 @@ describe("the shortcut registry", () => {
     }
   });
 
+  // #1131: the design's theme chord belongs to reopen on macOS.
+  it.each([true, false])("keeps light/dark and reopen distinct, including Option-modified key events (mac=%s)", (mac) => {
+    const keymap = resolveKeymap({}, mac);
+    const toggle = "mod+alt+shift+l";
+    const reopen = mac ? "mod+alt+t" : "mod+alt+shift+t";
+    expect(keymap["app.toggleMode"]).toEqual([toggle]);
+    expect(keymap["session.reopenTab"]).toEqual([reopen]);
+    const modifiers = mac ? { metaKey: true } : { ctrlKey: true };
+    for (const [event, owner] of [
+      [key({ ...modifiers, altKey: true, shiftKey: true, key: "Ò", code: "KeyL" }), "app.toggleMode"],
+      [key({ ...modifiers, altKey: true, shiftKey: !mac, key: "†", code: "KeyT" }), "session.reopenTab"],
+    ] as const) {
+      const chord = chordOf(event, mac);
+      expect(SHORTCUT_ACTIONS.filter((action) => keymap[action.id].includes(chord)).map((action) => action.id)).toEqual([owner]);
+      expect(bindingProblem(owner, chord, mac)).toBeNull();
+    }
+    expect(keycaps(toggle, mac)).toEqual(mac ? ["⌘", "⌥", "⇧", "L"] : ["Ctrl", "Alt", "Shift", "L"]);
+    expect(keycaps(reopen, mac)).toEqual(mac ? ["⌘", "⌥", "T"] : ["Ctrl", "Alt", "Shift", "T"]);
+  });
+
+  it("requires an explicit replacement to give the macOS reopen chord to light/dark", () => {
+    expect(saveShortcut("app.toggleMode", ["mod+alt+t"], { mac: true })).toMatchObject({
+      ok: false, conflict: { id: "session.reopenTab" },
+    });
+    expect(getPrefs().shortcuts).toEqual({});
+  });
+
   it("covers the three kinds of binding", () => {
     expect(bindingKind("mod+k")).toBe("chord");
     expect(bindingKind("escape")).toBe("key");

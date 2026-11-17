@@ -1,4 +1,4 @@
-import { AgentsTab } from "./SettingsSections";
+import { AppearanceTab, AgentsTab } from "./SettingsSections";
 import { SETTINGS_SECTIONS } from "./settingsRegistry";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,9 @@ import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SETTING_HIGHLIGHT_FADE_MS, SETTING_HIGHLIGHT_HOLD_MS, SettingsPage } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { bindingText, resetShortcut, saveShortcut } from "@/lib/shortcuts";
+import { setTheme } from "@/lib/theme";
+import { ShortcutsTab } from "./ShortcutsTab";
 import { movePaletteSelection } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
@@ -579,5 +582,29 @@ describe("consolidated page introductions (#1152)", () => {
     render(<AgentsTab />);
     expect(screen.getByText(SETTINGS_SECTIONS.agents.subtitle)).toBeTruthy();
     await act(async () => {});
+  });
+});
+
+// #1131: hints must follow the bound action, never the conflicting design chord.
+describe("light/dark shortcut hints", () => {
+  it("keeps Appearance and Shortcuts in sync through customization, removal and reset", () => {
+    setTheme("den");
+    setPrefs({ shortcuts: {} });
+    render(<><AppearanceTab /><ShortcutsTab /></>);
+    const assertHint = (binding: string) => {
+      const text = bindingText(binding);
+      expect(screen.getByText(`${text} switches light and dark`)).toBeTruthy();
+      expect(screen.getByRole("button", { name: `Switch light and dark: ${text}. Change` })).toBeTruthy();
+    };
+    assertHint("mod+alt+shift+l");
+    expect(screen.queryByText(`${bindingText("mod+alt+t")} switches light and dark`)).toBeNull();
+    act(() => { expect(saveShortcut("app.toggleMode", ["mod+alt+shift+f6"])).toEqual({ ok: true }); });
+    assertHint("mod+alt+shift+f6");
+    expect(screen.queryByText(`${bindingText("mod+alt+shift+l")} switches light and dark`)).toBeNull();
+    act(() => { expect(saveShortcut("app.toggleMode", [])).toEqual({ ok: true }); });
+    expect(screen.queryByText(/switches light and dark/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Switch light and dark: .*Change$/ })).toBeNull();
+    act(() => { expect(resetShortcut("app.toggleMode")).toEqual({ ok: true }); });
+    assertHint("mod+alt+shift+l");
   });
 });
