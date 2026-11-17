@@ -135,10 +135,10 @@ export function OpenSettingsFileButton({ projectPath }: { projectPath?: string |
     const state = !layer.exists ? "none yet" : layer.git ? GIT_WORDS[layer.git] : null;
     return { key: layer.layer, title: LAYER_TITLE[layer.layer], detail: state ? `${name} · ${state}` : name, path: layer.path!, displayPath, exists: layer.exists, icon: layer.layer === "repositoryShared" ? FolderGit2 : UserRoundPen, problemLine: layer.problem?.line ?? null, broken: !!layer.problem };
   });
-  // Shared first, as the design opens it; a project without one opens its local file, else Your settings.
+  // Shared first, as the design opens it; a project without one opens its local file, else explicitly offers personal settings.
   const ordered = [...project].sort((a, b) => Number(b.key === "repositoryShared") - Number(a.key === "repositoryShared"));
   const current = ordered.find((target) => target.exists) ?? user;
-  const name = shortFileName(current.displayPath);
+  const name = current === user ? `personal ${shortFileName(current.displayPath)}` : shortFileName(current.displayPath);
   const line = current.problemLine;
   const broken = current.broken;
   const prepare = () => current === user ? ensureUserFile(file) : Promise.resolve();
