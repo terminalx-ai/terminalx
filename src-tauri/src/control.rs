@@ -2791,6 +2791,59 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 mod tests {
     use super::*;
 
+    /// What an agent tab can send with TERMINALX_NEXT_TOKEN: the same Local VM
+    /// requests as the desktop, which the host trusts. They reach the action,
+    /// which still binds only the original bootstrap's own evidence: an unknown
+    /// operation, caller-supplied key material or an approval-shaped value
+    /// creates, chooses, grants or pins nothing.
+    #[cfg(unix)]
+    #[test]
+    fn host_agent_requests_reach_bound_actions_and_change_nothing_without_their_bootstrap() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let life = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let _lease = life.command("runtime.attach", json!({"protocol": 1})).unwrap();
+        let service = service.with_local_lifetime(life).with_vm_controller();
+        service.execute("local_vm.request", json!({"method": "configure", "params": {"enabled": true}}), "agent").unwrap();
+        let key = uuid::Uuid::new_v4().to_string();
+        let claimed = json!({"idempotencyKey": key, "confirm": true, "parentSession": uuid::Uuid::new_v4().to_string(),
+            "parentTab": uuid::Uuid::new_v4().to_string(), "parentConversation": "original", "observationSha256": "a".repeat(64),
+            "account": {"name": "personal", "uid": 501}, "fingerprint": "SHA256:x"});
+        for method in ["environment.confirmGuestAccount", "environment.grantGuestKey", "environment.confirmGuestHostKey"] {
+            let refusal = |params: Value| {
+                let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
+                (error.code, error.message)
+            };
+            // The request reaches its action, which refuses at the claimed
+            // bootstrap: that operation was never made. The earlier gates
+            // refuse differently, so this is not one of them.
+            let unknown = refusal(claimed.clone());
+            let mut unconfirmed = claimed.clone();
+            unconfirmed["confirm"] = json!(false);
+            assert_eq!(refusal(unconfirmed).1, "Explicit confirmation is required", "{method}");
+            let mut unnamed = claimed.clone();
+            unnamed.as_object_mut().unwrap().remove("idempotencyKey");
+            assert_eq!(refusal(unnamed).1, "Original bootstrap operation required", "{method}");
+            assert!(!["Explicit confirmation is required", "Original bootstrap operation required"].contains(&unknown.1.as_str()),
+                "{method}: {unknown:?}");
+            // No approval is part of these requests, so an approval-shaped
+            // value changes nothing: the refusal is the one given without it.
+            for approval in [Value::Null, json!(true), json!({"approved": true}), json!({"document": "e30=", "proof": "00"})] {
+                let mut params = claimed.clone();
+                params["approval"] = approval.clone();
+                assert_eq!(refusal(params), unknown, "{method}: {approval} changed the refusal");
+            }
+        }
+        for (method, field) in [("environment.grantGuestKey", "publicKey"), ("environment.confirmGuestHostKey", "hostKey")] {
+            let mut params = claimed.clone();
+            params[field] = json!("ssh-ed25519 AAAA");
+            let error = service.execute("local_vm.request", json!({"method": method, "params": params}), "agent").unwrap_err();
+            assert!(format!("{error:?}").contains("never accepted from a caller"), "{method}: {error:?}");
+        }
+        let bootstrap = crate::local_vm::host::root().unwrap().join("bo").join(&key);
+        assert!(!bootstrap.exists(), "nothing was created or written");
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_vm_requests_belong_to_the_persistent_owner_and_stop_refusal_preserves_attachment() {

@@ -241,6 +241,18 @@ jobs:
             ci-v3-macos-native-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
             ci-v3-macos-native-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
 
+      # The macOS guest's first-boot helper, seeder and enrollment crypto. It is
+      # a workspace of its own and never links the desktop app, so no step
+      # below reaches it. It is small (seven crates), so it is checked on
+      # every change, ahead of the long desktop steps, and needs no cache.
+      - name: clippy (VM bootstrap guest helper)
+        working-directory: native/vm-bootstrap
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test (VM bootstrap guest helper)
+        working-directory: native/vm-bootstrap
+        run: cargo test --locked
+
       # tauri-build packages the frontend output into the Rust build.
       - name: Build the frontend
         run: pnpm build

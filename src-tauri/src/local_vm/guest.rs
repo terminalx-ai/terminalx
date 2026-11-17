@@ -90,14 +90,20 @@ fn runtime_executable() -> PathBuf {
     PathBuf::from(INSTALL).join("bin/terminalx-serve")
 }
 pub(super) fn installation() -> Result<PathBuf> {
-    Ok(PathBuf::from(INSTALL))
+    #[cfg(target_os = "macos")]
+    { super::macos_account::installation() }
+    #[cfg(not(target_os = "macos"))]
+    { Ok(PathBuf::from(INSTALL)) }
 }
 
 pub(super) fn installed_identity() -> Result<(PathBuf, Identity)> {
     let base = installation()?;
     let identity = Identity::load(&base)?;
     #[cfg(target_os = "macos")]
-    super::guest_account::check_legacy_user()?;
+    {
+        super::macos_account::check_installation_binding(&base, identity.macos_account.as_ref())?;
+        if identity.macos_account.is_none() { super::guest_account::check_legacy_user()?; }
+    }
     Ok((base, identity))
 }
 
@@ -131,6 +137,8 @@ pub struct Identity {
     pub host_key_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<super::linux_profile::Account>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_account: Option<super::macos_account::Account>,
 }
 
 impl Identity {
@@ -151,7 +159,11 @@ impl Identity {
         Read::by_ref(&mut file).take(4097).read_to_end(&mut bytes)?;
         if bytes.len() > 4096 { bail!("Guest identity exceeds its bound"); }
         let identity: Self = serde_json::from_slice(&bytes)?;
+        if identity.account.is_some() && identity.macos_account.is_some() {
+            bail!("Guest identity cannot bind two operating-system accounts");
+        }
         if let Some(account)=&identity.account { account.check_current()?; }
+        if let Some(account)=&identity.macos_account { account.check_current(base)?; }
         validate_id(&identity.environment_id)?;
         validate_id(&identity.generation)?;
         if identity.host_key_sha256.len() != 64 || !identity.host_key_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -161,6 +173,16 @@ impl Identity {
             bail!("Incompatible local guest protocol");
         }
         Ok(identity)
+    }
+
+    fn check_account(&self, expected: Option<&super::macos_account::Account>, runtime: Option<&str>) -> Result<()> {
+        if expected != self.macos_account.as_ref() {
+            bail!("Guest personalized account differs from the retained transport binding");
+        }
+        if self.macos_account.is_some() {
+            super::transport::validate_runtime_sha(runtime.context("Personalized runtime digest required")?)?;
+        }
+        Ok(())
     }
 
     /// Only the installing host holds the key; a worker, which runs as this
@@ -194,6 +216,8 @@ fn check_runtime(expected: Option<&str>, actual: &str) -> Result<()> {
 pub struct Request {
     #[serde(default, rename = "expectedRuntimeSha256")]
     pub expected_runtime_sha256: Option<String>,
+    #[serde(default, rename = "expectedMacosAccount")]
+    pub expected_macos_account: Option<super::macos_account::Account>,
     /// The installing host's key (`guest_key.rs`); never logged or stored.
     #[serde(rename = "hostKey")]
     pub host_key: String,
@@ -528,6 +552,7 @@ impl Guest {
         let identity = Identity::load(&self.base)?;
         identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
+        identity.check_account(request.expected_macos_account.as_ref(), request.expected_runtime_sha256.as_deref())?;
         if identity != self.state.lock().unwrap().identity {
             bail!("Guest identity changed; restart/reconcile required");
         }
@@ -804,6 +829,9 @@ impl Guest {
             .context("Explicit files array is required")?;
         let mut state = self.state.lock().unwrap();
         validate_task(&state.identity, &self.base, &task, &files)?;
+        if let Some(super::transport::Transport::MacosPersonalized { binding }) = &task.transport_binding {
+            check_runtime(Some(&binding.runtime_sha256), &self.runtime_sha256)?;
+        }
         if state.canceled_targets.contains_key(&task.target.task_id) {
             bail!("This task target was canceled before start; delayed starts are refused");
         }
@@ -818,6 +846,7 @@ impl Guest {
                 || r.task.target.task_id == task.target.task_id
         }) {
             if prior.task.target != task.target
+                || prior.task.transport_binding != task.transport_binding
                 || prior.task.idempotency_key != task.idempotency_key
                 || prior.task.input_digest != task.input_digest
             {
@@ -2336,6 +2365,13 @@ fn page(task: &Task, after: u64) -> Result<Task> {
 }
 
 fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInput]) -> Result<()> {
+    match (&identity.macos_account, &task.transport_binding) {
+        (Some(account), Some(super::transport::Transport::MacosPersonalized { binding }))
+            if &binding.account == account && binding.target.environment_id == identity.environment_id
+                && binding.target.generation == identity.generation => {},
+        (None, None) => {},
+        _ => bail!("Task personalized account/transport differs from guest identity"),
+    }
     for id in [
         &task.target.environment_id,
         &task.target.workspace_id,
@@ -2704,8 +2740,17 @@ fn task_launch_config(
             identity.generation.clone(),
         ),
     ];
-    let install = PathBuf::from(INSTALL);
-    let server = json!({"command":runtime_executable(),"args":["local-vm-computer","--stdio","--task",target],
+    // A personalized macOS guest runs from its own account's installation;
+    // every other guest keeps the fixed one (on Linux, the root-sealed copy).
+    let (install, runtime) = match &identity.macos_account {
+        Some(account) => {
+            let install = account.installation()?;
+            let runtime = install.join("bin/terminalx-serve");
+            (install, runtime)
+        }
+        None => (PathBuf::from(INSTALL), runtime_executable()),
+    };
+    let server = json!({"command":runtime,"args":["local-vm-computer","--stdio","--task",target],
         "env":{"TERMINALX_LOCAL_VM_ENVIRONMENT_ID":identity.environment_id,"TERMINALX_LOCAL_VM_GENERATION":identity.generation,
         "TERMINALX_HOME":install.join("runtime")}});
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -2780,6 +2825,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         let (base, identity) = installed_identity()?;
         identity.check_host(&request.host_key)?;
         identity.check(&request.params)?;
+        identity.check_account(request.expected_macos_account.as_ref(), request.expected_runtime_sha256.as_deref())?;
         std::env::set_var("TERMINALX_HOME", base.join("runtime"));
         for name in [
             crate::hooks::CONTROL_SOCKET_ENV,
@@ -2791,7 +2837,7 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
         }
         crate::control::call(
             "local_vm.guest",
-            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256,"hostKey":request.host_key}),
+            json!({"method":request.method,"params":request.params,"expectedRuntimeSha256":request.expected_runtime_sha256,"expectedMacosAccount":request.expected_macos_account,"hostKey":request.host_key}),
             Duration::from_secs(40),
         )
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))
@@ -2831,6 +2877,7 @@ mod tests {
         let env = host.enroll("Test guest", "local:test-guest").unwrap();
         let identity = Identity {
             account: None,
+            macos_account: None,
             environment_id: env.id.clone(),
             generation: env.generation.clone(),
             protocol: PROTOCOL,
@@ -3857,6 +3904,7 @@ mod tests {
         Request {
             // As the host sends it; a Linux guest refuses a request without it.
             expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+            expected_macos_account: None,
                 host_key: HOST_KEY.into(),
             method: method.into(),
             params,
@@ -3982,6 +4030,7 @@ mod tests {
                 guest
                     .dispatch(Request {
                 expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+                expected_macos_account: None,
                 host_key: HOST_KEY.into(),
                         method: req.method.clone(),
                         params: req.params.clone(),
@@ -4009,6 +4058,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+                expected_macos_account: None,
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: changed
@@ -4021,6 +4071,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+                expected_macos_account: None,
                 host_key: HOST_KEY.into(),
                 method: req.method,
                 params: wrong
@@ -4047,6 +4098,7 @@ mod tests {
         guest
             .dispatch(Request {
                 expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+                expected_macos_account: None,
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone(),
@@ -4103,6 +4155,7 @@ mod tests {
         assert!(guest
             .dispatch(Request {
                 expected_runtime_sha256: Some(guest.runtime_sha256.clone()),
+                expected_macos_account: None,
                 host_key: HOST_KEY.into(),
                 method: req.method.clone(),
                 params: req.params.clone()
@@ -5111,6 +5164,47 @@ mod tests {
         let present = installation_present_at(&base);
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(!present.unwrap());
+    }
+
+    #[test]
+    fn personalized_rpc_binding_and_provider_paths_refuse_legacy_or_changed_accounts() {
+        let (_home, guest, task) = setup();
+        let mut identity = guest.state.lock().unwrap().identity.clone();
+        let account = super::super::macos_account::Account {
+            short_name: "personal".into(), uid: 501, gid: 20,
+            home: "/Users/personal".into(), home_device: 1, home_inode: 42,
+        };
+        let digest = "a".repeat(64);
+        identity.check_account(None, None).unwrap();
+        assert!(identity.check_account(Some(&account), Some(&digest)).is_err());
+        // An account-bound request must not execute against an old default-
+        // account guest, even when environment/generation happen to match.
+        let mut rpc = request(&guest, "describe", json!({}));
+        rpc.expected_macos_account = Some(account.clone());
+        assert!(guest.dispatch(rpc).is_err());
+        identity.macos_account = Some(account.clone());
+        identity.check_account(Some(&account), Some(&digest)).unwrap();
+        assert!(identity.check_account(None, Some(&digest)).is_err());
+        assert!(identity.check_account(Some(&account), None).is_err());
+        for (field, value) in [("uid", json!(502)), ("gid", json!(21)),
+            ("shortName", json!("another")), ("home", json!("/Users/another")),
+            ("homeDevice", json!(2)), ("homeInode", json!(43))] {
+            let mut changed = json!(account); changed[field] = value;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert!(identity.check_account(Some(&changed), Some(&digest)).is_err(), "{field}");
+        }
+        let config = task_launch_config(&identity, &task.target, "codex").unwrap();
+        let table: toml::Table = toml::from_str(config.args.strip_prefix(" -c '").unwrap().strip_suffix('\'').unwrap()).unwrap();
+        let server = &table["mcp_servers"]["guest_computer"];
+        assert_eq!(server["command"].as_str(), Some("/Users/personal/.terminalx-local/bin/terminalx-serve"));
+        assert_eq!(server["env"]["TERMINALX_HOME"].as_str(), Some("/Users/personal/.terminalx-local/runtime"));
+        assert!(!config.args.contains("/Users/lume"));
+        // The legacy durable identity retains its original serialized schema.
+        let mut legacy = json!(identity);
+        legacy.as_object_mut().unwrap().remove("macosAccount");
+        let legacy: Identity = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.macos_account.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("macosAccount").is_none());
     }
 
     #[test]

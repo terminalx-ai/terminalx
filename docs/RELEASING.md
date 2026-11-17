@@ -294,6 +294,39 @@ validates the stapled tickets on any DMG and on the app inside it, and runs
 Gatekeeper's assessment of both. Run it on a downloaded release to confirm
 what a new Mac will see.
 
+### Signing the VM guest helper
+
+`python3 -I scripts/release/release.py vm-bootstrap <new-output-directory>`
+builds the macOS VM guest helper, its validation probe and the seed tool
+(`native/vm-bootstrap`) and signs them with the release's own Developer ID
+Application identity. It is not a release step: it needs no version, records
+or clean checkout, and `all` does not run it.
+
+- **Same identity, one resolver.** The identity is the one the `build` step
+  gives Tauri: `APPLE_SIGNING_IDENTITY`, or else the one Developer ID
+  Application identity in the login keychain
+  (`txrelease/credentials.py`). `scripts/build-vm-bootstrap.mjs --sign` is
+  handed it in `APPLE_SIGNING_IDENTITY` and never looks one up. Run by itself
+  without that variable, `--sign` refuses before building.
+- **Nothing is read from the repository.** No key, certificate or password is
+  read by either script; `codesign` uses the keychain.
+- **How it signs.** Hardened runtime, a secure timestamp (Apple's timestamp
+  service, so it needs a network) and a fixed identifier per executable:
+  `com.terminalx.next.vm-bootstrap`, `com.terminalx.next.vm-validation-probe`
+  and `com.terminalx.next.vm-seed`.
+- **Checked afterwards.** The step verifies each executable (`codesign
+  --verify --strict`), and that it reports that identity, its team, its
+  identifier, the runtime and a timestamp, and is the file the manifest
+  records. `manifest.json` records the signed digests, the digests before
+  signing, the team and `developerIdSigned: true`.
+- **Not notarized.** `notarized` stays `false`: nothing is submitted to Apple
+  for notarization, catalogued, installed or run in a guest.
+
+Without `--sign`, `node scripts/build-vm-bootstrap.mjs <new-output-directory>`
+still makes the unsigned build, which carries only the linker's ad hoc
+signature. `pnpm test:vm-bootstrap` covers that build; the signed build has its
+own test, which runs only with `TX_VM_BOOTSTRAP_SIGN=1` and the identity set.
+
 The scripts need Python 3.9 or newer; the `python3` macOS ships
 (`/usr/bin/python3`) is 3.9, and an older one stops at once with a message
 naming the minimum. Their tests need the same Python and `git`, and run on

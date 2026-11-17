@@ -1,0 +1,2 @@
+# Unified-diff context includes a single space on otherwise blank lines.
+bootstrap.patch whitespace=-blank-at-eol

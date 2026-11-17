@@ -97,6 +97,7 @@ mod tests {
         State {
             identity: Identity {
                 account: None,
+            macos_account: None,
                 environment_id: params.environment_id.clone(),
                 generation: params.generation.clone(),
                 protocol: 1,
