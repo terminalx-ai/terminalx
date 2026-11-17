@@ -2114,7 +2114,9 @@ none of the rest.
 - **Account label.** `accountLabel` is the label of the account the tab runs
   on, or last ran on (its `launchedAccount`, else `account`, else the
   machine's own login), and only when that agent has two or more accounts on
-  the machine. The header's label and the tab's mark read it, and never this
+  the machine, and is sent only to a connection that manages the machine,
+  since a label can be an email address. The header's label and the tab's
+  mark read it, and never this
   computer's accounts (`TabAccountLabel`, `TabAccountMark`).
 - **Continue in a new tab.** The title-bar button reads "Continue in a new
   tab…" where the machine grants `machine/7` and `session/2`. The dialog
