@@ -1,3 +1,4 @@
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { FileLock, Info, Lock, Play, ShieldAlert } from "lucide-react";
@@ -170,6 +171,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
   const dirty = draft !== value || (kind === "archive" && draftTimeout !== timeout);
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  useSettingsLeaveGuard(dirtyRef.current || busy);
   const saving = useRef(false);
   useEffect(() => {
     // Follow the resolved value until the person starts editing.
@@ -208,6 +210,7 @@ function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId 
   return <div className="flex flex-col gap-2">
     <div role="group" aria-label={kind === "setup" ? "Setup" : "Archive"} className={CARD}>
       <CardHeader title={kind === "setup" ? "Setup" : "Archive"} description={kind === "setup" ? "runs once when a worktree is created" : "runs before a worktree is removed"}>
+        {!locked && (dirty || busy) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : `Save ${kind} script`}</Button>}
         {locked && <Lock className="size-3.5 shrink-0 text-warning" aria-label="Locked" />}
         {chip && <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded bg-mention/10 px-1.5 py-0.5 text-[11px] text-mention"><FileLock className="size-3" aria-hidden />{chip}</span>}
         {kind === "setup" ? <EnvironmentInfo environmentId={environmentId} /> : <label className="flex shrink-0 items-center gap-2 text-xs text-faint" title="If it fails or times out, TerminalX asks before removing the worktree.">timeout
@@ -258,6 +261,7 @@ function RunCard({ project }: { project: Project }) {
   const [message, setMessage] = useState<string | null>(null);
   const dirtyRef = useRef(false);
   dirtyRef.current = draft !== value;
+  useSettingsLeaveGuard(dirtyRef.current || busy);
   const saving = useRef(false);
   useEffect(() => { if (!dirtyRef.current) setDraft(value); }, [value, first?.id]);
   const save = async () => {
@@ -284,6 +288,7 @@ function RunCard({ project }: { project: Project }) {
   return <div className="flex flex-col gap-2">
     <div role="group" aria-label="Run" className={CARD}>
       <CardHeader title="Run" description={first && first.name !== "Run" ? `starts and stops the app for this session · ${first.name}` : "starts and stops the app for this session"}>
+        {(dirtyRef.current || busy) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : "Save run script"}</Button>}
         {keys.length > 0 && <KbdGroup keys={keys} />}
       </CardHeader>
       <div onKeyDown={(event) => saveKey(event, () => void save())}>

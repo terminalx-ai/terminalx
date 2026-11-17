@@ -1,3 +1,4 @@
+import { SettingsLeaveGuardContext } from "./settingsLeaveGuard";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { settingsSectionOffered } from "@/lib/settingsSections";
 import { SettingsFileError } from "./SettingsFile";
@@ -66,6 +67,14 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   onOpenSkills?: () => void;
   onOpenUsage?: () => void;
 }) {
+  const leaveGuards = useRef(new Set<() => boolean>());
+  const [leaveWarning, setLeaveWarning] = useState(false);
+  const canLeave = () => {
+    const blocked = [...leaveGuards.current].some((guard) => guard());
+    setLeaveWarning(blocked);
+    return !blocked;
+  };
+  const close = () => { if (canLeave()) onBack(); };
   const initial = resolveSetting(initialTab);
   const [section, setSection] = useState<SettingsSection>(initial.section);
   const [projectPath, setProjectPath] = useState<string | undefined>(initial.section === "repositories" ? initialProjectPath : undefined);
@@ -111,6 +120,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   }, [clearHighlight]);
   useEffect(() => clearHighlight, [clearHighlight]);
   const changeQuery = (value: string) => {
+    if (value.trim() && !canLeave()) return;
     // A search hides the open section, and with it any row still marked from the last open.
     if (value.trim()) clearHighlight();
     setQuery(value);
@@ -183,7 +193,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       inputRef.current?.focus();
       return;
     }
-    onBack();
+    close();
   });
   useHotkey("mod+f", () => {
     if (hasEscapeOverlay(resultsRef.current)) return false;
@@ -192,6 +202,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   }, { global: true });
   // A page chosen in the sidebar opens at its top with no row marked; only search and links name a row (PRO-387).
   const choose = (next: SettingsSection, path?: string, row?: SettingId, page?: ProjectPage) => {
+    if (!canLeave()) return;
     if (!row) clearHighlight();
     setSection(next);
     setProjectPath(path);
@@ -216,10 +227,11 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   return (
     // The settings menu stands where the project sidebar stands, at its width and in its row style, so opening Settings
     // reads as the sidebar changing what it lists rather than a different screen.
+    <SettingsLeaveGuardContext.Provider value={leaveGuards.current}>
     <main className="flex h-full min-w-0 flex-1 bg-background" aria-label="Settings">
       <aside className="flex h-full min-h-0 w-(--sidebar-w) shrink-0 flex-col border-r border-hairline">
         <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-1 pl-[78px] pr-2">
-          <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={onBack}><ArrowLeft /></Button>
+          <Button variant="ghost" size="icon-sm" aria-label="Back to previous page" onClick={close}><ArrowLeft /></Button>
           <h1 className="px-1 text-sm font-medium">Settings</h1>
         </div>
         {/* Search heads the menu, as it does the things it searches. */}
@@ -381,6 +393,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
               <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
             </div>
+            {leaveWarning && <p role="alert" className="mb-3 text-sm text-destructive">Save your script changes before leaving Settings. If a save is in progress, wait for it to finish.</p>}
             <SettingsHeaderSlotProvider value={headerSlot}>
               {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
             </SettingsHeaderSlotProvider>
@@ -391,6 +404,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       </div>
       <CantSaveToast />
     </main>
+    </SettingsLeaveGuardContext.Provider>
   );
 }
 
