@@ -88,6 +88,26 @@ for (const width of [200, 268, 420]) {
     const listBox = rect(await list.boundingBox());
     const orgA = page.locator('[data-testid="cloud-org-list"][data-org="org-a"]');
 
+    // The quota belongs to the fold's description and is reachable without a nested tab stop.
+    const fold = orgA.getByRole("button", { name: "Share Lab", exact: true });
+    await fold.focus();
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+    await page.getByRole("tooltip").waitFor();
+    const keyboardFocused = await fold.evaluate((el) => document.activeElement === el);
+    const quotaTooltip = await page.getByRole("tooltip").textContent();
+    await page.keyboard.press("Escape");
+    await page.getByRole("tooltip").waitFor({ state: "hidden" });
+    const quotaDescription = await fold.evaluate((el) => document.getElementById(el.getAttribute("aria-describedby"))?.textContent);
+    await page.keyboard.press("Enter");
+    const keyboardCollapsed = await fold.getAttribute("aria-expanded") === "false";
+    await page.keyboard.press("Space");
+    failed += report(`cloud quota keyboard (${name})`, {
+      "Tab reaches the organization fold and reveals usage": keyboardFocused && quotaTooltip === "1 of 2 cloud workspaces running",
+      "usage remains described after Escape": quotaDescription === "1 of 2 cloud workspaces running",
+      "Enter and Space still toggle the fold": keyboardCollapsed && await fold.getAttribute("aria-expanded") === "true",
+    });
+
     // The titlebar: every button inside the sidebar, the View menu's last among the left ones.
     const titlebar = await page.getByTestId("sidebar-titlebar").getByRole("button").evaluateAll((buttons) =>
       buttons.map((button) => {

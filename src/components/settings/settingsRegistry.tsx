@@ -13,9 +13,6 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.";
 
-export const MACHINES_DESCRIPTION =
-  "Settings → Machines: let other computers that run TerminalX operate this Mac, and add machines this Mac can operate. Each computer pairs with a one-time code and a fingerprint you compare on both screens before choosing Allow. While it is on, agents in this Mac's sessions can operate the paired machines with the terminalx command line.";
-
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
 
@@ -323,8 +320,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
-    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version"], scope: "user",
+    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it. Agents in this Mac's sessions can operate the paired machines with the terminalx command line.",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version", "guide", "help", "cli", "terminalx"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({
@@ -374,12 +371,6 @@ export const SETTINGS_ROWS = [
     description: LOCAL_VM_TASKS_DESCRIPTION,
     searchTerms: ["experimental", "local vm", "vm", "virtual machine", "computer", "desktop", "tasks", "guest", "linux", "macos"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
-  }),
-  defineSetting({
-    id: "experimental.machines", section: "experimental", title: "Machines",
-    description: MACHINES_DESCRIPTION,
-    searchTerms: ["experimental", "machines", "operate", "remote", "computer", "pair", "pairing code", "mac mini", "server"], scope: "user",
-    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.machines" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",

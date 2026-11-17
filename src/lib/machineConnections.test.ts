@@ -91,10 +91,21 @@ async function started() {
 const commands = (name: string) => mocks.invoke.mock.calls.filter(([command]) => command === name);
 
 describe("machine connections", () => {
-  it("reads nothing and attaches nothing until Machines is on", async () => {
+  it("reads nothing and attaches nothing until a window starts them", async () => {
     await flush();
     expect(mocks.invoke).not.toHaveBeenCalled();
     expect(store.getMachineConnections()).toMatchObject({ ready: false, machines: [], connections: {} });
+  });
+
+  it("with no machine paired reads the empty list and attaches nothing (PRO-360)", async () => {
+    paired = [];
+    views = [];
+    stop = store.startMachineConnections();
+    await vi.waitFor(() => expect(store.getMachineConnections().ready).toBe(true));
+    await flush();
+    expect(store.getMachineConnections()).toMatchObject({ machines: [], connections: {}, error: null });
+    expect(commands("machine_remote_attach")).toEqual([]);
+    expect(commands("machines_reconnect")).toEqual([]);
   });
 
   it("attaches every paired machine once, with its connection keyed machine:<id>", async () => {

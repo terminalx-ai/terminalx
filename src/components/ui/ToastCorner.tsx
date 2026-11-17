@@ -1,8 +1,11 @@
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { liftClearOf } from "@/components/cleanup/CleanupIndicator";
 
-/** What the stack keeps off: the composer, and the cards waiting on the reader above it. */
-const AVOID = "[data-composer-box], [data-toast-avoid]";
+/**
+ * What the stack keeps off: the composer, the cards waiting on the reader
+ * above it, and the held follow-ups over it (PRO-380), which are its controls too.
+ */
+const AVOID = "[data-composer-box], [data-toast-avoid], [data-held-tray]";
 
 /** Kept from the window's top edge however tall the composer is. */
 const TOP_MARGIN = 8;

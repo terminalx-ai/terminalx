@@ -246,7 +246,7 @@ const ShowAgents = createContext(false);
  * that belong to none. Workspaces and tabs are not levels here; a row names
  * its branch, and the full tree is one click away as the detailed sidebar.
  */
-export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const order = useSidebarOrder();
   const filter = useSidebarFilter();
@@ -325,7 +325,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <SidebarTitlebar onHide={onHide} />
 
       <div className="shrink-0 px-2">
-        <AppDestinations onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
+        <AppDestinations onOpenHome={onOpenHome} onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
@@ -472,6 +472,7 @@ export function ListSection({
   title,
   mark,
   note,
+  description,
   heading = true,
   forceOpen = false,
   onMenu,
@@ -485,11 +486,14 @@ export function ListSection({
   title?: string;
   mark?: ReactNode;
   note?: ReactNode;
+  /** Persistent accessible description, also revealed on hover or keyboard focus. */
+  description?: string;
   heading?: boolean;
   forceOpen?: boolean;
   /** Open the section's menu: a right-click, or the context-menu key, on its header. */
   onMenu?: () => void;
 } & Record<`data-${string}`, string>) {
+  const descriptionId = useId();
   const [expanded, toggle] = useFold(`list:${id}`, true);
   const open = expanded || forceOpen || !heading;
   return (
@@ -504,22 +508,26 @@ export function ListSection({
             onMenu();
           })}
         >
-          <button
-            type="button"
-            id={`list-${id}`}
-            onClick={toggle}
-            aria-expanded={open}
-            aria-label={label}
-            title={title}
-            className={cn(
-              "flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-              !mark && "text-[11px] font-medium uppercase tracking-[.08em] text-faint hover:text-muted-foreground",
-            )}
-          >
-            {mark}
-            <span data-list-name className={cn("min-w-0 shrink-0 truncate", mark && "max-w-[60%] text-[12.5px] font-medium text-foreground/90")}>{label}</span>
-            {note && <span className="min-w-0 truncate text-[11px] text-faint">{note}</span>}
-          </button>
+          <WithTooltip label={description}>
+            <button
+              type="button"
+              id={`list-${id}`}
+              onClick={toggle}
+              aria-expanded={open}
+              aria-label={label}
+              aria-describedby={description ? descriptionId : undefined}
+              title={title}
+              className={cn(
+                "flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                !mark && "text-[11px] font-medium uppercase tracking-[.08em] text-faint hover:text-muted-foreground",
+              )}
+            >
+              {mark}
+              <span data-list-name className={cn("min-w-0 shrink-0 truncate", mark && "max-w-[60%] text-[12.5px] font-medium text-foreground/90")}>{label}</span>
+              {note && <span className="min-w-0 truncate text-[11px] text-faint">{note}</span>}
+            </button>
+          </WithTooltip>
+          {description && <span id={descriptionId} className="sr-only">{description}</span>}
           {actions && <div className="flex min-w-0 shrink-0 items-center gap-0.5">{actions}</div>}
           {/* The fold at the header's end, as on a project's row: shown on hover or focus, and always while folded. */}
           <button

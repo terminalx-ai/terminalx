@@ -22,7 +22,7 @@ export const SETTINGS_SECTIONS = [
   { id: "repositories", title: "Projects", description: "Project paths, preview URLs, files to copy, scripts, actions and workspace cleanup", terms: ["repositories repository project git root worktrees ignored glob patterns env worktreeinclude setup archive hooks terminal"] },
   { id: "organizations", title: "Organizations", description: "Members, cloud workspaces and organization settings", terms: ["team invite billing compute environment agent logins routes github setup"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks and Machines", terms: ["machines operate other computers", "app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, and Local VM tasks", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 
@@ -32,7 +32,6 @@ export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 export function settingsSectionOffered(tab: SettingsTab): boolean {
   if (tab === "orchestrator") return getExperimentalSettings()?.orchestratorRuns === true;
   if (tab === "localVms") return getExperimentalSettings()?.localVmTasks === true;
-  if (tab === "machines") return getExperimentalSettings()?.machines === true;
   return true;
 }
 

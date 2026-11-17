@@ -5537,7 +5537,6 @@ pub fn set_experimental_settings(
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
     local_vm_tasks: Option<bool>,
-    machines: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
     if let Some(on) = native_codex {
@@ -5551,9 +5550,6 @@ pub fn set_experimental_settings(
     }
     if let Some(on) = local_vm_tasks {
         settings.experimental.local_vm_tasks = on;
-    }
-    if let Some(on) = machines {
-        settings.experimental.machines = on;
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)

@@ -64,11 +64,12 @@ const ACTIONS = [
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
 
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
-  { id: "app.home", label: "Home", group: "App", keys: [] },
+  // Keep Mod+G / Mod+Shift+G for next/previous search matches in editors and chats.
+  { id: "app.home", label: "Home", group: "App", keys: ["mod+alt+0"] },
   { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"], menu: { section: "file", order: 0, label: "New Chat", target: "focused" } },
   { id: "app.startFrom", label: "Start session from…", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1.5, label: "Start From…" } },
   { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"], menu: { section: "go", order: 1, label: "Issues" } },
-  { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
+  { id: "app.agentDashboard", label: "Overview", group: "App", keys: ["mod+1"], menu: { section: "go", order: 0, label: "Overview" } },
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
   // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
@@ -102,8 +103,9 @@ const ACTIONS = [
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },
-  // The browser's keys: the main modifier and a digit for a position in the tab row, 9 for the last tab.
-  { id: "session.tab1", label: "Switch to tab 1", group: "Session", keys: ["mod+1"] },
+  // Overview owns mod+1 everywhere. Add Shift for tab 1; other positions keep their existing keys.
+  // Explicit saved bindings still win over these defaults, including a saved mod+1 for tab 1.
+  { id: "session.tab1", label: "Switch to tab 1", group: "Session", keys: ["mod+shift+1"] },
   { id: "session.tab2", label: "Switch to tab 2", group: "Session", keys: ["mod+2"] },
   { id: "session.tab3", label: "Switch to tab 3", group: "Session", keys: ["mod+3"] },
   { id: "session.tab4", label: "Switch to tab 4", group: "Session", keys: ["mod+4"] },
@@ -311,6 +313,17 @@ export function keycaps(binding: string, mac = isMac): string[] {
           return p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1);
       }
     });
+}
+
+/** ARIA uses KeyboardEvent key names, not the glyphs drawn on keycaps. */
+export function ariaKeyShortcut(binding: string, mac = isMac): string | undefined {
+  if (holdCode(binding)) return undefined;
+  const names: Record<string, string> = {
+    mod: mac ? "Meta" : "Control", ctrl: "Control", meta: "Meta", alt: "Alt", shift: "Shift",
+    up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
+    escape: "Escape", enter: "Enter", space: "Space", plus: "Plus",
+  };
+  return normalizeBinding(binding).split("+").map((key) => names[key] ?? (key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1))).join("+");
 }
 
 /** A binding in a sentence: "⌘⇧D", "Ctrl+Shift+D", "Right ⌥". */
