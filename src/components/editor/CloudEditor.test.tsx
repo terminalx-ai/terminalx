@@ -12,7 +12,7 @@ import { EditorPane } from "./EditorPane";
 
 vi.mock("@/lib/api", () => ({ api: { headTree: vi.fn(), fileContentsAt: vi.fn() }, fs: {} }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn() }));
 
 const SESSION = "cloud:org-1:ws-1";
 const KEY = SESSION;
@@ -70,8 +70,8 @@ beforeEach(() => {
 afterEach(async () => {
   cleanup();
   unregister();
-  const { ask } = await import("@tauri-apps/plugin-dialog");
-  vi.mocked(ask).mockResolvedValue(true);
+  const { confirmInApp } = await import("@/lib/confirm");
+  vi.mocked(confirmInApp).mockResolvedValue(true);
   await closeAllEditors(SESSION);
 });
 

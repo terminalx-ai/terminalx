@@ -84,7 +84,7 @@ export function NotificationsOffCard() {
       data-notifications-off
       className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm shadow-surface hairline animate-fade-in"
     >
-      <BellSlash className="mt-0.5 size-4 shrink-0 text-warning" />
+      <BellSlash data-notifications-off-icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">Notifications are off for TerminalX</div>
         <div className="mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">

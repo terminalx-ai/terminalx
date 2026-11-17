@@ -5,7 +5,8 @@ import { GroupHeader, LocalSidebarSections, MoveToLocalSectionItems } from "./Lo
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { createContext, useContext, useId, useMemo, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import { Archive, ArchiveRestore, ChevronDown, CircleDot, Copy, Ellipsis, ExternalLink, Eye, EyeOff, Folder, FolderInput, FolderOpen, FolderPlus, GitBranch, GitPullRequest, GitPullRequestArrow, Github, Laptop, Link, Mail, Palette, Pencil, PictureInPicture2, Pin, Plus, Settings, Share2, SquarePen, SquareTerminal, Trash2 } from "@/icons";
-import { ask as askDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -214,7 +215,7 @@ export async function confirmRemoveProject(group: ConversationGroup) {
   const detail = conversations
     ? `${conversations} (View → Show archived lists ${open.length === 1 ? "it" : "them"}), and the folder on disk is left as it is.`
     : "The folder on disk is left as it is.";
-  const yes = await askDialog(`Remove ${group.name} from TerminalX? ${detail}`, { title: "Remove project", kind: "warning", okLabel: "Remove", cancelLabel: "Cancel" }).catch(() => false);
+  const yes = await confirmInApp({ title: `Remove ${group.name} from TerminalX?`, body: detail, action: "Remove", destructive: true });
   if (!yes) return;
   try {
     await archiveSessions(open.map((session) => session.id), true);

@@ -51,7 +51,7 @@ const { setPrefs } = await import("@/lib/prefs");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } = await import("./Dictation");
 
-// jsdom is not a Mac, so the macOS default (hold Right Option, or ⌘⇧D) is stored explicitly; `mod` is Ctrl here.
+// jsdom is not a Mac, so the macOS default (hold Right Option, or ⇧⌘D) is stored explicitly; `mod` is Ctrl here.
 const MAC_DICTATION = { "composer.dictate": ["hold:AltRight", "mod+shift+d"] };
 const rightOption = { key: "Alt", code: "AltRight", altKey: true };
 
@@ -138,7 +138,7 @@ describe("holding Right Option to dictate into the composer", () => {
     expect(startDictation).not.toHaveBeenCalled();
   });
 
-  it("keeps ⌘⇧D as a toggle, which a hold and its release do not stop", () => {
+  it("keeps ⇧⌘D as a toggle, which a hold and its release do not stop", () => {
     render(<Composer />);
     fireEvent.keyDown(document.body, { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true });
     expect(startDictation).toHaveBeenCalledTimes(1);

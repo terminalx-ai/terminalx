@@ -23,6 +23,10 @@ describe("Notifications are off for TerminalX", () => {
     const card = screen.getByRole("alert");
     expect(card.textContent).toContain("Notifications are off for TerminalX");
     expect(card.textContent).toContain("“Show the diff inside edit approvals” needs your approval, but macOS blocks TerminalX banners and the dock badge.");
+    // PRO-400: the bell-off icon is in the muted text colour, not amber.
+    const icon = card.querySelector("[data-notifications-off-icon]")!;
+    expect(icon.getAttribute("class")).toContain("text-muted-foreground");
+    expect(icon.getAttribute("class")).not.toContain("text-warning");
   });
 
   it("opens the app's own page under System Settings › Notifications", async () => {

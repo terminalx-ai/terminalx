@@ -344,7 +344,7 @@ describe("the default dictation key by platform", () => {
     expect(toggle).toHaveBeenCalledTimes(1);
   });
 
-  it("is a held Right Option on macOS with nothing stored, and ⌘⇧D still toggles", async () => {
+  it("is a held Right Option on macOS with nothing stored, and ⇧⌘D still toggles", async () => {
     const platform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform")!;
     Object.defineProperty(Navigator.prototype, "platform", { configurable: true, get: () => "MacIntel" });
     vi.resetModules();

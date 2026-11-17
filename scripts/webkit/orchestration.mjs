@@ -404,7 +404,7 @@ try {
         await strip.waitFor();
         const flagged = await strip.getByRole("status", { name: "A plan waits for your approval" }).count();
         const chatFirst = (await page.getByTestId("run-view").count()) === 0;
-        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⌘⇧O, as ⌘⇧R is Automations.
+        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⇧⌘O, as ⇧⌘R is Automations.
         const hint = await page.getByTestId("run-view-hint").textContent();
         await page.keyboard.press("Meta+Shift+O");
         const view = page.getByTestId("run-view");
@@ -437,7 +437,7 @@ try {
           "the brief's done-when commands wrap only between words and after a slash": commandsWhole,
           "the open brief is the window's full-height 420px right column where there is room, labelled brief": (size.width < 1200 ? !approvalColumn.inColumn : inColumn(approvalColumn)) && approvalColumn.heading.endsWith("brief"),
           "the session opens on its chat, and the Run tab says a plan waits": chatFirst && flagged === 1,
-          "the title bar shows ⌘⇧O run view, and ⌘⇧O opens the Run view": hint === "⌘⇧Orun view" && opened,
+          "the title bar shows ⇧⌘O run view, and ⇧⌘O opens the Run view": hint === "⇧⌘Orun view" && opened,
           // Model and effort are one pill (18.02): the tier's dot, the model, the effort.
           "each piece's model and effort is one pill, marked with its tier's dot": (await view.getByTestId("piece-model-pill").count()) === 6 && (await view.locator('[data-piece="store"] [data-testid="piece-model-pill"] .rounded-full').count()) === 1,
           "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,

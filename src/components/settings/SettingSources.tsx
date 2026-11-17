@@ -167,7 +167,7 @@ export function OpenSettingsFileButton({ projectPath }: { projectPath?: string |
           </DropdownMenuItem>;
         })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={copy}><Copy />Copy path<kbd aria-hidden className="ml-auto rounded border border-hairline px-1 font-sans text-[10px] text-faint">⌘⇧C</kbd></DropdownMenuItem>
+        <DropdownMenuItem onSelect={copy}><Copy />Copy path<kbd aria-hidden className="ml-auto rounded border border-hairline px-1 font-sans text-[10px] text-faint">⇧⌘C</kbd></DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   </div>;

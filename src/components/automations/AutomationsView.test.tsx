@@ -19,7 +19,7 @@ const { automationStore, createAutomation, updateAutomation, runAutomationNow, s
   openUrl: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 vi.mock("@/components/AgentMark", () => ({ AgentMark: () => <span aria-hidden>agent</span> }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));

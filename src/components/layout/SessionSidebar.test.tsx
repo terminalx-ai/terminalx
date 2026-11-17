@@ -6,7 +6,9 @@ import type { Project, SessionEntry } from "@/types/session";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+// Confirmations are the app's own dialog (PRO-400): one request object, answered true or false.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(), chooseInApp: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("./AppShell", () => ({ TITLEBAR_INSET: 78 }));
 vi.mock("@/components/account/AccountSidebarEntry", () => ({ AccountSidebarEntry: () => null }));
@@ -453,12 +455,12 @@ describe("the conversation list", () => {
   it("removes a project from its menu after asking, archiving its conversations rather than deleting them", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([session("here", "/repos/web", at(1)), session("there", "/repos/web", at(2), { branch: "old" }), session("done", "/repos/web", at(3), { archived: true })]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockResolvedValue(true);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockResolvedValue(true);
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: /^Remove project…/ })); });
-    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
+    expect(vi.mocked(dialog.confirmInApp).mock.calls[0][0]).toEqual({ title: "Remove web from TerminalX?", body: "Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.", action: "Remove", destructive: true });
     // Archived together, in one change, before the project goes.
     const calls = mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived" || command === "remove_project").map(([command, args]) => [command, args]);
     expect(calls).toEqual([["set_sessions_archived", { sessionIds: ["there", "here"], archived: true }], ["remove_project", { path: "/repos/web" }]]);
@@ -994,8 +996,8 @@ describe("the archive (#718)", () => {
 
   it("picks several rows and archives, brings back or deletes them together", async () => {
     await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4)), session("c", chatsPath, at(3)), session("d", chatsPath, at(2))]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockReset().mockResolvedValue(true);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockReset().mockResolvedValue(true);
     mount();
     const row = (id: string) => screen.getByRole("button", { name: new RegExp(`^Talk ${id}`) });
     expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
@@ -1036,16 +1038,16 @@ describe("the archive (#718)", () => {
     act(() => { fireEvent.click(row("b"), { metaKey: true }); });
     act(() => { fireEvent.click(row("d")); });
     await act(async () => { fireEvent.click(within(screen.getByRole("toolbar", { name: "2 conversations selected" })).getByRole("button", { name: /Delete/ })); });
-    expect(vi.mocked(dialog.ask)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toMatch(/^Delete 2 sessions\? Their transcripts and attachments are removed\./);
+    expect(vi.mocked(dialog.confirmInApp)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(dialog.confirmInApp).mock.calls[0][0]).toMatchObject({ title: "Delete 2 sessions?", body: expect.stringMatching(/^Their transcripts and attachments are removed\./), destructive: true });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "delete_session").map(([, args]) => args)).toEqual([{ sessionId: "b" }, { sessionId: "d" }]);
     expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
   });
 
   it("leaves the rows picked when the delete is cancelled", async () => {
     await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4))]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockReset().mockResolvedValue(false);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockReset().mockResolvedValue(false);
     mount();
     act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk a/ }), { metaKey: true }); });
     act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk b/ }), { metaKey: true }); });

@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="archive-log">{id}</div> }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: mocks.message }));
+// The second confirmation is the app's own dialog (PRO-400): one request object, answered true or false.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({
   api: { workspaceDisposition: mocks.workspaceDisposition },
@@ -150,13 +152,13 @@ describe("WorkspaceRemoveDialog", () => {
       // Declining the second confirmation removes nothing.
       fireEvent.click(removeButton());
       await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
-      expect(mocks.ask.mock.calls[0][0]).toContain(path);
-      expect(mocks.ask.mock.calls[0][0]).toContain(line);
+      expect(mocks.ask.mock.calls[0][0].body).toContain(path);
+      expect(mocks.ask.mock.calls[0][0].body).toContain(line);
       expect(mocks.removeWorkspace).not.toHaveBeenCalled();
 
       // The branch is not deleted by default with a workspace that is not
       // safe, and the confirmation says what really happens to it.
-      expect(mocks.ask.mock.calls[0][0]).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
+      expect(mocks.ask.mock.calls[0][0].body).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
       expect((screen.getByRole("switch") as HTMLButtonElement).getAttribute("aria-checked")).toBe("false");
 
       fireEvent.click(removeButton());

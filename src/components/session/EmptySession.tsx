@@ -30,9 +30,9 @@ function closedWhen(iso: string): string {
  * first, each reopened on its conversation in this session; a new tab; and
  * "Reopen closed tab", the action welcome keeps after the last tab closes.
  *
- * Everything here is this session's own: Reopen closed tab, and ⌘⌥T while
+ * Everything here is this session's own: Reopen closed tab, and ⌥⌘T while
  * the page is shown, bring back this session's newest closed tab, never a
- * sibling's from the branch's row of tabs (which ⌘⌥T reopens elsewhere).
+ * sibling's from the branch's row of tabs (which ⌥⌘T reopens elsewhere).
  */
 export function EmptySession({ session }: { session: SessionEntry }) {
   const store = useSessionStore();
@@ -55,7 +55,7 @@ export function EmptySession({ session }: { session: SessionEntry }) {
       .finally(() => setBusy(null));
   }, []);
   const reopen = useCallback((tabId: string) => run(tabId, () => reopenClosedAgentTab(session.id, tabId)), [run, session.id]);
-  // Ahead of the row's own ⌘⌥T; with nothing of this session's to bring back, the row's handles it.
+  // Ahead of the row's own ⌥⌘T; with nothing of this session's to bring back, the row's handles it.
   useShortcut("session.reopenTab", useCallback(() => {
     const { newest } = now.current;
     if (!newest) return false;

@@ -1,5 +1,5 @@
 import { useReviewComments } from "./ReviewComments";
-import { DiscardDialog, DiscardButton } from "./DiscardDialog";
+import { DiscardDialog, DiscardButton, type DiscardTarget } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { commitRange } from "@/lib/changesScope";
@@ -44,7 +44,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const selectedSource = useRef({ source, generation: 0 });
   if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
   const generation = selectedSource.current.generation;
-  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
+  const [discarding, setDiscarding] = useState<DiscardTarget | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
@@ -275,7 +275,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
             />}
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined}
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(files.find((file) => file.path === current.path) ?? current) : undefined}
               onOpenFile={onOpenFile && current.status !== "deleted" ? () => onOpenFile(current.path) : undefined}
               staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}

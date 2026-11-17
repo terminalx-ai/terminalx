@@ -71,7 +71,7 @@ async function check(browser, url, colorScheme) {
   page.on("pageerror", (error) => errors.push(error.message));
   const mac = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform));
   const mod = mac ? "Meta" : "Control";
-  const keys = mac ? { matchCase: "⌥⌘C", addToChat: "⌘⇧L", clear: "⌘K" } : { matchCase: "Ctrl+Alt+C", addToChat: "Ctrl+Shift+L", clear: "Ctrl+K" };
+  const keys = mac ? { matchCase: "⌥⌘C", addToChat: "⇧⌘L", clear: "⌘K" } : { matchCase: "Ctrl+Alt+C", addToChat: "Ctrl+Shift+L", clear: "Ctrl+K" };
   await openConversation(page, "Local long session");
   assert.equal(await page.evaluate(() => document.documentElement.getAttribute("data-mode")), colorScheme, `the app follows the ${colorScheme} appearance`);
   const dock = page.getByTestId("panel-terminal");

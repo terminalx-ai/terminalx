@@ -236,6 +236,47 @@ export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   );
 }
 
+const SIDEBAR_LINES = ["80%", "64%", "72%", "56%", "68%"];
+
+/**
+ * The window in miniature, drawn in a theme's own colours (design 17.07): a
+ * sidebar with the traffic lights and five rows, then the chat with a
+ * message, two lines of reply, an accent button beside a plain one, and the
+ * composer. The tokens are that theme's, scoped by `data-theme` and
+ * `data-mode`, so a palette change redraws its card with no second list.
+ */
+function ThemePreview({ theme, mode }: { theme: ThemeId; mode: "light" | "dark" }) {
+  const edge = "1px solid var(--border)";
+  const card = { background: "var(--surface-card)", border: edge };
+  return (
+    <span
+      aria-hidden
+      data-theme={theme}
+      data-mode={mode}
+      data-theme-preview
+      className="flex h-[124px] w-[200px] overflow-hidden rounded-lg"
+      style={{ background: "var(--surface-page)", border: edge }}
+    >
+      <span className="grid w-[54px] shrink-0 content-start gap-1.5 p-1.5" style={{ borderRight: edge }}>
+        <span className="flex gap-0.5">
+          {["#ff5f57", "#febc2e", "#28c840"].map((light) => <span key={light} className="size-1.5 rounded-full" style={{ background: light }} />)}
+        </span>
+        {SIDEBAR_LINES.map((width) => <span key={width} className="h-1.5 rounded" style={{ width, background: "var(--ink-muted)", opacity: 0.35 }} />)}
+      </span>
+      <span className="grid min-w-0 flex-1 content-start gap-1.5 p-2" style={{ background: "var(--surface-chat)" }}>
+        <span className="ml-auto h-[18px] w-20 rounded" style={card} />
+        <span className="h-[5px] w-[90%] rounded" style={{ background: "var(--ink-strong)", opacity: 0.6 }} />
+        <span className="h-[5px] w-[70%] rounded" style={{ background: "var(--ink-strong)", opacity: 0.6 }} />
+        <span className="flex gap-1">
+          <span data-theme-accent className="h-2.5 w-[30px] rounded" style={{ background: "var(--accent)" }} />
+          <span className="h-2.5 w-6 rounded" style={card} />
+        </span>
+        <span className="mt-1 h-6 rounded" style={card} />
+      </span>
+    </span>
+  );
+}
+
 export function AppearanceTab() {
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
@@ -247,41 +288,27 @@ export function AppearanceTab() {
         id="theme-label"
         stacked
         control={
-          <div role="radiogroup" aria-labelledby="theme-label" className="grid grid-cols-4 gap-2">
-            {THEMES.map((t) => {
-              const swatchMode = hasLightMode(t.id) ? resolvedMode : "dark";
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === t.id}
-                  onClick={() => setTheme(t.id as ThemeId)}
-                  className={cn(
-                    "group flex flex-col gap-1.5 rounded-lg border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                    theme === t.id ? "border-ring" : "border-transparent hover:border-border",
-                  )}
-                >
-                  <div
-                    data-theme={t.id}
-                    data-mode={swatchMode}
-                    className="relative h-14 w-full overflow-hidden rounded-md"
-                    style={{ background: "var(--surface-page)" }}
-                  >
-                    <div
-                      className="absolute left-2 top-2 h-8 w-[60%] rounded-sm"
-                      style={{ background: "var(--surface-card)", boxShadow: "inset 0 0 0 1px var(--hairline-strong)" }}
-                    />
-                    <div className="absolute bottom-2 left-2 h-1.5 w-8 rounded-full" style={{ background: "var(--accent)" }} />
-                    <div className="absolute bottom-2 left-11 h-1.5 w-4 rounded-full" style={{ background: "var(--ink-muted)" }} />
-                  </div>
-                  <div className="flex items-center justify-between px-0.5">
-                    <span className="text-xs font-medium">{t.name}</span>
-                    {t.darkOnly && <span className="text-xs text-faint">dark only</span>}
-                  </div>
-                </button>
-              );
-            })}
+          // Design 17.07: each card is a 200 by 124 drawing of the window in that theme, then its name and a caption.
+          // The cards keep that size and wrap where the column is narrower than four of them.
+          <div role="radiogroup" aria-labelledby="theme-label" className="-m-1.5 flex flex-wrap gap-x-0.5 gap-y-2">
+            {THEMES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={theme === t.id}
+                data-theme-card={t.id}
+                onClick={() => setTheme(t.id as ThemeId)}
+                className={cn(
+                  "group grid gap-1.5 rounded-xl border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  theme === t.id ? "border-ring" : "border-transparent hover:border-border",
+                )}
+              >
+                <ThemePreview theme={t.id} mode={hasLightMode(t.id) ? resolvedMode : "dark"} />
+                <span className="px-0.5 text-[12.5px] font-medium leading-4">{t.name}</span>
+                <span className="-mt-1 px-0.5 text-xs leading-4 text-faint">{t.caption}</span>
+              </button>
+            ))}
           </div>
         }
       />

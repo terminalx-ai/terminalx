@@ -73,14 +73,14 @@ const ACTIONS = [
   { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
   // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
-  // (18.01) drew ⌘⇧R, but that is Automations; ⌘⇧O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
+  // (18.01) drew ⇧⌘R, but that is Automations; ⇧⌘O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
   { id: "app.runView", label: "Run view", group: "App", keys: ["mod+shift+o"], menu: { section: "go", order: 2.5, label: "Run View" } },
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
   // #1131 design disposition (pending design sign-off): retain the shipped defaults.
-  // PRO-377's ⌘⌥T proposal conflicts with Reopen closed tab on macOS; keep that
-  // established action and use ⌘⌥⇧L (Ctrl+Alt+Shift+L elsewhere) for light/dark.
+  // PRO-377's ⌥⌘T proposal conflicts with Reopen closed tab on macOS; keep that
+  // established action and use ⌥⇧⌘L (Ctrl+Alt+Shift+L elsewhere) for light/dark.
   // Appearance and Shortcuts must show the active keymap, including edits/unbinding.
   // Context: https://github.com/terminalx-ai/terminalx/pull/1073#issuecomment-6929470119
   { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"] },
@@ -279,12 +279,24 @@ function holdCap(code: string, mac: boolean): string {
   return `${side} ${name}`;
 }
 
-/** Keycaps for a binding: ["⌘", "B"] on mac, ["Ctrl", "B"] elsewhere, ["Right ⌥"] for a held key. */
+/** The order macOS writes modifiers in, in its menus and its documentation: ⌃⌥⇧⌘, then the key. */
+const MAC_MODIFIER_ORDER = ["ctrl", "alt", "shift", "mod"];
+
+/**
+ * Keycaps for a binding: ["⌘", "B"] on mac, ["Ctrl", "B"] elsewhere, ["Right ⌥"] for a held key.
+ * A binding is stored with its modifiers in one fixed order (`normalizeBinding`); on a Mac they are
+ * drawn in the system's order instead, so ⇧⌘D reads as it does in every other app's menus.
+ */
 export function keycaps(binding: string, mac = isMac): string[] {
   const code = holdCode(binding);
   if (code != null) return [holdCap(code, mac)];
-  return normalizeBinding(binding)
-    .split("+")
+  const parts = normalizeBinding(binding).split("+");
+  if (mac) {
+    const rank = (part: string) => MAC_MODIFIER_ORDER.indexOf(part);
+    const mods = parts.filter((part) => rank(part) >= 0).sort((a, b) => rank(a) - rank(b));
+    parts.splice(0, parts.length, ...mods, ...parts.filter((part) => rank(part) < 0));
+  }
+  return parts
     .map((p) => {
       switch (p) {
         case "mod":
@@ -330,7 +342,7 @@ export function ariaKeyShortcut(binding: string, mac = isMac): string | undefine
   return normalizeBinding(binding).split("+").map((key) => names[key] ?? (key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1))).join("+");
 }
 
-/** A binding in a sentence: "⌘⇧D", "Ctrl+Shift+D", "Right ⌥". */
+/** A binding in a sentence: "⇧⌘D", "Ctrl+Shift+D", "Right ⌥". */
 export function bindingText(binding: string, mac = isMac): string {
   return keycaps(binding, mac).join(mac ? "" : "+");
 }

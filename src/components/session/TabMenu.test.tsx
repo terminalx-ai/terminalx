@@ -11,7 +11,9 @@ vi.mock("@tauri-apps/api/event", async () => {
   return { listen: backend.listen };
 });
 const native = vi.hoisted(() => ({ ask: vi.fn(async () => true), reveal: vi.fn(async () => undefined) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: native.ask, message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+// "ask" is the app's own confirmation (PRO-400), not the system alert.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: native.ask, chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: native.reveal, openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -415,6 +417,7 @@ describe("a tab's right-click menu", () => {
     native.ask.mockResolvedValueOnce(false);
     await choose("Restart agent");
     expect(native.ask).toHaveBeenCalledTimes(1);
+    expect((native.ask.mock.calls as unknown[][])[0][0]).toMatchObject({ title: "Restart the agent?", action: "Restart", destructive: true });
     expect(backend.callsOf("stop_tab")).toEqual([]);
     await choose("Restart agent");
     expect(backend.callsOf("stop_tab")).toEqual([{ sessionId: "a", tabId: "a2" }]);

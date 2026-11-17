@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { recordRecentFile } from "@/lib/recentFiles";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
 import { isLocalKey } from "@/types/target";
@@ -419,8 +419,12 @@ export async function setDiffMode(id: string, mode: DiffMode) {
   const entry = state.editors.find((e) => e.id === id);
   if (entry?.kind !== "diff" || entry.diff.mode === mode) return;
   if (entry.diff.mode === "edit" && entry.dirty) {
-    const leave = await ask(`${fileName(entry.rel)} has unsaved changes. Leave Edit? Your changes stay in this tab until you save or close it.`,
-      { title: "Unsaved changes", kind: "warning", okLabel: "Leave Edit", cancelLabel: "Keep editing" }).catch(() => false);
+    const leave = await confirmInApp({
+      title: "Leave Edit with unsaved changes?",
+      body: `${fileName(entry.rel)} has unsaved changes. They stay in this tab until you save or close it.`,
+      action: "Leave Edit",
+      cancel: "Keep editing",
+    });
     if (!leave) return;
   }
   set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, diff: { ...e.diff, mode } } : e) });
@@ -443,8 +447,14 @@ export function editorLinkContext(entry: EditorEntry) {
 
 async function confirmDiscard(names: string[]): Promise<boolean> {
   if (!names.length) return true;
-  const what = names.length === 1 ? `${names[0]} has unsaved changes.` : `${names.length} files have unsaved changes.`;
-  return ask(`${what} Close and lose them?`, { title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep editing" }).catch(() => false);
+  const one = names.length === 1;
+  return confirmInApp({
+    title: one ? `Close ${names[0]} without saving?` : `Close ${names.length} files without saving?`,
+    body: `${one ? "Its unsaved changes are" : "Their unsaved changes are"} lost. This can't be undone.`,
+    action: "Discard",
+    cancel: "Keep editing",
+    destructive: true,
+  });
 }
 
 export async function closeEditor(id: string) {

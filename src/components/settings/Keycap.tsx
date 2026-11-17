@@ -1,7 +1,7 @@
 import { cn } from "@/lib/cn";
 import { bindingText, holdCode } from "@/lib/shortcuts";
 
-/** One keycap for a whole chord, ⌘⇧] (design 09.13, PRO-377). */
+/** One keycap for a whole chord, ⇧⌘] (design 09.13, PRO-377). */
 export const KEYCAP = "inline-flex h-5 items-center rounded-[5px] bg-veil-raised px-1.5 font-mono text-xs leading-none text-muted-foreground hairline";
 
 /** The keys of one binding as a single keycap; a held key reads "Hold" before it. */

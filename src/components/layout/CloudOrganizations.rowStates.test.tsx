@@ -46,7 +46,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 // The dialog has its own tests (CloudWorkspaceLifecycle.test.tsx); here only what the sidebar hands it.
 vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceLifecycle")>()),

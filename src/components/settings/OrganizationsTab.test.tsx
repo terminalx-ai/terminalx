@@ -10,7 +10,7 @@ import { newSetup, saveSetup } from "@/lib/organizationSetup";
 
 const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn(), refreshAccount: vi.fn(), signIn: vi.fn() }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: () => () => {}, useAccount: () => ({ status: mocks.status, ready: true, busy: false }), refreshAccount: mocks.refreshAccount, signIn: mocks.signIn }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return { ...actual, api: { ...actual.api, organizationCreate: vi.fn() } };
@@ -109,7 +109,7 @@ describe("organization Settings", () => {
       expect(screen.getByText("member · 2 running workspaces")).toBeTruthy();
       fireEvent.click(screen.getByRole("switch", { name: "Show Beta in sidebar" }));
       await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
-      expect(mocks.ask.mock.calls[0][0]).toMatch(/2 running workspaces.*keep running and costing money/);
+      expect(mocks.ask.mock.calls[0][0]).toMatchObject({ title: "Hide Beta?", body: expect.stringMatching(/2 running workspaces.*keep running and costing money/), action: "Hide organization" });
       expect(getPrefs().hiddenOrganizations).toEqual([]);
       mocks.ask.mockResolvedValue(true);
       fireEvent.click(screen.getByRole("switch", { name: "Show Beta in sidebar" }));

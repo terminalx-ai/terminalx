@@ -160,7 +160,7 @@ function DiffEditorContent({ entry, visible }: { entry: DiffEditorEntry; visible
     </div>
     {copied === "done" && <p role="status" className="sr-only">Copied file</p>}
     {copied === "failed" && <p role="status" className="px-3 py-1 text-xs text-muted-foreground">Could not copy file. Try again.</p>}
-    {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath } : null} base={uncommitted ? undefined : range?.base}
+    {canDiscard && <DiscardDialog source={source} file={discarding ? { path: entry.rel, oldPath, status: changedFile?.status, additions: changedFile?.additions, deletions: changedFile?.deletions } : null} base={uncommitted ? undefined : range?.base}
       onClose={() => setDiscarding(false)} onDiscarded={() => void refresh()} />}
     {changed && <div role="status" className="shrink-0 bg-warning/10 px-3 py-2 text-xs">This file changed on disk or differs from this snapshot. Edit and media preview use the current file.</div>}
     {error && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}</div>}

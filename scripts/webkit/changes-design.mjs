@@ -143,6 +143,24 @@ try {
     assert.equal(await page.getByRole("button", { name: "Discard changes to src/lib/prefs.ts" }).isVisible(), false);
     await page.getByRole("button", { name: /prefs\.ts/ }).hover();
     assert.equal(await page.getByRole("button", { name: "Discard changes to src/lib/prefs.ts" }).isVisible(), true);
+    // PRO-400 (17.01): Discard asks in the app's own card, which names the file and counts the lines that go back.
+    await page.getByRole("button", { name: "Discard changes to src/lib/prefs.ts" }).click();
+    const discard = page.getByRole("dialog", { name: "Discard changes to src/lib/prefs.ts?" });
+    await discard.waitFor();
+    assert.match(await discard.innerText(), /6 added lines go back to .+\. This can’t be undone\./);
+    assert.deepEqual((await discard.getByRole("button").allTextContents()).map((label) => label.trim()), ["Cancel", "Discard"]);
+    const red = await discard.getByRole("button", { name: "Discard", exact: true }).evaluate((button) => {
+      const probe = document.createElement("i");
+      probe.style.background = "var(--destructive)";
+      document.body.append(probe);
+      const want = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { got: getComputedStyle(button).backgroundColor, want };
+    });
+    assert.equal(red.got, red.want, "Discard is the red action");
+    await shot("17.01-discard");
+    await discard.getByRole("button", { name: "Cancel", exact: true }).click();
+    await discard.waitFor({ state: "detached" });
     await page.getByLabel("Viewed src/lib/overviewSort.ts").check();
     await page.getByText("1 of 6 viewed").waitFor();
     // 05.04: one header row: chip, +/−, copy, layout, options.

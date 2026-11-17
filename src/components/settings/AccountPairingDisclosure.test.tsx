@@ -122,8 +122,14 @@ describe("account binding disclosure", () => {
     expect(within(identity).getByText("owner@terminalx.ai")).toBeTruthy();
     const signOutRow = screen.getByTestId("account-sign-out");
     fireEvent.click(within(signOutRow).getByRole("button", { name: "Sign out" }));
-    expect(within(signOutRow).getByRole("button", { name: "Confirm sign out" })).toBeTruthy();
-    expect(signOutRow.textContent).toContain("QR and code pairings keep working");
+    // The app's own dialog (PRO-400): the question, what happens, Cancel on the left and a red Sign out on the right.
+    const dialog = screen.getByRole("dialog", { name: "Sign out of TerminalX?" });
+    expect(dialog.textContent).toContain("QR and code pairings keep working");
+    const buttons = within(dialog).getAllByRole("button").map((button) => button.textContent?.trim());
+    expect(buttons).toEqual(["Cancel", "Sign out"]);
+    expect(within(dialog).getByRole("button", { name: "Sign out" }).className).toContain("bg-destructive");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
   it("takes initials from the first and last name, else the email", () => {
     expect(accountInitials({ name: "Alex Kim", email: "a@b.c", organization: null })).toBe("AK");

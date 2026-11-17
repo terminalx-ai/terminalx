@@ -27,7 +27,7 @@ function description(method: MergeMethod, methods: PrMergeMethods | null | undef
 
 /**
  * The Merge button's menu (design 05.10): MERGE METHOD, each method with what it does and the current one ticked, the
- * one ⌘⇧M uses marked with its keys, then what to do once merged.
+ * one ⇧⌘M uses marked with its keys, then what to do once merged.
  */
 export function MergeMenu({ url, base, methods, commits, disabled, working, size = "xs", archive, canDeleteBranch, shortcutMethod, onMerge }: {
   url: string;

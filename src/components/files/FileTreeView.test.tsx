@@ -248,7 +248,9 @@ describe("FileTreeView", () => {
       fireEvent.contextMenu(await screen.findByText("a.ts"));
       fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Discard changes" }));
       const dialog = await screen.findByRole("dialog");
-      expect(within(dialog).getByText("Discard changes to this file?")).toBeTruthy();
+      // The dialog names the file (PRO-400). The tree has no line counts for it, so it says what goes back without them.
+      expect(within(dialog).getByText("Discard changes to a.ts?")).toBeTruthy();
+      expect(dialog.textContent).toContain("go back to the last commit. This can’t be undone.");
       expect(mocks.discard).not.toHaveBeenCalled();
       fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
       await waitFor(() => expect(mocks.discard).toHaveBeenCalledWith("a.ts", undefined, undefined));

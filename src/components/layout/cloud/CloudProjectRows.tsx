@@ -10,7 +10,7 @@ import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { StatusGroups } from "../StatusGroups";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -563,12 +563,12 @@ function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, s
     if (next && next !== row.title) void act(() => updateCloudSession(row, { title: next }));
   };
   const remove = async () => {
-    const yes = await ask(`Delete "${row.title}"? Its transcript and owned provider-native resume files may be permanently removed from the cloud workspace. This is not hiding the session. There is no conversation undo or automatic export; save needed copies first. Deletion does not refund tokens or reset provider usage. Local Stats & Usage does not scan this cloud history.${row.worktreeName ? " Its worktree goes with it when no other session uses it." : ""}`, {
-      title: "Delete session",
-      kind: "warning",
-      okLabel: "Delete",
-      cancelLabel: "Cancel",
-    }).catch(() => false);
+    const yes = await confirmInApp({
+      title: `Delete "${row.title}"?`,
+      body: `Its transcript and owned provider-native resume files may be permanently removed from the cloud workspace. This is not hiding the session. There is no conversation undo or automatic export; save needed copies first. Deletion does not refund tokens or reset provider usage. Local Stats & Usage does not scan this cloud history.${row.worktreeName ? " Its worktree goes with it when no other session uses it." : ""}`,
+      action: "Delete",
+      destructive: true,
+    });
     if (!yes) return;
     await act(async () => {
       try {
@@ -578,12 +578,12 @@ function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, s
         // would be lost and ask the second time before trying again.
         const reason = errorMessage(refused);
         if (!reason.includes(NEEDS_SECOND_CONFIRMATION)) throw refused;
-        const sure = await ask(`${reason}\n\nNothing was deleted. Delete "${row.title}" and its worktree anyway?`, {
-          title: "Delete anyway?",
-          kind: "warning",
-          okLabel: "Delete anyway",
-          cancelLabel: "Cancel",
-        }).catch(() => false);
+        const sure = await confirmInApp({
+          title: `Delete "${row.title}" and its worktree anyway?`,
+          body: `${reason}\n\nNothing was deleted.`,
+          action: "Delete anyway",
+          destructive: true,
+        });
         if (!sure) return;
         await deleteCloudSession(row, { confirmedUnsafe: true });
       }

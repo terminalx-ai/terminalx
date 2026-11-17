@@ -48,7 +48,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 // The dialog has its own tests (CloudWorkspaceLifecycle.test.tsx); here only what the sidebar hands it.
 vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceLifecycle")>()),
@@ -643,6 +643,7 @@ describe("an organization's states", () => {
     fireEvent.click(within(line).getByRole("button", { name: "Switch" }));
     await waitFor(() => expect(mocks.api.organizationSelect).toHaveBeenCalledWith(OTHER, "s:1"));
     expect(mocks.ask).toHaveBeenCalledTimes(1);
+    expect(mocks.ask.mock.calls[0][0]).toMatchObject({ title: expect.stringMatching(/^Switch the default organization to .+\?$/), body: expect.stringContaining("will close"), action: "Switch" });
   });
 
   it("says once what this Mac dropped of a workspace deleted elsewhere, and the notice can be dismissed", async () => {
