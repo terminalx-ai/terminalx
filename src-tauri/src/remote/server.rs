@@ -747,23 +747,33 @@ impl WorkspaceRpc {
         self.is_machine().then(machine::ids_by_path)
     }
 
-    /// A session as it is sent: on a machine it names its project.
+    /// A session as it is sent: on a machine it names its project. No tab
+    /// names its account: that is only in a manager's session list.
     fn session_wire(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>) -> Value {
-        self.session_wire_with(session, ids, &mut super::machine_session::Accounts::default())
+        self.session_wire_with(session, ids, None)
     }
 
-    /// A session as it is sent. On a machine each tab names the account it
-    /// runs on when its agent has several there (`machine/10`, PRO-408);
-    /// `accounts` holds what was read for the sessions sent together.
-    fn session_wire_with(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>, accounts: &mut super::machine_session::Accounts) -> Value {
+    /// A session as it is sent. With `accounts` (a machine, to a manager
+    /// granted `machine/10`, PRO-408: [`Self::shows_accounts`]) each tab names
+    /// the account it runs on when its agent has several there; `accounts`
+    /// holds what was read for the sessions sent together.
+    fn session_wire_with(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>, accounts: Option<&mut super::machine_session::Accounts>) -> Value {
         let mut value = json!(session);
         if let (Some(ids), Some(fields)) = (ids, value.as_object_mut()) {
             fields.insert("projectId".into(), json!(ids.get(&session.project_path)));
         }
-        if self.is_machine() {
+        if let Some(accounts) = accounts.filter(|_| self.is_machine()) {
             super::machine_session::account_labels(&mut value, session, accounts);
         }
         value
+    }
+
+    /// Whether `peer` is told which account each tab runs on. An account's
+    /// label is the name its owner gave it in Settings → Agents, often an
+    /// email address: only a manager that asked for `machine/10` reads it,
+    /// never a participant or an older desktop.
+    fn shows_accounts(&self, peer: &Peer) -> bool {
+        self.is_machine() && peer.authority == Authority::Manage && peer.granted(machine::MACHINE_10)
     }
 
     /// A pipeline as it is sent: on a machine it names its project too.
@@ -1022,11 +1032,19 @@ impl WorkspaceRpc {
             }
         };
         let ids = self.project_ids();
-        let mut accounts = super::machine_session::Accounts::default();
-        let wire: Vec<Value> = sessions.iter().map(|session| self.session_wire_with(session, ids.as_ref(), &mut accounts)).collect();
+        let wire: Vec<Value> = sessions.iter().map(|session| self.session_wire_with(session, ids.as_ref(), None)).collect();
+        // With each tab's account, for the managers that are told it; read only when one is connected.
+        let labelled: Option<Vec<Value>> = peers.iter().any(|peer| self.shows_accounts(peer)).then(|| {
+            let mut accounts = super::machine_session::Accounts::default();
+            sessions.iter().map(|session| self.session_wire_with(session, ids.as_ref(), Some(&mut accounts))).collect()
+        });
         for peer in peers {
             // Workspace-wide, as `visible_sessions`.
-            let visible: &[Value] = if self.access(&peer).can_view() { &wire } else { &[] };
+            let visible: &[Value] = match (&labelled, self.access(&peer).can_view()) {
+                (_, false) => &[],
+                (Some(labelled), true) if self.shows_accounts(&peer) => labelled,
+                (_, true) => &wire,
+            };
             peer.notify("session.sessions", json!({ "sessions": visible }));
         }
     }
@@ -3263,7 +3281,8 @@ impl WorkspaceRpc {
     fn session_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let ids = self.project_ids();
         let mut accounts = super::machine_session::Accounts::default();
-        let sessions: Vec<Value> = self.visible_sessions(peer)?.iter().map(|session| self.session_wire_with(session, ids.as_ref(), &mut accounts)).collect();
+        let shows = self.shows_accounts(peer);
+        let sessions: Vec<Value> = self.visible_sessions(peer)?.iter().map(|session| self.session_wire_with(session, ids.as_ref(), shows.then_some(&mut accounts))).collect();
         Ok(json!({ "sessions": sessions }))
     }
 

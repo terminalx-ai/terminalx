@@ -137,3 +137,57 @@ async fn a_machine_sessions_worktree_is_removed_on_the_machine_only_when_safe_or
     assert!(call(&m.rpc, &viewer, "workspace.remove", json!({ "sessionId": kept_id, "expectedSessions": [kept_id], "clientRequestId": "remove-viewer-0001" })).await.is_err());
     assert!(PathBuf::from(kept["session"]["cwd"].as_str().unwrap()).exists());
 }
+
+/// The next `session.sessions` this connection hears.
+async fn next_sessions(events: &mut super::super::server::Notifications) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let heard = events.recv().await.expect("the connection is open");
+            if heard["event"] == "session.sessions" {
+                return heard["params"]["sessions"].clone();
+            }
+        }
+    })
+    .await
+    .expect("session.sessions was sent")
+}
+
+/// An account's label is the name its owner gave it in Settings → Agents,
+/// often an email address: only a manager that asked for `machine/10` is
+/// told which account a tab runs on, in its session list and broadcasts. An
+/// older desktop sees the session without it; a participant hears of none.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_manager_granted_machine_10_is_told_which_account_a_tab_runs_on() {
+    let m = machine_rpc();
+    let (_path, id) = project(&m.path("code"), "api");
+    // A second Claude account beside the machine's own login: tabs now name theirs.
+    let store = crate::agent_keys::store().unwrap();
+    let account = crate::agent_accounts::new_id();
+    crate::agent_accounts::create_private(&crate::agent_accounts::account_dir(&store.root, crate::agent_keys::Agent::Claude, &account)).unwrap();
+    let identity = crate::agent_accounts::Identity { email: Some("ada@example.com".into()), plan: Some("Max".into()), ..Default::default() };
+    crate::agent_accounts::add_signed_in(&store, crate::agent_keys::Agent::Claude, &account, &identity, None, false).unwrap();
+
+    let (manager, mut manager_events, _) = computer(&m.rpc).await;
+    let wanted = ["machine/1", "machine/10", "session/1", "session/2"];
+    let (viewer, mut viewer_events, _) = connect(&m.rpc, "viewer", Authority::Participate, wanted.to_vec()).await;
+    let (older, mut older_events, _) = connect(&m.rpc, "older-computer", Authority::Manage, vec!["machine/1", "session/1", "session/2"]).await;
+    let made = call(&m.rpc, &manager, "session.create", json!({ "agent": "claude", "model": "opus", "projectId": id, "clientRequestId": "create-accounts" })).await.unwrap();
+    let session_id = made["sessionId"].clone();
+    let tab_of = |sessions: &serde_json::Value| sessions.as_array().unwrap().iter().find(|session| session["id"] == session_id).map(|session| session["tabs"][0].clone()).expect("the session is listed");
+
+    let listed = |peer| {
+        let rpc = m.rpc.clone();
+        async move { call(&rpc, &peer, "session.list", json!({})).await.unwrap()["sessions"].clone() }
+    };
+    assert!(tab_of(&listed(manager.clone()).await)["accountLabel"].is_string(), "the manager is told");
+    // A participant without the machine's member list sees no sessions at all, so no account either.
+    assert_eq!(code(call(&m.rpc, &viewer, "session.list", json!({})).await), "forbidden");
+    assert!(tab_of(&listed(older.clone()).await).get("accountLabel").is_none(), "nor a desktop that did not ask for machine/10");
+    assert!(made["session"]["tabs"][0].get("accountLabel").is_none(), "only the session list names it");
+
+    // The broadcast is told per connection, by the same rule.
+    assert!(tab_of(&next_sessions(&mut manager_events).await)["accountLabel"].is_string());
+    let heard = next_sessions(&mut viewer_events).await;
+    assert!(heard.as_array().unwrap().iter().all(|session| session["tabs"].as_array().unwrap().iter().all(|tab| tab.get("accountLabel").is_none())), "{heard}");
+    assert!(tab_of(&next_sessions(&mut older_events).await).get("accountLabel").is_none());
+}
