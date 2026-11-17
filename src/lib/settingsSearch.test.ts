@@ -24,9 +24,9 @@ describe("settings row search", () => {
 
   it("finds the font rows for 'font', and only those", () => {
     const ids = searchSettings("font").map((match) => match.id);
-    expect(ids).toContain("appearance.textSize");
+    expect(ids).toContain("general.textSize");
     // Not every row whose description happens to hold an f, an o, an n and a t in order.
-    expect(ids).toEqual(["appearance.textSize"]);
+    expect(ids).toEqual(["general.textSize"]);
   });
 
   it("finds nothing for a mistyped second word, as the empty state expects", () => {

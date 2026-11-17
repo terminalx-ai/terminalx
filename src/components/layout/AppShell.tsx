@@ -36,6 +36,7 @@ import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey, isLocalKey, isMachineKey, machineKeyKind } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
+import { toggleMode } from "@/lib/theme";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
@@ -287,6 +288,7 @@ export function AppShell() {
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
+  useShortcut("app.toggleMode", toggleMode);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
   useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });

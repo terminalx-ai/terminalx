@@ -78,6 +78,8 @@ const ACTIONS = [
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
+  // PRO-377: Appearance names these keys under Mode. The design drew ⌘⌥T, which is Reopen closed tab on macOS; L for light.
+  { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"] },
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
