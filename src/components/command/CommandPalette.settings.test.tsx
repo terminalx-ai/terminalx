@@ -152,7 +152,8 @@ describe("settings in the command palette", () => {
     const results = screen.getAllByRole("option");
     const pages = within(screen.getByRole("group", { name: "Settings pages" })).getAllByRole("option");
     // Orchestrator and Local VMs are behind their Experimental switches, which are off.
-    expect(pages).toHaveLength(15);
+    expect(pages).toHaveLength(16);
+    expect(pages.map((row) => row.id)).toContain("palette:settings-page:machines");
     expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:localVms");
@@ -172,7 +173,7 @@ describe("settings in the command palette", () => {
     expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
     fireEvent.keyDown(input, { key: "Enter" });
     // PRO-401: the pages are in design 07.05's order, General first.
-    expect(pages.slice(0, 8).map((row) => row.id.replace("palette:settings-page:", ""))).toEqual(["general", "account", "appearance", "shortcuts", "integrations", "devices", "agents", "environment"]);
+    expect(pages.slice(0, 9).map((row) => row.id.replace("palette:settings-page:", ""))).toEqual(["general", "account", "appearance", "shortcuts", "integrations", "devices", "machines", "agents", "environment"]);
     await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("general"));
   });
 
