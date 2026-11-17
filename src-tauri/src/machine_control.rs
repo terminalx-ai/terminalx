@@ -42,7 +42,7 @@ pub const UPDATING: &str = "machine_updating";
 pub const ACCESS_REMOVED: &str = "machine_access_removed";
 /// The person at the machine pressed Disconnect.
 pub const DISCONNECTED: &str = "machine_disconnected";
-/// Settings → Experimental → Machines is off.
+/// Data privacy mode is on: this computer operates no machine (PRO-357).
 pub const DISABLED: &str = "machines_disabled";
 /// The machine is connected, but its version does not serve this command.
 /// The window sets it, from the namespaces the machine granted
@@ -348,11 +348,13 @@ mod desktop {
 
     /// Run `machine.<action>`.
     pub(crate) fn execute(connections: &Arc<MachineConnections>, sink: &dyn EventSink, action: &str, params: Value) -> Result<Value, ControlError> {
-        if !crate::store::settings::load().experimental.machines {
+        // Machines are on for everyone (PRO-360); what a command can reach is the machines the person paired
+        // in the app. Data privacy mode makes no machine connection (PRO-357), so it answers nothing here either.
+        if crate::data_privacy::enabled() {
             return Err(ControlError::new(
                 DISABLED,
-                "Machines are off in this TerminalX.",
-                Some("In TerminalX, open Settings → Experimental and turn on Machines.".into()),
+                "Data privacy mode is on, so this computer operates no machine.",
+                Some("Turn off data privacy mode in TerminalX to operate your machines.".into()),
             ));
         }
         match action {

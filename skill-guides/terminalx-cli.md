@@ -1783,7 +1783,7 @@ deleting a workspace are done in the app.
 ### Paired machines
 
 A machine is another computer running TerminalX that this computer paired with (Settings →
-Machines, behind Settings → Experimental → Machines). The same verbs work on it with
+Machines). The same verbs work on it with
 `--machine <machine>`, where `<machine>` is its name (any case) or its id from `machines list`.
 The CLI never connects to the machine itself: the app carries each command over the one
 connection it already holds to it, directly or through the relay.
@@ -1874,10 +1874,10 @@ machine, and a worker of a run may not pair a machine or start a session on one 
 The built-in browser, computer use, the Local VM, `sessions report`, `sessions usage`,
 `sessions status` and the issue and pipeline commands work on this computer only.
 
-**The person's switch.** Every machine command answers `machines_disabled` until the person
-turns on Settings → Experimental → Machines. With it on, any agent in a local session can
-operate the paired machines through these commands, with the full rights pairing gave this
-computer there.
+**What gates it.** Pairing: any agent in a local session can operate the machines the person
+paired, through these commands, with the full rights pairing gave this computer there. With
+none paired there is nothing to reach. Every machine command answers `machines_disabled` while
+data privacy mode is on.
 
 ### This guide
 
@@ -2078,7 +2078,8 @@ JSON failures have this shape:
   this command. Update TerminalX there; do not retry.
 - `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
   in, or the person at it disconnected this computer. Ask the person; do not retry.
-- `machines_disabled`: Settings → Experimental → Machines is off. Tell the person; do not retry.
+- `machines_disabled`: data privacy mode is on, so this computer operates no machine. Tell the
+  person; do not retry.
 - `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
   to the person, then repeat the command with `--fingerprint`.
 - `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.

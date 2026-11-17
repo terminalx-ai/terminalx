@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, ChevronRight, Copy, Ellipsis, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Check, ChevronRight, Copy, Ellipsis, ExternalLink, Info, LoaderCircle, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -12,10 +13,12 @@ import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
+import { repoFile } from "@/lib/repo";
 import { machineSectionKey } from "@/types/target";
 import type { MachineActivityEntry, MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import type { MachineName } from "@/types/pairing";
 import { AddMachineDialog } from "./AddMachineDialog";
+import { StepRow } from "./HeadlessServerTab";
 import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connectionStatus";
 import { PlatformIcon, keyLabel, osLabel, routeLabel, seenText, shortDate, soft } from "./machineText";
 import { runningText, useRunningSessions } from "./useRunningSessions";
@@ -27,11 +30,27 @@ const heading = "text-[14px] font-semibold";
 const card = "flex min-h-14 items-center gap-3 rounded-lg border border-hairline px-3 py-2.5";
 const iconBox = "grid size-8 shrink-0 place-items-center rounded-md bg-muted";
 
+/** The Machines guide (PRO-360): add a Mac, add a server, start a session there, offline, update and remove. */
+export const MACHINES_GUIDE_URL = repoFile("docs/MACHINES-GUIDE.md");
+
+/** Opens the guide in the browser; the same link sits under the page's lead and in the first-run card. */
+function GuideLink() {
+  return (
+    <button
+      type="button"
+      onClick={() => void openUrl(MACHINES_GUIDE_URL)}
+      className="inline-flex items-center gap-1 whitespace-nowrap rounded-sm text-[12.5px] text-muted-foreground underline decoration-hairline-strong underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
+      Machines guide <ExternalLink className="size-3" aria-hidden />
+    </button>
+  );
+}
+
 /**
  * Settings → Machines (PRO-349, screen 21.02): the switch that lets other
  * computers operate this Mac, this Mac's name and key label, the machines
- * this Mac operates, and the computers that operate it. Shown only with
- * Experimental → Machines on, until PRO-360. Data privacy mode turns off
+ * this Mac operates, and the computers that operate it. With no machine
+ * paired it opens with how to start, and the guide (PRO-360). Data privacy mode turns off
  * both operating and being operated (PRO-357), and the page says so.
  */
 export function MachinesSettings() {
@@ -72,7 +91,9 @@ function MachinesList({ onOpen }: { onOpen: (machineId: string) => void }) {
 
   return (
     <div className="flex flex-col" data-testid="machines-settings">
-      <p className="-mt-4 mb-2 text-[13px] text-muted-foreground">Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.</p>
+      <p className="-mt-4 mb-2 text-[13px] text-muted-foreground">
+        Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them. <GuideLink />
+      </p>
       <div className="border-b border-hairline py-1.5">
         <RegisteredSetting
           setting="machines.allowOperating"
@@ -303,10 +324,39 @@ function YourMachines({ onOpen }: { onOpen: (machineId: string) => void }) {
           ))}
         </ul>
       )}
-      {store.ready && store.machines.length === 0 && !store.error && <p className="mt-3 text-[12.5px] text-faint">No machines yet. Add one to operate it from this Mac.</p>}
+      {store.ready && store.machines.length === 0 && !store.error && <MachinesFirstRun />}
       <AddMachineDialog open={adding} onOpenChange={setAdding} onPaired={() => void refreshPairedMachines()} />
       <RemoveMachineDialog machine={removing} onClose={() => setRemoving(null)} />
     </>
+  );
+}
+
+/**
+ * Your machines with none paired (PRO-360): how to start, in three steps, and
+ * the guide. No 21.xx screen shows this state; it is 21.02's bordered card
+ * with 21.06's numbered steps.
+ */
+function MachinesFirstRun() {
+  const step = "text-[12px] leading-[18px] text-muted-foreground";
+  return (
+    <div className="mt-2.5 rounded-lg border border-hairline px-4 py-3.5" data-testid="machines-first-run">
+      <p className="text-[13px] font-medium">No machines yet</p>
+      <p className={cn(soft, "mt-0.5")}>Add a Mac, a Mac mini or a Linux server that runs TerminalX. Its sessions run there, and this Mac shows them in the sidebar.</p>
+      <ol className="mt-3 grid gap-3" aria-label="How to add a machine">
+        <StepRow n={1} title="Get the other computer ready">
+          <p className={step}>On a Mac, open Settings → Machines there and turn on “Let other computers operate this Mac”. On a server, install TerminalX and run terminalx-serve pair.</p>
+        </StepRow>
+        <StepRow n={2} title="Add it here">
+          <p className={step}>Choose Add a machine: from your account, with a pairing code, or as a headless server. Check that both screens show the same fingerprint, then choose Allow on the other computer.</p>
+        </StepRow>
+        <StepRow n={3} title="Start a session there">
+          <p className={step}>It appears as a section in the sidebar. Start a session from its +, or choose it under Where it runs in a new session.</p>
+        </StepRow>
+      </ol>
+      <div className="mt-3">
+        <GuideLink />
+      </div>
+    </div>
   );
 }
 

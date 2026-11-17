@@ -79,7 +79,7 @@ function expectOnlyWorkspaceChanged(before: ReturnType<typeof getSessionStore>, 
   expect(getSessionStore()).toEqual({ ...before, selectedCloudWorkspace: workspace });
 }
 
-/** Machines on, with the Mac mini attached. */
+/** The Mac mini paired and attached. */
 async function attachMachines() {
   stopMachines = startMachineConnections();
   await vi.waitFor(() => expect(getMachineConnections().connections.m1).toBeTruthy());

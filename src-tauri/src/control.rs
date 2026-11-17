@@ -341,6 +341,13 @@ impl WindowControl {
             return crate::store::environment::desktop_snapshot(key, revision)
                 .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
         }
+        // The runtime's relay session needs a current access token (PRO-368).
+        // The window rotates the session and keeps the runtime's copy itself.
+        if command == "account.refresh" {
+            let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("The account is unavailable."))?;
+            pairing.refresh_account_for_runtime();
+            return Ok(json!({ "refreshed": true }));
+        }
         if command == "agentKey.snapshot" {
             let harness = params["harness"].as_str().ok_or_else(|| ControlError::invalid("Agent required."))?;
             let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Key revision required."))?;

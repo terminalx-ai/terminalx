@@ -3,7 +3,10 @@ import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { ArrowUp, AtSign, ChevronDown, CircleAlert, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { showError } from "@/lib/errorToasts";
+import { goalCommand } from "@/lib/goalCommand";
+import { openSettingRow } from "@/lib/settingsLinks";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -152,6 +155,7 @@ export function Composer({
   canStop = true,
   stopMode = "stop",
   autoFocus,
+  onOpenCodexTab,
 }: {
   tab: TabEntry;
   /** Stable backend/tab identity; pending sends survive view replacement. */
@@ -221,6 +225,8 @@ export function Composer({
    */
   stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
+  /** Opens a Codex tab beside this one: offered when a `/goal` is typed to an agent without goals (PRO-380). */
+  onOpenCodexTab?: () => void;
 }) {
   const { models: listed, refresh: refreshPickerModels, loaded: modelsLoaded } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
@@ -448,9 +454,31 @@ export function Composer({
   );
 
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
+  // "/goal" with nothing after it was pressed in a Codex chat: it stays, said wrong, until the text changes (PRO-380, 03.20).
+  const [emptyGoal, setEmptyGoal] = useState(false);
+  const goalMissing = emptyGoal && isEmptyGoal(draft);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
     if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
+    const goal = goalCommand(text);
+    if (goal !== null && !(tab.harness !== "codex" && commands.some((c) => c.name === "goal"))) {
+      // Goals are Codex's (#256): a bare "/goal" says nothing to set, and another agent has none to set.
+      if (tab.harness === "codex" && !goal && !sendable.length) {
+        setEmptyGoal(true);
+        return;
+      }
+      if (tab.harness !== "codex") {
+        const name = tab.title?.trim();
+        showError(`${name ? `“${name}”` : "This tab"} runs ${agentName(tab.harness)}, which has no goals. Your text is still in the composer`, undefined, {
+          title: "Goals work in Codex chats only",
+          icon: "target",
+          copy: false,
+          key: `goal-codex-only:${tab.id}`,
+          actions: onOpenCodexTab ? [{ label: "Open a Codex tab", icon: "bot", run: onOpenCodexTab }] : undefined,
+        });
+        return;
+      }
+    }
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
     const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
@@ -489,7 +517,7 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, tab.harness, tab.title, commands, onOpenCodexTab, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
@@ -563,7 +591,7 @@ export function Composer({
   const reviewsReady = pendingReviewCount(tab.id, draft);
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
+    <div className="@container mx-auto w-full max-w-3xl px-6 pb-4 pt-2" data-tab-composer={tab.id}>
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
       {reviewsReady > 0 && (
@@ -577,6 +605,8 @@ export function Composer({
       <div
         className={cn(
           "relative rounded-2xl bg-composer p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
+          // An outline: the box's hairline is a box-shadow, which a ring would replace.
+          goalMissing && "outline outline-1 -outline-offset-1 outline-destructive/70 focus-within:ring-0",
           attach.dragging && "ring-2 ring-accent/60",
         )}
         // What stays in the corner of the window (the clean-up indicator) keeps off this box.
@@ -629,10 +659,13 @@ export function Composer({
             onDraftChange(e.target.value);
             setCaret(e.target.selectionStart ?? e.target.value.length);
             setDismissedToken(null);
+            if (emptyGoal && !isEmptyGoal(e.target.value)) setEmptyGoal(false);
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyDown={onKeyDown}
           disabled={disabled}
+          aria-invalid={goalMissing || undefined}
+          aria-describedby={goalMissing ? `${tab.id}-goal-missing` : undefined}
           rows={1}
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
@@ -778,6 +811,23 @@ export function Composer({
           </div>
         </div>
       </div>
+      {goalMissing ? (
+        <div id={`${tab.id}-goal-missing`} role="alert" className="flex items-center gap-1.5 px-1 pt-1.5 text-[11.5px] text-destructive" data-testid="goal-missing">
+          <CircleAlert aria-hidden className="size-3 shrink-0" />
+          Type a goal after /goal, like “/goal ship saved views with tests”
+        </div>
+      ) : busy && followUps && alternateKeys && !heldReason && !disabled ? (
+        // What Return and the other chord do with a follow-up while the agent works (PRO-380, 03.12).
+        // One line, cut short rather than pushing the composer up (the whole of it is the tooltip), and none in a
+        // narrow composer, where it would be a stub and its line is the room an approval's buttons need.
+        <div className="truncate px-1 pt-1.5 text-[11.5px] text-faint @max-[34rem]:hidden" data-testid="follow-up-hint"
+          title={`${keysOf("composer.send").join("")} ${followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"} · ${alternateKeys.replaceAll("+", "")} ${followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"} · change the default in Settings › Agents › Follow-ups`}>
+          {keysOf("composer.send").join("")} {followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"}
+          {" · "}{keysOf("composer.sendAlternate").join("")} {followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"}
+          {" · "}change the default in{" "}
+          <button type="button" className="underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => openSettingRow("agents.followUps")}>Settings › Agents › Follow-ups</button>
+        </div>
+      ) : null}
       {setupRunning && <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status">Setup running</div>}
       {pendingNote && (
         <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-pending">
@@ -892,3 +942,6 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
 }
 
 const NO_TURNS: readonly Turn[] = [];
+
+
+const isEmptyGoal = (draft: string) => goalCommand(draft) === "";

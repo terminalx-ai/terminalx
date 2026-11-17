@@ -1129,6 +1129,10 @@ impl Step<'_> {
             self.needs_you(StopReason::ReviewerChangedWorkspace { detail: format!("{} That commit is not on the pull request (at {}), so it was made in this checkout.", moved.trim_end_matches('.'), short(&pr.head_sha)) });
             return Ok(());
         }
+        if !self.author_at_work_during_review() {
+            self.needs_you(StopReason::ReviewerChangedWorkspace { detail: self.unattributed(&workspace.head, reviewed) });
+            return Ok(());
+        }
         if self.p.moved_reviews >= MOVED_REVIEW_TRIES {
             let reviews = self.p.moved_reviews + 1;
             self.needs_you(StopReason::ReviewerChangedWorkspace {
@@ -1144,6 +1148,27 @@ impl Step<'_> {
         // The first time it is read again at once; a branch that moves again
         // is waited on until it holds still.
         self.look_at_moved_head(self.p.moved_reviews == 1)
+    }
+
+    /// Whether the author's conversation was at work since the overtaken
+    /// review was asked for: in a turn now, or with a turn that ended since.
+    /// The reviewer shares the checkout and its push rights, so a head on the
+    /// pull request is not proof the author moved it; a reviewer that pushed
+    /// its own change must not have it reviewed as the author's work.
+    fn author_at_work_during_review(&self) -> bool {
+        if self.host.agent_busy(&self.p.author) {
+            return true;
+        }
+        let Some(asked) = self.p.review_requested_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()) else { return false };
+        self.host.last_reply(&self.p.author).is_some_and(|(ended, _)| ended >= asked.with_timezone(&Utc))
+    }
+
+    fn unattributed(&self, head: &str, reviewed: &str) -> String {
+        format!(
+            "the branch moved to {} during the review of {}, and the author session was not at work meanwhile, so it cannot be told from a change the reviewer pushed itself.",
+            short(head),
+            short(reviewed),
+        )
     }
 
     /// From a set-aside review, and then from the poller: review the new head
@@ -1168,6 +1193,10 @@ impl Step<'_> {
                 return self.evaluate_snapshot(pr, Merger::Pipeline);
             }
             if same_commit(&pr.head_sha, &workspace.head) {
+                if !self.author_at_work_during_review() {
+                    self.needs_you(StopReason::ReviewerChangedWorkspace { detail: self.unattributed(&workspace.head, &wait.reviewed) });
+                    return Ok(());
+                }
                 return self.request_review_again();
             }
             if still {

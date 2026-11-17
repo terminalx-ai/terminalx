@@ -10,12 +10,11 @@ import { setPrefs } from "@/lib/prefs";
 import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
 import { AgentDashboard } from "./AgentDashboard";
 
-/** PRO-346: machine sessions in the overview, with a Where column and an All machines menu while a machine is paired and Machines is on. */
+/** PRO-346: machine sessions in the overview, with a Where column and an All machines menu while a machine is paired. */
 const state = vi.hoisted(() => ({
   sessions: [] as SessionEntry[],
   cloud: [] as unknown[],
   machineSessions: [] as unknown[],
-  machinesOn: false,
   machines: [] as PairedMachine[],
   states: {} as Record<string, MachineConnectionState>,
   select: vi.fn(),
@@ -35,8 +34,8 @@ vi.mock("@/lib/cloudPeople", () => ({ usePeople: () => (id: string) => id, loadR
 vi.mock("@/lib/machineConnections", () => ({ useMachineConnections: () => ({ machines: state.machines, states: state.states }) }));
 vi.mock("@/lib/machineDashboard", async (original) => ({
   ...(await original<typeof import("@/lib/machineDashboard")>()),
-  useMachineDashboardEnabled: () => state.machinesOn,
-  useMachineDashboard: () => (state.machinesOn ? state.machineSessions : []),
+  // As the store does: no paired machine, no machine session.
+  useMachineDashboard: () => (state.machines.length ? state.machineSessions : []),
   openMachineSession: state.openMachine,
 }));
 vi.mock("@/components/dashboard/AgentCard", () => ({
@@ -91,7 +90,6 @@ beforeEach(async () => {
   setPrefs({ dashboard: DEFAULT_DASHBOARD_PREFERENCES });
   state.sessions = [local("Notarize release builds")];
   state.cloud = [cloudSession("Push org events")];
-  state.machinesOn = true;
   state.machines = [MINI, SERVER];
   state.states = { [MINI.machineId]: { state: "direct", route: { kind: "lan" }, rttMs: 4 } as MachineConnectionState };
   state.machineSessions = [
@@ -155,11 +153,8 @@ it("leaves out Cloud when there is no cloud session", async () => {
   expect(menu.queryByRole("menuitem", { name: /Cloud/ })).toBeNull();
 });
 
-it.each([
-  ["Machines is off", () => { state.machinesOn = false; }],
-  ["no machine is paired", () => { state.machines = []; }],
-])("looks as it always did while %s", async (_case, set) => {
-  set();
+it("looks as it always did while no machine is paired (PRO-360)", async () => {
+  state.machines = [];
   render(<AgentDashboard />);
   expect(screen.queryByRole("button", { name: /All machines/ })).toBeNull();
   expect(screen.queryByText(/on Mac mini/)).toBeNull();

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SessionEntry } from "@/types/session";
-import { DEFAULT_DASHBOARD_PREFERENCES, TABLE_COLUMNS } from "@terminalx/portable/dashboard";
+import { DEFAULT_DASHBOARD_PREFERENCES, tableColumns } from "@terminalx/portable/dashboard";
 import { setPrefs, getPrefs } from "@/lib/prefs";
 import { AgentDashboard } from "./AgentDashboard";
 
@@ -115,7 +115,8 @@ it("keeps search and filters across views, hides automations and archives until 
   await waitFor(() => expect(rowNames()).toEqual(["Fix nightly"]));
 });
 
-it.each(TABLE_COLUMNS)("sorts and toggles the $label column", async ({ id, label, menu }) => {
+// Where is offered only with Machines on and a machine paired: MachineDashboard.test sorts and hides it.
+it.each(tableColumns(false))("sorts and toggles the $label column", async ({ id, label, menu }) => {
   state.sessions = [session("Task 10"), session("Task 2")];
   setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, hiddenColumns: [] } });
   render(<AgentDashboard />);
@@ -150,7 +151,7 @@ it("shows the designed default columns, people and the toolbar", async () => {
   expect(screen.getByRole("textbox", { name: "Search sessions" }).getAttribute("placeholder")).toBe("Search sessions, branches, PRs");
   await showView("Table");
   const headers = within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("columnheader").map((header) => header.textContent);
-  // Where joins after Project only with Machines on and a machine paired (PRO-346).
+  // Where joins after Project only once a machine is paired (PRO-346).
   expect(headers).toEqual(["Session", "Project", "Branch", "Changes", "Status", "Agent", "Owner", "Active"]);
   expect(screen.getByRole("img", { name: "You" })).toBeDefined();
   fireEvent.keyDown(window, { key: "/" });

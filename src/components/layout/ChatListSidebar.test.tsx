@@ -300,7 +300,7 @@ describe("status grouping and view controls (PRO-164)", () => {
 });
 
 describe("the Machines section (PRO-345)", () => {
-  const machines = async (on: boolean) => {
+  const machines = async (paired: boolean) => {
     const experimental = await import("@/lib/experimentalSettings");
     const connections = await import("@/lib/machineConnections");
     const { pairedMachine } = await import("@/components/machines/machineFixtures.test-utils");
@@ -308,9 +308,8 @@ describe("the Machines section (PRO-345)", () => {
     connections.resetMachineConnectionsForTests();
     const answer = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args?: never) => {
-      if (command === "experimental_settings") return { nativeCodex: false, machines: on };
-      if (command === "machines_list") return [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
-      if (command === "machines_connections") return [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
+      if (command === "machines_list") return !paired ? [] : [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
+      if (command === "machines_connections") return !paired ? [] : [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
       return answer(command, args);
     });
     await connections.refreshPairedMachines();
@@ -335,11 +334,11 @@ describe("the Machines section (PRO-345)", () => {
     expect(store.getSessionStore().selectedCloudWorkspace).toBe("machine:m1");
   });
 
-  it("shows nothing with Experimental → Machines off, even with machines paired", async () => {
+  it("shows nothing with no machine paired (PRO-360)", async () => {
     await machines(false);
     await boot([session("one", "/repos/web", new Date().toISOString())]);
     mount();
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_list"));
     expect(screen.queryByTestId("machines-section")).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, CircleCheck, Loader2, TriangleAlert } from "@/icons";
+import { CircleCheck, Loader2, TriangleAlert } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudProviderConnection, type CloudProviderSummary, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
@@ -298,9 +298,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                 ? { label: "New machines paused", tone: "text-warning" }
                 : item.connection?.state === "attention-required" || item.availability === "attention-required"
                   ? { label: "Needs attention", tone: "text-warning" }
-                  : item.connection?.state === "connected"
-                    ? { label: "Connected", tone: "text-add" }
-                    : null;
+                  : null;
             return (
               <label
                 key={item.id}
@@ -323,7 +321,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
                   {itemCopy && <span className="text-faint">{itemCopy.billing}</span>}
                   {state && (
                     <span className={cn("flex items-center gap-1", state.tone)}>
-                      {state.tone === "text-add" ? <Check className="size-3" /> : <TriangleAlert className="size-3" />}
+                      <TriangleAlert className="size-3" />
                       {state.label}
                     </span>
                   )}
@@ -338,7 +336,15 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
         <>
           <div className="mt-4 grid grid-cols-[1fr_200px] gap-3 max-sm:grid-cols-1">
             <div className="min-w-0">
-              <FieldLabel>{copy?.credentialFields.map((field) => field.label).join(" · ") || `${cloudProviderLabel(provider)} API token`}</FieldLabel>
+              <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                <span className="text-[12.5px] font-medium">{copy?.credentialFields.map((field) => field.label).join(" · ") || `${cloudProviderLabel(provider)} API token`}</span>
+                {/* Replacing the key is a link on the field's own line, not a row of its own (12.03). */}
+                {manage && connection && !entering && !disconnecting && (
+                  <button type="button" className="text-[12px] text-muted-foreground hover:text-foreground hover:underline disabled:opacity-60" disabled={Boolean(busy)} onClick={() => setReplacing(true)}>
+                    Replace key
+                  </button>
+                )}
+              </div>
               {copy?.credentialFields
                 .filter((field) => field.helpUrl?.startsWith("https://"))
                 .map((field) => (
@@ -415,13 +421,6 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
             <p className="mt-2 text-[12.5px] text-muted-foreground">
               {connected ? "Organization owners and administrators manage provider keys." : `Ask an owner or administrator of ${organization.name} to connect ${provider.displayName}.`}
             </p>
-          )}
-          {manage && connection && !entering && !disconnecting && (
-            <div className="mt-2">
-              <Button size="sm" variant="ghost" className="-ml-2.5" disabled={Boolean(busy)} onClick={() => setReplacing(true)}>
-                Replace key
-              </Button>
-            </div>
           )}
           {entering && connection && (
             <div className="mt-3 rounded-lg border border-hairline bg-raised p-3" data-testid="cloud-setup-provider-connect">
@@ -545,7 +544,7 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
               readOnly={!canEdit}
               disabled={busy === "save"}
               aria-invalid={canEdit && !nameValid}
-              aria-describedby="cloud-setup-computer-name-help"
+              aria-describedby={!canEdit || !nameValid ? "cloud-setup-computer-name-help" : undefined}
               onChange={(event) => {
                 setName(event.target.value.toLowerCase());
                 setSaveError(null);
@@ -591,9 +590,12 @@ export function ComputeStep({ organization, record, onRecord, contextRevision, o
           </span>
         </div>
       </div>
-      <p id="cloud-setup-computer-name-help" className={cn("mt-1.5 text-[12px]", canEdit && !nameValid ? "text-destructive" : "text-faint")}>
-        {!canEdit ? `Owners and admins of ${organization.name} choose the computer's name and colour.` : !nameValid ? NAME_RULE : "Everyone in the organization sees the cloud computer by this name."}
-      </p>
+      {/* The "Shows as" chip already says how everyone sees the name (12.03); a line shows only for a rule or a restriction. */}
+      {(!canEdit || !nameValid) && (
+        <p id="cloud-setup-computer-name-help" className={cn("mt-1.5 text-[12px]", canEdit ? "text-destructive" : "text-faint")}>
+          {!canEdit ? `Owners and admins of ${organization.name} choose the computer's name and colour.` : NAME_RULE}
+        </p>
+      )}
 
       <p className="mt-3 text-[12px] leading-[18px] text-faint">
         {idleMinutes > 0 && provider?.capabilities.suspend ? `Idle workspaces sleep after ${idleMinutes} minutes. ` : ""}

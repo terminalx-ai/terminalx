@@ -2991,8 +2991,6 @@ export interface ExperimentalSettings {
   orchestratorRuns?: boolean;
   /** Show Local VM tasks and chosen computers: Settings → Local VMs, a tab's computer choice, its task cards (PRO-114). */
   localVmTasks?: boolean;
-  /** Show Settings → Machines: operate this Mac from other computers, and add machines (PRO-342). */
-  machines?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -3002,7 +3000,6 @@ export const experimental = {
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
-  setMachines: (machines: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { machines }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;

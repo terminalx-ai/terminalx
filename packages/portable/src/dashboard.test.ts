@@ -78,12 +78,12 @@ describe("the Where column (PRO-346)", () => {
     expect(WHERE_COLUMN.label).toBe("Where");
   });
   it("sorts by where a session runs, rows without it last", () => {
-    const rows = [row("a", { where: "This Mac" }), row("b", { where: "Cloud" }), row("c"), row("d", { where: "Mac mini" })];
+    const rows = [row("a", { where: "This Mac" }), row("b", { where: "Cloud" }), row("c", { where: null }), row("d", { where: "Mac mini" })];
     expect(sortDashboardRows(rows, { column: "where", direction: "asc" }).map((r) => r.id)).toEqual(["b", "d", "a", "c"]);
     expect(sortDashboardRows(rows, { column: "where", direction: "desc" }).map((r) => r.id)).toEqual(["a", "d", "b", "c"]);
   });
   it("keeps a saved Where choice, and the last column offered stays shown", () => {
-    expect(dashboardPreferences({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"] })).toMatchObject({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"] });
+    expect(dashboardPreferences({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"], columnSet: DEFAULT_DASHBOARD_PREFERENCES.columnSet })).toMatchObject({ sort: { column: "where", direction: "asc" }, hiddenColumns: ["where"] });
     const allButWhere = tableColumns(true).filter((c) => c.id !== "where").map((c) => c.id);
     expect(toggleTableColumn(allButWhere, "where", tableColumns(true))).toEqual(allButWhere);
     // Where hidden too still leaves Name, as Where is not always offered.
