@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MachinePairResult } from "@/types/machines";
 import { CODE, inspected, pairedMachine } from "./machineFixtures.test-utils";
@@ -185,7 +185,10 @@ describe("Add a machine: Headless server (screen 21.06)", () => {
   it("leaving the tab while it waits cancels that pairing; each tab keeps its own code", async () => {
     const { dialog } = openHeadless();
     paste(dialog);
-    fireEvent.click(await within(dialog).findByRole("button", { name: "Continue" }));
+    const continueButton = within(dialog).getByRole("button", { name: "Continue" }) as HTMLButtonElement;
+    // The button exists while code inspection is pending, but cannot start pairing yet.
+    await waitFor(() => expect(continueButton.disabled).toBe(false));
+    fireEvent.click(continueButton);
     await within(dialog).findByText("Waiting for approval on build-01…");
     fireEvent.click(within(dialog).getByRole("tab", { name: "Pairing code" }));
     expect(mocks.invoke).toHaveBeenCalledWith("machines_cancel_pairing");

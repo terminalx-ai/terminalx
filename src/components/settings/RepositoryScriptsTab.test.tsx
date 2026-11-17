@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { SettingsPage } from "./SettingsPage";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Project, SessionEntry } from "@/types/session";
@@ -6,12 +8,12 @@ const state = vi.hoisted(() => ({
   projects: [] as Project[], sessions: [] as SessionEntry[], selectedSessionId: null as string | null,
   update: vi.fn(), rerun: vi.fn(), resolve: vi.fn(), write: vi.fn(), review: vi.fn(), open: vi.fn(),
 }));
-vi.mock("@/lib/sessions", () => ({ useSessionStore: () => state, updateProject: state.update }));
+vi.mock("@/lib/sessions", async (original) => ({ ...await original<typeof import("@/lib/sessions")>(), useSessionStore: () => state, updateProject: state.update }));
 vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }), rerunSetup: state.rerun }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: state.open }));
 vi.mock("./EnvironmentSettings", () => ({ EnvironmentTable: ({ project }: { project: string }) => <p>Variables for {project}</p> }));
 vi.mock("@/lib/configuration", () => ({
-  configuration: { watch: async () => () => {}, resolve: state.resolve, write: state.write, review: state.review },
+  configuration: { files: async () => [], watch: async () => () => {}, resolve: state.resolve, write: state.write, review: state.review },
 }));
 import { RepositoryScriptsTab } from "./RepositoryScriptsTab";
 
@@ -37,12 +39,19 @@ beforeEach(() => {
 });
 
 it("shows the page's heading and saves each script on this computer as it is left, with the archive timeout", async () => {
+  state.update.mockImplementation(async (_path, { scripts }) => {
+    state.resolve.mockResolvedValue(resolved({
+      setupScript: { value: scripts.setup, source: "user" },
+      archiveScript: { value: scripts.archive, source: "user" },
+      archiveTimeoutMinutes: { value: scripts.archiveTimeoutMinutes ?? 5, source: "user" },
+    }));
+  });
   render(<RepositoryScriptsTab projectPath="/a" />);
   expect(screen.getByRole("heading", { name: "Scripts" })).toBeTruthy();
   expect(screen.getByText("Commands that run when a workspace is set up, run or removed.")).toBeTruthy();
   await waitFor(() => expect(textarea("Setup script").value).toBe("npm ci"));
   expect(screen.queryByText(/· locked/)).toBeNull();
-  // PRO-388: the project file opens from the title bar only, and no script has a Save button of its own.
+  // The project file opens from the title bar; unchanged scripts need no Save button.
   expect(screen.queryByRole("button", { name: /Open .*settings\.json/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["Setup", "Run", "Archive"]);
@@ -211,4 +220,120 @@ it("does not ask to trust a committed script that a local override replaces", as
   expect(screen.queryByRole("region", { name: "Repository trust" })).toBeNull();
   expect(screen.queryByText(/not trusted yet/)).toBeNull();
   expect(button("Run setup now").disabled).toBe(false);
+});
+
+function SettingsHarness() {
+  const [open, setOpen] = useState(true);
+  return open
+    ? <SettingsPage initialTab="repositories.scripts" initialProjectPath="/a" onBack={() => setOpen(false)} />
+    : <button onClick={() => setOpen(true)}>Reopen Settings</button>;
+}
+
+it.each([
+  { kind: "setup", source: "user" }, { kind: "archive", source: "user" },
+  { kind: "setup", source: "repositoryLocal" }, { kind: "archive", source: "repositoryLocal" },
+] as const)("keeps a focused $kind draft from $source on Escape, then reopens with saved content", async ({ kind, source }) => {
+  state.resolve.mockImplementation(async () => resolved({
+    setupScript: { value: state.projects[0].scripts?.setup ?? "", source },
+    archiveScript: { value: state.projects[0].scripts?.archive ?? "", source },
+  }));
+  let finishSave: (() => void) | undefined;
+  state.update.mockImplementation(async (_path, patch) => {
+    await new Promise<void>((resolve) => { finishSave = resolve; });
+    state.projects[0] = { ...state.projects[0], ...patch };
+  });
+  state.write.mockImplementation(async (_path, _layer, _key, script) => {
+    await new Promise<void>((resolve) => { finishSave = resolve; });
+    state.projects[0].scripts = { ...state.projects[0].scripts!, [kind]: script };
+  });
+  render(<SettingsHarness />);
+  const label = kind === "setup" ? "Setup script" : "Archive script";
+  const editor = await screen.findByLabelText(label);
+  act(() => editor.focus());
+  fireEvent.change(editor, { target: { value: "echo changed" } });
+  expect(document.activeElement).toBe(editor);
+  fireEvent.keyDown(editor, { key: "Escape" });
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  expect(screen.getByRole("alert").textContent).toContain("Save your script changes");
+  expect(state.update).not.toHaveBeenCalled();
+  expect(state.write).not.toHaveBeenCalled();
+  fireEvent.click(button(`Save ${kind} script`));
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  await act(async () => { finishSave!(); });
+  await screen.findByText(`${kind === "setup" ? "Setup" : "Archive"} script saved.`);
+  fireEvent.keyDown(document, { key: "Escape" });
+  fireEvent.click(button("Reopen Settings"));
+  await waitFor(() => expect(textarea(label).value).toBe("echo changed"));
+});
+
+it("keeps Settings and the draft open after a failed save, with an explicit retry", async () => {
+  state.update.mockRejectedValueOnce(new Error("Disk unavailable"));
+  render(<SettingsHarness />);
+  const editor = await screen.findByLabelText("Setup script");
+  act(() => editor.focus());
+  fireEvent.change(editor, { target: { value: "echo retry" } });
+  fireEvent.keyDown(editor, { key: "Escape" });
+  fireEvent.click(button("Save setup script"));
+  await screen.findByText("Disk unavailable");
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(textarea("Setup script").value).toBe("echo retry");
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  state.resolve.mockResolvedValue(resolved({ setupScript: { value: "echo retry", source: "user" } }));
+  fireEvent.click(button("Save setup script"));
+  await screen.findByText("Setup script saved.");
+  fireEvent.click(button("Back to previous page"));
+  expect(button("Reopen Settings")).toBeTruthy();
+});
+
+
+it.each((["setup", "archive"] as const).flatMap((kind) =>
+  [false, true].map((edited) => ({ kind, edited })),
+))("shows the inherited $kind script after removing its local override (edited: $edited) and lets Settings close", async ({ kind, edited }) => {
+  const key = kind === "setup" ? "setupScript" : "archiveScript";
+  const label = kind === "setup" ? "Setup script" : "Archive script";
+  let removed = false;
+  state.resolve.mockImplementation(async () => resolved({
+    [key]: { value: removed ? "echo committed" : "echo local", source: removed ? "repositoryShared" : "repositoryLocal" },
+    archiveTimeoutMinutes: { value: removed ? 10 : 2, source: removed ? "repositoryShared" : "repositoryLocal" },
+  }));
+  state.write.mockImplementation(async (_path, _layer, writtenKey, value) => {
+    if (writtenKey === key && value === null) removed = true;
+  });
+  render(<SettingsHarness />);
+  await waitFor(() => expect(textarea(label).value).toBe("echo local"));
+  // Removing an override also discards any draft in that override, after the write succeeds.
+  if (edited) fireEvent.change(textarea(label), { target: { value: "echo unsaved local" } });
+  fireEvent.click(button("Remove local override"));
+  await screen.findByText("Local override removed.");
+  expect(state.write).toHaveBeenCalledWith("/a", "repositoryLocal", key, null);
+  await waitFor(() => expect(textarea(label).value).toBe("echo committed"));
+  expect(textarea(label).readOnly).toBe(true);
+  expect(screen.queryByRole("button", { name: `Save ${kind} script` })).toBeNull();
+  if (kind === "archive") {
+    expect(state.write).toHaveBeenCalledWith("/a", "repositoryLocal", "archiveTimeoutMinutes", null);
+    expect((screen.getByLabelText("Archive timeout") as HTMLSelectElement).value).toBe("10");
+  }
+  act(() => textarea(label).focus());
+  fireEvent.keyDown(textarea(label), { key: "Escape" });
+  expect(button("Reopen Settings")).toBeTruthy();
+  fireEvent.click(button("Reopen Settings"));
+  await waitFor(() => expect(textarea(label).value).toBe("echo committed"));
+});
+
+
+it("keeps the local draft and close guard when removing an override fails", async () => {
+  state.resolve.mockResolvedValue(resolved({ setupScript: { value: "echo local", source: "repositoryLocal" } }));
+  state.write.mockRejectedValueOnce(new Error("Cannot remove override"));
+  render(<SettingsHarness />);
+  await screen.findByLabelText("Setup script");
+  fireEvent.change(textarea("Setup script"), { target: { value: "echo unsaved" } });
+  fireEvent.click(button("Remove local override"));
+  await screen.findByText("Cannot remove override");
+  expect(textarea("Setup script").value).toBe("echo unsaved");
+  expect(textarea("Setup script").readOnly).toBe(false);
+  expect(button("Save setup script").disabled).toBe(false);
+  fireEvent.keyDown(textarea("Setup script"), { key: "Escape" });
+  expect(screen.queryByText("Reopen Settings")).toBeNull();
+  expect(screen.getByText(/Save your script changes before leaving Settings/)).toBeTruthy();
 });
