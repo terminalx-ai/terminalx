@@ -159,15 +159,18 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
       // Organization sections retain their layout with a display:contents boundary.
       const visible = getComputedStyle(row).display === "contents" ? row.firstElementChild as HTMLElement | null : row;
       if (!visible) return false;
+      // Marking the row asks nested tab containers to reveal it. Keep observing
+      // until that tab commits its visibility before scrolling or moving focus.
+      if (highlight.current?.row !== visible) highlightRow(visible);
+      if (visible.closest("[hidden]")) return false;
       visible.scrollIntoView?.({ block: "start" });
-      highlightRow(visible);
       // Sign-in links may also open their existing consent dialog. Keep focus there.
       if (!hasEscapeOverlay()) { visible.tabIndex = -1; visible.focus({ preventScroll: true }); }
       return true;
     };
     if (reveal()) return;
     const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
     return () => observer.disconnect();
   }, [section, projectPath, project?.path, projectPage, target, openRequest, selectionRequest, highlightRow]);
 
