@@ -760,3 +760,40 @@ async fn removal_without_a_phone_socket_is_retained_until_relay_control_returns(
     assert_eq!(revoked["relayDeviceId"], "phone");
     relay.stop();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_revocations_retry_control_loss_before_send_or_acknowledgment() {
+    for sent_before_loss in [false, true] {
+        let rig = Rig::new().await;
+        rig.pair("phone", "token", false, true);
+        rig.phones.tick(now_ms());
+        let mut control = rig.relay.phone_test_hold_control();
+        DeviceRegistry.revoke("phone").unwrap();
+        rig.phones.tick(now_ms());
+        // The first queue accepted the command. It can disappear before the
+        // control loop reads it, or after send but before its reply arrives.
+        let old_reply = if sent_before_loss {
+            let (request, reply) = control.take().expect("initial revocation");
+            assert_eq!(request["type"], "device-revoke");
+            assert_eq!(request["relayDeviceId"], "phone");
+            rig.phones.tick(now_ms());
+            assert!(control.take().is_none(), "do not duplicate an outstanding request on a live registration");
+            Some(reply)
+        } else { None };
+        drop(control);
+        let mut replacement = rig.relay.phone_test_hold_control();
+        rig.phones.tick(now_ms());
+        let (retried, reply) = replacement.take().expect("unacknowledged revocation must survive control loss");
+        assert_eq!(retried["type"], "device-revoke");
+        assert_eq!(retried["relayDeviceId"], "phone");
+        drop(old_reply);
+        // An error is not an acknowledgment; keep retrying the removal.
+        reply.send(Ok(json!({"type":"control-error", "reqId":retried["reqId"]}))).unwrap();
+        rig.phones.tick(now_ms());
+        let (retried, reply) = replacement.take().expect("a refusal must not discard the revocation");
+        reply.send(Ok(json!({"type":"device-revoked", "reqId":retried["reqId"]}))).unwrap();
+        rig.phones.tick(now_ms());
+        rig.phones.tick(now_ms());
+        assert!(replacement.take().is_none(), "only an acknowledged revocation leaves the retry set");
+    }
+}

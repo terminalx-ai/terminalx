@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -155,6 +155,14 @@ impl PhoneConnection {
     fn wire_transport(&self) -> phone::wire::Transport { if self.host_id().is_some() { phone::wire::Transport::Relay } else { phone::wire::Transport::Direct } }
 }
 
+/// A revocation remains pending until the relay replies to this exact request.
+struct RevocationRequest {
+    id: String,
+    registration: crate::remote::host::Registration,
+    sent: Instant,
+    reply: std::sync::mpsc::Receiver<Result<Value>>,
+}
+
 pub(crate) struct Phones {
     host: Arc<PhoneHost>,
     sessions: SessionManager,
@@ -165,7 +173,7 @@ pub(crate) struct Phones {
     /// Device identities outlive their sockets, so external removal still
     /// retires a disconnected phone's relay credential.
     known_devices: Mutex<HashSet<String>>,
-    pending_revocations: Mutex<HashSet<String>>,
+    pending_revocations: Mutex<HashMap<String, Option<RevocationRequest>>>,
     /// The account generation as last read, each tick: the phone RPC
     /// asks for it on every request and event, which must not read a file.
     generation: Arc<AtomicU64>,
@@ -200,7 +208,7 @@ impl Phones {
             state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
             known_devices: Mutex::new(DeviceRegistry.list()?.into_iter().map(|device| device.id).collect()),
-            pending_revocations: Mutex::new(HashSet::new()),
+            pending_revocations: Mutex::new(HashMap::new()),
             generation,
             account_known: AtomicBool::new(first.is_ok()),
             account: Mutex::new(account),
@@ -335,16 +343,37 @@ impl Phones {
     }
 
     fn revoke_relay(&self, device_id: &str) {
-        self.pending_revocations.lock().unwrap().insert(device_id.to_string());
+        self.pending_revocations.lock().unwrap().entry(device_id.to_string()).or_insert(None);
+        if let Some(relay) = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade) {
+            relay.close_device_connections(device_id);
+        }
         self.flush_revocations();
     }
 
     fn flush_revocations(&self) {
-        if let Some(relay) = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade) {
-            // Keep removals observed while offline until a control connection
-            // can accept them; disconnecting a socket never clears this set.
-            self.pending_revocations.lock().unwrap().retain(|device| !relay.revoke_device(device));
-        }
+        use std::sync::mpsc::TryRecvError;
+        let relay = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade);
+        let registration = relay.as_ref().and_then(|relay| relay.registration());
+        self.pending_revocations.lock().unwrap().retain(|device, pending| {
+            if let Some(request) = pending {
+                match request.reply.try_recv() {
+                    Ok(Ok(reply)) if reply["type"] == "device-revoked" && reply["reqId"] == request.id => return false,
+                    Err(TryRecvError::Empty) if registration.as_ref() == Some(&request.registration)
+                        && request.sent.elapsed() < HANDSHAKE_TIMEOUT => return true,
+                    // Closed before send/ack, refused, timed out, or replaced:
+                    // retry the idempotent revocation on the next live control.
+                    _ => *pending = None,
+                }
+            }
+            if let (Some(relay), Some(registration)) = (&relay, &registration) {
+                let id = uuid::Uuid::new_v4().simple().to_string();
+                let frame = json!({"type":"device-revoke", "v":1, "reqId":id, "relayDeviceId":device});
+                if let Ok(reply) = relay.forward_control(frame) {
+                    *pending = Some(RevocationRequest { id, registration: registration.clone(), sent: Instant::now(), reply });
+                }
+            }
+            true
+        });
     }
 
     /// Read the full account binding again. Profile edits do not retire it.

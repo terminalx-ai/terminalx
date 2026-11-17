@@ -409,6 +409,19 @@ fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
 /// The relay's replies to them, each naming the request's `reqId`.
 const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
 
+#[cfg(test)]
+pub(crate) struct PhoneTestControl(mpsc::UnboundedReceiver<ControlCommand>);
+
+#[cfg(test)]
+impl PhoneTestControl {
+    pub(crate) fn take(&mut self) -> Option<(Value, std::sync::mpsc::Sender<Result<Value>>)> {
+        match self.0.try_recv().ok()? {
+            ControlCommand::Forward { frame, respond, .. } => Some((frame, respond)),
+            _ => panic!("expected a forwarded phone control request"),
+        }
+    }
+}
+
 /// A live registration, as the window needs it to use it (PRO-368).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
@@ -585,6 +598,16 @@ impl RelayHost {
     }
 
     #[cfg(test)]
+    pub(crate) fn phone_test_hold_control(&self) -> PhoneTestControl {
+        let (commands, receive) = mpsc::unbounded_channel();
+        let mut registered = self.registered.lock().unwrap();
+        let live = &mut registered.as_mut().unwrap().0;
+        live.commands = commands;
+        live.relay_generation += 1;
+        PhoneTestControl(receive)
+    }
+
+    #[cfg(test)]
     pub(crate) fn phone_test_forward(&self, connection: crate::machine_wire::RelayConnection) {
         let live = self.registered.lock().unwrap().as_ref().unwrap().0.clone();
         let open = ConnectionOpen { conn_id:connection.conn_id, conn_ticket:connection.conn_ticket, kind:connection.kind, relay_device_id:connection.relay_device_id, attach_deadline_ms:connection.attach_deadline_ms };
@@ -689,16 +712,19 @@ impl RelayHost {
     }
 
     /// End a device's relay credentials (`device-revoke`) and close its
-    /// relay connections. Returns whether the live control queue accepted
-    /// the revocation; callers can retain offline revocations for retry.
-    pub fn revoke_device(&self, relay_device_id: &str) -> bool {
-        let queued = self.registered.lock().unwrap().as_ref().is_some_and(|(live, _)| {
-            live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() }).is_ok()
-        });
+    /// relay connections. Phone cleanup uses `forward_control` instead to
+    /// retain its revocation until the relay acknowledges it.
+    pub fn revoke_device(&self, relay_device_id: &str) {
+        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
+            let _ = live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() });
+        }
+        self.close_device_connections(relay_device_id);
+    }
+
+    pub(crate) fn close_device_connections(&self, relay_device_id: &str) {
         for cancel in self.state.lock().unwrap().connections.remove(relay_device_id).unwrap_or_default() {
             let _ = cancel.send(());
         }
-        queued
     }
 
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
