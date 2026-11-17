@@ -146,6 +146,8 @@ pub(crate) struct CliRecord {
     #[serde(default)]
     pub recorded: bool,
     pub tail: TailRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<claude::background::WatchRecord>,
     #[serde(default)]
     pub echoed: Vec<EchoRecord>,
     #[serde(default)]
@@ -460,7 +462,7 @@ impl SessionManager {
         if rt.held_queue.sending.is_some() {
             return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
         }
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || rt.automation_completions_in_flight != 0 {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
         }
         if !rt.compaction.is_idle() {
@@ -529,6 +531,10 @@ impl SessionManager {
             ready_ms: p.ready.since().map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
             recorded: p.recorded,
             tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
+            background: match &rt.background {
+                Some(watch) => Some(watch.try_lock().map_err(|_| Unsettled("Background work is being read".into()))?.handover()),
+                None => None,
+            },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
                 collaboration_required: echo.collaboration_required, text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
@@ -599,9 +605,12 @@ impl SessionManager {
         anyhow::ensure!(self.terminals.is_live(&cli.pane_id), "its terminal {} was not handed over", cli.pane_id);
         let (decode, marker) = follow::decoders(kind);
         let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).with_usage(cli.tail.usage).marking(marker));
-        // Read on from where its CLI began: what the CLI started in the
-        // background since is found again (#696).
-        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        // Preserve acknowledgments and partial records with the cursor. An
+        // older owner has no snapshot, so keep its conservative replay path.
+        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(match cli.background {
+            Some(background) => claude::background::Watch::from_handover(tail.clone(), background),
+            None => claude::background::Watch::new(tail.clone()),
+        })));
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pane = cli.pane_id.clone();
         let asks: HashMap<String, AskRecord> = record.pending.into_iter().map(|ask| (ask.request_id.clone(), ask)).collect();

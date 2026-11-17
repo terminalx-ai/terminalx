@@ -382,6 +382,7 @@ impl Rig {
             held_queue: Default::default(),
             turn_open: false,
             turn_generation: 0,
+            automation_completions_in_flight: 0,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
@@ -3218,6 +3219,55 @@ fn a_handover_reads_which_cards_hooks_still_wait_on() {
     assert!(awaited().is_empty(), "answered, whether or not its hook has woken to say so");
     let reply = worker.join().unwrap();
     assert_eq!(reply.output, Some(codex::pty::permission_decision(true)), "the answer reaches the agent");
+}
+
+#[test]
+fn handover_keeps_handled_background_reports_from_becoming_pending_again() {
+    use std::io::Write;
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().background = Some(Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone()))));
+    let now = index::now();
+    let records = [
+        json!({ "type": "assistant", "timestamp": now, "message": { "content": [{ "type": "tool_use", "id": "ci", "name": "Bash", "input": { "run_in_background": true } }] } }),
+        json!({ "type": "user", "timestamp": now, "message": { "content": [{ "type": "tool_result", "tool_use_id": "ci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }),
+        json!({ "type": "user", "timestamp": now, "turnOrigin": "task_notification", "message": { "content": "<task-notification><task-id>bci</task-id><tool-use-id>ci</tool-use-id><status>completed</status></task-notification>" } }),
+    ];
+    let mut file = std::fs::OpenOptions::new().append(true).open(&rig.transcript).unwrap();
+    for record in records { writeln!(file, "{record}").unwrap(); }
+    let watch = rig.rt.lock().unwrap().background.clone().unwrap();
+    let start = chrono::Utc::now() + chrono::TimeDelta::seconds(1);
+    watch.lock().unwrap().automation_turn_completed(Some(start), start + chrono::TimeDelta::seconds(1), Some("Handled"));
+    assert!(watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+
+    let record = rig.manager.hold_tabs(Duration::from_secs(5), |mut held| held.tabs.remove(0)).unwrap();
+    let record = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+    rig.manager.adopt_tab(record).unwrap();
+    let adopted = rig.rt.lock().unwrap().background.clone().unwrap();
+    assert!(adopted.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+    rig.manager.terminals.kill_all();
+}
+
+#[test]
+fn handover_keeps_its_deadline_when_background_work_is_being_read() {
+    let rig = Rig::with_live_pane();
+    let watch = Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone())));
+    rig.rt.lock().unwrap().background = Some(watch.clone());
+    let reading = watch.lock().unwrap();
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(reading);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
+}
+
+#[test]
+fn handover_keeps_a_completion_callback_from_being_lost() {
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().automation_completions_in_flight = 1;
+    let completion = AutomationCompletionGuard(rig.rt.clone());
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(completion);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
 }
 
 /// What an issue pipeline stopped on its author's answer hears (#725): a

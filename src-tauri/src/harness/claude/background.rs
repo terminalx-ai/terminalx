@@ -41,6 +41,7 @@ use std::sync::Arc;
 use crate::harness::tui::Tail;
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// How long after a wakeup was due it still counts: the CLI fires it only
@@ -54,14 +55,14 @@ const CRON_LIFETIME: Duration = Duration::days(7);
 /// between carry none of these.
 const FINAL: &[&str] = &["completed", "failed", "killed", "stopped", "error", "errored", "cancelled", "canceled", "timeout", "timed_out", "expired"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Task {
     /// The CLI's own id for it, once its result has said.
     id: Option<String>,
-    what: &'static str,
+    what: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Cron {
     /// The job's id, once its result has said.
     id: Option<String>,
@@ -70,13 +71,13 @@ struct Cron {
 }
 
 /// A stop the agent asked for, applied once its result says it worked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Stopping {
     Task(String),
     Cron(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Notification {
     at: DateTime<Utc>,
     task_id: Option<String>,
@@ -105,7 +106,7 @@ fn same_notification(prompt: &str, rendered: &str) -> bool {
 
 /// What one CLI started and has not heard back from, by the tool use that
 /// started each.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     tasks: BTreeMap<String, Task>,
     crons: BTreeMap<String, Cron>,
@@ -203,11 +204,11 @@ impl Ledger {
                 }
             }
             "Monitor" => {
-                self.tasks.insert(id.into(), Task { id: None, what: "a monitor" });
+                self.tasks.insert(id.into(), Task { id: None, what: "a monitor".into() });
             }
             _ if input["run_in_background"].as_bool() == Some(true) => {
                 let what = if name == "Bash" { "a background command" } else { "a background agent" };
-                self.tasks.insert(id.into(), Task { id: None, what });
+                self.tasks.insert(id.into(), Task { id: None, what: what.into() });
             }
             _ => {}
         }
@@ -228,7 +229,7 @@ impl Ledger {
             }
             // Sent to the background while it ran.
             None if !failed && structured["backgroundTaskId"].is_string() => {
-                self.tasks.insert(id.into(), Task { id: task_id.map(String::from), what: "a background command" });
+                self.tasks.insert(id.into(), Task { id: task_id.map(String::from), what: "a background command".into() });
             }
             None => {}
         }
@@ -337,12 +338,31 @@ pub struct Watch {
     ledger: Ledger,
 }
 
+/// The cursor and ledger must move together: replaying from the launch would
+/// recreate notifications that a completed turn already acknowledged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WatchRecord {
+    aimed: (PathBuf, u64),
+    offset: u64,
+    partial: Vec<u8>,
+    skip: HashSet<String>,
+    ledger: Ledger,
+}
+
 impl Watch {
     /// Keep up with `tail` from where it stands: where its CLI was started.
     pub fn new(tail: Arc<Tail>) -> Self {
         let aimed = tail.reading();
         let skip = tail.carried();
         Self { offset: aimed.1, aimed, tail, partial: Vec::new(), skip, ledger: Ledger::default() }
+    }
+
+    pub(crate) fn handover(&self) -> WatchRecord {
+        WatchRecord { aimed: self.aimed.clone(), offset: self.offset, partial: self.partial.clone(), skip: self.skip.clone(), ledger: self.ledger.clone() }
+    }
+
+    pub(crate) fn from_handover(tail: Arc<Tail>, record: WatchRecord) -> Self {
+        Self { tail, aimed: record.aimed, offset: record.offset, partial: record.partial, skip: record.skip, ledger: record.ledger }
     }
 
     /// Read what the CLI has written since the last look; what it is still
@@ -501,6 +521,57 @@ mod tests {
         assert!(watch.automation_outstanding(at(600)).is_some(), "a later delivery cannot settle an earlier turn");
         watch.automation_turn_completed(Some(at(3)), at(4), Some("Final"));
         assert!(watch.automation_outstanding(at(600)).is_none());
+    }
+
+    #[test]
+    fn handover_keeps_acknowledged_and_pending_notifications_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let tail = tail(&path, HashSet::new());
+        let mut watch = Watch::new(tail.clone());
+        let first = notification("b1", "t1", "completed");
+        append(&path, &[
+            tool_use("t1", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("t1", "running", serde_json::json!({ "backgroundTaskId": "b1" }), false),
+            reported(&first),
+        ]);
+        watch.automation_turn_completed(Some(at(1)), at(2), Some("Handled"));
+        assert!(watch.automation_outstanding(at(2)).is_none());
+        let record = watch.handover();
+        let record = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        let mut adopted = Watch::from_handover(tail.clone(), record);
+        assert!(adopted.automation_outstanding(at(100)).is_none(), "handover must not recreate the handled report");
+
+        let second = notification("b2", "t2", "failed");
+        append(&path, &[
+            tool_use("t2", "Bash", serde_json::json!({ "run_in_background": true })),
+            tool_result("t2", "running", serde_json::json!({ "backgroundTaskId": "b2" }), false),
+            queued(&second),
+        ]);
+        let record = adopted.handover();
+        let mut adopted = Watch::from_handover(tail, record);
+        assert!(adopted.automation_outstanding(at(100)).is_some(), "an unhandled report must survive handover");
+        append(&path, &[reported(&second)]);
+        adopted.automation_turn_completed(Some(at(3)), at(4), Some("Handled failure"));
+        assert!(adopted.automation_outstanding(at(100)).is_none());
+    }
+
+    #[test]
+    fn handover_preserves_an_unfinished_transcript_record() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let tail = tail(&path, HashSet::new());
+        let mut watch = Watch::new(tail.clone());
+        let line = format!("{}\n", background("partial"));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&line.as_bytes()[..20]).unwrap();
+        assert!(watch.automation_outstanding(at(1)).is_none());
+        let record = watch.handover();
+        let mut adopted = Watch::from_handover(tail, serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap());
+        assert!(adopted.automation_outstanding(at(1)).is_none());
+        file.write_all(&line.as_bytes()[20..]).unwrap();
+        assert!(adopted.automation_outstanding(at(1)).is_some());
     }
 
     #[test]

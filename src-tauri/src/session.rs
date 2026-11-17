@@ -1091,6 +1091,7 @@ pub struct TabRuntime {
     pub held_queue: held::Queue,
     pub turn_open: bool,
     turn_generation: u64,
+    automation_completions_in_flight: usize,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
     /// A compact boundary observed during this command, not proof a model turn ended.
@@ -1155,6 +1156,17 @@ struct CliRestart {
     pane: String,
     process: Option<pty::StoppingPane>,
     _privacy: Vec<crate::data_privacy::RemoteWrite>,
+}
+
+/// Prevent handover from capturing a closed turn before its automation
+/// acknowledgment and durable completion have both been applied.
+struct AutomationCompletionGuard(Arc<Mutex<TabRuntime>>);
+
+impl Drop for AutomationCompletionGuard {
+    fn drop(&mut self) {
+        let mut rt = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        rt.automation_completions_in_flight = rt.automation_completions_in_flight.saturating_sub(1);
+    }
 }
 
 impl TabRuntime {
@@ -2286,6 +2298,7 @@ impl SessionManager {
                 held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
                 turn_generation: 0,
+                automation_completions_in_flight: 0,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
@@ -7861,15 +7874,18 @@ impl SessionManager {
     /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
     /// before notifying automation or scheduling a settings restart that may
     /// re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
         let (generation, started_at, finished) = completed;
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
         let started = started_at.and_then(|at| chrono::TimeDelta::from_std(at.elapsed()).ok()).map(|elapsed| chrono::Utc::now() - elapsed);
         let watch = rt.background.clone();
+        rt.automation_completions_in_flight += 1;
+        let completion = AutomationCompletionGuard(rt_arc.clone());
         drop(rt);
         if let Some(watch) = watch { watch.lock().unwrap().automation_turn_completed(started, finished, final_message.as_deref()); }
         self.observer.automation_completed(&session, &tab, final_message, generation);
+        drop(completion);
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
