@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError } from "./api";
 import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle } from "./catalog";
 import { keyItemName } from "./keys";
+import { cloudSections } from "./list";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
 
@@ -74,6 +75,27 @@ describe("the phone's cloud catalog", () => {
     h.catalog.release("org-1", "ws-new");
     expect(h.catalog.session("org-1", "ws-new")).not.toBe(session);
     h.catalog.close();
+  });
+
+  it("lists an unfamiliar provider under its organization and opens its running workspace", async () => {
+    const h = harness();
+    const workspace = item("ws-new-provider", { provider: "new-compute", state: "ready" });
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [workspace] : [], tombstones: [] }));
+    h.api.open.mockResolvedValue({ id: "a1", workspaceId: "ws-new-provider", state: "waiting-for-runtime", authority: "participate", expiresAt: Date.now() + 60_000 });
+
+    await h.catalog.refresh();
+    const { sections } = cloudSections(h.catalog.getSnapshot().organizations);
+    expect(sections).toEqual([{ key: "org-1", title: "Acme", error: null, data: [workspace] }]);
+    expect(h.api.open).not.toHaveBeenCalled();
+
+    const listed = sections[0].data[0].workspace;
+    const release = h.catalog.retain(listed.orgId, listed.id);
+    try {
+      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new-provider", "mobile-1", expect.anything()));
+    } finally {
+      release();
+      h.catalog.close();
+    }
   });
 
   it("keeps what it showed for an organization whose list could not be read, and forgets nothing because of it", async () => {

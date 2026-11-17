@@ -139,24 +139,24 @@ describe("the Cloud tab", () => {
   const listing = (organizations: unknown[], fields: Record<string, unknown> = {}) => { mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, saved: false, titles: {}, organizations, ...fields }); };
   const organization = (orgId: string, name: string, workspaces: unknown[], error: string | null = null) => ({ organization: { orgId, name, role: "member" }, error, loaded: true, workspaces });
 
-  it("lists each workspace as the Sessions list does: mark, title, status with its time, then repository and branch; and only reads", async () => {
+  it("lists each workspace with its status, provider, repository and branch, and only reads", async () => {
     world();
     const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
     listing([
       organization("org-1", "Acme", [
-        item("fix-login", { runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
-        item("old-work", { state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+        item("fix-login", { provider: "new-compute", providerDescriptor: { label: "New Compute" }, runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
+        item("old-work", { provider: "unlabelled-compute", providerDescriptor: { label: 42 }, state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
         item("warm-up", { state: "suspended", lastActivityAt: minutesAgo(2 * 24 * 60 + 5) }),
       ]),
       organization("org-2", "Beta", [], "cloud_provider_unavailable"),
     ]);
     await show(<CloudScreen />);
     expect(text()).toContain("Acme");
-    const row = button("fix-login, Needs your answer, Can send");
-    expect(row.textContent).toBe("fix-loginNeeds your answer · 6macme/web · tx/fix-login");
-    expect(button("old-work, Stopped, View only, Shared with 3").textContent).toBe("old-workStopped");
+    const row = button("fix-login, Needs your answer, Can send, New Compute");
+    expect(row.textContent).toBe("fix-loginNeeds your answer · 6mNew Compute · acme/web · tx/fix-login");
+    expect(button("old-work, Stopped, View only, Shared with 3, unlabelled-compute").textContent).toBe("old-workStoppedunlabelled-compute");
     // Days, where the status has room for them, as 22.06 says them.
-    expect(button("warm-up, Stopped, Can send").textContent).toBe("warm-upStopped · 2 days ago");
+    expect(button("warm-up, Stopped, Can send, box").textContent).toBe("warm-upStopped · 2 days agobox");
     expect(text()).toContain("The cloud provider is not answering right now.");
     // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
     const leave = mocks.focus.at(-1)!();
@@ -165,7 +165,7 @@ describe("the Cloud tab", () => {
     expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(mocks.catalog.retain).not.toHaveBeenCalled();
     expect(mocks.catalog.start).not.toHaveBeenCalled();
-    await click("old-work, Stopped, View only, Shared with 3");
+    await click("old-work, Stopped, View only, Shared with 3, unlabelled-compute");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "old-work", orgId: "org-1", title: "old-work" } });
   });
 
@@ -219,9 +219,9 @@ describe("the Cloud tab", () => {
     listing([organization("org-1", "Acme", [item("ws-9", { state: "suspended" })])], { loading: true, refreshedAt: null, saved: true, titles: { "org-1/ws-9": "Checkout redesign" } });
     await show(<CloudScreen />);
     expect(container.querySelector('[data-testid="cloud-placeholders"]')).toBeNull();
-    expect(button("Checkout redesign, Stopped, Can send")).toBeTruthy();
+    expect(button("Checkout redesign, Stopped, Can send, box")).toBeTruthy();
     expect(text()).not.toContain("ws-9");
-    await click("Checkout redesign, Stopped, Can send");
+    await click("Checkout redesign, Stopped, Can send, box");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
