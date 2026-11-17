@@ -29,4 +29,3 @@ export function localCommands(cwd: string, harness: string): ComposerCommands {
     },
   };
 }
-

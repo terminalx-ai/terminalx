@@ -166,6 +166,7 @@ beforeEach(async () => {
   enqueued = [];
   cache = {};
   guard.handlers = {
+    phase2_desktop_contracts_available: () => false,
     data_privacy_status: () => ({ enabled: false, managed: false }),
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,

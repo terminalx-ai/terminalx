@@ -729,6 +729,21 @@ impl AccountManager {
         Ok((context, if scope.multi_org { OrgAccess::Member } else { OrgAccess::Active }))
     }
 
+    /// PRO-125 authorizes read markers by membership even on an inactive target.
+    /// This does not widen the authorization of existing cloud APIs.
+    pub(crate) fn inbox_member_context(&self, organization: &str) -> Result<AccountContext, &'static str> {
+        let mut context = self.context().ok_or("account_signed_out")?;
+        if !self.inbox_member_is_current(&context, organization) {
+            return Err("cloud_organization_unavailable");
+        }
+        context.organization_id = organization.into();
+        Ok(context)
+    }
+
+    pub(crate) fn inbox_member_is_current(&self, context: &AccountContext, organization: &str) -> bool {
+        self.scope_if_same_account(context).is_some_and(|scope| scope.members.contains(organization))
+    }
+
     /// [`Self::is_current`] for a context from [`Self::context_in`]: a
     /// member Organization's answer stays current across a change of the
     /// default Organization, and is fenced by the account and the membership.

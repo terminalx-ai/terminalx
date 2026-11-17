@@ -1502,6 +1502,68 @@ pub async fn cloud_catalog_feed(
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.catalog_feed(cursor.as_deref()))
 }
 
+#[tauri::command]
+pub fn phase2_desktop_contracts_available(state: tauri::State<'_, crate::AppState>) -> bool {
+    state.cloud_workspaces.phase2_contracts_available()
+}
+
+// Internal PRO-137 transport only. Native validation and activation hold precede HTTP.
+#[tauri::command]
+pub async fn cloud_workspace_follow_put(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceFollowingResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_follow(&org_id, &workspace_id, true, input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_follow_delete(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceFollowingResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_follow(&org_id, &workspace_id, false, input))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_reassign(org_id: String, workspace_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::WorkspaceReassignResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.workspace_reassign(&org_id, &workspace_id, input))
+}
+
+// Internal transport surface only; the service holds production activation.
+#[tauri::command]
+pub async fn desktop_presence_put(org_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::PresencePutResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.presence_put(&org_id, input))
+}
+
+#[tauri::command]
+pub async fn desktop_presence_read(org_id: String, input: serde_json::Value, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::PresenceReadResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.presence_read(&org_id, input))
+}
+
+#[tauri::command]
+pub async fn desktop_inbox(after: String, wait_ms: u32, state: tauri::State<'_, crate::AppState>) -> Result<crate::desktop_inbox::InboxPage, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.inbox(&after, wait_ms))
+}
+
+#[tauri::command]
+pub async fn desktop_inbox_stream(after: String, last_event_id: Option<String>, state: tauri::State<'_, crate::AppState>) -> Result<crate::desktop_inbox::InboxStreamPage, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.inbox_stream(&after, last_event_id.as_deref()))
+}
+
+#[tauri::command]
+pub async fn desktop_inbox_receipts(event_ids: Vec<String>, state: tauri::State<'_, crate::AppState>) -> Result<crate::desktop_inbox::InboxReceipt, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.inbox_receipts(event_ids))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_read_marker(org_id: String, workspace_id: String, session_id: Option<String>, read_at: String, state: tauri::State<'_, crate::AppState>) -> Result<crate::desktop_inbox::ReadMarker, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.read_marker(&org_id, &workspace_id, session_id, read_at))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_restart(workspace_id: String, org_id: Option<String>, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CloudWorkspaceSnapshot, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.restart(org_id.as_deref(), &workspace_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_details(workspace_id: String, org_id: Option<String>, state: tauri::State<'_, crate::AppState>) -> Result<crate::cloud_workspaces::CloudWorkspaceDetailsResponse, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.details(org_id.as_deref(), &workspace_id))
+}
+
 async fn cloud_workspace_lifecycle(
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,

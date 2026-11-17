@@ -343,4 +343,3 @@ describe("with no machine paired (PRO-360)", () => {
     expect(count).toBe(0);
   });
 });
-

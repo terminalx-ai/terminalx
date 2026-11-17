@@ -254,6 +254,11 @@ export interface CloudSidebarSection {
   name: string;
   /** Project identities (`host/owner/name` or `blank/<name>`), each in one section at most. */
   projects: string[];
+  /** Workspace ids; absent on legacy project sections until migration. */
+  workspaces?: string[];
+  icon?: string;
+  sort?: "active" | "created" | "name";
+  collapsed?: boolean;
 }
 
 /** Saved sections as written, minus anything malformed (a hand-edited or older file never breaks the sidebar). */
@@ -265,7 +270,12 @@ function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
     if (!isObject(orgs)) continue;
     for (const [orgId, sections] of Object.entries(orgs)) {
       if (!Array.isArray(sections)) continue;
-      const kept = sections.filter((section): section is CloudSidebarSection => isObject(section) && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.projects)).map((section) => ({ id: section.id, name: section.name, projects: section.projects.filter((id): id is string => typeof id === "string") }));
+      const kept = sections.filter((section): section is CloudSidebarSection => isObject(section) && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.projects)).map((section) => ({ id: section.id, name: section.name, projects: section.projects.filter((id): id is string => typeof id === "string"),
+        ...(Array.isArray(section.workspaces) ? { workspaces: section.workspaces.filter((id): id is string => typeof id === "string") } : {}),
+        ...(typeof section.icon === "string" ? { icon: section.icon.slice(0, 16) } : {}),
+        ...(["active", "created", "name"].includes(section.sort ?? "") ? { sort: section.sort } : {}),
+        ...(typeof section.collapsed === "boolean" ? { collapsed: section.collapsed } : {}),
+      }));
       if (kept.length) (out[who] ??= {})[orgId] = kept;
     }
   }

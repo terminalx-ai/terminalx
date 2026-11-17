@@ -1,3 +1,4 @@
+import { PresenceFaces } from "@/components/dashboard/TeamOverview";
 import { MemberProfile, memberName } from "@/components/people/MemberProfile";
 import { featureFlags, useFeatureFlag } from "@/lib/featureFlags";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
@@ -52,7 +53,7 @@ import {
   useCloudWorkspaceSessions,
   type CloudSessionRow,
 } from "@/lib/cloudSessions";
-import { createCloudSection, keepFocusForNameField, moveProjectToSection, sectionOfProject, useCloudSidebarSections } from "@/lib/cloudSidebarSections";
+import { createCloudSection, isBuiltInSection, keepFocusForNameField, moveProjectToSection, sectionOfProject, useCloudSidebarSections } from "@/lib/cloudSidebarSections";
 import { errorCode } from "@/lib/cloudTerminals";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
@@ -232,6 +233,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
           )}
         </button>
         {only && <ShareBadge you={only.item.workspace.you} sharedWith={only.item.workspace.sharedWith} className={yieldsToRowActions} />}
+        {only && <PresenceFaces orgId={project.orgId} workspaceId={only.item.workspace.id} othersOnly compact />}
         <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
           {/* A member is not shown a + that could only be refused; the menu's "New session" says why. */}
           {mayStart === true && (
@@ -340,8 +342,8 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
 
 /** "Move to section" in a project's menu: the reader's sections, a new one, or none. */
 function MoveToSectionItems({ project }: { project: CloudProject }) {
-  const sections = useCloudSidebarSections(project.orgId);
-  const current = sectionOfProject(sections, project.identity);
+  const sections = useCloudSidebarSections(project.orgId).filter((section) => !isBuiltInSection(section.id));
+  const current = sectionOfProject(sections, project.identity, project.workspaces.map((node) => node.item.workspace.id));
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger>
@@ -354,18 +356,18 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
             role="menuitemradio"
             aria-checked={current?.id === section.id}
             disabled={current?.id === section.id}
-            onSelect={() => moveProjectToSection(project.orgId, project.identity, section.id)}
+            onSelect={() => moveProjectToSection(project.orgId, project.identity, section.id, project.workspaces.map((node) => node.item.workspace.id))}
           >
             {current?.id === section.id ? <Check /> : <span aria-hidden className="size-4 shrink-0" />}
             <span className="truncate">{section.name}</span>
           </DropdownMenuItem>
         ))}
         {sections.length > 0 && <DropdownMenuSeparator />}
-        <DropdownMenuItem onSelect={() => createCloudSection(project.orgId, project.identity)}>
+        <DropdownMenuItem onSelect={() => createCloudSection(project.orgId, project.identity, project.workspaces.map((node) => node.item.workspace.id))}>
           <FolderPlus /> New section…
         </DropdownMenuItem>
         {current && (
-          <DropdownMenuItem onSelect={() => moveProjectToSection(project.orgId, project.identity, null)}>
+          <DropdownMenuItem onSelect={() => moveProjectToSection(project.orgId, project.identity, null, project.workspaces.map((node) => node.item.workspace.id))}>
             <X /> <span className="min-w-0 truncate">Remove from {current.name}</span>
           </DropdownMenuItem>
         )}
@@ -401,8 +403,8 @@ function OpenWorkspaceItem({ node }: { node: CloudWorkspaceNode }) {
   );
 }
 
-/** Loaded sessions are direct project children; empty workspaces retain their actions. */
-function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle }) {
+/** A workspace's sessions; with several workspaces in the project, under a row that names the workspace. */
+export function WorkspaceRows({ node, named, open, onLifecycle, extraActions }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle; extraActions?: ReactNode }) {
   const store = useSessionStore();
   const filter = useSidebarFilter();
   const menu = useRowMenu();
@@ -453,13 +455,6 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
     </>
   );
   const attentionInput = { tabs: every.flatMap((row) => row.tabs), fromCache: !known || every.every((row) => row.source !== "live"), connection: connection.state };
-  if (sessions.length) return <>
-    {rows}
-    {named && (resolveCloudAttention(node.item, attentionInput) || deletionLine(node.item)) && <li data-testid="cloud-workspace-notice" data-workspace={workspace.id}>
-      <CloudWorkspaceAttention item={node.item} input={attentionInput} compact />
-      {deletionLine(node.item) && <p className="ml-6 text-[10px] text-faint">{deletionLine(node.item)}</p>}
-    </li>}
-  </>;
   if (!named) return rows;
   const selected = store.selectedCloudWorkspace === node.key;
   const extra = extraRepositories(node.item);
@@ -478,6 +473,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
         >
           <GitBranch className="size-3.5 shrink-0 text-faint" />
           <span className="min-w-0 flex-1 truncate text-[13px]">{workspace.name}</span>
+          <PresenceFaces orgId={workspace.orgId} workspaceId={workspace.id} othersOnly compact />
           {extra && <Chip data-testid="cloud-extra-repositories">{extra.label}</Chip>}
           <span className={cn("flex shrink-0 items-center gap-1 text-[11px] text-faint", activity.tone === "attention" && "text-destructive", yieldsToRowActions)} data-testid="cloud-workspace-row-state">
             <span aria-hidden className={cn("size-1.5 rounded-full", DOT[activity.tone])} />
@@ -493,6 +489,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[17rem]">
+              {extraActions}
               <WorkspaceActionItems item={node.item} onLifecycle={onLifecycle} run={run} />
             </DropdownMenuContent>
           </DropdownMenu>

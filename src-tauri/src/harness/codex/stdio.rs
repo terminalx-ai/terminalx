@@ -62,6 +62,7 @@ struct Stream { item: String, reasoning: bool, part: i64, text: String }
 const SUMMARY_BREAK: &str = "\n\n";
 
 pub struct Stdio {
+    pub(crate) actual_stance: Option<crate::harness::settings::Stance>,
     pub launch: Arc<()>,
     pub thread: Option<String>,
     pub exited: bool,
@@ -106,6 +107,41 @@ pub struct Stdio {
     routed: bool,
 }
 
+/// Read the provider's resolved thread stance, never the requested launch
+/// mode. The app-server schema reports a tagged SandboxPolicy object. New
+/// shapes, granular approvals and non-human reviewers stay unknown. Extra
+/// writable roots must remain inside this checkout, not widen it to `/`.
+fn reported_stance(result: &Value, cwd: &str) -> Option<crate::harness::settings::Stance> {
+    if result.get("approvalsReviewer").is_some_and(|reviewer| reviewer.as_str() != Some("user")) { return None; }
+    let approval = result["approvalPolicy"].as_str()?;
+    let raw = &result["sandbox"];
+    let sandbox = if let Some(raw) = raw.as_str() {
+        raw
+    } else {
+        let object = raw.as_object()?;
+        let kind = object.get("type")?.as_str()?;
+        let allowed: &[&str] = match kind {
+            "readOnly" => &["type", "networkAccess"],
+            "workspaceWrite" => &["type", "networkAccess", "writableRoots", "excludeTmpdirEnvVar", "excludeSlashTmp"],
+            "dangerFullAccess" => &["type"],
+            _ => return None,
+        };
+        if object.keys().any(|key| !allowed.contains(&key.as_str())) { return None; }
+        for key in ["networkAccess", "excludeTmpdirEnvVar", "excludeSlashTmp"] {
+            if object.get(key).is_some_and(|value| !value.is_boolean()) { return None; }
+        }
+        if let Some(roots) = object.get("writableRoots") {
+            let cwd = std::path::Path::new(cwd).canonicalize().ok()?;
+            for root in roots.as_array()? {
+                let root = std::path::Path::new(root.as_str()?);
+                if !root.is_absolute() || !root.canonicalize().ok()?.starts_with(&cwd) { return None; }
+            }
+        }
+        match kind { "readOnly" => "read-only", "workspaceWrite" => "workspace-write", "dangerFullAccess" => "danger-full-access", _ => return None }
+    };
+    Some(crate::harness::settings::Stance::Sandboxed { approval: approval.into(), sandbox: sandbox.into() })
+}
+
 /// Whether `codex --version` reports MIN_VERSION or a later release.
 pub(crate) fn supported(version: &str) -> bool {
     let release = |text: &str| -> Option<(u64, u64, u64)> {
@@ -124,7 +160,7 @@ impl Stdio {
     }
 
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
-        Self { launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
+        Self { actual_stance: None, launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             usage: Default::default(), usage_model: None, prompt_model: None,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
             streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }
@@ -313,6 +349,7 @@ impl Stdio {
                     ensure!(self.thread.is_none(), "Codex changed thread during initialization");
                     ensure!(self.resume.as_ref().is_none_or(|thread| *thread == id), "Codex resumed a different thread");
                     self.usage_model = result["model"].as_str().filter(|model| !model.is_empty()).map(str::to_owned);
+                    self.actual_stance = reported_stance(result, &self.cwd);
                     self.thread = Some(id.clone());
                     self.ready = true;
                     let mut actions = vec![Action::ThreadReady(id)];

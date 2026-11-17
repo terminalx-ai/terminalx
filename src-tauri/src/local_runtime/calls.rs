@@ -118,7 +118,7 @@ pub fn execute(manager: &SessionManager, sink: &Arc<dyn EventSink>, command: &st
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
                 // Queued, not written here: a program that is not reading
                 // must hold up neither this request nor the pane's gate (#661).
-                manager.typing.send(&manager.mobile, terminals, id, &bytes)?;
+                manager.typing.send_guarded(manager, terminals, id, &bytes)?;
                 manager.note_pane_typing(id);
                 Ok(Value::Null)
             }

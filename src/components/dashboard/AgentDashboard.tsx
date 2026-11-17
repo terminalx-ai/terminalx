@@ -1,3 +1,5 @@
+import { PresenceFaces, OwnerProfile, useTeamOverview } from "./TeamOverview";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Cloud, Laptop, Monitor, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
@@ -89,10 +91,11 @@ export function AgentDashboard() {
   // Local sessions count as yours: under your cloud user id once a roster names it.
   const identity = useAccount().status.identity;
   const me = userIdForEmail(identity?.email);
-  const localOwner = me ?? "local";
+  const catalog = useCloudCatalog();
+  const localOwner = catalog.viewerUserId ?? me ?? "local";
 
   const cloud = useCloudDashboard(true);
-  const { visibleIds } = useOrganizationVisibility();
+  const { visibleIds, selectedOrganization } = useOrganizationVisibility();
   const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
   // Sessions on paired machines (PRO-346): none while no machine is paired.
   const machineSessions = useMachineDashboard(true);
@@ -148,10 +151,16 @@ export function AgentDashboard() {
     () => ({ ...filters, owners: preferences.owners, projects: filters.projects.includes(QUICK_CHATS_FILTER) ? [...filters.projects, ...quickPaths] : filters.projects }),
     [filters, quickPaths, preferences.owners],
   );
-  const filtered = useMemo(
+  const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
+  // usePeople notifies on roster changes while keeping its resolver identity.
+  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" || id === catalog.viewerUserId ? "You" : Object.values(catalog.orgs).flatMap((org) => org.workspaces).find((item) => item.workspace.createdBy === id)?.workspace.creator?.displayName ?? personName(id)]));
+  const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
+  const baseFiltered = useMemo(
     () => filterSessions(sessions, { query, filters: pathFilters, projectName }),
     [sessions, query, pathFilters, projectName],
   );
+  const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const filtered = team.rows;
   const buckets = useMemo(() => ({
     ...bucketSessions(filtered),
     archived: filtered.filter((s) => s.archived).sort((a, b) => b.modified.localeCompare(a.modified)),
@@ -159,10 +168,6 @@ export function AgentDashboard() {
   const archivedState = DASHBOARD_STATES.filter((state) => state.id === "archived");
   const boardColumns = filters.archived === "only" ? archivedState : filters.archived === "show" ? [...COLUMNS, ...archivedState] : COLUMNS;
   const shown = useMemo(() => ({ ...buckets, done: buckets.done.slice(0, doneLimit) }), [buckets, doneLimit]);
-  const ownerIds = useMemo(() => [...new Set(sessions.flatMap((session) => session.ownerId ? [session.ownerId] : []))], [sessions]);
-  // usePeople notifies on roster changes while keeping its resolver identity.
-  const ownerNames = JSON.stringify(ownerIds.map((id) => [id, id === "local" ? identity?.name?.trim() || "You" : personName(id)]));
-  const owners = useMemo(() => new Map<string, string>(JSON.parse(ownerNames)), [ownerNames]);
   // Everyone with a session here, and how recently they worked: the people picker and Active now.
   const people = useMemo<OverviewPerson[]>(() => [...owners].map(([id, name]) => {
     const theirs = sessions.filter((session) => session.ownerId === id && !session.archived);
@@ -221,10 +226,12 @@ export function AgentDashboard() {
       additions, deletions,
       changes: additions === null || deletions === null ? null : additions + deletions,
       owner: session.ownerId ? owners.get(session.ownerId) ?? null : null,
+      ownerCell: isCloudDashboardSession(session) ? (session.ownerId ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={owners.get(session.ownerId) ?? "Owner unavailable"} /> : "Owner unavailable") : local ? "You" : undefined,
+      locationCell: isCloudDashboardSession(session) ? <span className="inline-flex items-center gap-1">Cloud <PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} /></span> : undefined,
       updated: session.lastMessageAt ?? session.modified,
       created: session.created ?? null,
     };
-  }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, sort, preferences.view, showWhere, machineById]);
+  }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, sort, preferences.view, showWhere, machineById, catalog]);
 
   // Keep selection by identity when rows reorder, filters change, or the view switches.
   const move = (dColumn: number, dRow: number) => {
@@ -373,11 +380,15 @@ export function AgentDashboard() {
           )}
         </FilterChip>
         <div className="ml-auto flex shrink-0 items-center gap-3">
+          {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
+          {team.controls}
           <ActiveNow people={people} />
           <NewSessionButton onClick={() => openNewSession()} />
         </div>
       </header>
 
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col @min-[600px]:flex-row">
+      {team.views}
       {preferences.view === "table" ? (
         <SessionTable navigationRef={tableNavigation} containerRef={tableRef} rows={tableRows} hiddenColumns={preferences.hiddenColumns} sort={sort} where={showWhere} compact={preferences.compact}
           onSort={(column) => setPreferences({ ...preferences, sort: nextDashboardSort(sort, column) })}
@@ -388,7 +399,7 @@ export function AgentDashboard() {
           }}
           loading={loading}
         />
-      ) : <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-4 pt-3 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
+      ) : <div className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-thin px-4 pt-3 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
         <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {boardColumns.map((c) => (
             <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
@@ -436,6 +447,7 @@ export function AgentDashboard() {
           ))}
         </div>
       </div>}
+      </div>
     </div>
   );
 }

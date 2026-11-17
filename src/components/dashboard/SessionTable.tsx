@@ -17,6 +17,8 @@ export type SessionPlace = { kind: "local" } | { kind: "cloud" } | { kind: "mach
 
 export interface SessionTableRow extends DashboardTableRow {
   session?: StatusSession;
+  ownerCell?: ReactNode;
+  locationCell?: ReactNode;
   place?: SessionPlace;
   prs: readonly PrAssociation[];
   additions: number | null;
@@ -99,7 +101,7 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
     if (row) { row.focus({ preventScroll: true }); pendingFocus.current = null; }
   });
   return (
-    <div ref={containerRef} onScroll={measure} className="min-h-0 flex-1 overflow-auto scrollbar-thin px-4 pb-4">
+    <div ref={containerRef} onScroll={measure} className="min-h-0 min-w-0 flex-1 overflow-auto scrollbar-thin px-4 pb-4">
       <table aria-label="Sessions" aria-busy={loading} aria-rowcount={rows.length + 1} className="w-full table-fixed border-collapse text-left text-[13px]" style={{ minWidth: columns.reduce((sum, column) => sum + (width(column.id) ?? NAME_MIN), 0) }}>
         <colgroup>{columns.map(({ id }) => <col key={id} style={{ width: width(id) }} />)}</colgroup>
         <thead className="sticky top-0 z-10 bg-background">
@@ -142,6 +144,8 @@ export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns,
 }
 
 function cell(row: SessionTableRow, column: TableColumnId, tabbable: boolean): ReactNode {
+  if (column === "owner" && row.ownerCell) return row.ownerCell;
+  if (column === "where" && row.locationCell) return row.locationCell;
   if (column === "name") return <span data-session-title className="block truncate">{row.name}</span>;
   // The session's own status, icon and label ('Checks failing · PR #781'). The
   // badge mounts only for visible rows, sharing the sidebar's cached status polling.

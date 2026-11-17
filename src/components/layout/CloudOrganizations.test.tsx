@@ -207,7 +207,7 @@ describe("cloud organizations in the sidebar", () => {
     expect(within(list).queryByRole("button", { name: "Projects" })).toBeNull();
     const acme = orgSection(ORG);
     // A repository with two workspaces is one project; each workspace names its sessions. A blank project is listed by its name.
-    expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["acme/api", "image-only"]);
+    expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["My workspaces section", "Shared with me section", "acme/api", "image-only"]);
     const api = within(acme).getByRole("group", { name: "acme/api" });
     expect(within(api).queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
     const fix = within(api).getByRole("button", { name: /^Fix login redirect/, description: /Status: Backlog$/ });
