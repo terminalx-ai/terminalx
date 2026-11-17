@@ -849,7 +849,8 @@ export function SessionView({
             )}
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
             {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && (
+            {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !(stripRow && !compact) && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"

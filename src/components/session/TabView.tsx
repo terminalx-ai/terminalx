@@ -45,7 +45,7 @@ import { ResetChatDialog } from "./ResetChatDialog";
 import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
-import { modelLabel, useModels } from "@/lib/models";
+import { modeLabel, modelLabel, useModels } from "@/lib/models";
 import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -782,7 +782,14 @@ export function TabView({
 
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
-  const banner = (placement: "top" | "composer") => (
+  // A request on its own is part of the turn: the chat draws it inline, at the
+  // messages' width, after what the agent said (PRO-382).
+  // Only while the tab waits on it, as the banner did: once the turn moves on, an answer on its way is no request.
+  const asksInChat = !recovery && tab.status === "waiting" && transcript.pendingAsks.length > 0;
+  // A quick chat (`isQuickChat`) has no project: its path is a scratch directory that names nothing.
+  const projectName = session.kind === "quick" ? null : session.projectPath.split("/").filter(Boolean).pop() ?? null;
+  const askMeta = [tab.permissionMode ? modeLabel(tab.permissionMode) : null, projectName].filter(Boolean).join(" · ") || null;
+  const banner = (placement: "top" | "composer") => (placement === "composer" && asksInChat ? null :
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}
@@ -828,14 +835,19 @@ export function TabView({
     <Chat
       sessionId={backend.logSessionId}
       checkpointTabId={local && !readOnly ? tab.id : undefined}
-      transcript={{ ...transcript, pendingAsks: [] }}
+      transcript={asksInChat ? transcript : { ...transcript, pendingAsks: [] }}
+      active={active}
+      takesKeys={focused && active && !continuationOpen && !terminalMode}
+      askDetail
+      askMeta={askMeta}
+      answerBlockedReason={backend.approveBlockedReason ?? null}
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
       live={live}
       // Until the saved conversation is read, an empty chat is one still loading, not one with nothing in it.
       loading={!readOnly && (!!tab.loadingHistory || (local && !log.loaded))}
       progressing={live && tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
-      answering={answering || deciding}
+      answering={answering || deciding || recovering || !backend.caps.write}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}

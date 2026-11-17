@@ -72,8 +72,10 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * an agent's install or sign-in in a terminal on the machine.
  * `machine/5` (PRO-357): `machine.rotateCredential`, a fresh device token
  * for the paired computer.
+ * `machine/6` (PRO-351): browse the machine's folders, add, clone and remove
+ * its projects (docs/MACHINES.md "As built (PRO-351)").
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -87,6 +89,12 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "machine.agentSetup": "machine/4",
   "machine.agentSetupRunning": "machine/4",
   "machine.rotateCredential": "machine/5",
+  "machine.browse": "machine/6",
+  "machine.addProject": "machine/6",
+  "machine.removeProject": "machine/6",
+  "machine.cloneProject": "machine/6",
+  "machine.cloneStatus": "machine/6",
+  "machine.cloneCancel": "machine/6",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",
@@ -694,6 +702,44 @@ export interface RuntimeMissingAgent {
 export interface RuntimeAgentsReport {
   agents: RuntimeAgent[];
   missing: RuntimeMissingAgent[] | null;
+}
+
+/** A folder `machine.browse` lists (`machine/6`): a name and where it is, never what it holds. */
+export interface MachineFolder {
+  name: string;
+  /** Absolute, on the machine: display only, never a local path. */
+  path: string;
+  /** Set for a Git repository: its branch from `HEAD` (null when detached), and whether `origin` is on github.com. */
+  git: { branch: string | null; github: boolean } | null;
+  /** Set when the folder already is a project of the machine (archived ones too). */
+  projectId: string | null;
+}
+
+/** `machine.browse` (`machine/6`): the folders directly inside `path`, under the runtime user's home. */
+export interface MachineFolderListing {
+  home: string;
+  path: string;
+  /** The folder above `path`; null at `home`. */
+  parent: string | null;
+  entries: MachineFolder[];
+  /** Some folders were left out: at most 500 are listed. */
+  truncated: boolean;
+}
+
+/** A clone on a machine (`machine/6`), from `machine.cloneProject`, `machine.cloneStatus` or `machine.cloneCancel`. */
+export interface MachineClone {
+  cloneId: string;
+  repository: string;
+  /** Where it lands on the machine: `<parent>/<name>`. */
+  path: string;
+  state: "cloning" | "done" | "failed" | "canceled";
+  /** Git's progress while cloning (`Receiving objects`), as it names it. */
+  stage: string | null;
+  percent: number | null;
+  /** The project it was added as, once `done`. */
+  project: MachineProject | null;
+  /** Why it failed: the local clone's codes (`access-denied`, `destination-exists`, `network`, …). */
+  error: { code: string; message: string } | null;
 }
 
 /** A step of an agent's setup on a machine (`machine/4`), as on this Mac (`src/lib/agentSetupFlow.ts`). */
@@ -1535,6 +1581,44 @@ export class WorkspaceRpcClient {
   async startAgentSetup(params: { harness: string; step: MachineAgentSetupStep; cols: number; rows: number }): Promise<PtyInfo> {
     // Not resent after a drop: a second start would only be refused as busy.
     return this.call<PtyInfo>("machine.agentSetup", params);
+  }
+
+  /** `machine/6`: the folders directly inside `path` on the machine (its user's home when absent). Folder names only. */
+  async browseMachineFolders(path?: string): Promise<MachineFolderListing> {
+    return this.call<MachineFolderListing>("machine.browse", path === undefined ? {} : { path });
+  }
+
+  /** `machine/6`: make a folder on the machine one of its projects. A folder that already is one comes back as it is. */
+  async addMachineProject(path: string): Promise<MachineProject> {
+    const result = await this.call<{ project: MachineProject }>("machine.addProject", { path });
+    return result.project;
+  }
+
+  /** `machine/6`: remove a project from the machine. Its folder and worktrees stay on disk. */
+  async removeMachineProject(projectId: string): Promise<void> {
+    await this.call("machine.removeProject", { projectId });
+  }
+
+  /**
+   * `machine/6`: start cloning `repository` (`owner/name` or a URL) into
+   * `<parent>/<name>` on the machine, with its git sign-in. Answers at once;
+   * follow it with {@link cloneStatus} until it ends.
+   */
+  async cloneMachineProject(repository: string, parent: string): Promise<MachineClone> {
+    const result = await this.call<{ clone: MachineClone }>("machine.cloneProject", { repository, parent });
+    return result.clone;
+  }
+
+  /** `machine/6`: how a clone is going, or how it ended. */
+  async cloneStatus(cloneId: string): Promise<MachineClone> {
+    const result = await this.call<{ clone: MachineClone }>("machine.cloneStatus", { cloneId });
+    return result.clone;
+  }
+
+  /** `machine/6`: stop a clone; it leaves nothing behind. */
+  async cancelClone(cloneId: string): Promise<MachineClone> {
+    const result = await this.call<{ clone: MachineClone }>("machine.cloneCancel", { cloneId });
+    return result.clone;
   }
 
   /** `machine/4`: the setup step running there for `harness`, to follow it from another window or after a reload. */

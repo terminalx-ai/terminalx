@@ -1780,6 +1780,105 @@ own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeo
 report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
+### Paired machines
+
+A machine is another computer running TerminalX that this computer paired with (Settings →
+Machines, behind Settings → Experimental → Machines). The same verbs work on it with
+`--machine <machine>`, where `<machine>` is its name (any case) or its id from `machines list`.
+The CLI never connects to the machine itself: the app carries each command over the one
+connection it already holds to it, directly or through the relay.
+
+```text
+terminalx machines list --json
+terminalx machines status <machine> --json
+terminalx machines add --code <code> [--fingerprint <fingerprint>] [--this-network] --json
+terminalx machines remove <machine> --yes --json
+terminalx projects list --machine <machine> --json
+terminalx sessions list --machine <machine> [--project <project>] [--archived] --json
+terminalx sessions list --all-machines [--archived] --json
+terminalx sessions create --machine <machine> --project <project> --prompt <text> [--agent <agent>] \
+  [--model <model>] [--effort <effort>] [--mode <mode>] [--title <text>] [--name <worktree>] \
+  [--base <branch>] [--worktree|--on-main] [--idempotency-key <key>] --json
+terminalx sessions rename <machine-session> --title <text> --json
+terminalx sessions archive|unarchive <machine-session>... --json
+terminalx tabs list <machine-session> --json
+terminalx send <machine-session> <text> [--tab <tab>] [--idempotency-key <key>] --json
+terminalx read <machine-session> [--tab <tab>] [--since <seq>] [--tail <count>] --json
+terminalx wait <machine-session> [--tab <tab>] [--timeout <seconds>] --json
+terminalx permissions list --machine <machine> --json
+terminalx permissions allow <request> [--option <option>] --machine <machine> --json
+terminalx permissions deny <request> --machine <machine> --json
+terminalx worktrees list --machine <machine> [--project <project>] --json
+terminalx worktrees delete <worktree> --machine <machine> [--project <project>] --dry-run|--yes \
+  [--sessions <id,id>] [--force] --json
+```
+
+**Keys.** `sessions create` answers with the session's key, `machine:<machine>:<project>:<session>`.
+Every command that names a session takes that key without `--machine`: the key says which
+machine. A session id (or a unique start of it), or one of its agent tab ids, works with
+`--machine`. A project is named by its key from `projects list --machine`, its id, its name or
+its path on the machine. Never build a key by hand.
+
+**A typical lead on another machine:**
+
+```text
+terminalx sessions create --machine "Mac mini" --project api --prompt "Fix the flaky test" --json
+terminalx wait machine:<m>:<p>:<s> --timeout 1800 --json
+terminalx read machine:<m>:<p>:<s> --tail 20 --json
+terminalx send machine:<m>:<p>:<s> "Also add a regression test" --json
+```
+
+**What each command does there.**
+
+- `machines list` and `machines status` show each machine's name, version, operating system,
+  route setting and connection `state` (`direct`, `relay`, `connecting`, `reconnecting`,
+  `offline`, `needsUpdate`, `updating`, `accessRemoved`, `disconnected`, or `idle` when this
+  window holds no connection). `status` adds `problem`: the error any command would get now.
+- `machines add --code` pairs in two steps, as the Add a machine dialog does. Without
+  `--fingerprint` it contacts nothing and answers `fingerprint_confirmation_required`, with the
+  machine's name and the `fingerprint` in `details`. Show that fingerprint to the person. Then
+  run the same command with `--fingerprint <fingerprint>`: the machine asks its person to
+  Allow this computer, and they should allow it only if the machine shows the same
+  fingerprint. The command waits (up to two minutes) for Allow, then answers with the machine.
+  A fingerprint that does not match the code is `pairing_fingerprint_mismatch`. `--this-network`
+  never uses the relay. A code for a machine already paired answers `alreadyPaired: true` and
+  pairs nothing.
+- `machines remove --yes` forgets the machine here: its connection, record and credentials. Its
+  sessions keep running there; pairing again needs a new code from it.
+- `sessions list --machine` lists that machine's sessions; `--all-machines` lists this
+  computer's sessions (`machine: null`) and then every paired machine's (each with `machine`:
+  its id and name), and `machines` says how each machine stands. A machine that is away is
+  listed from what it last said, with `fresh: false`. Without either flag, `sessions list` is
+  this computer's only, exactly as before.
+- `sessions create` runs in a new worktree the machine cuts beside its project (`--base` names
+  the branch it starts from), or in the project itself with `--on-main`, and sends the first
+  prompt there. `startError` says when the session was made but its prompt did not start. Pass
+  the same `--idempotency-key` when retrying after a timeout: the machine answers with the
+  session it already made. An issue start (`--issue`) is not offered here: start it from the
+  issue page in the app (Start on …), or give its text as `--prompt`.
+- `send` reaches the agent live: typed now, or queued there behind the running turn. Nothing is
+  queued on this computer while the machine is away; the command is refused instead. Pass
+  `--idempotency-key` so a repeat after a timeout returns the first answer.
+- `read` replays the tab's transcript from the machine. `wait` follows it and returns the same
+  `reason`s as for a local tab. Neither starts anything.
+- `permissions allow` without `--option` chooses the request's Allow; `--option` takes one of
+  the ids `permissions list --machine` prints.
+- `worktrees list` and `worktrees delete` are Settings → Storage on the machine: each worktree
+  has a `verdict`, and the machine checks a removal again before it removes anything.
+  `--dry-run` shows the worktree, its verdict and `wouldRemove`, whatever the verdict; `--force`
+  removes one whose verdict is not `eligible`.
+  Renaming a machine's worktree is not offered.
+
+**Out of scope.** Orchestration runs stay on this computer: a run's workers cannot run on a
+machine, and a worker of a run may not pair a machine or start a session on one (`forbidden`).
+The built-in browser, computer use, the Local VM, `sessions report`, `sessions usage`,
+`sessions status` and the issue and pipeline commands work on this computer only.
+
+**The person's switch.** Every machine command answers `machines_disabled` until the person
+turns on Settings → Experimental → Machines. With it on, any agent in a local session can
+operate the paired machines through these commands, with the full rights pairing gave this
+computer there.
+
 ### This guide
 
 ```text
@@ -1969,10 +2068,32 @@ JSON failures have this shape:
 - `unsupported`: this app does not know the command; see `cloud status`.
 - Other `cloud_…` codes are the service's own answers (for example
   `cloud_workspace_concurrency_exceeded`: the organization is at its running limit).
+- `machine_unknown`: no paired machine has that name or id; see `machines list`.
+- `machine_offline`: the machine is not connected (no route answers, or its link was just lost
+  and TerminalX is reconnecting). It is answered at once, never as a timeout, and nothing was
+  sent. Check `machines status`, then run the command again once it is connected.
+- `machine_needs_update`, `machine_updating`: one of the two computers must update first, or
+  the machine is updating now (back in under a minute).
+- `machine_unsupported`: the machine is connected, but its TerminalX version does not serve
+  this command. Update TerminalX there; do not retry.
+- `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
+  in, or the person at it disconnected this computer. Ask the person; do not retry.
+- `machines_disabled`: Settings → Experimental → Machines is off. Tell the person; do not retry.
+- `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
+  to the person, then repeat the command with `--fingerprint`.
+- `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.
+- `pairing_not_approved`, `pairing_code_inactive`, `pairing_another_computer`,
+  `pairing_pairing_paused`, `pairing_unreachable`, `pairing_invalid_code`: `machines add`
+  did not pair; `recovery` says what to do (`details.reason` is the reason).
+- `worktree_not_safe`, `worktree_not_removed`, `sessions_changed`: a machine's worktree was not
+  removed; the message says why.
+- `window_unavailable`: the app's window did not answer a machine command. Check the session
+  with `read` before repeating a `send`.
 - `internal`: report the message and stop rather than guessing at app state.
 
 All mutating commands act only through the running app. Version 1 exposes no arbitrary
 filesystem or git-write command; worktree deletion and browser profile deletion are the only
 destructive operations outside the browser page itself. Cloud commands use the app's signed-in
 account over this same local socket: there is no hosted endpoint, and the organization's
-cloud-provider key is never involved.
+cloud-provider key is never involved. Machine commands likewise go through the app's own
+connection to the machine; the CLI opens none.

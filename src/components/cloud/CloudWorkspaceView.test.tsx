@@ -13,6 +13,11 @@ import { cloudAgentApi } from "@/lib/cloudAgentApi";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { refreshHarnesses } from "@/lib/sessions";
 import { setPrefs } from "@/lib/prefs";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// Provider names come from the descriptors the server publishes (PRO-415);
+// the app has read its provider list, as it has by the time a workspace opens.
+learnDescriptors();
 
 /** Input handlers of every xterm made, so a test can type into one. */
 const typed: ((data: string) => void)[] = [];
