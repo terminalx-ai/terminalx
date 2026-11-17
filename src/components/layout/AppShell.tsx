@@ -1,3 +1,4 @@
+import { SettingsLeaveBoundaryContext, useSettingsLeaveBoundary } from "@/components/settings/settingsLeaveGuard";
 import { bootDataPrivacy } from "@/lib/dataPrivacy";
 import { bootSelfUi } from "@/lib/selfUi";
 import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
@@ -108,8 +109,8 @@ const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((modul
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const MachineMain = lazy(() => import("@/components/machines/MachineMain").then((module) => ({ default: module.MachineMain })));
-/** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
-const GENERAL_SETTINGS_TAB: SettingsTab = "account";
+/** Where Settings opens when no section is asked for: General (PRO-374; it was Account, PRO-81). SettingsPage falls back to the same one. */
+const GENERAL_SETTINGS_TAB: SettingsTab = "general";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
@@ -135,6 +136,8 @@ export function AppShell() {
   const runtimeSwitch = useRuntimeSwitch();
   const store = useSessionStore();
   const account = useAccount();
+  const settingsBoundary = useSettingsLeaveBoundary();
+  const { canLeave } = settingsBoundary;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
   // The repository Settings opens on, for a request that names one; every other way in names none.
@@ -143,15 +146,16 @@ export function AppShell() {
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   // A menu/palette selection navigates away from Settings just like the sidebar.
-  useEffect(() => setSettingsOpen(false), [store.navigationVersion]);
+  useEffect(() => { if (canLeave()) setSettingsOpen(false); }, [store.navigationVersion, canLeave]);
   // The full-window cloud setup (PRO-370), opened from Settings → Organizations in Settings' place.
   // Any other request for Settings, or any navigation, ends it: its progress is already saved.
   const [cloudSetup, setCloudSetup] = useState<CloudSetupTarget | null>(null);
   useEffect(() => setCloudSetup(null), [settingsRequest, store.navigationVersion]);
   useEffect(() => onOpenCloudSetup((target) => {
+    if (!canLeave()) return;
     setCloudSetup(target);
     setSettingsOpen(true);
-  }), []);
+  }), [canLeave]);
 
   // An update is looked for in the background, so it is seen without going to Settings for it.
   useEffect(() => { void bootDataPrivacy().then(() => startUpdateChecks()); }, []);
@@ -203,11 +207,12 @@ export function AppShell() {
   // Also a click handler, which is handed the click's event: anything that is not a section's
   // name opens Account too, never a blank page.
   const openSettings = useCallback((tab?: unknown) => {
+    if (!canLeave()) return;
     setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsProjectPath(undefined);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }, []);
+  }, [canLeave]);
   // A setting's row (PRO-127): a toast's Open setting, and a terminalx://settings/<row-id> link from
   // another app, which focuses the app on that row (Settings scrolls to it and highlights it). A link
   // naming no row opens Settings at its default page.
@@ -219,71 +224,78 @@ export function AppShell() {
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   // Or from a project's menu: its general page (Project settings) or its Scripts (Scripts and actions).
   useEffect(() => onProjectSettingsRequest((projectPath, page) => {
+    if (!canLeave()) return;
     setSettingsTab(page === "general" ? "repositories.rootPath" : "repositories.scripts");
     setSettingsProjectPath(projectPath);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }), []);
+  }), [canLeave]);
   // A run's limits, from a session's Run view.
   useEffect(() => onOrchestratorSettingsRequest(() => {
+    if (!canLeave()) return;
     setSettingsTab("orchestrator");
     setSettingsProjectPath(undefined);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }), []);
+  }), [canLeave]);
   // "Add your own templates in Settings › Project templates", from Create a project.
   useEffect(() => onTemplateSettingsRequest(() => openSettings("projects.templates")), [openSettings]);
   // The empty model picker's way out: Settings › Agents, where the agent's sign-in is checked.
   useEffect(() => onAgentSettingsRequest(() => openSettings("agents")), [openSettings]);
   const openAccountSettings = useCallback(() => {
+    if (!canLeave()) return;
     setSettingsTab("account");
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }, []);
+  }, [canLeave]);
   // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
   // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
   const openOrganizationsSettings = useCallback((row: "organizations.overview" | "organizations.agentLogins") => {
+    if (!canLeave()) return;
     setSettingsTab(row);
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }, []);
+  }, [canLeave]);
   useEffect(() => onOpenOrganizationSettings(openOrganizationsSettings), [openOrganizationsSettings]);
   const openAgentSettings = useCallback(() => {
+    if (!canLeave()) return;
     setSettingsTab("agents");
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }, []);
+  }, [canLeave]);
   const openStorageSettings = useCallback(() => {
+    if (!canLeave()) return;
     setSettingsTab("storage");
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
-  }, []);
-  const newSession = useCallback(() => openNewSession(), []);
+  }, [canLeave]);
+  const newSession = useCallback(() => { if (canLeave()) openNewSession(); }, [canLeave]);
   const showHome = useCallback(() => {
+    if (!canLeave()) return;
     setSettingsOpen(false);
     openHome();
-  }, []);
-  const showIssues = useCallback(() => { setSettingsOpen(false); openIssues(); }, []);
-  const showAgents = useCallback(() => { setSettingsOpen(false); openAgents(); }, []);
-  const showStats = useCallback(() => openStats(), []);
-  const showSkills = useCallback(() => openSkills(), []);
-  const showAutomations = useCallback(() => { setSettingsOpen(false); openAutomations(); }, []);
+  }, [canLeave]);
+  const showIssues = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openIssues(); }, [canLeave]);
+  const showAgents = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openAgents(); }, [canLeave]);
+  const showStats = useCallback(() => { if (canLeave()) openStats(); }, [canLeave]);
+  const showSkills = useCallback(() => { if (canLeave()) openSkills(); }, [canLeave]);
+  const showAutomations = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openAutomations(); }, [canLeave]);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
   useShortcut("app.about", () => openSettings("about"));
   useShortcut("app.checkUpdates", () => { openSettings("about"); void checkForUpdate(); });
   useShortcut("app.shortcuts", () => openSettings("shortcuts"));
-  useShortcut("app.addProject", () => { setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
+  useShortcut("app.addProject", () => { if (!canLeave()) return; setSettingsOpen(false); void openLocalProject().catch((error) => console.error("add project", error)); });
   useShortcut("app.openRecent", () => setPaletteOpen(true));
-  useShortcut("app.nextSession", () => { setSettingsOpen(false); stepVisibleSession(1); });
-  useShortcut("app.nextAttention", () => { setSettingsOpen(false); stepAttentionSession(); });
+  useShortcut("app.nextSession", () => { if (!canLeave()) return; setSettingsOpen(false); stepVisibleSession(1); });
+  useShortcut("app.nextAttention", () => { if (!canLeave()) return; setSettingsOpen(false); stepAttentionSession(); });
   useShortcut("session.archive", () => {
     const id = getSessionStore().selectedSessionId;
     // A cloud session is archived from its workspace; a machine session on its machine (PRO-346).
     if (id && isLocalKey(id)) void archiveWithUndo(id).catch(reportError("Couldn't archive the session"));
     else if (machineKeyKind(id) === "session") void updateMachineSession(id as string, { archived: true }).catch(() => {});
   });
-  useShortcut("app.previousSession", () => { setSettingsOpen(false); stepVisibleSession(-1); });
+  useShortcut("app.previousSession", () => { if (!canLeave()) return; setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
@@ -291,7 +303,7 @@ export function AppShell() {
   useShortcut("app.toggleMode", toggleMode);
   useShortcut("app.settings", () => openSettings());
   useShortcut("app.newSession", newSession);
-  useShortcut("app.startFrom", () => { setSettingsOpen(false); openNewSession(true); });
+  useShortcut("app.startFrom", () => { if (!canLeave()) return; setSettingsOpen(false); openNewSession(true); });
   useShortcut("app.home", showHome);
   useShortcut("app.issues", showIssues);
   useShortcut("app.agentDashboard", showAgents);
@@ -326,11 +338,13 @@ export function AppShell() {
   const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
   useShortcut("app.runView", () => {
     if (!selected || !selectedRun) return;
+    if (!canLeave()) return;
     setSettingsOpen(false);
     showRunView(selected.id, true);
   });
 
   return (
+    <SettingsLeaveBoundaryContext.Provider value={settingsBoundary}>
     <div data-app-shell className="flex h-full w-full flex-col">
       <SelfUiAccess />
       {/* Merged-workspace notices, top right under the tabs: a stack of them in the bottom corner covered the composer
@@ -373,6 +387,7 @@ export function AppShell() {
             target={cloudSetup}
             onExit={() => setCloudSetup(null)}
             onDone={() => {
+              if (!canLeave()) return;
               setCloudSetup(null);
               setSettingsOpen(false);
             }}
@@ -383,12 +398,14 @@ export function AppShell() {
               initialTab={settingsTab}
               initialProjectPath={settingsProjectPath}
               openRequest={settingsRequest}
-              onBack={() => setSettingsOpen(false)}
+              onBack={() => { if (canLeave()) setSettingsOpen(false); }}
               onOpenSkills={() => {
+                if (!canLeave()) return;
                 setSettingsOpen(false);
                 showSkills();
               }}
               onOpenUsage={() => {
+                if (!canLeave()) return;
                 setSettingsOpen(false);
                 showStats();
               }}
@@ -475,6 +492,7 @@ export function AppShell() {
       {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
       <UpdateNotice />
     </div>
+    </SettingsLeaveBoundaryContext.Provider>
   );
 }
 

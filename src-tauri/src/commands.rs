@@ -2880,6 +2880,8 @@ pub async fn changes_between(cwd: String, base: String, head: Option<String>, hi
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePair {
+    pub before_size: Option<u64>,
+    pub after_size: Option<u64>,
     pub before: Option<String>,
     pub after: Option<String>,
 }
@@ -2893,12 +2895,12 @@ pub async fn diff_media_content(cwd: String, path: String, tree: Option<String>)
 pub async fn file_contents_at(cwd: String, path: String, base: String, head: Option<String>) -> CmdResult<FilePair> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&cwd);
-        let before = git::blob_at(p, &base, &path).map_err(err)?;
-        let after = match head {
-            Some(h) => git::blob_at(p, &h, &path).map_err(err)?,
-            None => git::working_file(p, &path),
+        let (before, before_size) = git::blob_text_at(p, &base, &path, 4 * 1024 * 1024).map_err(err)?;
+        let (after, after_size) = match head {
+            Some(h) => git::blob_text_at(p, &h, &path, 4 * 1024 * 1024).map_err(err)?,
+            None => git::working_file_with_size(p, &path),
         };
-        Ok(FilePair { before, after })
+        Ok(FilePair { before, after, before_size, after_size })
     })
     .await
     .map_err(err)?

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RepositoryAction } from "@/lib/repositoryActions";
 import type { Project, ProjectPatch } from "@/types/session";
@@ -31,7 +31,7 @@ describe("repository settings pages", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete Dev" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [] } satisfies ProjectPatch));
-    expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reset all actions to terminalx.json", hidden: true })).toBeNull();
   });
 
   it("shows a failed save inline and as a toast, keeping the stored list", async () => {
@@ -51,8 +51,7 @@ describe("repository settings pages", () => {
     const file = { ...dev, id: "f", name: "From file" };
     const { unmount } = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={async () => [file]} />);
     await act(async () => undefined);
-    fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Reset to terminalx.json" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reset all actions to terminalx.json" }));
     await waitFor(() => expect(mock.update).toHaveBeenCalledWith("/repo", { actions: [file] }));
     unmount();
     for (const none of [async () => null, async () => [] as RepositoryAction[], async () => { throw new Error("unreadable"); }]) {
@@ -60,9 +59,46 @@ describe("repository settings pages", () => {
       await screen.findByRole("button", { name: "Edit Dev" });
       await new Promise((resolve) => setTimeout(resolve, 0));
       fireEvent.click(screen.getByRole("button", { name: "Edit Dev" }));
-      expect(screen.queryByRole("button", { name: "Reset to terminalx.json" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Reset all actions to terminalx.json", hidden: true })).toBeNull();
       view.unmount();
     }
+  });
+
+  it("keeps reset at list level after editing two actions and deleting every action", async () => {
+    const test = { ...dev, id: "test", name: "Test", command: "pnpm test" };
+    const fileActions = [dev, test];
+    const readRepositoryFile = vi.fn(async () => fileActions);
+    mock.projects = [project({ actions: fileActions })];
+    const view = render(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={readRepositoryFile} />);
+    mock.update.mockImplementation(async (_path: string, patch: ProjectPatch) => {
+      mock.projects = [project(patch)];
+      view.rerender(<RepositoryActionsPage projectPath="/repo" readRepositoryFile={readRepositoryFile} />);
+    });
+    await screen.findByRole("button", { name: "Reset all actions to terminalx.json" });
+    for (const name of ["Dev", "Test"]) {
+      fireEvent.click(screen.getByRole("button", { name: `Edit ${name}` }));
+      expect(within(screen.getByRole("dialog")).queryByRole("button", { name: /Reset/ })).toBeNull();
+      fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: `echo custom ${name}` } });
+      fireEvent.click(screen.getByRole("button", { name: "Save action" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+    expect(mock.update).toHaveBeenLastCalledWith("/repo", { actions: [
+      { ...dev, command: "echo custom Dev" }, { ...test, command: "echo custom Test" },
+    ] });
+    fireEvent.click(screen.getByRole("button", { name: "Reset all actions to terminalx.json" }));
+    await waitFor(() => expect(mock.update).toHaveBeenLastCalledWith("/repo", { actions: fileActions }));
+    for (const name of ["Dev", "Test"]) {
+      fireEvent.click(screen.getByRole("button", { name: `Edit ${name}` }));
+      fireEvent.click(screen.getByRole("button", { name: `Delete ${name}` }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+    expect(screen.queryByRole("list", { name: "Saved actions" })).toBeNull();
+    expect(mock.update).toHaveBeenLastCalledWith("/repo", { actions: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Reset all actions to terminalx.json" }));
+    await screen.findByRole("button", { name: "Edit Dev" });
+    expect(screen.getByRole("button", { name: "Edit Test" })).toBeTruthy();
+    expect(mock.update).toHaveBeenLastCalledWith("/repo", { actions: fileActions });
+    expect(readRepositoryFile).toHaveBeenCalledExactlyOnceWith("/repo");
   });
 
   it("saves preview URLs and asks to open a repository when none matches", async () => {

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { SettingsFileStatus } from "@/lib/settingsFile";
+import { mouseClick } from "@/test/press";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -59,30 +60,36 @@ it("Reset to default removes the row's key with reset_user_setting, and is disab
   const { RegisteredSetting } = await import("./settingsRegistry");
   render(<><RegisteredSetting setting="general.linkActions" control={<span />} /><RegisteredSetting setting="general.websiteLinks" control={<span />} /></>);
 
-  openMenu(screen.getByRole("button", { name: "Website links actions" }));
+  mouseClick(screen.getByRole("button", { name: "Actions for Website links" }));
   let menu = await screen.findByRole("menu");
   expect(within(menu).getByRole("menuitem", { name: "Reset to default" }).getAttribute("aria-disabled")).toBe("true");
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
-  openMenu(screen.getByRole("button", { name: "Link actions actions" }));
+  // PRO-374: one “…” per row, holding Reset to default (with the default), Copy setting link, Save for this project… and Saved in.
+  expect(screen.getAllByRole("button", { name: /^Actions for / })).toHaveLength(2);
+  mouseClick(screen.getByRole("button", { name: "Actions for Link actions" }));
   menu = await screen.findByRole("menu");
   expect(menu.textContent).toContain("Saved in ~/.raccoon/settings.json");
-  expect(within(menu).queryByText(/Copy setting link/)).toBeNull();
+  expect(within(menu).getByRole("menuitem", { name: "Reset to default" }).textContent).toContain("On");
+  expect(within(menu).getByRole("menuitem", { name: "Copy setting link" }).textContent).toContain("general.linkActions");
+  const project = within(menu).getByRole("menuitem", { name: /Save for this project/ });
+  expect(project.getAttribute("aria-disabled")).toBe("true");
+  expect(project.textContent).toContain("This setting is per person only");
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Reset to default" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("reset_user_setting", { key: "preferences.linkActions" }));
   await waitFor(() => expect(screen.queryByText("Your value")).toBeNull());
 });
 
-it("Open settings.json opens the user file, names its broken line, and opens it in a chosen editor", async () => {
+it("Open personal settings.json opens the user file, names its broken line, and opens it in a chosen editor", async () => {
   await boot();
   const { OpenSettingsFileButton } = await import("./SettingSources");
   render(<OpenSettingsFileButton />);
-  const button = screen.getByRole("button", { name: "Open settings.json" });
+  const button = screen.getByRole("button", { name: "Open personal settings.json" });
   fireEvent.click(button);
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("open_settings_file", { path: "/Users/me/.raccoon/settings.json", editor: null }));
 
-  openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
+  openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   const menu = await screen.findByRole("menu");
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Your settings~/.raccoon/settings.json", "Finder1", "Cursor2", "VS Code3", "Zed4", "Copy path⌘⇧C"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "VS Code" }));
@@ -90,8 +97,8 @@ it("Open settings.json opens the user file, names its broken line, and opens it 
 
   file = { ...file, error: "preferences.linkActions, line 7: Unexpected “,” before “}”", problem };
   await act(async () => mocks.listeners.get("settings_file_changed")!());
-  await waitFor(() => expect(screen.getByRole("button", { name: "Open settings.json · line 7" })).toBeTruthy());
-  expect((screen.getByRole("button", { name: "Open settings.json · line 7" }).parentElement as HTMLElement).className).toContain("text-destructive");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open personal settings.json · line 7" })).toBeTruthy());
+  expect((screen.getByRole("button", { name: "Open personal settings.json · line 7" }).parentElement as HTMLElement).className).toContain("text-destructive");
 });
 
 it("on a project page the one Open button names and opens the project's own file (PRO-388)", async () => {
@@ -125,7 +132,7 @@ it("a failed Open in reports the failure in an error toast", async () => {
   const answer = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation(async (command: string, args?: { key?: string }) => command === "open_settings_file" ? Promise.reject("Zed is not installed") : answer(command, args));
   render(<OpenSettingsFileButton />);
-  openMenu(screen.getByRole("button", { name: "More ways to open settings.json" }));
+  openMenu(screen.getByRole("button", { name: "More ways to open personal settings.json" }));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Zed" }));
   await waitFor(() => expect(toasts.getErrorToasts().map(toasts.errorToastText)).toEqual(["Couldn’t open ~/.raccoon/settings.json in Zed: Zed is not installed"]));
 });
@@ -135,7 +142,7 @@ it("a save refused by an invalid file raises Can’t save with the line, the par
   const prefs = await import("@/lib/prefs");
   const { CantSaveToast } = await import("./SettingSources");
   const { SettingsFileError } = await import("./SettingsFile");
-  render(<><SettingsFileError /><CantSaveToast /></>);
+  render(<><SettingsFileError /><CantSaveToast settingTitle={(key) => key === "preferences.sounds" ? "Sounds" : undefined} /></>);
   expect(screen.queryByRole("alert")).toBeNull();
   // The file was broken in an editor; the save is refused and the toast reads the file again for its line.
   file = { ...file, error: "preferences.linkActions, line 7: Unexpected “,” before “}”", problem };
@@ -145,12 +152,9 @@ it("a save refused by an invalid file raises Can’t save with the line, the par
     : original(command, args));
   await act(async () => prefs.setPrefs({ sounds: false }));
   const toast = await screen.findByRole("alert", { name: "Can’t save: ~/.raccoon/settings.json has an error on line 7" });
-  expect(toast.textContent).toContain("preferences.linkActions: Unexpected “,” before “}”");
-  expect(toast.textContent).toContain("This change wasn’t saved; your other settings keep their last good values until the file is fixed.");
-
-  // The banner reads as one error naming file, line and key.
-  const banner = screen.getAllByRole("alert").find((element) => element !== toast)!;
-  expect(banner.textContent).toBe("~/.raccoon/settings.json line 7: preferences.linkActions Unexpected “,” before “}”. The last good values stay in effect.Open");
+  // PRO-374 (09.43): the toast names the setting that stayed, and no banner sits above the page.
+  expect(toast.textContent).toContain("Sounds stays on until the file is fixed; nothing else changed.");
+  expect(screen.getAllByRole("alert")).toEqual([toast]);
 
   fireEvent.click(within(toast).getByRole("button", { name: "Copy error" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("copy_text", {
@@ -166,7 +170,8 @@ it("a save refused by an invalid file raises Can’t save with the line, the par
   await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   file = { ...file, error: "x", problem };
   await act(async () => mocks.listeners.get("settings_file_changed")!());
-  await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(1));
+  // A later problem raises neither the old toast nor a banner: the red Open settings.json names it.
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   expect(settings.useSettingsFile).toBeTypeOf("function");
 });
 

@@ -825,7 +825,7 @@ export const api = {
   diffMediaContent: (cwd: string, path: string, tree: string | null) =>
     invoke<{ data: string; mime: string } | null>("diff_media_content", { cwd, path, tree }),
   fileContentsAt: (cwd: string, path: string, base: string, head: string | null) =>
-    invoke<{ before: string | null; after: string | null }>("file_contents_at", { cwd, path, base, head }),
+    invoke<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>("file_contents_at", { cwd, path, base, head }),
   logCommits: (cwd: string, range?: string | null, limit?: number) =>
     invoke<CommitInfo[]>("log_commits", { cwd, range: range ?? null, limit: limit ?? 100 }),
 };

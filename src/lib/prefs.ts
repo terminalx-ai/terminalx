@@ -395,6 +395,11 @@ export function legacyUserPreferences(): Record<string, unknown> {
   } catch { return {}; }
 }
 
+/** A preference's built-in value, for "Reset to default" to name (PRO-374). */
+export function preferenceDefault(key: string): unknown {
+  return Object.hasOwn(DEFAULTS, key) ? (DEFAULTS as unknown as Record<string, unknown>)[key] : undefined;
+}
+
 export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }
 
 /** Apply a complete file view: removing a key restores its default. */
