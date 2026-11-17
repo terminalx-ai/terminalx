@@ -1520,24 +1520,21 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading and creating issues need no confirmation. When the person asks to file an issue,
-`issues create --provider github|linear` validates and submits it using the configured provider
-credentials, then returns the created issue, including its identifier and URL. Creation needs
-no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
-failures are reported without automatically retrying creation; check the provider before
-retrying an uncertain result to avoid duplicates.
+GitHub and Linear issue operations require additional TerminalX approval only for
+issue deletion. Reading, creating, commenting, editing supported fields, assigning or
+unassigning, adding or removing labels, closing/reopening and workflow status transitions
+(including completed/canceled) execute directly using the configured provider credentials.
+They need no project setting or desktop window and never enter the confirmation queue,
+even while a deletion request is pending or after one expires. Authentication, repository/team
+access checks, validation and provider errors still apply. Failed writes are not automatically
+retried; check the provider before retrying an uncertain result to avoid duplicate issues or
+comments. The existing limit of 4000 characters or 40 lines for a comment, new issue title or
+description still applies; link to the details instead.
 
-Other issue writes show a pending request in the main window, whoever runs the command.
-The person chooses Review to see the reported session,
-project, target, action and complete text in a bounded, scrollable dialog. Background requests
-do not open the dialog or switch conversations. Only the explicit action button approves;
-Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
-40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
-`declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
-new issue title or description still applies; link to the details instead. A project can let comments and
-status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels and edits to existing Linear issues always ask.
+There is currently no issue-deletion command. Any future issue deletion must require an
+explicit human approval naming the provider and issue, regardless of agent permission mode.
+Refusal, timeout or an unavailable confirmation window must leave the issue intact.
+Closing an issue or moving it to a completed/canceled state is not deletion.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -1783,7 +1780,7 @@ deleting a workspace are done in the app.
 ### Paired machines
 
 A machine is another computer running TerminalX that this computer paired with (Settings →
-Machines, behind Settings → Experimental → Machines). The same verbs work on it with
+Machines). The same verbs work on it with
 `--machine <machine>`, where `<machine>` is its name (any case) or its id from `machines list`.
 The CLI never connects to the machine itself: the app carries each command over the one
 connection it already holds to it, directly or through the relay.
@@ -1874,10 +1871,10 @@ machine, and a worker of a run may not pair a machine or start a session on one 
 The built-in browser, computer use, the Local VM, `sessions report`, `sessions usage`,
 `sessions status` and the issue and pipeline commands work on this computer only.
 
-**The person's switch.** Every machine command answers `machines_disabled` until the person
-turns on Settings → Experimental → Machines. With it on, any agent in a local session can
-operate the paired machines through these commands, with the full rights pairing gave this
-computer there.
+**What gates it.** Pairing: any agent in a local session can operate the machines the person
+paired, through these commands, with the full rights pairing gave this computer there. With
+none paired there is nothing to reach. Every machine command answers `machines_disabled` while
+data privacy mode is on.
 
 ### This guide
 
@@ -2078,7 +2075,8 @@ JSON failures have this shape:
   this command. Update TerminalX there; do not retry.
 - `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
   in, or the person at it disconnected this computer. Ask the person; do not retry.
-- `machines_disabled`: Settings → Experimental → Machines is off. Tell the person; do not retry.
+- `machines_disabled`: data privacy mode is on, so this computer operates no machine. Tell the
+  person; do not retry.
 - `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
   to the person, then repeat the command with `--fingerprint`.
 - `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.

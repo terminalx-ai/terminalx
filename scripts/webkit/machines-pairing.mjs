@@ -3,7 +3,7 @@
 // and its Headless server tab, screen 21.06) and the approval dialog (screen
 // 21.05) in the desktop's WebKit, at the window's smallest size (760×520,
 // tauri.conf.json), a roomy one and the screens' own width (1440×900), in the
-// light and the dark theme, with Experimental → Machines on.
+// light and the dark theme.
 //
 // The approval dialog shows over the app while a computer waits, then goes
 // when the request ends. Add a machine shows: empty, an invalid code, waiting
@@ -49,7 +49,7 @@ const fixture = `(() => {
   const note = (name, args) => window.__PW_CALLS__.push([name, args ?? null]);
   answers.machine_name = { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
   answers.copy_text = (args) => { note("copy_text", args); return null; };
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: true };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   const computers = [
     { id: "computer-1", label: "Paresh’s MacBook Air", platform: "macos", approvedAt: Date.parse("2026-11-03T09:00:00Z"), lastSeenAt: Date.now(), connected: true },
     { id: "computer-2", label: "build-box", platform: "linux", approvedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: Date.parse("2026-11-14T18:40:00Z"), connected: false },

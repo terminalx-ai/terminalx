@@ -79,7 +79,7 @@ async function ensureUserFile(file: SettingsFileStatus): Promise<void> {
  * the file sets one of the row's keys, and the ··· row menu (Reset to default,
  * Saved in …). Nothing until the file's status is known.
  */
-export function UserFileRowAccessory({ keys, title }: { keys: readonly string[]; title: string }) {
+export function UserFileRowAccessory({ keys, title, menu = true }: { keys: readonly string[]; title: string; menu?: boolean }) {
   const { file } = useSettingsFile();
   const [busy, setBusy] = useState(false);
   if (!file) return null;
@@ -92,7 +92,7 @@ export function UserFileRowAccessory({ keys, title }: { keys: readonly string[];
   };
   return <>
     {set.length > 0 && <SourceBadge kind="yours" />}
-    <DropdownMenu>
+    {menu && <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon-xs" aria-label={`${title} actions`} className="-my-1 size-5 shrink-0"><Ellipsis /></Button>
       </DropdownMenuTrigger>
@@ -101,7 +101,7 @@ export function UserFileRowAccessory({ keys, title }: { keys: readonly string[];
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-xs text-muted-foreground">Saved in <span className="font-mono">{shownPath(file)}</span></div>
       </DropdownMenuContent>
-    </DropdownMenu>
+    </DropdownMenu>}
   </>;
 }
 

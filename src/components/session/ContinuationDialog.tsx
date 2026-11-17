@@ -17,7 +17,6 @@ import { SessionAgentControls } from "./SessionAgentControls";
 import { PipelineLaunchControls } from "./PipelineLaunchControls";
 import { HandoffScene } from "./HandoffScene";
 import { Fold } from "@/components/ui/Fold";
-import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
 import { machineWhereRow } from "@/lib/machineNewSession";
 import { openMachineDraft } from "./MachineNewSession";
@@ -77,11 +76,10 @@ export function ContinuationDialog({ session, source, into, initialHarness, revi
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
   const [chosen, setChosen] = useState<LaunchSettings | null>(null);
-  // Runs on (PRO-348): this Mac, or a paired machine while Machines is on. A machine gets the new-session form with the handoff in it.
-  const machinesOn = useMachineDashboardEnabled();
+  // Runs on (PRO-348): this Mac, or a paired machine. A machine gets the new-session form with the handoff in it.
   const connections = useMachineConnections();
   const [runsOn, setRunsOn] = useState<string | null>(null);
-  const runsOnShown = machinesOn && !into && !reviewPrompt && connections.machines.length > 0;
+  const runsOnShown = !into && !reviewPrompt && connections.machines.length > 0;
   const onMachine = runsOnShown && runsOn ? machineConnection(connections, runsOn) : null;
   const models = useModels();
   const prefs = usePrefs();

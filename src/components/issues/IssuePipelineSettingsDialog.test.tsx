@@ -43,26 +43,11 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("a project's issue pipeline settings", () => {
-  it("asks before agents update issues until the project lets them, and saves that on its own", async () => {
-    const { rerender } = render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={() => {}} />);
-    const toggle = () => screen.getByRole("switch", { name: "Agents comment and change status without asking" });
-    expect(toggle().getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(toggle());
-    expect(toggle().getAttribute("aria-checked")).toBe("true");
-    await waitFor(() => expect(updateProject).toHaveBeenCalledWith("/repo", { agentIssueUpdates: true }));
-    rerender(<IssuePipelineSettingsDialog project={{ ...project(), agentIssueUpdates: true }} open onOpenChange={() => {}} />);
-    await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("true"));
-    // Independent of the pipeline: it can be changed with the pipeline off.
-    rerender(<IssuePipelineSettingsDialog project={{ ...project({ ...defaults, enabled: false }), agentIssueUpdates: true }} open onOpenChange={() => {}} />);
-    expect(toggle().hasAttribute("disabled")).toBe(false);
-  });
-
-  it("puts the switch back and says why when it cannot be saved", async () => {
-    updateProject.mockRejectedValueOnce(new Error("The project is no longer attached."));
+  it("describes deletion-only approval without a routine-write switch", () => {
     render(<IssuePipelineSettingsDialog project={project()} open onOpenChange={() => {}} />);
-    fireEvent.click(screen.getByRole("switch", { name: "Agents comment and change status without asking" }));
-    expect(await screen.findByText("The project is no longer attached.")).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "Agents comment and change status without asking" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByRole("switch", { name: "Agents comment and change status without asking" })).toBeNull();
+    expect(screen.getByText(/Only deleting an issue requires explicit human approval/)).toBeTruthy();
+    expect(updateProject).not.toHaveBeenCalled();
   });
 
   it("shows the defaults for a project that set nothing, and saves a change at once", async () => {
@@ -164,8 +149,7 @@ describe("a project's issue pipeline settings", () => {
 
   it("greys out the pipeline's settings but its own switch when the pipeline is off", () => {
     render(<IssuePipelineSettingsDialog project={project({ ...defaults, enabled: false })} open onOpenChange={() => {}} />);
-    const agents = screen.getByRole("switch", { name: "Agents comment and change status without asking" });
-    const switches = screen.getAllByRole("switch").filter((toggle) => toggle !== agents);
+    const switches = screen.getAllByRole("switch");
     expect(switches[0].hasAttribute("disabled")).toBe(false);
     expect(switches.slice(1).every((toggle) => toggle.hasAttribute("disabled"))).toBe(true);
     expect(screen.getByRole("textbox", { name: "Protected paths" }).hasAttribute("disabled")).toBe(true);

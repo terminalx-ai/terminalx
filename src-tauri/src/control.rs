@@ -341,6 +341,13 @@ impl WindowControl {
             return crate::store::environment::desktop_snapshot(key, revision)
                 .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
         }
+        // The runtime's relay session needs a current access token (PRO-368).
+        // The window rotates the session and keeps the runtime's copy itself.
+        if command == "account.refresh" {
+            let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("The account is unavailable."))?;
+            pairing.refresh_account_for_runtime();
+            return Ok(json!({ "refreshed": true }));
+        }
         if command == "agentKey.snapshot" {
             let harness = params["harness"].as_str().ok_or_else(|| ControlError::invalid("Agent required."))?;
             let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Key revision required."))?;
@@ -908,11 +915,10 @@ impl ControlService {
             "worktrees.delete" => self.worktree_delete(params),
             "review.comment" | "review.comments" => self.review_comments(command, params),
             "issues.list" => self.issues_list(params),
-            // Creation uses the local owner's credentials and never needs a
+            // Non-deletion operations use the owner's credentials without a
             // desktop attachment. Cloud workspace capabilities stay unchanged.
-            "issues.create" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => issue_operation(None, command, params),
-            #[cfg(feature = "desktop")]
-            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" => self.issue_op(command, params),
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create"
+                if cfg!(feature = "desktop") || self.local_lifetime.is_some() => issue_operation(None, command, params),
             #[cfg(not(feature = "desktop"))]
             "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => Err(ControlError::new(
                 "unsupported",
@@ -2138,11 +2144,6 @@ impl ControlService {
         Ok(json!({"project": project, "provider": provider, "issues": issues}))
     }
 
-    #[cfg(feature = "desktop")]
-    /// Existing issue operations, with their confirmation policy in `issue_control`.
-    fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        issue_operation(self.questions.as_ref(), command, params)
-    }
 }
 
 /// `machine.*` a run's worker may not ask for (`orchestration::guard`): it
@@ -2166,7 +2167,7 @@ fn refuse_limited_machine_caller(action: &str, params: &Value) -> Result<(), Con
 }
 
 fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str, params: Value) -> Result<Value, ControlError> {
-        use crate::issue_control::{authorize, in_project, run, Caller, Live, Subject, Write};
+        use crate::issue_control::{authorize, run, Caller, Live, Subject, Write};
         use crate::issue_ops::{Provider, Target};
         let action = command.trim_start_matches("issues.");
         let caller = Caller::of(&params);
@@ -2185,19 +2186,13 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
             refuse_other_repository(&project.path, reference)?;
         }
         let target = Target::resolve(Path::new(&project.path), if provider == "linear" { Provider::Linear } else { Provider::Github }).map_err(crate::issue_control::op_error)?;
-        let project_repo = match &target {
-            Target::Github { repo, .. } => Some(repo.clone()),
-            Target::Linear { .. } => None,
-        };
         // Shown in the question as the caller's claim, never trusted.
         let session = caller.session.as_deref().and_then(|session| resolve_session(session).ok());
-        let gate = |write: &Write, subject: &str, issue_repo: Option<&str>| {
+        let gate = |write: &Write, subject: &str, _issue_repo: Option<&str>| {
             let subject = Subject {
                 issue: subject,
                 provider,
                 project_name: &project.name,
-                // The switch is the project's, and applies only to an issue that is verifiably its own.
-                routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
                 session_title: session.as_ref().map(|s| s.title.as_str()),
                 session_id: session.as_ref().map(|s| s.id.as_str()),
             };

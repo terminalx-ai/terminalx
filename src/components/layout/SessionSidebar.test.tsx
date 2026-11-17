@@ -51,7 +51,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const rowsIn = (element: HTMLElement) => within(element).getAllByRole("listitem").map((row) => row.querySelector("[title]")?.getAttribute("title"));
 
 async function boot(list: SessionEntry[]) {
@@ -72,7 +72,7 @@ describe("new-chat entry points", () => {
   it("opens the composer from the New session destination and a project's +, without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     const onNewSession = vi.fn();
-    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
     // The titlebar only hides the sidebar: New session and Search are destinations (02.01).
     expect(within(screen.getByTestId("sidebar-titlebar")).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Hide sidebar"]);
     fireEvent.click(within(screen.getByRole("toolbar", { name: "Destinations" })).getByRole("button", { name: "New session" }));
@@ -80,6 +80,36 @@ describe("new-chat entry points", () => {
     fireEvent.click(screen.getByRole("button", { name: "New chat in web" }));
     expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
+  });
+});
+
+describe("Home navigation (#1103)", () => {
+  it.each(["simple", "list"] as const)("returns from a session by mouse and keyboard in the %s sidebar", async (sidebarLayout) => {
+    const { useShortcut } = await import("@/lib/hotkeys");
+    function HomeShortcut() {
+      useShortcut("app.home", store.openHome);
+      return null;
+    }
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    prefs.setPrefs({ sidebarLayout, shortcuts: {} });
+    store.selectSession("here");
+    mount();
+    render(<HomeShortcut />);
+    const home = screen.getByRole("button", { name: "Home" });
+    expect(home.getAttribute("aria-pressed")).toBe("false");
+    expect(home.textContent).toContain("CtrlAlt0");
+    fireEvent.click(home);
+    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
+    expect(home.getAttribute("aria-pressed")).toBe("true");
+
+    act(() => store.selectSession("here"));
+    expect(home.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.keyDown(window, { key: "0", code: "Digit0", ctrlKey: true, altKey: true });
+    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
+    expect(home.getAttribute("aria-pressed")).toBe("true");
+    expect(store.getSessionStore().sessions).toHaveLength(1);
   });
 });
 
@@ -516,9 +546,9 @@ describe("the conversation list", () => {
     mount();
     const destinations = screen.getByRole("toolbar", { name: "Destinations" });
     const ownText = (button: HTMLElement) => [...button.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("");
-    expect(within(destinations).getAllByRole("button").map(ownText)).toEqual(["Overview", "New session", "Search", "Automations", "Issues"]);
-    // A key chip on the first three, as bound now; none on the others.
-    expect(within(destinations).getAllByRole("button").map((button) => !!button.querySelector("kbd"))).toEqual([true, true, true, false, false]);
+    expect(within(destinations).getAllByRole("button").map(ownText)).toEqual(["Home", "Overview", "New session", "Search", "Automations", "Issues"]);
+    // A key chip on the first four, as bound now; none on the others.
+    expect(within(destinations).getAllByRole("button").map((button) => !!button.querySelector("kbd"))).toEqual([true, true, true, true, false, false]);
     expect(destinations.compareDocumentPosition(screen.getByTestId("conversation-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
@@ -1127,7 +1157,7 @@ describe("custom order (PRO-169)", () => {
 });
 
 describe("the Machines section (PRO-345)", () => {
-  const machines = async (on: boolean) => {
+  const machines = async (paired: boolean) => {
     const experimental = await import("@/lib/experimentalSettings");
     const connections = await import("@/lib/machineConnections");
     const { pairedMachine } = await import("@/components/machines/machineFixtures.test-utils");
@@ -1135,9 +1165,8 @@ describe("the Machines section (PRO-345)", () => {
     connections.resetMachineConnectionsForTests();
     const answer = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args?: never) => {
-      if (command === "experimental_settings") return { nativeCodex: false, machines: on };
-      if (command === "machines_list") return [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
-      if (command === "machines_connections") return [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
+      if (command === "machines_list") return !paired ? [] : [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
+      if (command === "machines_connections") return !paired ? [] : [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
       return answer(command, args);
     });
     await connections.refreshPairedMachines();
@@ -1162,11 +1191,11 @@ describe("the Machines section (PRO-345)", () => {
     expect(store.getSessionStore().selectedCloudWorkspace).toBe("machine:m1");
   });
 
-  it("shows nothing with Experimental → Machines off, even with machines paired", async () => {
+  it("shows nothing with no machine paired (PRO-360)", async () => {
     await machines(false);
     await boot([session("one", "/repos/web", new Date().toISOString())]);
     mount();
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_list"));
     expect(screen.queryByTestId("machines-section")).toBeNull();
   });
 });

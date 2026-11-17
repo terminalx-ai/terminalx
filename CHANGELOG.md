@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Machines is on for everyone: work on your other Macs and Linux servers from
+  this Mac, with their projects and sessions in your sidebar. Settings →
+  Experimental no longer has a Machines switch. Settings → Machines shows how
+  to add a first machine and links the new guide, docs/MACHINES-GUIDE.md. Until
+  a machine is added the app looks as before, and "Let other computers operate
+  this Mac" stays off until you turn it on. Agents can use the machines you
+  added through the terminalx command line (PRO-360).
+
 ## 0.2.34
 
 - Machines (Experimental, Settings → Experimental → Machines): the desktop

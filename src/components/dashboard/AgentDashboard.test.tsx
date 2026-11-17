@@ -115,7 +115,7 @@ it("keeps search and filters across views, hides automations and archives until 
   await waitFor(() => expect(rowNames()).toEqual(["Fix nightly"]));
 });
 
-// Where is offered only with Machines on and a machine paired: MachineDashboard.test sorts and hides it.
+// Where is offered only with a machine paired: MachineDashboard.test sorts and hides it.
 it.each(tableColumns(false))("sorts and toggles the $label column", async ({ id, label, menu }) => {
   state.sessions = [session("Task 10"), session("Task 2")];
   setPrefs({ dashboard: { ...DEFAULT_DASHBOARD_PREFERENCES, hiddenColumns: [] } });
@@ -151,7 +151,7 @@ it("shows the designed default columns, people and the toolbar", async () => {
   expect(screen.getByRole("textbox", { name: "Search sessions" }).getAttribute("placeholder")).toBe("Search sessions, branches, PRs");
   await showView("Table");
   const headers = within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("columnheader").map((header) => header.textContent);
-  // Where joins after Project only with Machines on and a machine paired (PRO-346).
+  // Where joins after Project only once a machine is paired (PRO-346).
   expect(headers).toEqual(["Session", "Project", "Branch", "Changes", "Status", "Agent", "Owner", "Active"]);
   expect(screen.getByRole("img", { name: "You" })).toBeDefined();
   fireEvent.keyDown(window, { key: "/" });

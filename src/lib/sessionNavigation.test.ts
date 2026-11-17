@@ -70,7 +70,7 @@ describe("sessions on paired machines (PRO-346)", () => {
     tabs: [{ id: `${id}-tab`, harness: "claude", model: "", permissionMode: "default", status, created: "x", modified: "x" }],
   });
 
-  async function boot(on: boolean) {
+  async function boot(paired: boolean) {
     vi.resetModules();
     localStorage.clear();
     localStorage.setItem("terminalx.machineCatalog.v1", JSON.stringify({ [MINI.machineId]: {
@@ -78,8 +78,7 @@ describe("sessions on paired machines (PRO-346)", () => {
       sessions: [runtimeSession("waits", "waiting", "2026-11-03T00:00:00Z"), runtimeSession("idle", "idle", "2026-11-02T00:00:00Z")],
       unread: [], syncedAt: 1,
     } }));
-    machines.state = { ready: true, error: null, machines: [MINI], states: {}, attachErrors: {}, connections: {} };
-    (await import("./machineDashboard")).setMachineDashboardEnabled(on);
+    machines.state = { ready: true, error: null, machines: paired ? [MINI] : [], states: {}, attachErrors: {}, connections: {} };
     return { navigation: await import("./sessionNavigation"), sessions: await import("./sessions") };
   }
 
@@ -91,7 +90,7 @@ describe("sessions on paired machines (PRO-346)", () => {
     expect(sessions.getSessionStore().selectedSessionId).toBe(key("idle"));
   });
 
-  it("steps to none while Machines is off", async () => {
+  it("steps to none while no machine is paired", async () => {
     const { navigation, sessions } = await boot(false);
     navigation.stepAttentionSession();
     navigation.stepVisibleSession(1);

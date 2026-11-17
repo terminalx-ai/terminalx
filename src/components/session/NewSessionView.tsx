@@ -59,8 +59,7 @@ import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
-import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
-import { refreshPairedMachines } from "@/lib/machineConnections";
+import { refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { CreateAttempt, agentSignIn, createMachineSession } from "@/lib/machineNewSession";
 import { AddMachineDialog } from "@/components/machines/AddMachineDialog";
 import { MachineBranchMenu, MachineFormLine, MachineProjectMenu, WhereMenu, takeNewSessionSeed, useMachineDraft, useNewSessionSeed, type CloudWhere } from "./MachineNewSession";
@@ -138,8 +137,9 @@ export function NewSessionView({
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
   // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A projectless chat is local.
   const cloudDraft = useCloudDraft();
-  // A machine chosen in "Where it runs" (PRO-348): the same form, run on that machine. Behind Experimental → Machines.
-  const machinesOn = useMachineDashboardEnabled();
+  // A machine chosen in "Where it runs" (PRO-348): the same form, run on that machine.
+  // The menu is offered once a machine is paired; until then the form is as it was before Machines (PRO-360).
+  const machinesPaired = useMachineConnections().machines.length > 0;
   const localWanted = store.newSessionPreset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
   const machineDraft = useMachineDraft(store.harnesses, store.projects.find((p) => p.path === localWanted)?.name ?? null);
   const machine = projectless ? null : machineDraft;
@@ -652,8 +652,8 @@ export function NewSessionView({
     }
   };
 
-  // "Where it runs" (PRO-348): This Mac, each paired machine, each organization's cloud. Only while Machines is on.
-  const whereShown = machinesOn && !projectless;
+  // "Where it runs" (PRO-348): This Mac, each paired machine, each organization's cloud. Only once a machine is paired.
+  const whereShown = (machinesPaired || !!machine) && !projectless;
   const cloudWhere: CloudWhere[] = cloudChoices.map((section) => {
     const startable = section.mayStart === true ? section.projects.find((choice) => choice.selected) : undefined;
     const current = cloud?.project && cloud.project.orgId === section.orgId ? cloud.project.key : null;

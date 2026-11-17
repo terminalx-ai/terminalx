@@ -42,8 +42,8 @@ beforeEach(() => {
     id: "workspace-review", expiresAt: Date.now() + 40_000,
     question: {
       title: "Linear issue request", sessionId: "origin", sessionTitle: "Zeron comparison",
-      project: "TerminalX", target: "PRO", summary: "Create an issue in PRO",
-      description: "Review the proposed issue.", agree: "Create issue",
+      project: "TerminalX", target: "PRO-42", summary: "Permanently delete PRO-42",
+      description: "Review the issue to delete.", agree: "Delete issue",
     },
   };
   mocks.invoke.mockImplementation(async (command) => {
@@ -79,7 +79,7 @@ function expectOnlyWorkspaceChanged(before: ReturnType<typeof getSessionStore>, 
   expect(getSessionStore()).toEqual({ ...before, selectedCloudWorkspace: workspace });
 }
 
-/** Machines on, with the Mac mini attached. */
+/** The Mac mini paired and attached. */
 async function attachMachines() {
   stopMachines = startMachineConnections();
   await vi.waitFor(() => expect(getMachineConnections().connections.m1).toBeTruthy());

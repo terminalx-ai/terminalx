@@ -205,7 +205,7 @@ impl CloudRemote {
     /// A window closed: it lets go of every machine connection it held, and
     /// those nobody else holds end. A closed window runs no cleanup of its
     /// own, so without this its hold would keep a machine connecting after
-    /// Experimental → Machines is off.
+    /// the last window that wanted it has gone.
     pub fn release_holder(&self, holder: &str) {
         let ended: Vec<Attached> = {
             let mut connections = self.connections.lock().unwrap();
