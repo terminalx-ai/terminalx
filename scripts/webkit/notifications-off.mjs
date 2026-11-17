@@ -81,12 +81,12 @@ try {
       await painted(page);
       assert.match(await card.innerText(), /Notifications are off for TerminalX/);
       assert.match(await card.innerText(), /“Chat 0” needs your approval, but macOS blocks TerminalX banners and the dock badge\./);
-      // PRO-400: the bell-off icon is drawn in the muted text colour, not amber.
+      // The bell-off icon is amber, as screen 17.12 draws it (PRO-400 kept the screen's colour over its table's).
       const bell = await card.locator("[data-notifications-off-icon]").evaluate((icon) => {
         const colour = (value) => { const probe = document.createElement("i"); probe.style.color = value; document.body.append(probe); const drawn = getComputedStyle(probe).color; probe.remove(); return drawn; };
         return { drawn: getComputedStyle(icon).color, muted: colour("var(--muted-foreground)"), warning: colour("var(--warning)") };
       });
-      assert.ok(bell.drawn === bell.muted && bell.drawn !== bell.warning, `bell-off icon is muted ${where}: ${JSON.stringify(bell)}`);
+      assert.ok(bell.drawn === bell.warning && bell.drawn !== bell.muted, `bell-off icon is amber ${where}: ${JSON.stringify(bell)}`);
       const others = {
         composer: "[data-composer-box]",
         "send button": '[data-composer-box] button[aria-label="Send"]',
