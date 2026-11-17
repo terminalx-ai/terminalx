@@ -1,13 +1,9 @@
 //! `terminalx issues view/comment/status/assign/label/create` (PRO-100).
 //!
-//! Reads and issue creation need no confirmation. Other writes change shared
-//! state on GitHub or Linear and are put to the person first,
-//! in a bounded review in the main window: its default button refuses, it expires, and
-//! computer use is paused while it is on screen. The app cannot tell an
-//! agent's request from the person's own (they share the control token), so
-//! it never tries. A project may let comments and status moves on its own
-//! GitHub repository's issues go ahead without a question; assigning,
-//! labels and edits to existing Linear issues always ask.
+//! Only issue deletion requires explicit human approval, for both providers.
+//! Routine writes validate and execute without touching the confirmation queue.
+//! There is no deletion command yet; any future deletion entry point must use
+//! `Write::Delete` and this gate, regardless of the caller's permission mode.
 
 use std::sync::Arc;
 
@@ -55,6 +51,9 @@ impl Caller {
 /// A change to an issue, as the person is asked about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Write {
+    /// Reserved for future issue deletion paths; never use for closing an issue.
+    #[allow(dead_code)]
+    Delete,
     Comment { body: String },
     Status { to: String },
     Assign { to: Vec<String>, me: bool },
@@ -63,13 +62,18 @@ pub enum Write {
 }
 
 impl Write {
-    /// Whether the project's "without asking" switch covers this write.
-    fn routine(&self) -> bool {
-        matches!(self, Self::Comment { .. } | Self::Status { .. })
+    /// Exhaustive so new operations must explicitly choose their policy.
+    fn requires_confirmation(&self) -> bool {
+        match self {
+            Self::Delete => true,
+            Self::Comment { .. } | Self::Status { .. } | Self::Assign { .. }
+            | Self::Label { .. } | Self::Create { .. } => false,
+        }
     }
 
     fn agree(&self) -> &'static str {
         match self {
+            Self::Delete => "Delete issue",
             Self::Comment { .. } => "Post comment",
             Self::Status { .. } => "Change status",
             Self::Assign { .. } => "Change assignees",
@@ -82,6 +86,7 @@ impl Write {
     fn describe(&self, issue: &str) -> String {
         let names = |names: &[String]| names.iter().map(|name| format!("\u{201c}{}\u{201d}", one_line(name, 80))).collect::<Vec<_>>().join(", ");
         match self {
+            Self::Delete => format!("permanently delete {issue}."),
             Self::Comment { body } => format!("post this comment on {issue}:\n\n{}", quoted(body)),
             Self::Status { to } => format!("move {issue} to \u{201c}{}\u{201d}.", one_line(to, 80)),
             Self::Assign { me: true, .. } => format!("assign {issue} to you."),
@@ -171,20 +176,9 @@ pub struct Subject<'a> {
     pub issue: &'a str,
     pub provider: &'a str,
     pub project_name: &'a str,
-    /// The project lets comments and status moves go ahead without a
-    /// question, and the issue verifiably belongs to it (see [`in_project`]).
-    pub routine_allowed: bool,
     /// The session the request says it comes from. Claimed, so only shown.
     pub session_title: Option<&'a str>,
     pub session_id: Option<&'a str>,
-}
-
-/// Whether the project's switch may apply to an issue: only a GitHub issue
-/// read from the project's own repository. A Linear key reaches every team
-/// of the workspace and a project names none, so a Linear issue is never
-/// the project's to wave through.
-pub fn in_project(issue_repo: Option<&str>, project_repo: Option<&str>) -> bool {
-    matches!((issue_repo, project_repo), (Some(issue), Some(project)) if issue.eq_ignore_ascii_case(project))
 }
 
 pub fn question(write: &Write, subject: &Subject) -> Question {
@@ -216,12 +210,8 @@ pub fn question(write: &Write, subject: &Subject) -> Question {
     }
 }
 
-/// Lets `write` go ahead, or says why it may not. Creation and a comment or
-/// status move that the project allows go ahead without a question.
+/// Validate every write; only deletion enters the human confirmation queue.
 pub fn authorize(write: &Write, subject: &Subject, ask: Option<&Ask>) -> Result<(), ControlError> {
-    if write.routine() && subject.routine_allowed {
-        return Ok(());
-    }
     if let Some(what) = write.too_long() {
         return Err(ControlError::new(
             "invalid_arguments",
@@ -229,15 +219,14 @@ pub fn authorize(write: &Write, subject: &Subject, ask: Option<&Ask>) -> Result<
             Some(format!("Shorten the {what} to at most {SHOWN_CHARS} characters and {SHOWN_LINES} lines, link to the details instead, or ask the person to post it in the app.")),
         ));
     }
-    // Filing an issue is authorized by the user's request. Keep validation,
-    // but never enter the desktop confirmation queue (including its backoff).
-    if matches!(write, Write::Create { .. }) {
+    // Never touch queue state for non-deletion operations, even during backoff.
+    if !write.requires_confirmation() {
         return Ok(());
     }
     let Some(ask) = ask else {
         return Err(ControlError::new(
             "confirmation_unavailable",
-            "Changing an issue from the command line needs the person's answer, and this runtime has no window to ask in. Nothing was changed.",
+            "Deleting an issue needs the person's answer, and this runtime has no window to ask in. Nothing was changed.",
             Some("Ask the person to make the change, or run the command in the TerminalX desktop app.".to_string()),
         ));
     };
@@ -599,8 +588,8 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
-    fn subject(allows: bool) -> Subject<'static> {
-        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", routine_allowed: allows, session_id: Some("session-1"), session_title: Some("Fix login") }
+    fn subject() -> Subject<'static> {
+        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", session_id: Some("session-1"), session_title: Some("Fix login") }
     }
 
     /// An `Ask` that records each question and answers `answer`.
@@ -622,26 +611,27 @@ mod tests {
     }
 
     #[test]
-    fn a_write_is_asked_and_names_the_issue_the_action_and_the_text() {
-        let (ask, asked) = asking(|| Answer::Accepted);
-        let write = Write::Comment { body: "Fixed in https://github.com/acme/api/pull/13".into() };
-        authorize(&write, &subject(false), Some(&ask)).unwrap();
-        let question = asked.lock().unwrap().pop().unwrap();
-        assert_eq!((question.title.as_str(), question.agree.as_str()), ("Linear issue request", "Post comment"));
-        assert!(question.message.starts_with("A terminalx command in raccoon, which says it comes from the session \u{201c}Fix login\u{201d}, asks to post this comment on PRO-42 (Fix the login):"), "{}", question.message);
-        assert!(question.message.contains("\u{2503} Fixed in https://github.com/acme/api/pull/13"));
-
-        for (write, agree, says) in [
-            (Write::Status { to: "In Review".into() }, "Change status", "move PRO-42 (Fix the login) to \u{201c}In Review\u{201d}."),
-            (Write::Assign { to: vec!["alice".into(), "bob".into()], me: false }, "Change assignees", "assign PRO-42 (Fix the login) to \u{201c}alice\u{201d}, \u{201c}bob\u{201d}."),
-            (Write::Assign { to: vec![], me: true }, "Change assignees", "assign PRO-42 (Fix the login) to you."),
-            (Write::Assign { to: vec![], me: false }, "Change assignees", "remove everyone assigned to PRO-42 (Fix the login)."),
-            (Write::Label { add: vec!["bug".into()], remove: vec!["triage".into()] }, "Change labels", "change the labels of PRO-42 (Fix the login): add \u{201c}bug\u{201d} and remove \u{201c}triage\u{201d}."),
-            (Write::Create { title: "Flaky test".into(), body: Some("Seen twice.".into()) }, "Create issue", "create the issue \u{201c}Flaky test\u{201d} in PRO-42 (Fix the login) with this description:\n\n\u{2503} Seen twice."),
-        ] {
-            let question = super::question(&write, &subject(false));
-            assert_eq!(question.agree, agree);
-            assert!(question.message.contains(says), "{}", question.message);
+    fn deletion_alone_requires_an_explicit_answer_naming_provider_and_issue() {
+        for (provider, issue, label) in [("github", "#12 (Fix login)", "GitHub"), ("linear", "PRO-42 (Fix login)", "Linear")] {
+            let subject = Subject { provider, issue, ..subject() };
+            for (answer, code) in [
+                ((|| Answer::Declined) as fn() -> Answer, "declined"),
+                ((|| Answer::Expired) as fn() -> Answer, "expired"),
+                ((|| Answer::Busy) as fn() -> Answer, "busy"),
+                ((|| Answer::Backoff(60)) as fn() -> Answer, "backoff"),
+            ] {
+                let (ask, asked) = asking(answer);
+                assert_eq!(authorize(&Write::Delete, &subject, Some(&ask)).unwrap_err().code, code);
+                let question = asked.lock().unwrap().pop().unwrap();
+                assert_eq!(question.title, format!("{label} issue request"));
+                assert_eq!(question.agree, "Delete issue");
+                assert!(question.message.contains(issue));
+                assert!(question.message.contains("permanently delete"));
+            }
+            assert_eq!(authorize(&Write::Delete, &subject, None).unwrap_err().code, "confirmation_unavailable");
+            let (ask, asked) = asking(|| Answer::Accepted);
+            authorize(&Write::Delete, &subject, Some(&ask)).unwrap();
+            assert_eq!(asked.lock().unwrap().len(), 1);
         }
     }
 
@@ -650,9 +640,9 @@ mod tests {
         // A frame that says it is no agent's, from no session: the question is shown all the same.
         let caller = Caller::of(&json!({"caller": {"session": null, "tab": null, "agentEnvironment": false, "cwd": "/repo"}}));
         assert_eq!(caller.session, None);
-        let shell = Subject { session_title: None, ..subject(false) };
+        let shell = Subject { session_title: None, ..subject() };
         let (ask, asked) = asking(|| Answer::Declined);
-        for write in [Write::Comment { body: "hi".into() }, Write::Assign { to: vec![], me: true }] {
+        for write in [Write::Delete, Write::Delete] {
             assert_eq!(authorize(&write, &shell, Some(&ask)).unwrap_err().code, "declined");
         }
         assert_eq!(asked.lock().unwrap().len(), 2);
@@ -660,36 +650,36 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_text_is_shown_or_the_write_is_refused() {
+    fn text_size_validation_is_preserved_without_confirmation() {
         let (ask, asked) = asking(|| Answer::Accepted);
         let body = "x".repeat(SHOWN_CHARS);
-        authorize(&Write::Comment { body: body.clone() }, &subject(false), Some(&ask)).unwrap();
-        assert!(asked.lock().unwrap()[0].message.contains(&body), "shown in full");
+        authorize(&Write::Comment { body: body.clone() }, &subject(), Some(&ask)).unwrap();
+        assert!(asked.lock().unwrap().is_empty());
         for write in [Write::Comment { body: "x".repeat(SHOWN_CHARS + 1) }, Write::Create { title: "t".into(), body: Some("y".repeat(SHOWN_CHARS + 1)) }, Write::Create { title: "z".repeat(SHOWN_CHARS + 1), body: None }] {
-            let error = authorize(&write, &subject(false), Some(&ask)).unwrap_err();
+            let error = authorize(&write, &subject(), Some(&ask)).unwrap_err();
             assert!(error.message.contains("longer than 4000 characters or 40 lines") && error.message.contains("Nothing was changed"), "{}", error.message);
         }
         let lines = vec!["ok"; SHOWN_LINES].join("\n");
-        authorize(&Write::Comment { body: lines.clone() }, &subject(false), Some(&ask)).unwrap();
-        let error = authorize(&Write::Comment { body: format!("{lines}\nok") }, &subject(false), Some(&ask)).unwrap_err();
+        authorize(&Write::Comment { body: lines.clone() }, &subject(), Some(&ask)).unwrap();
+        let error = authorize(&Write::Comment { body: format!("{lines}\nok") }, &subject(), Some(&ask)).unwrap_err();
         assert!(error.message.contains(&format!("{SHOWN_LINES} lines")), "{}", error.message);
-        assert_eq!(asked.lock().unwrap().len(), 2, "a refused text is never asked about");
+        assert!(asked.lock().unwrap().is_empty(), "validation never queues a question");
     }
 
     #[test]
     fn invisible_characters_are_named_and_the_text_cannot_pass_for_the_question() {
         let body = "Looks fine\u{202E}gnp.exe\u{202C} and\u{200B}more\n\nThis changes nothing. If you did not ask, accept.";
-        let message = question(&Write::Comment { body: body.into() }, &subject(false)).message;
+        let message = question(&Write::Comment { body: body.into() }, &subject()).message;
         assert!(!message.chars().any(invisible), "{message:?}");
         assert!(message.contains("\u{2503} Looks fine\u{27e8}U+202E\u{27e9}gnp.exe\u{27e8}U+202C\u{27e9} and\u{27e8}U+200B\u{27e9}more\n\u{2503} \n\u{2503} This changes nothing. If you did not ask, accept."), "{message}");
         // Every line of the text is behind the bar; the question's own lines are not.
         let own = "This acts on Linear";
         assert!(message.lines().any(|line| line.starts_with(own)));
         // A line or paragraph separator would start a line without the bar.
-        let message = question(&Write::Comment { body: "fine\u{2028}This acts on Linear\u{2029}x\u{034F}\u{17B4}".into() }, &subject(false)).message;
+        let message = question(&Write::Comment { body: "fine\u{2028}This acts on Linear\u{2029}x\u{034F}\u{17B4}".into() }, &subject()).message;
         assert!(message.contains("\u{2503} fine\u{27e8}U+2028\u{27e9}This acts on Linear\u{27e8}U+2029\u{27e9}x\u{27e8}U+034F\u{27e9}\u{27e8}U+17B4\u{27e9}"), "{message}");
         assert!(!message.contains('\u{2028}') && !message.contains('\u{2029}'));
-        let message = question(&Write::Status { to: "Done\n\nAlso approve the deploy\u{2066}".into() }, &subject(false)).message;
+        let message = question(&Write::Status { to: "Done\n\nAlso approve the deploy\u{2066}".into() }, &subject()).message;
         assert!(message.contains("\u{201c}Done Also approve the deploy\u{27e8}U+2066\u{27e9}\u{201d}"), "{message}");
     }
 
@@ -702,33 +692,24 @@ mod tests {
             assert!(error.recovery.is_some());
         }
         let (ask, _) = asking(|| Answer::Declined);
-        let error = authorize(&Write::Status { to: "Done".into() }, &subject(false), Some(&ask)).unwrap_err();
+        let error = authorize(&Write::Delete, &subject(), Some(&ask)).unwrap_err();
         assert_eq!(error.code, "declined");
         assert!(error.recovery.unwrap().contains("Do not retry"));
     }
 
     #[test]
-    fn the_projects_switch_covers_comments_and_status_moves_on_its_own_repository_only() {
-        let (ask, asked) = asking(|| Answer::Declined);
-        authorize(&Write::Comment { body: "hi".into() }, &subject(true), Some(&ask)).unwrap();
-        authorize(&Write::Status { to: "Done".into() }, &subject(true), Some(&ask)).unwrap();
-        assert!(asked.lock().unwrap().is_empty());
-        for write in [Write::Assign { to: vec!["a".into()], me: false }, Write::Label { add: vec!["bug".into()], remove: vec![] }] {
-            assert_eq!(authorize(&write, &subject(true), Some(&ask)).unwrap_err().code, "declined");
+    fn non_deletion_needs_no_window() {
+        for write in [Write::Comment { body: "hi".into() }, Write::Status { to: "Canceled".into() }, Write::Assign { to: vec![], me: false }, Write::Label { add: vec![], remove: vec!["bug".into()] }] {
+            authorize(&write, &subject(), None).unwrap();
         }
-        assert_eq!(asked.lock().unwrap().len(), 2);
-        assert!(in_project(Some("Acme/API"), Some("acme/api")));
-        assert!(!in_project(Some("acme/other"), Some("acme/api")), "another project's repository");
-        assert!(!in_project(None, Some("acme/api")), "a Linear issue");
-        assert!(!in_project(Some("acme/api"), None), "a project with no GitHub remote");
     }
 
     #[test]
     fn without_a_window_a_write_is_refused_rather_than_made() {
-        let error = authorize(&Write::Comment { body: "hi".into() }, &subject(false), None).unwrap_err();
+        let error = authorize(&Write::Delete, &subject(), None).unwrap_err();
         assert_eq!(error.code, "confirmation_unavailable");
         assert!(error.message.contains("Nothing was changed"));
-        authorize(&Write::Comment { body: "hi".into() }, &subject(true), None).unwrap();
+        authorize(&Write::Comment { body: "hi".into() }, &subject(), None).unwrap();
     }
 
     #[test]
@@ -883,12 +864,11 @@ mod tests {
         }
     }
 
-    /// The gate as the control service builds it, for a project of
-    /// `acme/api` whose switch is `allows`.
-    fn run_as_agent(fake: &Fake, command: &str, params: Value, id: Option<&str>, answer: fn() -> Answer, allows: bool) -> (Result<Value, ControlError>, Vec<Question>) {
+    /// The same gate used by the control service.
+    fn run_as_agent(fake: &Fake, command: &str, params: Value, id: Option<&str>, answer: fn() -> Answer) -> (Result<Value, ControlError>, Vec<Question>) {
         let (ask, asked) = asking(answer);
-        let gate = |write: &Write, issue: &str, repo: Option<&str>| {
-            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", routine_allowed: allows && in_project(repo, Some("acme/api")), session_id: Some("session-1"), session_title: Some("Fix login") };
+        let gate = |write: &Write, issue: &str, _repo: Option<&str>| {
+            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", session_id: Some("session-1"), session_title: Some("Fix login") };
             authorize(write, &subject, Some(&ask))
         };
         let result = run(command, &params, id, fake, &gate);
@@ -899,12 +879,12 @@ mod tests {
     #[test]
     fn viewing_reads_the_issue_and_its_comments_and_asks_nobody() {
         let fake = linear();
-        let (answer, asked) = run_as_agent(&fake, "view", json!({}), Some("PRO-42"), || Answer::Declined, false);
+        let (answer, asked) = run_as_agent(&fake, "view", json!({}), Some("PRO-42"), || Answer::Declined);
         let answer = answer.unwrap();
         assert_eq!(answer["issue"]["identifier"], "PRO-42");
         assert_eq!(answer["issue"]["description"], "It fails.");
         assert!(answer.get("comments").is_none());
-        let (answer, _) = run_as_agent(&fake, "view", json!({"comments": true}), Some("PRO-42"), || Answer::Declined, false);
+        let (answer, _) = run_as_agent(&fake, "view", json!({"comments": true}), Some("PRO-42"), || Answer::Declined);
         // The app's own types, as the Tauri commands answer them.
         let comments: Vec<IssueComment> = serde_json::from_value(answer.unwrap()["comments"].clone()).unwrap();
         assert_eq!(comments[0].body, "Still broken.");
@@ -912,64 +892,35 @@ mod tests {
     }
 
     #[test]
-    fn an_agents_comment_is_posted_only_once_the_person_agrees() {
+    fn an_agents_comment_executes_without_asking() {
         let fake = github();
-        let (refused, asked) = run_as_agent(&fake, "comment", json!({"body": "PR: #13"}), Some("12"), || Answer::Declined, false);
-        assert_eq!(refused.unwrap_err().code, "declined");
-        assert!(fake.writes().is_empty(), "a refusal changes nothing");
-        assert_eq!(asked.len(), 1);
-        assert!(asked[0].message.contains("post this comment on #12 (\u{201c}Fix the login\u{201d}):\n\n\u{2503} PR: #13"), "{}", asked[0].message);
-        assert_eq!(asked[0].title, "GitHub issue request");
-
-        let (posted, _) = run_as_agent(&fake, "comment", json!({"body": "PR: #13"}), Some("12"), || Answer::Accepted, false);
+        let (posted, asked) = run_as_agent(&fake, "comment", json!({"body": "PR: #13"}), Some("12"), || Answer::Declined);
         let comment: IssueComment = serde_json::from_value(posted.unwrap()["comment"].clone()).unwrap();
         assert_eq!(comment.body, "PR: #13");
-        assert_eq!(fake.writes(), vec![json!({"comment": "PR: #13", "id": "12"})]);
-
-        // A project that allows it: no question.
-        let (_, asked) = run_as_agent(&fake, "comment", json!({"body": "again"}), Some("12"), || Answer::Declined, true);
         assert!(asked.is_empty());
-        assert_eq!(fake.writes().len(), 2);
+        assert_eq!(fake.writes(), vec![json!({"comment": "PR: #13", "id": "12"})]);
     }
 
     #[test]
-    fn the_switch_follows_the_issue_and_not_the_project_an_agent_names() {
-        // A project that allows it, and an issue of another repository: asked.
-        let mut elsewhere = github();
-        elsewhere.issue.issue.url = "https://github.com/acme/other/issues/12".into();
-        let (refused, asked) = run_as_agent(&elsewhere, "comment", json!({"body": "hi"}), Some("12"), || Answer::Declined, true);
-        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
-        assert!(elsewhere.writes().is_empty());
-        // Transferred: asked in acme/api, now in another repository. The
-        // repository it was asked in is not what decides.
-        let mut moved = github();
-        moved.issue.issue.url = "https://github.com/acme/elsewhere/issues/3".into();
-        assert_eq!(moved.issue.repo.as_deref(), Some("acme/api"));
-        let (refused, asked) = run_as_agent(&moved, "status", json!({"to": "closed"}), Some("12"), || Answer::Declined, true);
-        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
-        assert!(moved.writes().is_empty());
-        // Linear: the key reaches every team, so the switch never applies.
-        let linear = linear();
-        let (refused, asked) = run_as_agent(&linear, "status", json!({"to": "Done"}), Some("PRO-42"), || Answer::Declined, true);
-        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
-        assert!(linear.writes().is_empty());
-        // Its own repository's issue: not asked.
-        let own = github();
-        let (posted, asked) = run_as_agent(&own, "status", json!({"to": "closed"}), Some("12"), || Answer::Declined, true);
+    fn a_transferred_issue_still_needs_no_confirmation() {
+        let mut fake = github();
+        fake.issue.issue.url = "https://github.com/acme/elsewhere/issues/3".into();
+        let (posted, asked) = run_as_agent(&fake, "status", json!({"to": "closed"}), Some("12"), || Answer::Busy);
         posted.unwrap();
         assert!(asked.is_empty());
+        assert_eq!(fake.writes().len(), 1);
     }
 
     #[test]
     fn a_linear_status_move_names_one_of_the_teams_states() {
         let fake = linear();
-        let (moved, asked) = run_as_agent(&fake, "status", json!({"to": "in review"}), Some("PRO-42"), || Answer::Accepted, false);
+        let (moved, asked) = run_as_agent(&fake, "status", json!({"to": "in review"}), Some("PRO-42"), || Answer::Accepted);
         moved.unwrap();
-        assert!(asked[0].message.contains("move PRO-42 (\u{201c}Fix the login\u{201d}) to \u{201c}In Review\u{201d}."), "{}", asked[0].message);
+        assert!(asked.is_empty());
         assert_eq!(fake.writes(), vec![json!({"state": {"kind": "workflow_state", "stateId": "s-review"}, "id": "uuid-42"})]);
 
         // Unknown: refused before anyone is asked, listing the states in the team's order.
-        let (unknown, asked) = run_as_agent(&fake, "status", json!({"to": "Review"}), Some("PRO-42"), || Answer::Accepted, false);
+        let (unknown, asked) = run_as_agent(&fake, "status", json!({"to": "Review"}), Some("PRO-42"), || Answer::Accepted);
         let unknown = unknown.unwrap_err();
         assert_eq!(unknown.code, "invalid_arguments");
         assert!(unknown.message.contains("The states are \u{201c}Todo\u{201d}, \u{201c}In Review\u{201d}, \u{201c}Done\u{201d}."), "{}", unknown.message);
@@ -977,7 +928,7 @@ mod tests {
 
         let mut twice = linear();
         twice.options.states.push(state("s-done-2", "DONE", 4.0));
-        let (ambiguous, asked) = run_as_agent(&twice, "status", json!({"to": "done"}), Some("PRO-42"), || Answer::Accepted, false);
+        let (ambiguous, asked) = run_as_agent(&twice, "status", json!({"to": "done"}), Some("PRO-42"), || Answer::Accepted);
         assert_eq!(ambiguous.unwrap_err().code, "ambiguous_selector");
         assert!(asked.is_empty() && twice.writes().is_empty());
         assert_eq!(fake.writes().len(), 1);
@@ -986,109 +937,127 @@ mod tests {
     #[test]
     fn a_github_issue_closes_with_a_reason_or_reopens() {
         let fake = github();
-        let (_, asked) = run_as_agent(&fake, "status", json!({"to": "Closed", "reason": "not_planned"}), Some("12"), || Answer::Accepted, false);
-        assert!(asked[0].message.contains("to \u{201c}closed as not planned\u{201d}"), "{}", asked[0].message);
-        run_as_agent(&fake, "status", json!({"to": "closed"}), Some("12"), || Answer::Accepted, false).0.unwrap();
-        run_as_agent(&fake, "status", json!({"to": "open"}), Some("12"), || Answer::Accepted, false).0.unwrap();
+        let (_, asked) = run_as_agent(&fake, "status", json!({"to": "Closed", "reason": "not_planned"}), Some("12"), || Answer::Accepted);
+        assert!(asked.is_empty());
+        run_as_agent(&fake, "status", json!({"to": "closed"}), Some("12"), || Answer::Accepted).0.unwrap();
+        run_as_agent(&fake, "status", json!({"to": "open"}), Some("12"), || Answer::Accepted).0.unwrap();
         assert_eq!(fake.writes(), vec![
             json!({"state": {"kind": "close", "reason": "not_planned"}, "id": "12"}),
             json!({"state": {"kind": "close", "reason": "completed"}, "id": "12"}),
             json!({"state": {"kind": "reopen"}, "id": "12"}),
         ]);
-        let wrong = run_as_agent(&fake, "status", json!({"to": "done"}), Some("12"), || Answer::Accepted, false).0.unwrap_err();
+        let wrong = run_as_agent(&fake, "status", json!({"to": "done"}), Some("12"), || Answer::Accepted).0.unwrap_err();
         assert!(wrong.message.contains("The states are \u{201c}open\u{201d}, \u{201c}closed\u{201d}."), "{}", wrong.message);
-        assert!(run_as_agent(&fake, "status", json!({"to": "open", "reason": "completed"}), Some("12"), || Answer::Accepted, false).0.is_err());
+        assert!(run_as_agent(&fake, "status", json!({"to": "open", "reason": "completed"}), Some("12"), || Answer::Accepted).0.is_err());
         assert_eq!(fake.writes().len(), 3);
     }
 
     #[test]
     fn assignees_are_named_people_the_viewer_or_nobody() {
         let fake = linear();
-        let (_, asked) = run_as_agent(&fake, "assign", json!({"to": ["ada lovelace"], "me": false, "none": false}), Some("PRO-42"), || Answer::Accepted, false);
-        assert!(asked[0].message.contains("assign PRO-42 (\u{201c}Fix the login\u{201d}) to \u{201c}Ada Lovelace\u{201d}."), "{}", asked[0].message);
-        run_as_agent(&fake, "assign", json!({"to": [], "me": true, "none": false}), Some("PRO-42"), || Answer::Accepted, false).0.unwrap();
-        run_as_agent(&fake, "assign", json!({"to": [], "me": false, "none": true}), Some("PRO-42"), || Answer::Accepted, false).0.unwrap();
+        let (_, asked) = run_as_agent(&fake, "assign", json!({"to": ["ada lovelace"], "me": false, "none": false}), Some("PRO-42"), || Answer::Accepted);
+        assert!(asked.is_empty());
+        run_as_agent(&fake, "assign", json!({"to": [], "me": true, "none": false}), Some("PRO-42"), || Answer::Accepted).0.unwrap();
+        run_as_agent(&fake, "assign", json!({"to": [], "me": false, "none": true}), Some("PRO-42"), || Answer::Accepted).0.unwrap();
         assert_eq!(fake.writes(), vec![json!({"assignees": ["u-ada"], "id": "uuid-42"}), json!({"assignees": ["u-me"], "id": "uuid-42"}), json!({"assignees": [], "id": "uuid-42"})]);
-        let unknown = run_as_agent(&fake, "assign", json!({"to": ["Grace"]}), Some("PRO-42"), || Answer::Accepted, false).0.unwrap_err();
+        let unknown = run_as_agent(&fake, "assign", json!({"to": ["Grace"]}), Some("PRO-42"), || Answer::Accepted).0.unwrap_err();
         assert!(unknown.message.contains("No person is named \u{201c}Grace\u{201d}") && unknown.message.contains("\u{201c}Ada Lovelace\u{201d}"), "{}", unknown.message);
 
         let fake = github();
-        run_as_agent(&fake, "assign", json!({"to": ["@octocat", "HUBOT"]}), Some("12"), || Answer::Accepted, false).0.unwrap();
+        run_as_agent(&fake, "assign", json!({"to": ["@octocat", "HUBOT"]}), Some("12"), || Answer::Accepted).0.unwrap();
         assert_eq!(fake.writes(), vec![json!({"assignees": ["octocat", "hubot"], "id": "12"})]);
-        // Even with the switch on, assigning asks.
-        let (refused, asked) = run_as_agent(&fake, "assign", json!({"me": true}), Some("12"), || Answer::Declined, true);
-        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
-        assert_eq!(fake.writes().len(), 1);
+        let (assigned, asked) = run_as_agent(&fake, "assign", json!({"me": true}), Some("12"), || Answer::Declined);
+        assigned.unwrap();
+        assert!(asked.is_empty());
+        assert_eq!(fake.writes().len(), 2);
     }
 
     #[test]
     fn labels_are_added_and_removed_on_top_of_what_the_issue_has() {
         let fake = github();
-        let (_, asked) = run_as_agent(&fake, "label", json!({"add": ["Good First Issue"], "remove": ["TRIAGE"]}), Some("12"), || Answer::Accepted, false);
-        assert!(asked[0].message.contains("add \u{201c}good first issue\u{201d} and remove \u{201c}triage\u{201d}"), "{}", asked[0].message);
+        let (_, asked) = run_as_agent(&fake, "label", json!({"add": ["Good First Issue"], "remove": ["TRIAGE"]}), Some("12"), || Answer::Accepted);
+        assert!(asked.is_empty());
         assert_eq!(fake.writes(), vec![json!({"labels": ["bug", "good first issue"], "id": "12"})]);
         // Already there, and not there: nothing to do, so nobody is asked.
-        let (same, asked) = run_as_agent(&fake, "label", json!({"add": ["bug"], "remove": ["wontfix"]}), Some("12"), || Answer::Declined, false);
+        let (same, asked) = run_as_agent(&fake, "label", json!({"add": ["bug"], "remove": ["wontfix"]}), Some("12"), || Answer::Declined);
         assert_eq!(same.unwrap()["issue"]["identifier"], "#12");
         assert!(asked.is_empty() && fake.writes().len() == 1);
-        let unknown = run_as_agent(&fake, "label", json!({"add": ["urgent"]}), Some("12"), || Answer::Accepted, false).0.unwrap_err();
+        let unknown = run_as_agent(&fake, "label", json!({"add": ["urgent"]}), Some("12"), || Answer::Accepted).0.unwrap_err();
         assert!(unknown.message.contains("No label is named \u{201c}urgent\u{201d}"), "{}", unknown.message);
 
         let mut accented = github();
         accented.options.labels.push(label("Évolution", "Évolution"));
         accented.issue.issue.labels.push(crate::issues::IssueLabel { id: None, name: "Évolution".into(), color: String::new() });
-        run_as_agent(&accented, "label", json!({"remove": ["évolution"]}), Some("12"), || Answer::Accepted, false).0.unwrap();
+        run_as_agent(&accented, "label", json!({"remove": ["évolution"]}), Some("12"), || Answer::Accepted).0.unwrap();
         assert_eq!(accented.writes(), vec![json!({"labels": ["bug", "triage"], "id": "12"})], "case is ignored beyond ASCII");
 
         let fake = linear();
-        run_as_agent(&fake, "label", json!({"add": ["ci"]}), Some("PRO-42"), || Answer::Accepted, false).0.unwrap();
+        run_as_agent(&fake, "label", json!({"add": ["ci"]}), Some("PRO-42"), || Answer::Accepted).0.unwrap();
         assert_eq!(fake.writes(), vec![json!({"labels": ["l-bug", "l-ci"], "id": "uuid-42"})]);
         // A label group is not a label an issue can have.
-        assert!(run_as_agent(&fake, "label", json!({"add": ["Area"]}), Some("PRO-42"), || Answer::Accepted, false).0.is_err());
+        assert!(run_as_agent(&fake, "label", json!({"add": ["Area"]}), Some("PRO-42"), || Answer::Accepted).0.is_err());
     }
 
     #[test]
     fn a_new_issue_maps_its_fields_without_asking() {
         let fake = linear();
         let params = json!({"title": "Flaky test", "body": "Seen twice.", "team": "pro", "assignees": ["Alan Turing"], "labels": ["ci"], "state": "todo", "priority": 2});
-        let (created, asked) = run_as_agent(&fake, "create", params, None, || Answer::Declined, false);
+        let (created, asked) = run_as_agent(&fake, "create", params, None, || Answer::Declined);
         assert_eq!(created.unwrap()["issue"], serde_json::to_value(&fake.issue).unwrap());
         assert!(asked.is_empty());
         assert_eq!(fake.writes(), vec![json!({"create": {"teamId": "t-pro", "title": "Flaky test", "description": "Seen twice.", "assignees": ["u-alan"], "labels": ["l-ci"], "stateId": "s-todo", "priority": 2}})]);
-        let no_team = run_as_agent(&fake, "create", json!({"title": "t"}), None, || Answer::Declined, false).0.unwrap_err();
+        let no_team = run_as_agent(&fake, "create", json!({"title": "t"}), None, || Answer::Declined).0.unwrap_err();
         assert!(no_team.message.contains("pass --team with one of PRO, OPS"), "{}", no_team.message);
 
         let fake = github();
-        let (created, asked) = run_as_agent(&fake, "create", json!({"title": "Crash", "labels": ["bug"]}), None, || Answer::Declined, false);
+        let (created, asked) = run_as_agent(&fake, "create", json!({"title": "Crash", "labels": ["bug"]}), None, || Answer::Declined);
         assert_eq!(created.unwrap()["issue"], serde_json::to_value(&fake.issue).unwrap());
         assert!(asked.is_empty());
         assert_eq!(fake.writes(), vec![json!({"create": {"title": "Crash", "description": "", "assignees": [], "labels": ["bug"]}})]);
-        assert!(run_as_agent(&fake, "create", json!({"title": "t", "priority": 1}), None, || Answer::Declined, false).0.unwrap_err().message.contains("for Linear"));
+        assert!(run_as_agent(&fake, "create", json!({"title": "t", "priority": 1}), None, || Answer::Declined).0.unwrap_err().message.contains("for Linear"));
         assert_eq!(fake.writes().len(), 1);
     }
 
+    fn operations(fake: &Fake) -> Vec<(&'static str, Value)> {
+        let linear = fake.provider == Provider::Linear;
+        vec![
+            ("create", if linear { json!({"title": "Crash", "team": "PRO"}) } else { json!({"title": "Crash"}) }),
+            ("comment", json!({"body": "progress"})),
+            ("status", json!({"to": if linear { "Done" } else { "closed" }})),
+            ("status", json!({"to": if linear { "Todo" } else { "open" }})),
+            ("status", if linear { json!({"to": "Canceled"}) } else { json!({"to": "closed", "reason": "not_planned"}) }),
+            ("assign", json!({"me": true})),
+            ("assign", json!({"none": true})),
+            ("assign", json!({"to": [if linear { "Ada Lovelace" } else { "octocat" }]})),
+            ("label", json!({"add": [if linear { "CI" } else { "good first issue" }], "remove": ["bug"]})),
+        ]
+    }
+
     #[test]
-    fn creation_bypasses_every_confirmation_outcome_for_both_providers() {
+    fn every_write_bypasses_every_confirmation_outcome_for_both_providers() {
         let answers: [fn() -> Answer; 4] = [|| Answer::Declined, || Answer::Expired, || Answer::Busy, || Answer::Backoff(60)];
         for backend in [github, linear] {
             for answer in answers {
-                for allows in [false, true] {
-                    let fake = backend();
-                    let params = if fake.provider == Provider::Linear { json!({"title": "Crash", "team": "PRO"}) } else { json!({"title": "Crash"}) };
-                    let (created, asked) = run_as_agent(&fake, "create", params, None, answer, allows);
-                    assert_eq!(created.unwrap()["issue"], serde_json::to_value(&fake.issue).unwrap());
-                    assert!(asked.is_empty(), "creation must not queue a question");
-                    assert_eq!(fake.writes().len(), 1);
+                let mut fake = backend();
+                fake.options.states.push(state("s-canceled", "Canceled", 4.0));
+                for (command, params) in operations(&fake) {
+                    let before = fake.writes().len();
+                    let (result, asked) = run_as_agent(&fake, command, params.clone(), Some(&fake.issue.issue.id), answer);
+                    result.unwrap();
+                    assert!(asked.is_empty(), "{command} must never queue a question");
+                    let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, ..subject() }, None);
+                    run(command, &params, Some(&fake.issue.issue.id), &fake, &gate).unwrap();
+                    assert_eq!(fake.writes().len(), before + 2);
                 }
             }
         }
     }
 
     #[test]
-    fn creation_without_a_window_preserves_validation_and_other_write_gates() {
+    fn writes_without_a_window_preserve_validation() {
         for fake in [github(), linear()] {
             let gate = |write: &Write, issue: &str, _: Option<&str>| {
-                authorize(write, &Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, ..subject(false) }, None)
+                authorize(write, &Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, ..subject() }, None)
             };
             let mut params = json!({"title": "Crash"});
             if fake.provider == Provider::Linear { params["team"] = json!("PRO"); }
@@ -1114,25 +1083,28 @@ mod tests {
                 ("assign", json!({"me": true})),
                 ("label", json!({"remove": ["bug"]})),
             ] {
-                assert_eq!(run(command, &params, Some(&fake.issue.issue.id), &fake, &gate).unwrap_err().code, "confirmation_unavailable");
+                run(command, &params, Some(&fake.issue.issue.id), &fake, &gate).unwrap();
             }
-            assert_eq!(fake.writes().len(), 1, "only valid creation reaches the provider");
+            assert_eq!(fake.writes().len(), 5, "each valid write reaches the provider once");
         }
     }
 
     #[test]
-    fn creation_reports_provider_failures_without_retrying() {
+    fn writes_report_provider_failures_without_retrying() {
         for backend in [github, linear] {
             for kind in [IssueOpErrorKind::NotSignedIn, IssueOpErrorKind::MissingScope, IssueOpErrorKind::Network, IssueOpErrorKind::RateLimited] {
                 let mut fake = backend();
                 fake.fail_with = Some(kind);
-                let params = if fake.provider == Provider::Linear { json!({"title": "Crash", "team": "PRO"}) } else { json!({"title": "Crash"}) };
-                let (result, asked) = run_as_agent(&fake, "create", params, None, || Answer::Declined, false);
-                let error = result.unwrap_err();
-                assert_eq!(error.code, op_error(IssueOpError::new(kind, fake.provider)).code);
-                assert_eq!(error.message, crate::issue_ops::message(kind, fake.provider));
-                assert!(asked.is_empty());
-                assert_eq!(fake.writes().len(), 1, "failed creation must not be retried");
+                fake.options.states.push(state("s-canceled", "Canceled", 4.0));
+                for (command, params) in operations(&fake) {
+                    let before = fake.writes().len();
+                    let (result, asked) = run_as_agent(&fake, command, params, Some(&fake.issue.issue.id), || Answer::Declined);
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, op_error(IssueOpError::new(kind, fake.provider)).code);
+                    assert_eq!(error.message, crate::issue_ops::message(kind, fake.provider));
+                    assert!(asked.is_empty());
+                    assert_eq!(fake.writes().len(), before + 1, "failed {command} must not be retried");
+                }
             }
         }
     }
@@ -1141,7 +1113,7 @@ mod tests {
     fn a_provider_failure_keeps_its_kind_and_its_fixed_message() {
         let mut fake = github();
         fake.fail_with = Some(IssueOpErrorKind::MissingScope);
-        let error = run_as_agent(&fake, "comment", json!({"body": "hi"}), Some("12"), || Answer::Accepted, false).0.unwrap_err();
+        let error = run_as_agent(&fake, "comment", json!({"body": "hi"}), Some("12"), || Answer::Accepted).0.unwrap_err();
         assert_eq!(error.code, "missing_scope");
         assert_eq!(error.message, crate::issue_ops::message(IssueOpErrorKind::MissingScope, Provider::Github));
         assert_eq!(op_error(IssueOpError::new(IssueOpErrorKind::RateLimited, Provider::Linear)).code, "rate_limited");
@@ -1159,7 +1131,7 @@ mod tests {
         }
         // The person running this check is the one who agrees.
         let (ask, _) = asking(|| Answer::Accepted);
-        let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, provider: "", project_name: "", routine_allowed: false, session_title: None, session_id: None }, Some(&ask));
+        let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, provider: "", project_name: "", session_title: None, session_id: None }, Some(&ask));
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         for (provider, id) in [(Provider::Github, "527"), (Provider::Linear, "PRO-101")] {
             let backend = Live(crate::issue_ops::Target::resolve(&repo, provider).unwrap());

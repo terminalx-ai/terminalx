@@ -45,8 +45,7 @@ pub(crate) fn supported(command: &str) -> bool {
          | "cloud.sessions.list" | "cloud.sessions.create" | "cloud.send" | "cloud.read"
          | "cloud.wait" | "cloud.stop" | "cloud.resume" | "share.create"
          | "share.list" | "share.edit" | "share.revoke" | "share.remove"
-         | "share.approve" | "share.note" | "share.takeover" | "issues.view"
-         | "issues.comment" | "issues.status" | "issues.assign" | "issues.label"
+         | "share.approve" | "share.note" | "share.takeover"
          | "floating.show" | "floating.hide" | "floating.toggle"
          | "perf.terminal.start" | "perf.terminal.poll" | "window.terminalCounters"
          | "window.open" | "window.quit" | "window.stopAllAndQuit"
@@ -206,6 +205,13 @@ mod tests {
 
     fn registration(attachment: &Value, endpoint: &crate::hooks::ControlEndpoint) -> Value {
         json!({"epoch":attachment["epoch"], "lease":attachment["lease"], "socket":endpoint.socket, "token":endpoint.token})
+    }
+
+    #[test]
+    fn non_deletion_issue_operations_never_require_window_dispatch() {
+        for action in ["list", "view", "create", "comment", "status", "assign", "label"] {
+            assert!(!supported(&format!("issues.{action}")), "{action}");
+        }
     }
 
     #[test]
