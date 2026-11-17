@@ -49,7 +49,7 @@ fn native_path(entry: &index::SessionEntry, tab: &TabEntry) -> Result<PathBuf> {
     }
 }
 
-fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
+pub(crate) fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
     match harness {
         "claude" => Ok(claude::transcript::transcript_in(&crate::agent_data::claude_projects_root().context("No Claude home.")?, cwd, id)),
         "codex" => {
