@@ -14,7 +14,7 @@
 //! shows, and the person answers Allow in that terminal, after comparing the
 //! fingerprint the phone shows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -162,6 +162,10 @@ pub(crate) struct Phones {
     registry: DeviceRegistry,
     state: Mutex<State>,
     next: AtomicU64,
+    /// Device identities outlive their sockets, so external removal still
+    /// retires a disconnected phone's relay credential.
+    known_devices: Mutex<HashSet<String>>,
+    pending_revocations: Mutex<HashSet<String>>,
     /// The account generation as last read, each tick: the phone RPC
     /// asks for it on every request and event, which must not read a file.
     generation: Arc<AtomicU64>,
@@ -195,6 +199,8 @@ impl Phones {
             registry: DeviceRegistry,
             state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
+            known_devices: Mutex::new(DeviceRegistry.list()?.into_iter().map(|device| device.id).collect()),
+            pending_revocations: Mutex::new(HashSet::new()),
             generation,
             account_known: AtomicBool::new(first.is_ok()),
             account: Mutex::new(account),
@@ -291,12 +297,11 @@ impl Phones {
         }
     }
 
-    /// Close the connections of phones no longer paired: revoked from the
-    /// window or `devices revoke` with no runtime to ask, or removed at
-    /// sign-out. Their requests are refused already; this ends the idle ones
-    /// and their grants too. Blocking: it reads `devices.json`.
-    fn close_unpaired(&self, connected: Vec<String>) {
-        if connected.is_empty() || !self.account_known.load(Ordering::SeqCst) {
+    /// Reconcile all known phone identities, including disconnected phones.
+    /// External removal or an account change retires their relay credentials,
+    /// as well as any remaining sockets and grants. Reads `devices.json`.
+    fn close_unpaired(&self, connected: Vec<String>, account_changed: bool) {
+        if !self.account_known.load(Ordering::SeqCst) {
             return;
         }
         let paired = match self.registry.list() {
@@ -307,7 +312,17 @@ impl Phones {
             }
         };
         let account = self.account.lock().unwrap().clone();
-        for device_id in connected {
+        let candidates = {
+            let mut known = self.known_devices.lock().unwrap();
+            let mut candidates = known.clone();
+            candidates.extend(connected);
+            if account_changed {
+                candidates.extend(paired.iter().map(|device| device.id.clone()));
+            }
+            *known = paired.iter().filter(|device| account_allows(device, account.as_ref())).map(|device| device.id.clone()).collect();
+            candidates
+        };
+        for device_id in candidates {
             let current = paired.iter().find(|device| device.id == device_id);
             let stale = current.is_none_or(|device| !account_allows(device, account.as_ref()));
             if stale {
@@ -320,8 +335,15 @@ impl Phones {
     }
 
     fn revoke_relay(&self, device_id: &str) {
+        self.pending_revocations.lock().unwrap().insert(device_id.to_string());
+        self.flush_revocations();
+    }
+
+    fn flush_revocations(&self) {
         if let Some(relay) = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade) {
-            relay.revoke_device(device_id);
+            // Keep removals observed while offline until a control connection
+            // can accept them; disconnecting a socket never clears this set.
+            self.pending_revocations.lock().unwrap().retain(|device| !relay.revoke_device(device));
         }
     }
 
@@ -354,7 +376,8 @@ impl Phones {
         // can observe it and drop its tracking guard before cleanup runs.
         let connected = self.state.lock().unwrap().connections.keys().cloned().collect();
         let account_changed = self.read_account();
-        self.close_unpaired(connected);
+        self.close_unpaired(connected, account_changed);
+        self.flush_revocations();
         if account_changed {
             // Retire stale automatic relay credentials before cancelling all
             // streams, so their tracking guards cannot hide them from the tick.
@@ -520,6 +543,7 @@ impl Phones {
     }
 
     fn track(&self, device_id: &str) -> (u64, mpsc::UnboundedReceiver<ConnectionSignal>) {
+        self.known_devices.lock().unwrap().insert(device_id.to_string());
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::unbounded_channel();
         self.state.lock().unwrap().connections.entry(device_id.to_string()).or_default().push((id, sender));

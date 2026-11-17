@@ -673,3 +673,90 @@ async fn stale_relay_assignments_are_rejected_before_opening_the_data_leg() {
         .unwrap_err();
     assert!(error.to_string().contains("stale host assignment"));
 }
+
+async fn wait_disconnected(rig: &Rig) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rig.phones.status().connected.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("phone disconnect must release its tracking guard");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disconnected_automatic_phones_lose_relay_credentials_on_account_changes() {
+    for next in [Some(("another", 5)), Some(("owner", 6)), None] {
+        let mut rig = Rig::new().await;
+        let mut mirror = AccountMirror {
+            user_id: "owner".into(), email: "a@b".into(), display_name: "Owner".into(),
+            host_display_name: None, binding_generation: 5,
+        };
+        save_account_mirror(&mirror).unwrap();
+        rig.phones.tick(now_ms());
+        rig.pair("phone", "token", true, true);
+        let mut phone = rig.connect("phone", "token", "resume", [7; 32]).await;
+        phone.authenticated().await;
+        drop(phone);
+        wait_disconnected(&rig).await;
+        match next {
+            Some((user, generation)) => {
+                mirror.user_id = user.into();
+                mirror.binding_generation = generation;
+                save_account_mirror(&mirror).unwrap();
+            }
+            None => std::fs::remove_file(crate::store::root().unwrap().join("account.json")).unwrap(),
+        }
+        rig.phones.tick(now_ms());
+        let revoked = rig.command().await;
+        assert_eq!(revoked["type"], "device-revoke");
+        assert_eq!(revoked["relayDeviceId"], "phone");
+        let mut stale = rig.connect("phone", "token", "resume", [7; 32]).await;
+        assert!(stale.read().await.is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn externally_removed_disconnected_phones_lose_relay_credentials() {
+    for delete_record in [false, true] {
+        let mut rig = Rig::new().await;
+        rig.pair("phone", "token", false, true);
+        let mut phone = rig.connect("phone", "token", "resume", [7; 32]).await;
+        phone.authenticated().await;
+        drop(phone);
+        wait_disconnected(&rig).await;
+        if delete_record {
+            crate::store::write_json(&crate::store::root().unwrap().join("devices.json"), &json!({"devices":[]})).unwrap();
+        } else {
+            DeviceRegistry.revoke("phone").unwrap();
+        }
+        rig.phones.tick(now_ms());
+        let revoked = rig.command().await;
+        assert_eq!(revoked["type"], "device-revoke");
+        assert_eq!(revoked["relayDeviceId"], "phone");
+        let mut stale = rig.connect("phone", "token", "resume", [7; 32]).await;
+        assert!(stale.read().await.is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removal_without_a_phone_socket_is_retained_until_relay_control_returns() {
+    let rig = Rig::new().await;
+    rig.pair("phone", "token", false, true);
+    // Registry discovery is independent of whether this runtime served a socket.
+    rig.phones.tick(now_ms());
+    rig.relay.phone_test_retire();
+    DeviceRegistry.revoke("phone").unwrap();
+    rig.phones.tick(now_ms());
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let (relay, mut commands) = crate::remote::host::RelayHost::phone_test_registration(
+        rpc, format!("http://{}", rig.cell.local_addr().unwrap()), [9; 32],
+    );
+    rig.host.use_relay(&relay);
+    rig.phones.tick(now_ms());
+    let revoked = tokio::time::timeout(Duration::from_secs(5), commands.recv()).await.unwrap().unwrap();
+    assert_eq!(revoked["type"], "device-revoke");
+    assert_eq!(revoked["relayDeviceId"], "phone");
+    relay.stop();
+}

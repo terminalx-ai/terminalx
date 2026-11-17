@@ -689,15 +689,16 @@ impl RelayHost {
     }
 
     /// End a device's relay credentials (`device-revoke`) and close its
-    /// relay connections. Nothing to send while not registered: the relay
-    /// then admits nobody for this host anyway.
-    pub fn revoke_device(&self, relay_device_id: &str) {
-        if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
-            let _ = live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() });
-        }
+    /// relay connections. Returns whether the live control queue accepted
+    /// the revocation; callers can retain offline revocations for retry.
+    pub fn revoke_device(&self, relay_device_id: &str) -> bool {
+        let queued = self.registered.lock().unwrap().as_ref().is_some_and(|(live, _)| {
+            live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() }).is_ok()
+        });
         for cancel in self.state.lock().unwrap().connections.remove(relay_device_id).unwrap_or_default() {
             let _ = cancel.send(());
         }
+        queued
     }
 
     /// Register, serve and re-register forever. Only a 4101 fence stops it,
