@@ -6,9 +6,12 @@ import { computer, hostView, pairedMachine } from "./machineFixtures.test-utils"
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  // The opener plugin calls the Tauri internals itself, not @tauri-apps/api/core.
+  openUrl: vi.fn(async (_url: string) => undefined),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, listener: (event: { payload: unknown }) => void) => {
     mocks.listeners.set(name, listener);
@@ -35,6 +38,7 @@ beforeEach(async () => {
   mocks.listeners.clear();
   privacy = false;
   activity = [];
+  mocks.openUrl.mockClear();
   view = hostView({ allowOperating: false }, { machineId: MINI, computers: [computer({ keyId: STUDIO, route: "lan" })] });
   machines = [
     pairedMachine(),
@@ -84,6 +88,36 @@ const card = async (name: string) => {
   const list = await screen.findByRole("list", { name: "Your machines" });
   return within(list).getByRole("button", { name: `Open ${name}` }).closest("li") as HTMLElement;
 };
+
+describe("Settings → Machines with no machine paired (PRO-360)", () => {
+  it("says how to start in three steps and links the guide, in place of an empty list", async () => {
+    machines = [];
+    connections = [];
+    render(<MachinesSettings />);
+    const firstRun = await screen.findByTestId("machines-first-run");
+    expect(screen.queryByRole("list", { name: "Your machines" })).toBeNull();
+    expect(within(firstRun).getByText("No machines yet")).toBeTruthy();
+    const steps = within(within(firstRun).getByRole("list", { name: "How to add a machine" })).getAllByRole("listitem");
+    expect(steps.map((step) => step.querySelector(".font-medium")?.textContent)).toEqual(["Get the other computer ready", "Add it here", "Start a session there"]);
+    expect(steps[0].textContent).toContain("“Let other computers operate this Mac”");
+    expect(steps[0].textContent).toContain("terminalx-serve pair");
+    // Add a machine stays the page's one primary button.
+    expect(screen.getAllByRole("button", { name: "Add a machine" })).toHaveLength(1);
+    fireEvent.click(within(firstRun).getByRole("button", { name: "Machines guide" }));
+    const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
+    expect(MACHINES_GUIDE_URL).toMatch(/\/blob\/main\/docs\/MACHINES-GUIDE\.md$/);
+  });
+
+  it("keeps the guide linked under the page's lead once machines are paired", async () => {
+    render(<MachinesSettings />);
+    await card("Mac mini");
+    expect(screen.queryByTestId("machines-first-run")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Machines guide" }));
+    const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
+  });
+});
 
 describe("Settings → Machines (screen 21.02)", () => {
   it("shows the switch, This Mac with its name and key label, your machines and the computers that can operate this Mac", async () => {

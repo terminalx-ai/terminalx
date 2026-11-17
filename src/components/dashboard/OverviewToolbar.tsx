@@ -164,7 +164,7 @@ export function InclusionChip({ kind, value, onChange }: { kind: keyof typeof IN
 const menuName = (id: TableColumnId) => TABLE_COLUMNS.find((column) => column.id === id)!.menu;
 
 /** The order: which column, and which way. */
-/** `columns`: the ones the table offers (Where only with Machines on and a machine paired). */
+/** `columns`: the ones the table offers (Where only once a machine is paired). */
 export function SortChip({ sort, onChange, columns = TABLE_COLUMNS }: { sort: DashboardSort; onChange: (sort: DashboardSort) => void; columns?: readonly TableColumn[] }) {
   const Icon = sort.direction === "desc" ? ArrowDownWideNarrow : ArrowUpNarrowWide;
   return (

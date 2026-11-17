@@ -2,7 +2,11 @@
 
 Status: architecture note for the Machines epic. The nine decisions below were
 confirmed by the owner on 2026-11-13. Written against `main` at `46c6250f`
-(TerminalX 0.2.32) on 2026-11-14.
+(TerminalX 0.2.32) on 2026-11-14. Since PRO-360 Machines is on for everyone:
+there is no Settings → Experimental → Machines switch. Where an "As built"
+section below says a part sat behind it, that is how the part first shipped
+([As built (PRO-360)](#as-built-pro-360-machines-for-everyone)). The person's
+guide is [MACHINES-GUIDE.md](MACHINES-GUIDE.md).
 
 A **machine** is another computer that runs TerminalX: a second Mac, a Mac mini,
 or a headless Linux server running `terminalx-serve`. From this desktop a person
@@ -1308,9 +1312,9 @@ Development section are gone; their tests use `machine_remote_attach`.
 
 ### As built (PRO-346): the overview, the badge and the key guards
 
-All of this is behind Settings → Experimental → Machines. AppShell passes
-the switch to `setMachineDashboardEnabled` (`src/lib/machineDashboard.ts`),
-and while it is off every reader below gets no machine session.
+This first shipped behind Settings → Experimental → Machines. Since PRO-360
+there is no switch (`setMachineDashboardEnabled` is gone): every reader below
+gets the sessions of the paired machines, and none while no machine is paired.
 
 **The overview.** The owner decided (2026-11-16) to fit machines into the
 PRO-194 board and table instead of building a new left column. Each machine
@@ -1799,11 +1803,14 @@ which runs in a child process because data privacy is one switch per process.
 - **Agents on the operating computer can operate its paired machines** through
   the `terminalx` CLI (PRO-356), with the rights pairing gave the computer.
   That is the ticket's purpose (a lead session on one computer driving
-  sessions on another). The control is the person's switch, Settings →
-  Experimental → Machines, read in native code before any `machine.*` command
-  reaches the window; its description says agents can use it. Unlike cloud
-  control there is no second switch: nothing is billed, and the machines are
-  the person's own. A run's worker may not pair a machine or start a session
+  sessions on another). The control is pairing (owner decision, 2026-11-17,
+  PRO-360, replacing the Experimental → Machines switch): an agent reaches only
+  machines the person added in the app, each after Allow on that machine, and
+  with none paired there is nothing to reach. Settings → Machines says agents
+  can use them ("Your machines" description, and the guide). Data privacy mode
+  refuses every `machine.*` command in native code before it reaches the
+  window (`machines_disabled`). Unlike cloud control there is no second
+  switch: nothing is billed, and the machines are the person's own. A run's worker may not pair a machine or start a session
   on one.
 
 ### As built (PRO-357)
@@ -1898,8 +1905,8 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 
 ### As built (PRO-348): a new session on a machine
 
-- **Where it runs.** With Settings → Experimental → Machines on, the
-  new-session header has a "Where it runs" chip (01.07, 21.07). Its menu lists
+- **Where it runs.** Once a machine is paired (before PRO-360, with Settings →
+  Experimental → Machines on), the new-session header has a "Where it runs" chip (01.07, 21.07). Its menu lists
   This Mac, each paired machine, the organization cloud entries, then "Add a
   machine…" (the pairing dialog). A machine's second line is the route, the
   sessions running there, then one reason it may not start a session (no agent
@@ -2030,7 +2037,8 @@ attached desktop (`local_runtime::window::supported`), and a runtime with no
 desktop answers `unsupported`.
 
 - **Native first** (`src-tauri/src/machine_control.rs`): the desktop refuses
-  everything with `machines_disabled` while Experimental → Machines is off.
+  everything with `machines_disabled` while data privacy mode is on (until
+  PRO-360: while Experimental → Machines was off).
   `list`, `status`, `add` (`Machines::inspect` and `pair`, waiting for Allow)
   and `remove` (as Settings → Machines → Remove) are answered here. `add`
   takes two calls: the first shows the fingerprint and contacts nothing
@@ -2190,3 +2198,96 @@ moves either check updates its patch in the same pull request.
 Previous-release compatibility is the `machine-compat` job (PRO-354,
 `tests/machine_compat.rs`); this job does not repeat it. The relay route is
 `tests/machine_routes.rs` with the relay in `tests/common/relay.rs`.
+
+### As built (PRO-360): Machines for everyone
+
+- **No switch.** Settings → Experimental has no Machines row, the setting
+  (`experimental.machines`) is gone from `ExperimentalSettings` in Rust and
+  TypeScript, and `set_experimental_settings` no longer takes it. A settings
+  file that still has it reads, and loses it on the next save.
+- **Shown once a machine is paired.** Every place the switch gated now asks
+  whether a machine is paired: the sidebar's machine sections
+  (`MachinesSection`), the sidebar filter's machine rows, the overview's Where
+  column and All machines menu, the new-session form's Where it runs (and its
+  Add a machine dialog), the handoff's Runs on, Start on a machine, the badge,
+  notices and attention stepping (`machineDashboard.ts` has no `enabled` any
+  more). With none paired the app looks as it did before the epic; Settings →
+  Machines is always there.
+- **Nothing listens, nothing connects.** "Let other computers operate this
+  Mac" stays off by default (decision 9), so the runtime opens no listener and
+  registers nothing with the relay. AppShell holds `startMachineConnections`
+  for every window; with no machine paired it reads `machines_list` (a local
+  file) and attaches nothing (`machineConnections.test.ts`, "with no machine
+  paired reads the empty list and attaches nothing").
+- **The command line.** `machine.*` is gated by pairing, and refused with
+  `machines_disabled` in data privacy mode (Trust model, Accepted risks).
+- **First run.** With no machine paired, Settings → Machines → Your machines
+  shows three steps (get the other computer ready, add it here, start a
+  session there) and the guide. No 21.xx screen shows this state: it is
+  21.02's bordered card with 21.06's numbered steps. The guide is
+  [MACHINES-GUIDE.md](MACHINES-GUIDE.md), linked under the page's lead
+  (`MACHINES_GUIDE_URL`).
+
+## Release readiness (PRO-360)
+
+Checked against the epic's scope (PRO-338) on 2026-11-17, at `main`
+`d7f0b901`. The release ticket turns Machines on; this is what stands behind
+that, and what is still open. "Two-machine CI" is `machines-e2e`
+(`tests/machines_e2e.rs`, `tests/machine_routes.rs`), whose "Mac mini" is a
+desktop-mode runtime (`TERMINALX_LOCAL_DESKTOP=1`) on the `ubuntu-latest`
+runner and whose dev-server is a Linux container. `machine-compat` runs on
+`macos-latest`.
+
+### In scope
+
+| Item | Mac to Mac | Mac to Linux | Other evidence |
+| --- | --- | --- | --- |
+| Pair by code, fingerprint, Allow | Two-machine CI (the window approves) | Two-machine CI (`terminalx-serve pair`, answered `y`) | `pairing_tests`, `security_tests` |
+| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; the relay registration for a signed-in machine is PRO-368 (in review) |
+| Sessions and chat (create, send, read) | Two-machine CI | Two-machine CI | |
+| Approvals, stop | Two-machine CI (`session.decide`, `session.interrupt`) | Two-machine CI | |
+| Terminals (create, resize, reconnect, replay) | Two-machine CI | Two-machine CI | |
+| Files | Two-machine CI (`fs.write`, read back on the machine's disk) | Two-machine CI | |
+| Git (status, commit) | Two-machine CI (commit read with the machine's own git) | Two-machine CI | |
+| Push and pull requests | Not in two-machine CI | Not in two-machine CI | `remote/git_tests.rs` (the code cloud workspaces use) |
+| Forwarded ports | Not in two-machine CI | Not in two-machine CI | `remote/ports.rs`, `cloud_ports.rs` tests (PRO-355) |
+| Projects (add, remove) | Not in two-machine CI | `terminalx-serve projects add` in CI | PRO-351 tests (`machine.addProject`, folder browser) |
+| Agents and sign-in state | Not in two-machine CI | Not in two-machine CI | PRO-350 tests (`remote/machine.rs`, `harness/setup.rs`) |
+| Updates and version differences | `machine-compat` (each previous release against this build, both directions, on macOS) | Same | `remote/machine_update.rs` tests (PRO-354) |
+| Relay route and fallback | `machine_routes` (direct drops, relay answers; both drop, recovery) | Not covered | |
+| Revoke | Two-machine CI | Two-machine CI (`terminalx-serve devices revoke`) | |
+| The command line | Not in two-machine CI | Not in two-machine CI | `machine_control.rs` tests (PRO-356) |
+
+### Out of scope, hidden
+
+| Item | How it is kept out |
+| --- | --- |
+| Built-in browser, computer use, Local VM, orchestration runs on a machine | Hidden in a machine session (Session feature parity); no protocol method reaches them (decision 7); `pairing_tests::a_paired_computer_has_no_pairing_browser_or_computer_methods` |
+| Dictation into a machine's terminal | Hidden; dictation fills the composer only |
+| Moving a session between machines | No control offers it; a session's key names its machine (decision 8) |
+| Sharing a machine with other people | `collab/1` not served; sharing, presence and notes hidden |
+| A Windows host | Not built: no Windows runtime |
+
+### Open before the release commit
+
+- **Two-machine CI on main.** No `machines-e2e` run has passed on a commit
+  that holds every Machines ticket: PR #1084 (PRO-356) merged with it failing
+  (the fake agent's control socket refused a connection in
+  `a_computer_pairs_with_two_machines_and_operates_each_in_its_own_projects`),
+  and #1054's green run did not include #1084. Every main CI run since
+  2026-11-16 12:30 UTC has stayed queued. The release commit needs a green
+  `machines-e2e` on main (PRO-360 acceptance).
+- **No real macOS host in two-machine CI.** "Mac mini" there is a
+  desktop-mode runtime on Linux. Pairing two real Macs, and a Mac with a
+  Linux server, by hand before the release is the check that remains.
+- **Covered on one side only:** pull requests, ports, projects from the
+  desktop, agents and sign-in, the account route and the command line have
+  their own tests but no two-machine scenario.
+- **Security review (PRO-357).** Every threat has a mitigation and a test, or
+  is an accepted risk above. The one open finding has a ticket: PRO-369
+  (telling the window from a detached process during consent), in Backlog.
+  The agent control changed in PRO-360 (pairing instead of the switch) by the
+  owner's decision.
+- **Still open in the epic:** PRO-368 (relay registration for a signed-in
+  machine) and PRO-359 (the phone), both in review; session follow-ups
+  PRO-403 to PRO-408, in Backlog.
