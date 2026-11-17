@@ -752,7 +752,7 @@ the pull request that adds it.
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
-| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3) |
+| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |
 | `pty.create` | `pty/1` | Needs a project | Unless it names a `sessionId` (`pty/2`), which places it in that session's folder |
 | `pty.list` | `pty/1` | Served | Every terminal; each names its session or project |
 | `pty.write` | `pty/1` | Served | |
@@ -2042,7 +2042,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
 | Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
 | Image attachments | Works; uploaded to the machine by session | PRO-347 |
-| Other file attachments | Follow-up | PRO-407 |
+| Other file attachments | Works; uploaded to the machine (`composer/4`), stored in the session's attachments folder there, and the agent is handed those paths | PRO-407 |
 | Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
 | Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |

@@ -4350,14 +4350,16 @@ impl WorkspaceRpc {
                 permit.check_configuration().map_err(|_| RpcError::forbidden("Explicit configuration authority required"))?;
             }
         }
-        // Images uploaded with `session.attach` ride with the text, or alone.
+        // Images and files uploaded with `session.attach` ride with the text, or alone.
         let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
+        let file_ids = crate::cloud_agents::attachments::named_files(&params).ok_or_else(|| RpcError::invalid("files is a list of uploaded attachments; with the images, at most 10"))?;
+        let attached = !image_ids.is_empty() || !file_ids.is_empty();
         let text = match params.get("text").and_then(Value::as_str) {
             Some(text) => text,
-            None if !image_ids.is_empty() => "",
+            None if attached => "",
             None => return Err(RpcError::invalid("text is required")),
         };
-        if text.trim().is_empty() && image_ids.is_empty() {
+        if text.trim().is_empty() && !attached {
             return Err(RpcError::invalid("text is empty"));
         }
         // The same rule as a mailbox send (contract §21.5), for managers
@@ -4397,7 +4399,24 @@ impl WorkspaceRpc {
                 RpcError::invalid("Not sent: an image of this message did not reach the workspace. Attach it and send again.").with_data(json!({ "reason": "attachment-missing" }))
             })?
         };
-        let sent = self.manager().and_then(|manager| manager.send(&session.id, &tab.id, text.to_string(), images).map_err(RpcError::internal));
+        // Into the session's attachments folder on this computer (PRO-407):
+        // the agent is handed their paths here, as a local tab's files are.
+        let files = if file_ids.is_empty() {
+            Vec::new()
+        } else {
+            use crate::cloud_agents::attachments::FilesError;
+            match self.agents()?.attachments.take_files(&attachment_owner(peer), &session.id, &file_ids) {
+                Ok(files) => files,
+                Err(error) => {
+                    self.agents()?.attachments.remove(&image_ids);
+                    return Err(match error {
+                        FilesError::Missing(_) => RpcError::invalid(crate::cloud_agents::mailbox::FILE_MISSING_MESSAGE).with_data(json!({ "reason": "attachment-missing" })),
+                        FilesError::Failed(error) => RpcError::internal(error),
+                    });
+                }
+            }
+        };
+        let sent = self.manager().and_then(|manager| manager.send_pressed(&session.id, &tab.id, text.to_string(), images, None, files).map_err(RpcError::internal));
         if !image_ids.is_empty() {
             self.agents()?.attachments.remove(&image_ids);
         }
@@ -4638,8 +4657,14 @@ impl WorkspaceRpc {
         if !session.tabs.iter().any(|tab| tab.id == tab_id) {
             return Err(RpcError::not_found("no such tab"));
         }
+        // `kind: "file"` (`composer/4`, PRO-407): a file other than an image.
+        let file = match params.get("kind").and_then(Value::as_str) {
+            None | Some("image") => false,
+            Some("file") => true,
+            Some(_) => return Err(RpcError::invalid("kind is image or file")),
+        };
         if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
-            return Err(RpcError::forbidden("attaching an image needs driver access to the workspace"));
+            return Err(RpcError::forbidden(if file { "attaching a file needs driver access to the workspace" } else { "attaching an image needs driver access to the workspace" }));
         }
         let id = required_str(&params, "attachmentId")?;
         let media_type = required_str(&params, "mediaType")?;
@@ -4648,11 +4673,13 @@ impl WorkspaceRpc {
         let last = params.get("last").and_then(Value::as_bool).unwrap_or(false);
         let name = params.get("name").and_then(Value::as_str);
         use crate::cloud_agents::attachments::AttachError;
-        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, last) {
+        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, file, last) {
             Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
             Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
+            Err(AttachError::Refused(why)) => Err(RpcError::invalid(why).with_data(json!({ "reason": "file-refused" }))),
+            Err(AttachError::TooLarge) if file => Err(RpcError::invalid(format!("the file is larger than {} MB", crate::attachments::MAX_ATTACHMENT_BYTES / 1024 / 1024)).with_data(json!({ "reason": "file-too-large" }))),
             Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
-            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many attachments are waiting to be sent here; try again later").with_data(json!({ "reason": "attachments-full" }))),
             Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
         }
     }

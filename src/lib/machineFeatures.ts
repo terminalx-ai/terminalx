@@ -35,6 +35,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "slashCommands", label: "Slash commands", capability: "composer/1", action: "use slash commands" },
   { id: "fileMentions", label: "File mentions", capability: "composer/2", action: "mention files" },
   { id: "images", label: "Images in prompts", capability: "composer/3", action: "send images" },
+  { id: "files", label: "Files in prompts", capability: "composer/4", action: "send files" },
   { id: "worktreeRemoval", label: "Worktree removal", capability: "workspace/1", action: "remove a session's worktree" },
   { id: "mergedCleanup", label: "Clean-up after merge", capability: "workspace/2", action: "remove merged worktrees" },
   { id: "cleanup", label: "Worktree clean-up", capability: "cleanup/1", action: "clean up worktrees" },
