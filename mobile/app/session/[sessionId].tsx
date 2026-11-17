@@ -693,6 +693,15 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
   const [control, setControl] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const screen = useRef<TerminalScreen | null>(null);
+  const request = useMemo(() => ({ api: app.api, connection: app.connection, connected, sessionId, tabId, attempt }), [app.api, app.connection, connected, sessionId, tabId, attempt]);
+  const [previousRequest, setPreviousRequest] = useState(request);
+  if (previousRequest !== request) {
+    setPreviousRequest(request);
+    if (connected) {
+      setOpening(true);
+      setProblem(null);
+    }
+  }
 
   useEffect(() => {
     if (!connected) return;
@@ -710,8 +719,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
     const apply = (step: (current: TerminalScreen) => void | Promise<void>) => {
       parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
     };
-    setOpening(true);
-    setProblem(null);
     const ended = app.connection.onEvent((message) => {
       if (active && message.method === "terminal.closed") setProblem((message.params as { message?: string } | null)?.message ?? "The Mac ended the terminal view.");
     });
@@ -777,7 +784,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
         <StatusDot color={live && !refusal ? palette.success : palette.warning} />
         <Text style={[styles.terminalStatusText, { color: palette.muted }]}>{status}</Text>
       </View>
-      {problem ? <Card style={[styles.notice, styles.terminalProblem]}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn't available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
+      {problem ? <Card style={[styles.notice, styles.terminalProblem]}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn&apos;t available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
     </View>
     {refusal ? <Text style={[styles.terminalRefusal, { color: palette.danger }]}>{refusal}</Text> : null}
     {/* The keys a phone keyboard lacks, and the symbols a shell wants most, a thumb's reach above the keyboard. */}

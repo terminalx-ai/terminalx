@@ -92,7 +92,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   };
   const release = vi.fn();
   const unwatch = vi.fn();
-  const listed = state === null ? null : item("ws-1", { name: "fix-login", state }).workspace;
+  const listed = state === null ? null : item(mocks.params.workspaceId, { name: "fix-login", state }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
@@ -349,6 +349,54 @@ describe("a cloud workspace screen", () => {
     await click("Start");
     await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
     expect(mocks.catalog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers managers retry and tells others who can retry when setup failed", async () => {
+    for (const role of ["manager", "driver", "viewer"]) {
+      await show(null);
+      world({ state: "attention-required", role });
+      mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_workspace_runtime_bootstrap_failed" };
+      await show(<CloudWorkspaceScreen />);
+      expect(stateLine().textContent).toContain("Needs attention");
+      expect(container.querySelector("input")).toBeNull();
+      expect(startBar().textContent).toContain("runtime could not be set up");
+      if (role === "manager") {
+        await click("Retry resume");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalled();
+      } else {
+        expect(startBar().textContent).toContain("can retry resume");
+        expect(() => button("Retry resume")).toThrow();
+      }
+    }
+  });
+
+  it("allows a manager to retry a transient failed resume", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" };
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("provider did not answer");
+    await click("Retry resume");
+  });
+
+  it("keeps the composer for an online workspace needing attention", async () => {
+    const { session } = world({ state: "attention-required", role: "manager", connection: "connected" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    await type("continue");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledWith("t1", "continue");
+  });
+
+  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }, { state: "failed", action: "resume", errorCode: "cloud_provider_credential_invalid" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("desktop");
+    expect(startBar().textContent).not.toContain("runtime could not be set up");
+    expect(() => button("Retry resume")).toThrow();
+    expect(container.querySelector("input")).toBeNull();
   });
 
   it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {
