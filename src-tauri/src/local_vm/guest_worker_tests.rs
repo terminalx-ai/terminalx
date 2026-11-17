@@ -314,3 +314,130 @@ fn duplicate_dispatch_and_handler_failure_cannot_reenter_effect() {
         .is_err());
     assert!(worker.wire.poisoned);
 }
+
+fn lifetime_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [-1; 2];
+    // SAFETY: pipe initializes two fresh descriptors, each adopted once below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    for fd in fds {
+        // Match the launcher's pipe2(O_CLOEXEC): a provider must not inherit
+        // the owner's write end and keep its own lifetime alive.
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+    }
+    unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+        )
+    }
+}
+
+#[test]
+fn lifetime_watcher_stops_retained_child_during_blocked_effect_without_a_receipt() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    };
+    use std::time::Duration;
+    let (mut owner, stream) = pair();
+    let (read, write) = lifetime_pipe();
+    let channel = channel::Channel::new(stream.into(), read).unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let counted = stops.clone();
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let worker = std::thread::spawn(move || {
+        serve_channel(
+            channel,
+            |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5))?;
+                Ok(Observation::Stopped {
+                    extinction_confirmed: true,
+                })
+            },
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                child.kill().unwrap();
+                let status = child.wait().unwrap(); // Original retained child, not a PID lookup.
+                stopped_tx.send(status).unwrap();
+            },
+        )
+    });
+    let b = binding();
+    let mut wire = Wire::new(&mut owner);
+    wire.send(&Hello {
+        version: VERSION,
+        binding: b.clone(),
+    })
+    .unwrap();
+    let _: Hello = wire.receive().unwrap();
+    wire.send(&request(&b)).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    drop(write);
+    // No release of the blocked dispatcher is needed to initiate child shutdown.
+    assert!(!stopped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .success());
+    release_tx.send(()).unwrap();
+    assert!(worker.join().unwrap().is_err());
+    assert!(wire.receive::<Reply>().is_err());
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn malformed_handshake_initiates_shutdown_without_lifetime_eof() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (mut owner, stream) = pair();
+    let (read, _write) = lifetime_pipe();
+    let channel = channel::Channel::new(stream.into(), read).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        serve_channel(
+            channel,
+            |_| panic!("malformed handshake dispatched"),
+            move || {
+                tx.send(()).unwrap();
+            },
+        )
+    });
+    owner.write_all(&0u32.to_be_bytes()).unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(worker.join().unwrap().is_err());
+}
+
+#[test]
+fn dispatcher_failure_initiates_shutdown_even_while_owner_descriptors_stay_open() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (owner, stream) = pair();
+    let (read, _write) = lifetime_pipe();
+    let channel = channel::Channel::new(stream.into(), read).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        serve_channel(
+            channel,
+            |_| bail!("effect could have started"),
+            move || {
+                tx.send(()).unwrap();
+            },
+        )
+    });
+    let mut owner = Owner::connect(owner, binding()).unwrap();
+    assert!(owner
+        .request(None, Operation::Shutdown, |_| Ok(()))
+        .is_err());
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(worker.join().unwrap().is_err());
+}

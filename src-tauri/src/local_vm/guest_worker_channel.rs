@@ -5,6 +5,10 @@ use anyhow::Context as _;
 use anyhow::{ensure, Result};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 
 const STALL: Duration = Duration::from_secs(30);
@@ -13,6 +17,75 @@ pub(super) struct Channel {
     stream: OwnedFd,
     lifetime: OwnedFd,
     fenced: bool,
+}
+
+/// Independent of request dispatch: owner loss must revoke admission even
+/// while a provider call is blocked. The callback initiates shutdown through
+/// retained child handles; it must not wait for the dispatch mutex. Revocation
+/// is not child-exit proof, and no success receipt is manufactured here.
+pub(super) struct LifetimeMonitor {
+    state: Arc<Revocation>,
+    stop: Option<OwnedFd>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct Revocation {
+    revoked: AtomicBool,
+    stream: OwnedFd,
+    shutdown: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+impl Revocation {
+    fn revoke(&self) {
+        if !self.revoked.swap(true, Ordering::AcqRel) {
+            // SAFETY: the socket remains owned until the watcher exits.
+            unsafe {
+                libc::shutdown(self.stream.as_raw_fd(), libc::SHUT_RDWR);
+            }
+            let callback = self.shutdown.lock().unwrap().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+}
+
+impl LifetimeMonitor {
+    pub fn check(&self) -> Result<()> {
+        ensure!(
+            !self.state.revoked.load(Ordering::Acquire),
+            "worker lifetime revoked"
+        );
+        Ok(())
+    }
+
+    pub fn revoke(&self) {
+        self.state.revoke();
+    }
+}
+
+impl Drop for LifetimeMonitor {
+    fn drop(&mut self) {
+        // Closing this private pipe wakes the watcher without signaling any PID.
+        self.stop.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn private_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [-1; 2];
+    // SAFETY: pipe writes two fresh descriptors to the provided array.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: each descriptor is adopted once, including on flag errors.
+    let pair = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&pair.0, &pair.1] {
+        set_flags(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC)?;
+    }
+    Ok(pair)
 }
 
 fn flags(fd: RawFd, command: i32) -> io::Result<i32> {
@@ -33,6 +106,73 @@ fn set_flags(fd: RawFd, command: i32, value: i32) -> io::Result<()> {
 }
 
 impl Channel {
+    pub fn watch_lifetime(
+        &self,
+        shutdown: impl FnOnce() + Send + 'static,
+    ) -> Result<LifetimeMonitor> {
+        let lifetime = self.lifetime.try_clone()?;
+        let stream = self.stream.try_clone()?;
+        let (stop_read, stop_write) = private_pipe()?;
+        let state = Arc::new(Revocation {
+            revoked: AtomicBool::new(false),
+            stream,
+            shutdown: Mutex::new(Some(Box::new(shutdown))),
+        });
+        let signal = state.clone();
+        let thread = std::thread::Builder::new()
+            .name("guest-worker-lifetime".into())
+            .spawn(move || {
+                let mut fds = [
+                    libc::pollfd {
+                        fd: lifetime.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: stop_read.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    // No POLLIN: queued commands are not owner loss. HUP/ERR are
+                    // reported even with events=0, without consuming protocol bytes.
+                    libc::pollfd {
+                        fd: signal.stream.as_raw_fd(),
+                        #[cfg(target_os = "linux")]
+                        events: libc::POLLRDHUP,
+                        #[cfg(not(target_os = "linux"))]
+                        events: 0,
+                        revents: 0,
+                    },
+                ];
+                loop {
+                    // SAFETY: fds lives for the blocking poll call.
+                    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+                    if result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+                    {
+                        continue;
+                    }
+                    if result >= 0
+                        && fds[0].revents == 0
+                        && fds[2].revents == 0
+                        && fds[1].revents != 0
+                    {
+                        return;
+                    }
+                    if result < 0 || fds[0].revents != 0 || fds[2].revents != 0 {
+                        // Wake a concurrent protocol read/write, then start child
+                        // shutdown without waiting for a blocked operation to return.
+                        signal.revoke();
+                        return;
+                    }
+                }
+            })?;
+        Ok(LifetimeMonitor {
+            state,
+            stop: Some(stop_write),
+            thread: Some(thread),
+        })
+    }
+
     pub fn new(stream: OwnedFd, lifetime: OwnedFd) -> Result<Self> {
         let fd = stream.as_raw_fd();
         let life = lifetime.as_raw_fd();

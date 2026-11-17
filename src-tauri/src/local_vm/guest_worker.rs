@@ -11,6 +11,8 @@ use anyhow::{ensure, Context, Result};
 
 #[path = "guest_worker_channel.rs"]
 mod channel;
+#[path = "guest_worker_owner.rs"]
+mod owner;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::io::{Read, Write};
 
@@ -590,6 +592,38 @@ impl<S: Read + Write> Worker<S> {
         }
         result
     }
+}
+
+/// Internal dispatcher loop. The runtime supplies its retained-child shutdown
+/// initiator; the watcher runs independently of the operation closure. This
+/// does not enable the production entrypoint or provide execution adapters.
+fn serve_channel(
+    channel: channel::Channel,
+    mut effect: impl FnMut(&Request) -> Result<Observation>,
+    shutdown: impl FnOnce() + Send + 'static,
+) -> Result<()> {
+    let lifetime = channel.watch_lifetime(shutdown)?;
+    let result = (|| {
+        let mut worker = Worker::accept(channel)?;
+        loop {
+            let mut stopping = false;
+            worker.dispatch(|request| {
+                lifetime.check()?;
+                stopping = matches!(request.command, Operation::Shutdown);
+                let result = effect(request)?;
+                // A late result must not turn lifetime loss into a receipt.
+                lifetime.check()?;
+                Ok(result)
+            })?;
+            if stopping {
+                return Ok(());
+            }
+        }
+    })();
+    // Malformed frames and dispatcher failures also initiate shutdown, even
+    // when the peer leaves both descriptors open. The callback runs once.
+    lifetime.revoke();
+    result
 }
 
 #[cfg(test)]
