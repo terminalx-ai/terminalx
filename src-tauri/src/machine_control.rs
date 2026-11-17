@@ -222,7 +222,6 @@ pub(crate) fn pairing_route(params: &Value) -> Result<&'static str, ControlError
     }
 }
 
-/// A pairing that did not pair, by `MachinePairingFailure`, as the CLI's error.
 /// Only the fingerprint's letters and digits count: `cef4 2468…` is `CEF4·2468·…`.
 fn fingerprint_digits(fingerprint: &str) -> String {
     fingerprint.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect()
@@ -256,6 +255,7 @@ pub(crate) fn fingerprint_gate(name: &str, fingerprint: &str, expires_at: i64, g
     Ok(())
 }
 
+/// A pairing that did not pair, by `MachinePairingFailure`, as the CLI's error.
 pub(crate) fn pairing_refusal(reason: &str, message: &str) -> ControlError {
     let recovery = match reason {
         "not-approved" => "Ask the person at the machine to press Allow, then run terminalx machines add again with a new code.",
