@@ -29,7 +29,7 @@ import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
-import { WorkspacePanes } from "./WorkspacePanes";
+import { WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabAccountLabel, TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
@@ -572,6 +572,8 @@ export function SessionView({
   // A local session's files are tabs in its panes, beside the chat (PRO-402). A cloud session's, and the
   // floating window's (it has no panes), are the editor pane's.
   const tabsInPanes = !cloud && !compact;
+  const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow);
+  const switchInPaneStrip = tabsInPanes && paneLayout.showStrip;
   const hasEditors = !tabsInPanes && ed.editors.some((e) => e.sessionId === session.id);
   const shownFile = tabsInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
   useFileTabShortcuts(session.id, shownFile, tabsInPanes);
@@ -846,7 +848,7 @@ export function SessionView({
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
             {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
             {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !(stripRow && !compact) && (
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !switchInPaneStrip && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
@@ -935,7 +937,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
+              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} layout={paneLayout} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}

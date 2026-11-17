@@ -38,7 +38,7 @@ export function stepVisibleSession(direction: 1 | -1) {
   const sessions = [
     ...store.sessions.filter((session) => !hiddenProjects.has(session.projectPath)),
     ...getCloudDashboard().filter((session) => visibleIds.has(session.orgId)),
-    // Sessions on paired machines, while Experimental → Machines is on (PRO-346).
+    // Sessions on paired machines (PRO-346).
     ...getMachineDashboard(),
   ];
   const next = adjacentSession(sessions, store.selectedSessionId, direction);

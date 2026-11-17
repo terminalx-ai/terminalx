@@ -102,6 +102,16 @@ export interface MachineHostStatus {
   code: { expiresAt: number } | null;
   /** Pairing is paused after five wrong attempts in a minute, until then. */
   pausedUntil: number | null;
+  /** The runtime's relay registration from the account (PRO-368); absent from older runtimes. */
+  relayState?: "off" | "signedOut" | "connecting" | "retrying" | "registered" | "superseded";
+  relay?: {
+    relayHostId: string;
+    directorUrl: string;
+    cellUrl: string;
+    assignmentEpoch: number;
+    generation: number;
+    runtimeGeneration: number;
+  } | null;
 }
 
 /**

@@ -249,7 +249,7 @@ export interface Project {
   archived?: boolean;
   /** Absent while every setting is the default. */
   issuePipeline?: IssuePipelineSettings | null;
-  /** Agents may comment on issues and move their status without asking. Absent is off. */
+  /** Legacy persisted preference; issue approval is always deletion-only. */
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;

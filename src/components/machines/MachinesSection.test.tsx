@@ -46,7 +46,7 @@ const { clockTime, machineViewLabel, machineViewStatus } = await import("./conne
 const MAC_MINI = pairedMachine({ machineId: "m1", name: "Mac mini", lastSeenAt: Date.parse("2026-11-15T14:02:00") });
 const DEV_SERVER = pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } });
 
-let machinesOn = true;
+let paired = true;
 let views: MachineConnectionView[] = [];
 let attachRefusal: string | null = null;
 let stop: (() => void) | null = null;
@@ -86,7 +86,7 @@ beforeEach(() => {
   experimental.resetExperimentalSettingsForTests();
   for (const machineId of ["m1", "m2"]) api.closeWorkspaceConnection({ kind: "machine", machineId });
   sessions.selectCloudWorkspace(null);
-  machinesOn = true;
+  paired = true;
   attachRefusal = null;
   views = [
     { machineId: "m1", state: { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.2:6768/machine/1" }, since: 1, rttMs: 9 } },
@@ -95,11 +95,11 @@ beforeEach(() => {
   mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "experimental_settings":
-        return { nativeCodex: false, machines: machinesOn };
+        return { nativeCodex: false };
       case "machines_list":
-        return [MAC_MINI, DEV_SERVER];
+        return paired ? [MAC_MINI, DEV_SERVER] : [];
       case "machines_connections":
-        return views;
+        return paired ? views : [];
       case "machine_remote_attach":
         if (attachRefusal && args?.machineId === "m1") throw attachRefusal;
         return `conn-${String(args?.machineId)}`;
@@ -120,13 +120,13 @@ afterEach(() => {
 });
 
 describe("the Machines section", () => {
-  it("is absent with Experimental → Machines off", async () => {
-    machinesOn = false;
+  it("is absent, and attaches nothing, with no machine paired (PRO-360)", async () => {
+    paired = false;
     await mount();
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
-    // The paired machines are known, and still nothing shows.
-    expect(store.getMachineConnections().machines).toHaveLength(2);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_list"));
+    expect(store.getMachineConnections().machines).toHaveLength(0);
     expect(screen.queryByTestId("machines-section")).toBeNull();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("machine_remote_attach", expect.anything());
   });
 
   it("lists every paired machine with its icon, name and live state", async () => {
@@ -234,7 +234,7 @@ describe("the Machines section", () => {
     expect(within(section("Mac mini")).queryByRole("alert")).toBeNull();
   });
 
-  it("leaves the machine's view and closes its connections when Machines is turned off", async () => {
+  it("leaves the machine's view and closes its connections when the window lets go of them", async () => {
     await mount();
     await waitFor(() => expect(Object.keys(store.getMachineConnections().connections)).toHaveLength(2));
     fireEvent.click(headerButton("Mac mini"));
@@ -242,10 +242,8 @@ describe("the Machines section", () => {
     act(() => {
       stop!();
       stop = null;
-      emit("experimental_settings_changed", { machines: false });
     });
     expect(sessions.getSessionStore().selectedCloudWorkspace).toBeNull();
-    expect(screen.queryByTestId("machines-section")).toBeNull();
     expect(screen.queryByTestId("machine-main")).toBeNull();
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("cloud_remote_detach", { connectionId: "conn-m1" }));
   });

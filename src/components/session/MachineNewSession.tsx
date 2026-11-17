@@ -9,7 +9,6 @@ import { MachineMessage } from "@/components/machines/MachineMessage";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import { useMachineCatalog } from "@/lib/machineCatalog";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
-import { useMachineDashboardEnabled } from "@/lib/machineDashboard";
 import { machineFeatureMessage } from "@/lib/machineFeatures";
 import { useClientState } from "@/lib/machineUpdate";
 import { agentSignIn, machineWhereRow, pickMachineProject, type MachineAgentReport } from "@/lib/machineNewSession";
@@ -24,8 +23,8 @@ import type { HarnessInfo } from "@/types/session";
  * The machine half of the new-session form (PRO-348, screen 21.07): the
  * "Where it runs" menu, and with a machine chosen, its projects, the
  * project's branches there, and the line under the form that says the agent
- * is signed in there and the project exists there. All of it is behind
- * Settings → Experimental → Machines.
+ * is signed in there and the project exists there. None of it shows until a
+ * machine is paired.
  */
 
 /** A connected machine's live client; null while it is not connected. */
@@ -60,14 +59,13 @@ export interface MachineDraft {
 
 /**
  * The machine the new-session form runs on, from the store's
- * `machineSessionPreset`; null for This Mac, or while Machines is off.
+ * `machineSessionPreset`; null for This Mac.
  * `wantedName` is the project the form was on here: the machine's project of
  * that name is chosen unless one was asked for.
  */
 export function useMachineDraft(localHarnesses: HarnessInfo[], wantedName: string | null): MachineDraft | null {
   const store = useSessionStore();
-  const enabled = useMachineDashboardEnabled();
-  const preset = enabled ? store.machineSessionPreset : null;
+  const preset = store.machineSessionPreset;
   const connections = useMachineConnections();
   const catalog = useMachineCatalog();
   const machineId = preset?.machineId ?? "";
@@ -157,14 +155,12 @@ export function MachineWhereItem({ machine, chosen, wantedProject, onSelect }: {
 /**
  * "Start on…" beside another place's start button (an issue's): the paired
  * machines as the "Where it runs" menu lists them. Choosing one opens the
- * new-session form on it (PRO-348). Nothing while Machines is off or no
- * machine is paired.
+ * new-session form on it (PRO-348). Nothing while no machine is paired.
  */
 export function StartOnMachineMenu({ wantedProject, disabled, onPick, label = "Start on a machine" }: { wantedProject: string | null; disabled?: boolean; onPick: (machineId: string) => void; label?: string }) {
   const menu = useRowMenu();
-  const enabled = useMachineDashboardEnabled();
   const { machines } = useMachineConnections();
-  if (!enabled || machines.length === 0) return null;
+  if (machines.length === 0) return null;
   return (
     <DropdownMenu {...menu.root}>
       <DropdownMenuTrigger asChild {...menu.trigger}>

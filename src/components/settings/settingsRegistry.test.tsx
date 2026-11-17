@@ -58,7 +58,10 @@ describe("settings registry", () => {
   });
 
   it("resolves row links and safely defaults unknown legacy targets", () => {
-    expect(resolveSetting("appearance.textSize").section).toBe("appearance");
+    expect(resolveSetting("general.textSize").section).toBe("general");
+    // PRO-377 moved these rows from Appearance: a link copied before still opens the row.
+    expect(resolveSetting("appearance.textSize").id).toBe("general.textSize");
+    expect(resolveSetting("appearance.statusBar").id).toBe("general.statusBar");
     for (const value of [undefined, null, "missing", "toString", { type: "click" }]) expect(resolveSetting(value).id).toBe("account.identity");
   });
 
@@ -94,7 +97,8 @@ describe("settings registry", () => {
     for (const row of SETTINGS_ROWS) {
       const view = render(<>{row.render(row.layout === "content" ? { children: <section>Editor</section> } : { control: <span>Control</span> })}</>);
       const actions = screen.queryByRole("button", { name: `Actions for ${row.title}` });
-      if (row.layout === "content") expect(actions, row.id).toBeNull();
+      // The theme cards are the whole Theme row: no menu beside its title (design 09.08, PRO-377).
+      if (row.layout === "content" || row.id === "appearance.theme") expect(actions, row.id).toBeNull();
       else expect(actions, row.id).toBeTruthy();
       view.unmount();
     }

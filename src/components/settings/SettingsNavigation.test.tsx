@@ -189,8 +189,8 @@ it("opens a Scripts row link on its repository's page and focuses its registered
 });
 
 it("opens the custom order registry row and keeps the window choice independent of shared order events", async () => {
-  const view = render(<SettingsPage initialTab="appearance.customOrder" onBack={vi.fn()} />);
-  const row = view.container.querySelector('[data-setting-id="appearance.customOrder"]');
+  const view = render(<SettingsPage initialTab="general.customOrder" onBack={vi.fn()} />);
+  const row = view.container.querySelector('[data-setting-id="general.customOrder"]');
   expect(row).not.toBeNull();
   expect(document.activeElement).toBe(row);
   const toggle = screen.getByRole("switch", { name: "Custom order" });

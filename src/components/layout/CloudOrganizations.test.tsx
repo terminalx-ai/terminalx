@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
@@ -107,10 +107,30 @@ afterEach(() => {
   resetCloudSessions();
 });
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const orgSection = (orgId: string) => screen.getAllByTestId("cloud-org-list").find((section) => section.getAttribute("data-org") === orgId)!;
 
 describe("cloud organizations in the sidebar", () => {
+  it.each([5, null])("describes organization usage and reveals it on keyboard focus (limit: %s)", async (limit) => {
+    await act(async () => {
+      await catalog.ingestCloudList({ workspaces: [], quota: { used: 3, limit: 5, running: { used: 3, limit }, total: { used: 4, limit: 10 } } }, ORG);
+    });
+    mount();
+    const description = `${limit === null ? "3" : "3 of 5"} cloud workspaces running · 4 of 10 workspaces in all, stopped ones included`;
+    const fold = within(orgSection(ORG)).getByRole("button", { name: "Acme", description });
+    expect(fold.tabIndex).toBe(0);
+    expect(fold.querySelector("button, [tabindex]")).toBeNull();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => fold.focus());
+    expect(document.activeElement).toBe(fold);
+    expect((await screen.findByRole("tooltip")).textContent).toBe(description);
+    fireEvent.keyDown(fold, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+    expect(within(orgSection(ORG)).getByRole("button", { name: "Acme", description })).toBe(fold);
+    expect(mocks.resume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
   it("keeps cloud status groups and actions isolated from local custom ordering", async () => {
     prefs.setPrefs({ sidebarLayout: "status", sidebarSort: "custom" });
     catalog.cacheCloudSessions(ORG, "ws-1", [session("s1", "Fix login redirect", "idle", { manualStatus: "in_review" })] as never, ["session/2"]);

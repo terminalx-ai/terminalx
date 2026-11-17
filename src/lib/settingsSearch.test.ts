@@ -24,9 +24,9 @@ describe("settings row search", () => {
 
   it("finds the font rows for 'font', and only those", () => {
     const ids = searchSettings("font").map((match) => match.id);
-    expect(ids).toContain("appearance.textSize");
+    expect(ids).toContain("general.textSize");
     // Not every row whose description happens to hold an f, an o, an n and a t in order.
-    expect(ids).toEqual(["appearance.textSize"]);
+    expect(ids).toEqual(["general.textSize"]);
   });
 
   it("finds nothing for a mistyped second word, as the empty state expects", () => {
@@ -149,13 +149,11 @@ describe("settings row search", () => {
     expect(named()).not.toContain("localVms.tasks");
   });
 
-  it("finds Settings → Machines rows only while Experimental → Machines is on", () => {
+  it("finds Settings → Machines rows whatever the Experimental switches say (PRO-360)", () => {
     const named = () => searchSettings("pairing code").map((match) => match.id);
-    expect(named()).not.toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: true });
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
     expect(named()).toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: false });
-    expect(named()).not.toContain("machines.pairingCode");
+    expect(searchSettings("machines").map((match) => match.id)).not.toContain("experimental.machines");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {
