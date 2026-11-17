@@ -981,6 +981,7 @@ pub fn run() {
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
+            commands::pr_delete_branch,
             commands::pr_ready,
             commands::pr_check_authority,
             commands::pr_check_log,

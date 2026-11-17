@@ -161,6 +161,7 @@
   --accent-thinking: oklch(0.74 0.09 300);
   --accent-add: oklch(0.74 0.15 150);
   --accent-merged: oklch(0.72 0.14 300);
+  --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
@@ -189,6 +190,7 @@
   --accent-thinking: oklch(0.5 0.12 300);
   --accent-add: oklch(0.5 0.15 150);
   --accent-merged: oklch(0.5 0.15 300);
+  --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
   --warning: oklch(0.6 0.14 75);
   --info: oklch(0.5 0.13 240);
@@ -218,6 +220,7 @@
   --accent-thinking: oklch(0.74 0.09 300);
   --accent-add: oklch(0.74 0.15 150);
   --accent-merged: oklch(0.72 0.14 300);
+  --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
@@ -246,6 +249,7 @@
   --accent-thinking: oklch(0.5 0.12 300);
   --accent-add: oklch(0.5 0.15 150);
   --accent-merged: oklch(0.5 0.15 300);
+  --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
   --warning: oklch(0.6 0.14 75);
   --info: oklch(0.5 0.13 240);
@@ -275,6 +279,7 @@
   --accent-thinking: oklch(0.74 0.09 300);
   --accent-add: oklch(0.76 0.15 150);
   --accent-merged: oklch(0.72 0.14 300);
+  --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);
@@ -303,6 +308,7 @@
   --accent-thinking: oklch(0.5 0.12 300);
   --accent-add: oklch(0.5 0.15 150);
   --accent-merged: oklch(0.5 0.15 300);
+  --accent-merged-fg: oklch(0.99 0 0);
   --destructive: oklch(0.55 0.2 24);
   --warning: oklch(0.6 0.14 75);
   --info: oklch(0.5 0.13 240);
@@ -333,6 +339,7 @@
   --accent-thinking: oklch(0.74 0.09 300);
   --accent-add: oklch(0.74 0.15 150);
   --accent-merged: oklch(0.72 0.14 300);
+  --accent-merged-fg: oklch(0.2 0.05 300);
   --destructive: oklch(0.7 0.18 22);
   --warning: oklch(0.82 0.14 80);
   --info: oklch(0.74 0.11 230);

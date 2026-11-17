@@ -83,6 +83,8 @@ export interface GitSource {
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
   mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
+  /** "Delete the branch after merge": only a local checkout can ask for it today. */
+  deleteMergedBranch?(number: number, url?: string): Promise<void>;
   errorMessage(error: unknown): string;
 }
 
@@ -154,6 +156,7 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     createPr: ({ title, body, base, draft, sessionId }) => gh.create(cwd, title, body, base, draft, sessionId).then(() => null),
     readyPr: (number) => gh.ready(cwd, number),
     mergePr: (number, method) => gh.merge(cwd, number, method),
+    deleteMergedBranch: (number, url) => gh.deleteBranch(cwd, number, url),
     errorMessage,
   };
   if (locals.size > 64) locals.clear();
