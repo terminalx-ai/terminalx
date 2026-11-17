@@ -78,7 +78,11 @@ const ACTIONS = [
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
-  // PRO-377: Appearance names these keys under Mode. The design drew ⌘⌥T, which is Reopen closed tab on macOS; L for light.
+  // #1131 design disposition (pending design sign-off): retain the shipped defaults.
+  // PRO-377's ⌘⌥T proposal conflicts with Reopen closed tab on macOS; keep that
+  // established action and use ⌘⌥⇧L (Ctrl+Alt+Shift+L elsewhere) for light/dark.
+  // Appearance and Shortcuts must show the active keymap, including edits/unbinding.
+  // Context: https://github.com/terminalx-ai/terminalx/pull/1073#issuecomment-6929470119
   { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"] },
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
