@@ -2779,6 +2779,37 @@ fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) 
     Ok(ForkedTurn { session, tab_id: new_tab.id, note: None })
 }
 
+/// Create the fork's checkout and, for a turn fork, restore its saved files.
+fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, at: Option<u64>) -> Result<Option<String>, String> {
+    let project_path = Path::new(&src.project_path);
+    let main_git_turn = at.is_some() && !src.is_quick() && git::is_repo(Path::new(&src.cwd));
+    if !src.worktree_removed && (src.worktree_name.is_some() || main_git_turn) {
+        let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
+        let taken = git::taken_worktree_names(project_path, &taken);
+        let name = names::unclaimed(&taken);
+        // The main checkout may have changed branches since the session was created.
+        let base = if src.worktree_name.is_none() {
+            Some(git::run(Path::new(&src.cwd), &["rev-parse", "HEAD"]).map_err(err)?.trim().to_owned())
+        } else { src.branch.clone() };
+        let wt = git::create_worktree(project_path, &name, base.as_deref()).map_err(err)?;
+        entry.cwd = wt.path;
+        entry.worktree_name = Some(wt.name);
+        entry.branch = Some(wt.branch);
+        entry.base_ref = Some(wt.base_tree);
+        entry.worktree_base = wt.worktree_base;
+    }
+    let Some(end_seq) = at else { return Ok(None) };
+    if entry.worktree_name.is_some() {
+        match crate::checkpoints::turn_end(&src.id, &tab.id, end_seq) {
+            Err(error) => Ok(Some(format!("The new worktree has the branch's latest files: {error:#}"))),
+            Ok((tree, index)) => Ok(crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index)
+                .err().map(|error| format!("The turn's files could not be fully restored in the new worktree: {error:#}"))),
+        }
+    } else {
+        Ok(Some("The fork shares this checkout, so its files are as they are now.".into()))
+    }
+}
+
 /// Fork a tab into a new session; `at` cuts its conversation at a turn and
 /// puts the new worktree's files at that turn's end where they were kept.
 fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option<u64>) -> Result<(SessionEntry, Option<String>), String> {
@@ -2788,7 +2819,6 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
         let app = app.clone();
         let src = index::get(&session_id).map_err(err)?;
         let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
-        let project_path = Path::new(&src.project_path);
         let id = uuid::Uuid::now_v7().to_string();
         let now = index::now();
         let mut new_tab = forked_tab(&tab, &now);
@@ -2835,28 +2865,8 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
             parent: None,
             unknown: BTreeMap::new(),
         };
-        if src.worktree_name.is_some() && !src.worktree_removed {
-            let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
-            let taken = git::taken_worktree_names(project_path, &taken);
-            let name = names::unclaimed(&taken);
-            let wt = git::create_worktree(project_path, &name, src.branch.as_deref()).map_err(err)?;
-            entry.cwd = wt.path;
-            entry.worktree_name = Some(wt.name);
-            entry.branch = Some(wt.branch);
-            entry.base_ref = Some(wt.base_tree);
-            entry.worktree_base = wt.worktree_base;
-        }
-        let mut note = None;
-        if let (Some(end_seq), Some(conversation)) = (at, &conversation) {
-            if entry.worktree_name.is_some() {
-                let files = crate::checkpoints::turn_end(&src.id, &tab.id, end_seq)
-                    .and_then(|(tree, index)| crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index));
-                if let Err(error) = files {
-                    note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
-                }
-            } else {
-                note = Some("The fork shares this checkout, so its files are as they are now.".into());
-            }
+        let note = fork_workspace(&src, &tab, &mut entry, at)?;
+        if let Some(conversation) = &conversation {
             conversation.write(&entry.cwd, &id, &new_tab.id)?;
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
@@ -4732,6 +4742,64 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn turn_fork_isolates_main_and_worktree_sources_and_restores_checkpoint() {
+        use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let p = repo.path();
+        git::run(p, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(p, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(p, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(p.join("a.txt"), "initial\n").unwrap();
+        git::run(p, &["add", "a.txt"]).unwrap();
+        git::run(p, &["commit", "-qm", "initial"]).unwrap();
+        for worktree in [false, true] {
+            let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+                cwd: Some(p.to_str().unwrap().into()),
+                tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+                ..Default::default()
+            }).unwrap();
+            src.kind = SessionKind::Project;
+            src.project_path = p.to_str().unwrap().into();
+            if worktree {
+                let wt = git::create_worktree(p, "source", Some("main")).unwrap();
+                src.cwd = wt.path;
+                src.worktree_name = Some(wt.name);
+                src.branch = Some(wt.branch);
+            }
+            let tab = src.tabs[0].clone();
+            store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
+            let cwd = std::path::Path::new(&src.cwd);
+            let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+            crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
+            std::fs::write(cwd.join("a.txt"), "staged\n").unwrap();
+            git::run(cwd, &["add", "a.txt"]).unwrap();
+            std::fs::write(cwd.join("a.txt"), "turn end\n").unwrap();
+            let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
+            crate::checkpoints::observe(&src.id, &tab.id, 2, &mut done).unwrap();
+            std::fs::write(cwd.join("a.txt"), "source later\n").unwrap();
+            let status = git::run(cwd, &["status", "--porcelain"]).unwrap();
+            let mut dest = src.clone();
+            dest.worktree_name = None;
+            assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2)).unwrap().is_none());
+            assert_ne!(dest.cwd, src.cwd);
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("a.txt")).unwrap(), "turn end\n");
+            assert_eq!(git::run(std::path::Path::new(&dest.cwd), &["show", ":a.txt"]).unwrap(), "staged\n");
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
+            let mut missing = src.clone();
+            missing.worktree_name = None;
+            let note = super::fork_workspace(&src, &tab, &mut missing, Some(0)).unwrap().unwrap();
+            assert!(note.contains("no saved file checkpoint"), "{note}");
+            assert_ne!(missing.cwd, src.cwd);
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            if !worktree {
+                git::run(cwd, &["reset", "--hard", "HEAD"]).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn commit_message_generation_recognizes_signed_out_agents() {
         assert!(super::is_agent_sign_in_error("Not logged in. Please run /login."));
