@@ -2800,8 +2800,9 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
         // conversation refers to it.
         let scratch = if src.is_quick() { Some(store::quick::create(&id).map_err(err)?) } else { None };
         let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
+        let mut scratch_copy = None;
         if let (Some(scratch), true) = (&scratch, in_scratch) {
-            let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
+            scratch_copy = Some(copy_dir(Path::new(&src.cwd), Path::new(scratch)));
             // The fork's CLI reopens the parent conversation from the new
             // directory, and Claude Code looks for it under that directory's name.
             if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
@@ -2855,7 +2856,7 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
                     note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
                 }
             } else {
-                note = Some("The fork shares this checkout, so its files are as they are now.".into());
+                note = Some(non_worktree_fork_note(scratch_copy.as_ref()));
             }
             conversation.write(&entry.cwd, &id, &new_tab.id)?;
         }
@@ -2890,9 +2891,49 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
         })
         .map_err(err)?;
         let _ = app.emit("session_created", &entry);
-        // A fork with a worktree always creates it above; other forks share a checkout.
+        // Only worktree forks need workspace setup.
         if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
         Ok((entry, note))
+    }
+}
+
+/// Describe the actual non-worktree destination and its file-state limitation.
+fn non_worktree_fork_note(scratch_copy: Option<&std::io::Result<()>>) -> String {
+    match scratch_copy {
+        Some(Ok(())) => "The fork has a separate scratch directory with a copy of the current files, not the files at this turn.".into(),
+        Some(Err(error)) => format!("The fork has a separate scratch directory, but copying the current files failed and may be incomplete: {error}. Files were not restored to this turn."),
+        None => "The fork shares this checkout, so its files are as they are now.".into(),
+    }
+}
+
+#[cfg(test)]
+mod fork_notice_tests {
+    use super::*;
+
+    #[test]
+    fn quick_scratch_copy_describes_current_files_and_copy_failure() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("note.txt"), "current").unwrap();
+        let copy = copy_dir(source.path(), destination.path());
+        assert_eq!(std::fs::read_to_string(destination.path().join("note.txt")).unwrap(), "current");
+        let note = non_worktree_fork_note(Some(&copy));
+        assert!(note.contains("separate scratch directory"));
+        assert!(note.contains("current files"));
+        assert!(note.contains("not the files at this turn"));
+
+        let failed = copy_dir(&source.path().join("missing"), destination.path());
+        let note = non_worktree_fork_note(Some(&failed));
+        assert!(note.contains("copying the current files failed"));
+        assert!(note.contains("may be incomplete"));
+        assert!(note.contains("not restored to this turn"));
+    }
+
+    #[test]
+    fn shared_directory_notice_describes_current_files() {
+        let note = non_worktree_fork_note(None);
+        assert!(note.contains("shares this checkout"));
+        assert!(note.contains("files are as they are now"));
     }
 }
 
