@@ -211,11 +211,10 @@ vi.mock("@/lib/configuration", () => ({ configuration: {
 vi.mock("@/components/settings/AccountTab", () => ({ AccountTab: () => <div>Account settings</div> }));
 vi.mock("@/components/settings/EnvironmentSettings", () => ({ EnvironmentTable: () => null }));
 vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }) }));
-vi.mock("@/components/settings/SettingsPage", async (original) => {
-  const { SettingsPage: RealSettingsPage } = await original<typeof import("@/components/settings/SettingsPage")>();
-  return { SettingsPage: (props: ComponentProps<typeof RealSettingsPage>) => scriptSettings.real
-    ? <RealSettingsPage {...props} /> : <StubSettingsPage {...props} /> };
-});
+vi.mock("@/components/settings/SettingsPage", () => ({
+  SettingsPage: (props: ComponentProps<typeof RealSettingsPage>) => scriptSettings.real
+    ? <RealSettingsPage {...props} /> : <StubSettingsPage {...props} />,
+}));
 const StubSettingsPage = ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
     <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-project-path={initialProjectPath ?? ""} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
@@ -237,6 +236,9 @@ vi.mock("@/components/cleanup/CleanupIndicator", () => ({
   ),
 }));
 
+// Load the real Settings fixture during test setup, not inside the first lazy
+// navigation assertion (which otherwise includes its entire module import time).
+const { SettingsPage: RealSettingsPage } = await vi.importActual<typeof import("@/components/settings/SettingsPage")>("@/components/settings/SettingsPage");
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
