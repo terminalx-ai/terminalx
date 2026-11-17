@@ -7,3 +7,11 @@ export function goalCommand(text: string): string | null {
   const match = /^\/goal(?:\s+([\s\S]*))?$/.exec(text.trim());
   return match ? (match[1] ?? "").trim() : null;
 }
+
+/** Shared composer/held-edit policy, including provider-defined commands and attachments. */
+export function goalCommandProblem(text: string, harness: string, hasAttachments = false, commands: readonly { name: string }[] = []): "unsupported" | "empty" | null {
+  const goal = goalCommand(text);
+  if (goal === null || (harness !== "codex" && commands.some(command => command.name === "goal"))) return null;
+  if (harness !== "codex") return "unsupported";
+  return !goal && !hasAttachments ? "empty" : null;
+}
