@@ -2051,7 +2051,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); the dock's Setup and Run tabs, each action's run a dock tab; previews open through a forward | PRO-403 |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
-| Header branch button: diff size, Create PR | Follow-up | PRO-404 |
+| Header branch button: diff size, Create PR, push, pull, mark ready, merge, agent steps | Works; read from the machine's `git/1` (`git.status`, `git.prs`, the branch's diff against its base) as files change there, and run there with its Git sign-in; Merge is pinned to the head that was read (`git.prMerge` `head`). A cloud workspace session keeps the branch chip only | 21.08, PRO-404 |
 | Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
 | Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
 | Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
