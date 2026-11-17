@@ -331,7 +331,7 @@ fn linux_activation_identity() -> Option<Value> {
     Some(json!({"id":id,"instance":instance}))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn require_linux_worker_runtime() -> Result<()> {
     // The shared SessionManager still executes provider discovery, hooks
     // and workspace effects as its own UID. A private owner account alone
@@ -2816,6 +2816,14 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
 mod tests {
     use super::super::journal::{new_id, Journal, TaskInput};
     use super::*;
+
+    #[test]
+    fn linux_owner_cannot_start_shared_uid_task_execution() {
+        // Account provisioning must not accidentally activate the old
+        // SessionManager path before the cua runtime is fully integrated.
+        let error = require_linux_worker_runtime().unwrap_err().to_string();
+        assert!(error.contains("isolated cua worker runtime"));
+    }
 
     /// The key the test host installed its guest with.
     pub(super) const HOST_KEY: &str = "5f3c0e7a9b1d2f4e6a8c0b2d4f6e8a1c3b5d7f9e1a3c5e7b9d1f3a5c7e9b1d3f";
