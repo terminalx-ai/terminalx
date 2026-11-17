@@ -80,6 +80,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { MachineBranchButton, MachineDiffSize, useMachineBranch } from "./MachineBranchButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 
@@ -536,6 +537,17 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  // PRO-404: a machine session's branch, diff size and next Git step, read and run on the machine (21.08). Nothing is read for any other session.
+  const machineBranch = useMachineBranch({
+    session,
+    machineName: machine?.name ?? "",
+    backend,
+    gitSource: machine && !cloud?.locked ? cloud?.gitSource : undefined,
+    fileSource: machine ? cloud?.fileSource : undefined,
+    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === cloud.repository)?.remote) || null,
+    connected: !!machine && !!cloud?.connected,
+    tabId: activeTab?.id,
+  });
   // The side panel follows the agent tab while a review, terminal or page is on screen (PRO-392): swapping it for a
   // working-tree panel remounted it on Overview, and its "Latest turn" scope had no turn to read.
   const panelTab = activeTab ?? (selected ? session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0] : undefined);
@@ -799,6 +811,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
+            {machine && <MachineDiffSize branch={machineBranch} className={cn("ml-1.5 flex shrink-0 items-center", HEADER_TIGHT)} />}
             {/* The base commit is a detail (the branch's tooltip and the ··· menu have it); only a doubt about it stays on the bar. A cloud session has no menu, so it keeps the note. */}
             {session.worktreeBase && (session.worktreeBase.warning || !local) && (
               <span
@@ -843,6 +856,7 @@ export function SessionView({
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
+            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (

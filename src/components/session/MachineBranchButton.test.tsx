@@ -1,0 +1,242 @@
+import { act, cleanup, fireEvent, render as renderView, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import type { PullRequest } from "@/lib/api";
+import type { GitSource, SourceStatus } from "@/lib/gitSource";
+import type { SessionBackend } from "@/lib/sessionBackend";
+import type { FileSource } from "@/lib/workspaceFiles";
+import type { SessionEntry, TabEntry } from "@/types/session";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
+const { MachineBranchButton, MachineDiffSize, useMachineBranch } = await import("./MachineBranchButton");
+
+const HEAD = "1".repeat(40);
+const MOVED = "2".repeat(40);
+
+let status: SourceStatus;
+let prs: PullRequest[];
+let prsFail: Error | null;
+let canWrite: boolean;
+let watchers: ((paths: string[] | null) => void)[];
+let git: Record<string, ReturnType<typeof vi.fn>>;
+let send: ReturnType<typeof vi.fn>;
+
+function pr(patch: Partial<PullRequest> = {}): PullRequest {
+  return {
+    number: 7, title: "Read markers", url: "https://github.com/octo/app/pull/7", state: "OPEN", isDraft: false, base: "main", head: "feature",
+    headSha: HEAD, additions: 142, deletions: 9, mergeable: "MERGEABLE", mergeState: "CLEAN", reviewDecision: "APPROVED",
+    checks: [{ name: "test", state: "success" }], body: "", author: "octocat", ...patch,
+  } as PullRequest;
+}
+
+function makeSource(): GitSource {
+  git = {
+    workStatus: vi.fn(async () => ({ ...status })),
+    fetch: vi.fn(async () => null),
+    prs: vi.fn(async () => { if (prsFail) throw prsFail; return prs; }),
+    reviewRange: vi.fn(async (target: string) => ({ target, base: "b".repeat(40), head: "c".repeat(40) })),
+    changesBetween: vi.fn(async () => [{ path: "a.ts", status: "modified", additions: 140, deletions: 9 }, { path: "b.ts", status: "added", additions: 2, deletions: 0 }]),
+    commit: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1 }; return null; }),
+    push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
+    pull: vi.fn(async () => null),
+    createPr: vi.fn(async () => { prs = [pr()]; return null; }),
+    readyPr: vi.fn(async () => undefined),
+    mergePr: vi.fn(async () => { prs = [pr({ state: "MERGED" })]; }),
+    conversation: vi.fn(() => ({ read: async () => ({ mergeMethods: { default: "REBASE", merge: true, squash: true, rebase: true } }) })),
+  };
+  return { key: "machine:m1:p1|.", cloud: true, canWrite, errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)), ...git } as unknown as GitSource;
+}
+
+const fileSource = { watch: (listener: (paths: string[] | null) => void) => { watchers.push(listener); return () => {}; } } as unknown as FileSource;
+
+function Harness({ tabs, source }: { tabs: TabEntry[]; source: GitSource }) {
+  const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs, baseRef: null } as unknown as SessionEntry;
+  const branch = useMachineBranch({
+    session, machineName: "Mac mini", backend: { send } as unknown as SessionBackend, gitSource: source, fileSource,
+    remote: "git@github.com:octo/app.git", connected: true, tabId: "t1",
+  });
+  return <div><MachineDiffSize branch={branch} /><MachineBranchButton branch={branch} /></div>;
+}
+
+const idle = [{ id: "t1", status: "completed" }] as TabEntry[];
+function render(tabs: TabEntry[] = idle) {
+  const source = makeSource();
+  const view = renderView(<TooltipProvider delayDuration={0}><Harness tabs={tabs} source={source} /></TooltipProvider>);
+  return {
+    ...view,
+    retab: (next: TabEntry[]) => view.rerender(<TooltipProvider delayDuration={0}><Harness tabs={next} source={source} /></TooltipProvider>),
+  };
+}
+beforeEach(() => {
+  status = { isRepo: true, dirty: false, branch: "feature", upstream: null, ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 2, head: HEAD, conflicted: [], operation: null };
+  prs = [];
+  prsFail = null;
+  canWrite = true;
+  watchers = [];
+  send = vi.fn(async () => ({ accepted: true }));
+  try { localStorage.clear(); } catch { /* none */ }
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+describe("machine session header Git step (PRO-404, 21.08)", () => {
+  it("shows the branch's diff size and Create PR, and opens the PR on the machine after pushing", async () => {
+    // A branch with commits the machine has not pushed yet and no pull request.
+    status = { ...status, upstream: "origin/feature", ahead: 0 };
+    render();
+    expect((await screen.findByTestId("machine-diff-size")).textContent).toContain("+142 −9");
+    expect(git.reviewRange).toHaveBeenCalledWith("origin/main", false);
+    fireEvent.click(await screen.findByRole("button", { name: "Create PR" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((dialog).textContent).toContain("Runs on Mac mini with its Git sign-in.");
+    expect(((within(dialog).getByLabelText("PR title")) as HTMLInputElement).value).toBe("Add read markers to the catalog feed");
+    fireEvent.change(within(dialog).getByLabelText("Description"), { target: { value: "Adds markers." } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
+    await waitFor(() => expect(git.createPr).toHaveBeenCalledWith({ title: "Add read markers to the catalog feed", body: "Adds markers.", base: "main", draft: false, sessionId: "machine:m1:p1:s1" }));
+    // Already on the remote: nothing is pushed again.
+    expect(git.push).not.toHaveBeenCalled();
+    // The PR state follows: the new PR is read back and is ready to merge.
+    expect((await screen.findByRole("button", { name: "Merge" })).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("pushes a branch the machine never pushed before opening its pull request", async () => {
+    render();
+    // Never pushed: Push leads, Create PR is in the menu.
+    expect((await screen.findByRole("button", { name: "Push" })).hasAttribute("disabled")).toBe(false);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Create PR/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
+    await waitFor(() => expect(git.createPr).toHaveBeenCalled());
+    expect(git.push.mock.invocationCallOrder[0]).toBeLessThan(git.createPr.mock.invocationCallOrder[0]);
+  });
+
+  it("commits and pushes on the machine with the message given", async () => {
+    status = { ...status, upstream: "origin/feature", dirty: true };
+    prs = [pr()];
+    render();
+    fireEvent.click(await screen.findByRole("button", { name: "Commit and push" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((dialog).textContent).toContain("on Mac mini, then push to origin");
+    fireEvent.change(within(dialog).getByLabelText("Commit message"), { target: { value: "Add markers" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Commit and push" }));
+    await waitFor(() => expect(git.push).toHaveBeenCalled());
+    expect(git.commit).toHaveBeenCalledWith("Add markers");
+  });
+
+  it("says the commit is safe on the machine when only its push failed", async () => {
+    status = { ...status, upstream: "origin/feature", dirty: true };
+    prs = [pr()];
+    render();
+    git.push.mockRejectedValueOnce(new Error("rejected: fetch first."));
+    fireEvent.click(await screen.findByRole("button", { name: "Commit and push" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Commit message"), { target: { value: "Add markers" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Commit and push" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Committed on Mac mini, but the push failed: rejected: fetch first.");
+    expect(alert.textContent).toContain("Your commit is safe");
+  });
+
+  it("reads the branch again as soon as an agent's own turn ends", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    const view = render([{ id: "t1", status: "in_progress" }] as TabEntry[]);
+    expect((await screen.findByRole("button", { name: "Agent working" })).hasAttribute("disabled")).toBe(true);
+    const reads = git.workStatus.mock.calls.length;
+    status = { ...status, ahead: 1 };
+    view.retab(idle);
+    await waitFor(() => expect(git.workStatus.mock.calls.length).toBeGreaterThan(reads));
+    expect((await screen.findByRole("button", { name: "Push" })).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("asks once before a push publishes from the machine, then pushes directly", async () => {
+    status = { ...status, upstream: "origin/feature", ahead: 1 };
+    prs = [pr()];
+    render();
+    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((dialog).textContent).toContain("Push feature to origin. Runs on Mac mini with its Git sign-in.");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Push" }));
+    await waitFor(() => expect(git.push).toHaveBeenCalledTimes(1));
+    status = { ...status, ahead: 1 };
+    await act(async () => { watchers.forEach((watch) => watch(["a.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
+    fireEvent.click(await screen.findByRole("button", { name: "Push" }));
+    await waitFor(() => expect(git.push).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("merges with the repository's method, pinned to the head it read", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    render();
+    fireEvent.click(await screen.findByRole("button", { name: "Merge" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((dialog).textContent).toContain("Merge #7 into main using rebase.");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(git.mergePr).toHaveBeenCalledWith(7, "rebase", HEAD));
+    // Merged: the button gives way.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Merge" })).toBeNull());
+  });
+
+  it("refuses a merge when the machine's branch moved after the dialog opened", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    render();
+    fireEvent.click(await screen.findByRole("button", { name: "Merge" }));
+    const dialog = await screen.findByRole("dialog");
+    status = { ...status, head: MOVED };
+    prs = [pr({ headSha: MOVED })];
+    fireEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("The branch changed on the machine");
+    expect(git.mergePr).not.toHaveBeenCalled();
+  });
+
+  it("follows the machine's changes live: a file change there re-reads the branch", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    render();
+    await screen.findByRole("button", { name: "Merge" });
+    status = { ...status, dirty: true };
+    git.changesBetween.mockResolvedValue([{ path: "a.ts", status: "modified", additions: 150, deletions: 9 }]);
+    await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
+    expect((await screen.findByRole("button", { name: "Commit and push" })).hasAttribute("disabled")).toBe(false);
+    expect((screen.getByTestId("machine-diff-size")).textContent).toContain("+150 −9");
+  });
+
+  it("sends Fix checks to the agent tab on the machine and waits for it", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr({ mergeState: "UNSTABLE", checks: [{ name: "test", state: "failure" }] })];
+    const view = render();
+    fireEvent.click(await screen.findByRole("button", { name: "Fix checks" }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const [tab, text] = send.mock.calls[0];
+    expect(tab).toBe("t1");
+    expect(text).toContain("failing checks");
+    expect(text).toContain("Do not push, merge a pull request or open a new pull request.");
+    expect((await screen.findByRole("button", { name: "Agent working" })).hasAttribute("disabled")).toBe(true);
+    view.retab([{ id: "t1", status: "in_progress" }] as TabEntry[]);
+    view.retab(idle);
+    expect((await screen.findByRole("status")).textContent).toContain("Agent finished");
+  });
+
+  it("keeps the local steps but offers no Create PR while GitHub cannot be read", async () => {
+    prsFail = new Error("auth_failed");
+    status = { ...status, upstream: "origin/feature", ahead: 1 };
+    render();
+    expect((await screen.findByRole("button", { name: "Push" })).hasAttribute("disabled")).toBe(false);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
+    expect((await screen.findByRole("menuitem", { name: /Create PR/ })).getAttribute("aria-disabled") ?? (await screen.findByRole("menuitem", { name: /Create PR/ })).getAttribute("data-disabled")).toBeTruthy();
+  });
+
+  it("shows the step but runs nothing for a reader who may not write the machine's Git", async () => {
+    canWrite = false;
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    render();
+    expect((await screen.findByRole("button", { name: "Merge" })).hasAttribute("disabled")).toBe(true);
+    // Fetch is a write on git/1: a reader's refresh does not fetch.
+    expect(git.fetch).not.toHaveBeenCalled();
+  });
+});

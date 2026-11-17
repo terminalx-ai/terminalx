@@ -137,6 +137,8 @@ fn classify(text: &str, timed_out: bool) -> Failure {
         "merge conflict",
         "fix conflicts",
         "not mergeable",
+        // `gh pr merge --match-head-commit` when the head moved.
+        "head branch was modified",
         "would be overwritten",
     ]) {
         return Failure::Conflict;
@@ -1157,7 +1159,17 @@ impl WorkspaceGit {
             }
             _ => return Err(RpcError::invalid("method is merge, squash, rebase or queue")),
         };
-        let result = self.gh(&repo, &["pr", "merge", &number, flag], NETWORK_TIMEOUT);
+        // A merge pinned to the head the person saw: GitHub refuses it once the head has moved.
+        let head = match params.get("head") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(head)) if valid_object_id(head) => Some(head.as_str()),
+            Some(_) => return Err(RpcError::invalid("head is a commit id")),
+        };
+        let mut args = vec!["pr", "merge", number.as_str(), flag];
+        if let Some(head) = head {
+            args.extend(["--match-head-commit", head]);
+        }
+        let result = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.
         match (result, self.pr_view(&repo, &number)) {
             (_, Ok(pr)) if pr.state == "MERGED" => Ok(json!({ "repo": repo.name, "pr": pr })),

@@ -425,6 +425,26 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
 }
 
 #[test]
+fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let head = "a".repeat(40);
+    let pr = json!({
+        "number": 8, "title": "Pinned", "url": "https://github.test/octo/repo/pull/8",
+        "state": "OPEN", "headRefName": "feature/p", "baseRefName": "main", "headRefOid": head,
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": []
+    });
+    std::fs::write(f.state.join("pr-8.json"), pr.to_string()).unwrap();
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"not a sha"})), "invalid_params");
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"b".repeat(40)})), "conflict");
+    assert_eq!(f.call("git.prs", json!({"repo":"app","number":8})).unwrap()["prs"][0]["state"], "OPEN");
+    let merged = f.call("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":head})).unwrap();
+    assert_eq!(merged["pr"]["state"], "MERGED");
+    assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")));
+}
+
+#[test]
 fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let f = fixture();
     let remote = f.remote("origin");
