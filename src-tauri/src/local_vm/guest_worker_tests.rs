@@ -193,6 +193,11 @@ fn eof_at_every_receipt_boundary_fences_owner() {
     // A scripted duplex avoids hundreds of threads while exercising Owner's
     // exact send/read/fence path at every partial-receipt byte boundary.
     struct Duplex(Cursor<Vec<u8>>);
+    impl DeadlineIo for Duplex {
+        fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+            time_left(deadline).map(|_| ())
+        }
+    }
     impl Read for Duplex {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             self.0.read(out)
@@ -282,6 +287,11 @@ fn duplicate_dispatch_and_handler_failure_cannot_reenter_effect() {
     let b = binding();
     let req = request(&b);
     struct Duplex(Cursor<Vec<u8>>);
+    impl DeadlineIo for Duplex {
+        fn set_deadline(&mut self, deadline: std::time::Instant) -> std::io::Result<()> {
+            time_left(deadline).map(|_| ())
+        }
+    }
     impl Read for Duplex {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             self.0.read(out)
@@ -440,4 +450,55 @@ fn dispatcher_failure_initiates_shutdown_even_while_owner_descriptors_stay_open(
         .is_err());
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(worker.join().unwrap().is_err());
+}
+
+#[test]
+fn trickled_frame_has_one_deadline_and_fences_late_reply() {
+    let (reader, writer) = pair();
+    assert_trickle_deadline(reader, writer);
+    let (reader, writer) = pair();
+    let (lifetime, _keep_alive) = lifetime_pipe();
+    assert_trickle_deadline(
+        channel::Channel::new(reader.into(), lifetime).unwrap(),
+        writer,
+    );
+}
+
+fn assert_trickle_deadline(reader: impl DeadlineIo, mut writer: UnixStream) {
+    use std::time::{Duration, Instant};
+    let hello = Hello {
+        version: VERSION,
+        binding: binding(),
+    };
+    let bytes = frame(&hello);
+    let sender = std::thread::spawn(move || {
+        for byte in bytes {
+            if writer.write_all(&[byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let mut wire = Wire::new(reader);
+    wire.frame_timeout = Duration::from_millis(100);
+    let start = Instant::now();
+    assert!(wire.receive::<Hello>().is_err());
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(wire.poisoned);
+    assert!(wire.receive::<Hello>().is_err());
+    drop(wire);
+    sender.join().unwrap();
+}
+
+#[test]
+fn blocked_frame_write_is_bounded_and_fenced() {
+    use std::time::{Duration, Instant};
+    let (writer, _unread_peer) = pair();
+    let mut wire = Wire::new(writer);
+    wire.frame_timeout = Duration::from_millis(100);
+    let start = Instant::now();
+    assert!(wire.send(&"x".repeat(MAX_FRAME / 2)).is_err());
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(wire.poisoned);
+    assert!(wire.send(&true).is_err());
 }
