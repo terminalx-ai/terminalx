@@ -2664,8 +2664,8 @@ fn a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge(
     assert_ne!(reviewer.tab_id, "t2");
 
     // Findings go to the new author tab, which fixes them; the fix is reviewed and merged.
-    let addressing = run.reviewer(&reviewed(C1, "fix", HIGH));
-    assert_eq!(addressing.stage, Stage::Address);
+    let addressing = run.reviewer(&reviewed(C1, "changes", HIGH));
+    assert_eq!(addressing.stage, Stage::Address, "{:?} {:?} {:?}", addressing.state, addressing.note, addressing.events.iter().map(|e| (&e.kind, &e.message)).collect::<Vec<_>>());
     assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
     run.host.commit(C2);
     turn_completed(&run.host, "author", "t2", Some(&done("Fixed.")));

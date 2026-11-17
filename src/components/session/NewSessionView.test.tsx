@@ -33,10 +33,12 @@ vi.mock("@/lib/models", async (original) => ({
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 // Settings → Autocorrect is read through the store's subscription, so this one is live.
 const autocorrect = vi.hoisted(() => ({ on: false, listeners: new Set<() => void>() }));
+// The last agent chosen is saved like the app saves it: a pick is the agent once it is the saved one.
+const savedAgent = vi.hoisted(() => ({ lastAgent: "claude" }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: savedAgent.lastAgent, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
   getPrefs: () => ({ autocorrect: autocorrect.on }),
-  setPrefs: vi.fn(),
+  setPrefs: vi.fn((patch: { lastAgent?: string }) => { if (patch.lastAgent) savedAgent.lastAgent = patch.lastAgent; }),
   subscribePrefs: (listener: () => void) => {
     autocorrect.listeners.add(listener);
     return () => autocorrect.listeners.delete(listener);
@@ -76,6 +78,7 @@ const { forgetAgentAccounts } = await import("@/lib/useSessionAgent");
 const created = { id: "session-1", tabs: [{ id: "tab-1" }] } as SessionEntry;
 
 beforeEach(() => {
+  savedAgent.lastAgent = "claude";
   forgetAgentAccounts();
   dragDropListener.mockReset();
   dragDropListener.mockResolvedValue(vi.fn());
