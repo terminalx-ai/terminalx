@@ -6,9 +6,12 @@ import { computer, hostView, pairedMachine } from "./machineFixtures.test-utils"
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  // The opener plugin calls the Tauri internals itself, not @tauri-apps/api/core.
+  openUrl: vi.fn(async (_url: string) => undefined),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, listener: (event: { payload: unknown }) => void) => {
     mocks.listeners.set(name, listener);
@@ -24,7 +27,6 @@ let machines: PairedMachine[];
 let connections: MachineConnectionView[];
 let privacy: boolean;
 let activity: MachineActivityEntry[];
-let opened: string[];
 const CODE = { code: "txm2.eyJ2IjoyfQ", expiresAt: Date.now() + 300_000 };
 const MINI = "cs1uhCLEB_ttCYaQ";
 const STUDIO = "dYd7tB05O1-4RVzm";
@@ -36,7 +38,7 @@ beforeEach(async () => {
   mocks.listeners.clear();
   privacy = false;
   activity = [];
-  opened = [];
+  mocks.openUrl.mockClear();
   view = hostView({ allowOperating: false }, { machineId: MINI, computers: [computer({ keyId: STUDIO, route: "lan" })] });
   machines = [
     pairedMachine(),
@@ -70,10 +72,6 @@ beforeEach(async () => {
     }
     if (command === "machines_account_list") return { signedIn: false };
     if (command === "machines_activity") return activity;
-    if (command === "plugin:opener|open_url") {
-      opened.push(String(args.url));
-      return null;
-    }
     if (command === "machines_disconnect" || command === "machines_let_back") {
       const held = command === "machines_disconnect" ? Date.now() : null;
       view = { ...view, status: { ...view.status!, computers: view.status!.computers.map((one) => (one.id === args.id ? { ...one, connected: false, route: null, disconnectedAt: held } : one)) } };
@@ -107,7 +105,7 @@ describe("Settings → Machines with no machine paired (PRO-360)", () => {
     expect(screen.getAllByRole("button", { name: "Add a machine" })).toHaveLength(1);
     fireEvent.click(within(firstRun).getByRole("button", { name: "Machines guide" }));
     const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
-    await waitFor(() => expect(opened).toEqual([MACHINES_GUIDE_URL]));
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
     expect(MACHINES_GUIDE_URL).toMatch(/\/blob\/main\/docs\/MACHINES-GUIDE\.md$/);
   });
 
@@ -116,7 +114,8 @@ describe("Settings → Machines with no machine paired (PRO-360)", () => {
     await card("Mac mini");
     expect(screen.queryByTestId("machines-first-run")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Machines guide" }));
-    await waitFor(() => expect(opened).toHaveLength(1));
+    const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
   });
 });
 
