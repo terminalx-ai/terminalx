@@ -40,7 +40,8 @@ import { useAccount } from "@/lib/account";
 import { refreshCloudWorkspaces } from "@/lib/cloudCatalog";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
-import { cloudSessionMark, useCloudDashboard } from "@/lib/cloudDashboard";
+import { cloudSessionMark, openCloudSession, useCloudDashboard, type CloudDashboardTab } from "@/lib/cloudDashboard";
+import { cloudTabRows } from "@/lib/cloudSessionTabs";
 import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import {
@@ -63,6 +64,9 @@ import { getSessionStore, selectCloudSession, selectCloudWorkspace, openWelcome,
 import { cn } from "@/lib/cn";
 import { parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 import type { TabStatus } from "@/types/session";
+import { useTerminals } from "@/lib/terminal";
+import { useVisibleSessionTab } from "@/lib/visibleTab";
+import { CloudSessionTabRows } from "./CloudSessionTabRows";
 import { RowTime } from "../SidebarRows";
 import { useFold } from "../useFold";
 
@@ -426,7 +430,9 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions, fl
   const activity = useWorkspaceActivity(node, every, !known || every.every((row) => row.source !== "live"));
   // Each session's mark as the Dashboard shows it: the live tabs while connected, else the server's list.
   const dashboard = useCloudDashboard();
-  const marks = useMemo(() => new Map(dashboard.filter((session) => session.orgId === node.item.workspace.orgId && session.workspaceId === node.item.workspace.id).map((session) => [session.key, cloudSessionMark(session)])), [dashboard, node.item.workspace.orgId, node.item.workspace.id]);
+  // The tab rows under a session read their statuses from the same projection (#1172).
+  const projected = useMemo(() => new Map(dashboard.filter((session) => session.orgId === node.item.workspace.orgId && session.workspaceId === node.item.workspace.id).map((session) => [session.key, session])), [dashboard, node.item.workspace.orgId, node.item.workspace.id]);
+  const marks = useMemo(() => new Map([...projected].map(([key, session]) => [key, cloudSessionMark(session)])), [projected]);
   const connection = useCloudConnection(node.key);
   // What this desktop may do here: the attach result's authority once it has
   // connected, else what the list says opening would grant. A participant is
@@ -439,7 +445,7 @@ export function WorkspaceRows({ node, named, open, onLifecycle, extraActions, fl
   const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
-  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} node={node} activity={activity} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
+  const sessionRow = (row: CloudSessionRow) => <CloudSessionItem key={row.key} row={row} node={node} activity={activity} status={marks.get(row.key) ?? cloudSessionStatus(row)} projectedTabs={projected.get(row.key)?.tabs ?? null} manage={manage} canSetStatus={!!capabilities?.includes("session-status/1")} selected={store.selectedSessionId === row.key} />;
   const rows = (
     <>
       {sidebarLayout === "status" ? <StatusGroups sessions={sessions} scope={node.key}>{sessionRow}</StatusGroups> : sessions.map(sessionRow)}
@@ -542,8 +548,12 @@ function CloudSessionOwner({ node }: { node: CloudWorkspaceNode }) {
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, selected }: { row: CloudSessionRow; node: CloudWorkspaceNode; activity: CloudActivity; status: TabStatus; manage: boolean; canSetStatus: boolean; selected: boolean }) {
+function CloudSessionItem({ row, node, activity, status, projectedTabs, manage, canSetStatus, selected }: { row: CloudSessionRow; node: CloudWorkspaceNode; activity: CloudActivity; status: TabStatus; projectedTabs: readonly CloudDashboardTab[] | null; manage: boolean; canSetStatus: boolean; selected: boolean }) {
   const statusDescriptionId = useId();
+  // Every agent tab of the session, listed under its row when it holds two or more (#1172).
+  const shown = useVisibleSessionTab(row.key);
+  const asked = useTerminals().selected[row.key];
+  const tabRows = useMemo(() => cloudTabRows(row, { projected: projectedTabs, shown, asked }), [row, projectedTabs, shown, asked]);
   const rowStatus = detailedStatus(row.rowStatus ?? { tabs: [{ status }] });
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
@@ -670,6 +680,7 @@ function CloudSessionItem({ row, node, activity, status, manage, canSetStatus, s
           </RowActions>
         )}
       </div>
+      <CloudSessionTabRows sessionTitle={row.title} tabs={tabRows} sessionSelected={selected} onOpen={(tabId) => openCloudSession(row.key, tabId)} />
       {error && <p className="ml-2 text-[10px] text-destructive">{error}</p>}
     </li>
   );
