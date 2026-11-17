@@ -57,6 +57,49 @@ function session(id: string, patch: Partial<SessionEntry> = {}): SessionEntry {
 const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelector("[data-session-title]")?.textContent);
 const openMenu = (name: string) => fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false, pointerType: "mouse" });
 const closeMenu = () => fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+it("updates live cards and counts across team views, with waiting taking priority", () => {
+  const first = session("First");
+  const second = session("Second");
+  state.sessions = [first, second];
+  const view = render(<AgentDashboard />);
+  const column = (name: string) => within(screen.getByRole("region", { name }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+  expect(column("Working").getByText("First")).toBeTruthy();
+  expect(column("Working").getByText("Second")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /^Active now0/ }));
+  expect(column("Working").getByText(/current view/)).toBeTruthy();
+  fireEvent.click(column("Working").getByRole("button", { name: "Show all sessions" }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+  state.sessions = [{ ...first, tabs: [{ ...first.tabs[0], status: "completed" }] }, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Working").getByText("1")).toBeTruthy();
+  expect(column("Done").getByText("First")).toBeTruthy();
+  state.sessions = [{ ...first, tabs: [{ ...first.tabs[0], status: "in_progress" }, { ...first.tabs[0], id: "waiting", status: "waiting" }] }, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Needs you").getByText("First")).toBeTruthy();
+  expect(column("Working").queryByText("First")).toBeNull();
+  state.sessions = [first, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Working").getByText("2")).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "missing" } });
+  fireEvent.click(column("Working").getByRole("button", { name: "Show all sessions" }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+});
+
+it("moves completed background work out of Working when the activity clears", () => {
+  const active = session("Active");
+  const background = session("Background", { tabs: [{ ...active.tabs[0], id: "background", status: "completed" }], rowStatus: { tabs: [{ status: "completed", activity: "background" }] } });
+  state.sessions = [active, background];
+  const view = render(<AgentDashboard />);
+  const working = () => within(screen.getByRole("region", { name: "Working" }));
+  expect(working().getByText("2")).toBeTruthy();
+  expect(working().getByText("Background")).toBeTruthy();
+  state.sessions = [active, { ...background, rowStatus: { tabs: [{ status: "completed" }] } }];
+  view.rerender(<AgentDashboard />);
+  expect(working().getByText("1")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Done" })).getByText("Background")).toBeTruthy();
+});
 /** The view lives in the Display menu (02.15). */
 async function showView(name: "Table" | "Board") {
   openMenu("Display");

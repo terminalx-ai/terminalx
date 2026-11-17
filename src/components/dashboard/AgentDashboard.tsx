@@ -160,6 +160,14 @@ export function AgentDashboard() {
     [sessions, query, pathFilters, projectName],
   );
   const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const scoped = !!query.trim() || hasFilters(filters) || preferences.owners.length > 0 || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only";
+  const clearScope = () => {
+    setQuery("");
+    setFilters({ ...NO_FILTERS, automations: "show", archived: "show" });
+    setPreferences({ ...preferences, owners: [] });
+    setPlace("all");
+    team.clearScope();
+  };
   const filtered = team.rows;
   const buckets = useMemo(() => ({
     ...bucketSessions(filtered),
@@ -402,7 +410,7 @@ export function AgentDashboard() {
       ) : <div className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-thin px-4 pt-3 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
         <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {boardColumns.map((c) => (
-            <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
+            <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading} clearScope={c.id === "working" && scoped ? clearScope : undefined}>
               {shown[c.id].map((s) =>
                 isMachineDashboardSession(s) ? (
                   <MachineAgentCard
@@ -498,12 +506,14 @@ function Column({
   count,
   loading,
   children,
+  clearScope,
 }: {
   id: DashboardState;
   label: string;
   count: number;
   loading: boolean;
   children: ReactNode;
+  clearScope?: () => void;
 }) {
   const empty = count === 0 && !loading;
   return (
@@ -531,7 +541,7 @@ function Column({
             <AgentCardSkeleton />
           </>
         ) : empty ? (
-          <div className="rounded-lg px-2 py-3 text-[12px] text-faint">{EMPTY[id]}</div>
+          <div className="rounded-lg px-2 py-3 text-[12px] text-faint">{clearScope ? <>No running sessions in the current view. <button type="button" className="underline" onClick={clearScope}>Show all sessions</button></> : EMPTY[id]}</div>
         ) : (
           children
         )}
