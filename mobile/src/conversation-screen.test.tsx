@@ -1096,7 +1096,12 @@ describe("the phone's terminal view, as on the desktop", () => {
     await vi.waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
     expect(mocks.app.api.subscribeTerminal).not.toHaveBeenCalled();
     expect(button("Escape").disabled).toBe(true);
+    let finish!: (value: { opened: boolean }) => void;
+    mocks.app.api.openTerminal.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await click("Try again");
+    expect(container.textContent).toContain("Opening…");
+    expect(container.textContent).not.toContain("Wait for Codex to finish this turn");
+    await act(async () => finish({ opened: true }));
     await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
     expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
   });
