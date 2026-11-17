@@ -7,6 +7,7 @@ import { observationsBody, preparationPrompt, type PreparationRepository } from 
 import { PREPARATION_LIMIT_MINUTES, PreparationError, machineSentence, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
 import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, retryEnvironmentRun, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
 import { formatMicros, providerLabel } from "@/lib/organizationCompute";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { checkSummary, environmentErrorMessage, organizationEnvironment, type EnvironmentStatus } from "@/lib/organizationEnvironment";
 import { RecipeDetails } from "./EnvironmentRecipes";
 
@@ -55,6 +56,8 @@ type Stage = { kind: "idle" } | { kind: "offering" } | { kind: "confirm"; offer:
  * Saving it changes nothing: applying and building stay their own presses.
  */
 export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved }: { status: EnvironmentStatus; organizationId: string | null; onSaved: () => void }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const provider = status.provider as CloudWorkspaceProviderId;
   const [local, setStage] = useState<Stage>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);

@@ -2,7 +2,7 @@ import { noteChangesCount } from "@/lib/panelMarks";
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { openConflict, openDiff, useEditors } from "@/lib/editors";
+import { openConflict, openDiff, openReviewStack, useEditors } from "@/lib/editors";
 import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
@@ -211,16 +211,17 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   };
   // Turn, checkpoint and commit scopes are fixed snapshots; All and Uncommitted are live comparisons a tab can refresh.
   const fixed = choice.scope === "turn" || choice.scope === "checkpoint" || choice.scope === "commit";
-  const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, fixed
-    ? { scope: "turn", range, oldPath: file.oldPath, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
-    : { scope: "all", range, oldPath: file.oldPath, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
+  // A file opens the scope's one review tab, which stacks every changed file (PRO-392); the panel stays as it is.
+  const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openReviewStack(editor.sessionId, editor.root, file.path, fixed
+    ? { scope: "turn", range, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
+    : { scope: "all", range, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
   // A Checks row whose file this list does not have yet: read All changes, then open the file (PRO-234).
   useEffect(() => onThreadJumpFallback(source.key, async (thread) => {
     const all = await source.reviewRange(choice.target, false);
     const file = threadFile(await source.changesBetween(all.base, all.head, hideWhitespace), thread);
     if (!file) return false;
     if (editor) {
-      openDiff(editor.sessionId, editor.root, file.path, { scope: "all", range: { base: all.base, head: all.head }, oldPath: file.oldPath, target: choice.target, uncommitted: false });
+      openReviewStack(editor.sessionId, editor.root, file.path, { scope: "all", range: { base: all.base, head: all.head }, target: choice.target, uncommitted: false });
       return true;
     }
     // Here the list itself shows the diff: it opens the file once All changes has loaded it.

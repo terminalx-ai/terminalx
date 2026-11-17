@@ -50,7 +50,7 @@ pub(crate) fn supported(command: &str) -> bool {
          | "floating.show" | "floating.hide" | "floating.toggle"
          | "perf.terminal.start" | "perf.terminal.poll" | "window.terminalCounters"
          | "window.open" | "window.quit" | "window.stopAllAndQuit"
-    )
+    ) || crate::machine_control::supported(command)
 }
 
 fn unavailable(message: impl Into<String>) -> ControlError {
@@ -163,6 +163,7 @@ impl Registry {
         let result = (|| -> anyhow::Result<ControlResponse> {
             let mut socket = UnixStream::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
+                .or_else(|| command.strip_prefix("machine.").map(|action| crate::machine_control::timeout_for(action,&params)+Duration::from_secs(15)))
                 .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });
             socket.set_read_timeout(Some(timeout))?;
             socket.set_write_timeout(Some(Duration::from_secs(5)))?;
