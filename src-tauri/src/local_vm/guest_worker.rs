@@ -476,9 +476,7 @@ impl DeadlineIo for std::os::unix::net::UnixStream {
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) =>
-                {
-                    ()
-                }
+                {}
                 result => return result,
             }
         }
@@ -497,9 +495,7 @@ impl DeadlineIo for std::os::unix::net::UnixStream {
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) =>
-                {
-                    ()
-                }
+                {}
                 result => return result,
             }
         }
