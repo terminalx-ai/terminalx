@@ -11,6 +11,31 @@ beforeEach(() => orchestratorRuns(false));
 afterEach(() => orchestratorRuns(false));
 
 describe("settings row search", () => {
+  it("uses Appearance for the current section, not as a legacy alias for General", () => {
+    const matches = searchSettings("appearance");
+    expect(matches.map((match) => match.id)).toEqual(expect.arrayContaining(["appearance.theme", "appearance.mode"]));
+    expect(matches.every((match) => match.section === "appearance")).toBe(true);
+  });
+
+  it.each([
+    ["font size", "general.textSize"],
+    ["zoom", "general.textSize"],
+    ["transcript layout", "general.transcriptLayout"],
+    ["reorder", "general.customOrder"],
+    ["tab bar", "general.tabBar"],
+    ["sessions on a branch", "general.branchSessions"],
+    ["usage", "general.openUsage"],
+    ["status bar", "general.statusBar"],
+    ["usage", "general.usage"],
+    ["resources", "general.resources"],
+    ["usage display", "general.usageDisplay"],
+    ["auto-refresh", "general.usageRefresh"],
+  ])("still finds %s in General after removing the old section alias (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "general", sectionTitle: "General" }),
+    ]));
+  });
+
   it("ranks a title match ahead of a description match ahead of a search term", () => {
     // "When quitting TerminalX" (title), "When a session warns…" (description), and "when" as a search term.
     const ids = searchSettings("when").map((match) => match.id);
