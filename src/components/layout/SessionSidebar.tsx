@@ -552,6 +552,7 @@ export function PinnedGroup({ sessions, selectedId, showArchived, children }: { 
   const [expanded, toggle] = useFold("pinned", true);
   const { sidebarSort } = usePrefs();
   const order = useSidebarOrder();
+  const { sections } = useLocalSections();
   if (!sessions.length) return null;
   const ordered = orderConversations(sessions, selectedId, showArchived, sidebarSort, order);
   return (
@@ -559,7 +560,7 @@ export function PinnedGroup({ sessions, selectedId, showArchived, children }: { 
       <GroupHeader icon={<Pin className="size-3.5 text-muted-foreground" />} name="Pinned" count={sessions.length} open={expanded} onToggle={toggle} />
       {expanded && (
         <ul className="flex flex-col [--indent:10px]">
-          <SidebarSortList items={ordered.map((session) => ({ id: session.id, name: conversationTitle(session) }))}>{ordered.map(children)}</SidebarSortList>
+          <SidebarSortList items={ordered.map((session) => ({ id: session.id, name: conversationTitle(session), pinned: true, section: sections.find((section) => section.sessions.includes(session.id))?.id ?? null }))}>{ordered.map(children)}</SidebarSortList>
         </ul>
       )}
     </section>
