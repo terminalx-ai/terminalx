@@ -1041,14 +1041,17 @@ as a user service and is paired from its own terminal. The user's guide is
   witness's pid from the kernel (`SO_PEERCRED`, `LOCAL_PEERPID`), challenges it
   with the nonce, and refuses (`person_required`) the runtime itself, any
   process it started, one whose controlling terminal is one of its terminals,
-  and, on a runtime with no window, one with no controlling terminal. The
-  window's client sends a witness too. `pair` also refuses when its input or
-  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known
-  limits: a same-user process that detaches and opens a pseudo-terminal of its
-  own looks like a person anywhere; and on a desktop-launched runtime, which
-  must let the terminal-less window through, a process that detaches with
-  `setsid` and has no terminal is let through too, until the runtime can
-  recognise the window process itself (PRO-369).
+  and one with no controlling terminal: on a runtime with no window always;
+  on a runtime the desktop launched on a Mac, unless it proves it is the
+  window (PRO-369). The window's client sends a witness too, with a MAC of the
+  witness socket and nonce under a key derived from the machine's host key,
+  which only the window (its Keychain item) and the runtime (the copy the
+  window handed over) hold. `pair` also refuses when its input or output is
+  not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known limits: a
+  same-user process that detaches and opens a pseudo-terminal of its own
+  looks like a person anywhere; and a desktop-launched runtime that keeps its
+  own host key (not on a Mac) holds nothing only the window knows, so there a
+  process that detaches with `setsid` and has no terminal is let through.
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
@@ -1889,10 +1892,12 @@ which runs in a child process because data privacy is one switch per process.
 - **A shell on the operating computer can remove a machine** by editing
   `machines.json` or the Keychain. That loses this computer's own access and
   gains nothing, so no integrity key guards it.
-- **Consent cannot yet tell the window from a detached process** of the same
-  user on a desktop runtime (`serve_cli::consent`); recognising the window is
-  PRO-369. A same-user process that opens a pseudo-terminal of its own to run
-  `terminalx-serve pair` also passes.
+- **Consent tells the window from a detached process only on a Mac**
+  (`serve_cli::consent`, PRO-369): there the window proves it holds the host
+  key in its Keychain item. A desktop-launched runtime elsewhere keeps its own
+  key and lets a detached process with no terminal through. A same-user
+  process that opens a pseudo-terminal of its own to run
+  `terminalx-serve pair` passes anywhere.
 - **A computer on a runtime before PRO-357** does not rotate its token (it
   does not ask for `machine/5`). Its token still expires after 90 days unused.
 - **Whoever holds a computer's client key and token is that computer.** With
@@ -2469,8 +2474,8 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   desktop, agents and sign-in, the account route and the command line have
   their own tests but no two-machine scenario.
 - **Security review (PRO-357).** Every threat has a mitigation and a test, or
-  is an accepted risk above. The one open finding has a ticket: PRO-369
-  (telling the window from a detached process during consent), in Backlog.
+  is an accepted risk above. The one open finding, telling the window from a
+  detached process during consent, is closed on a Mac by PRO-369.
   The agent control changed in PRO-360 (pairing instead of the switch) by the
   owner's decision.
 - **Still open in the epic:** PRO-368 (relay registration for a signed-in
