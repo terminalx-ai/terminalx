@@ -216,17 +216,13 @@ function OrganizationSection({
   // The organization's row says it is the cloud and how many of its workspaces run; the tooltip has the limit where
   // the organization has one (PRO-371: only the count where it has none).
   const note = usage ? (
-    <WithTooltip label={usage.card.replace(/\n/g, " · ")}>
-      <span
-        role="note"
-        aria-label={`${usage.label}. ${usage.card}`}
-        className={cn("block min-w-0 truncate", usage.atLimit && "text-warning")}
-        data-testid="cloud-org-quota"
-        data-at-limit={usage.atLimit || undefined}
-      >
-        cloud · {usage.used} running
-      </span>
-    </WithTooltip>
+    <span
+      className={cn("block min-w-0 truncate", usage.atLimit && "text-warning")}
+      data-testid="cloud-org-quota"
+      data-at-limit={usage.atLimit || undefined}
+    >
+      cloud · {usage.used} running
+    </span>
   ) : "cloud";
 
   const actions = (
@@ -346,6 +342,7 @@ function OrganizationSection({
       label={name}
       mark={<OrgMark name={name} />}
       note={note}
+      description={usage?.card.replace(/\n/g, " · ")}
       title={temporary ? "Shown while selected; your sidebar preference is unchanged" : org.isPersonal ? `${org.name} (personal)` : org.name}
       forceOpen={temporary}
       actions={actions}
