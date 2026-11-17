@@ -211,8 +211,10 @@ async fn a_credential_rotates_on_each_connection() {
 
     // The answer was lost: the computer comes back with the token it has,
     // and the one it never kept stops working.
+    let hello = again.call("hello", "rpc.hello", hello(&["machine/1", "machine/5"])).await;
+    assert!(hello["ok"].as_bool().unwrap_or(false), "{hello}");
     let lost = again.call("rotate", "machine.rotateCredential", json!({})).await;
-    let lost = lost["result"]["deviceToken"].as_str().unwrap().to_string();
+    let lost = lost["result"]["deviceToken"].as_str().unwrap_or_else(|| panic!("a second fresh token: {lost}")).to_string();
     let mut kept = ask(&rig, [5; 32], &new).await;
     assert_eq!(kept.answer(Duration::from_secs(5)).await, Answer::In, "a lost answer locks nothing out");
     let mut unused = ask(&rig, [5; 32], &lost).await;
