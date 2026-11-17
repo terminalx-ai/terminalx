@@ -1004,17 +1004,59 @@ fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout:
 pub(crate) fn rollback_created_worktree(project: &Path, worktree: &CreatedWorktree, expected: &str, snapshot: Option<&str>) -> Result<()> {
     let path = Path::new(&worktree.path);
     let snapshot = snapshot.context("worktree contains changes not owned by the fork; it was kept")?;
-    if fork_worktree_snapshot(path)? != snapshot { bail!("worktree changes were added or modified; it was kept"); }
+    if fork_worktree_snapshot(path, worktree.worktree_base.as_ref().and_then(|base| base.file_copy.as_ref()).map(|report| report.copied_files.as_slice()).unwrap_or_default())? != snapshot { bail!("worktree changes were added or modified; it was kept"); }
     rollback_new_worktree(project, path, &worktree.branch, expected, true)
 }
 
-/// Capture the index and tracked changes. Untracked and ignored files are
-/// never considered owned: retaining the workspace is safer than deleting them.
-pub(crate) fn fork_worktree_snapshot(path: &Path) -> Result<String> {
-    let status = run(path, &["status", "--porcelain=v1", "--untracked-files=all", "--ignored"])?;
-    if status.lines().any(|line| line.starts_with("??") || line.starts_with("!!")) {
-        bail!("worktree contains untracked or ignored files; it was kept");
+/// Capture tracked changes while accepting only the exact files that the
+/// creation copy published and that have not since been changed.
+pub(crate) fn fork_worktree_snapshot(path: &Path, copied: &[crate::worktree_files::CopiedFile]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let untracked = run(path, &["ls-files", "--others", "-z"])?;
+    let actual: std::collections::BTreeSet<_> = untracked.split('\0').filter(|name| !name.is_empty()).collect();
+    let expected: std::collections::BTreeSet<_> = copied.iter().map(|file| file.path.as_str()).collect();
+    if actual != expected { bail!("worktree contains untracked or ignored files; it was kept"); }
+    for file in copied {
+        let relative = Path::new(&file.path);
+        let mut current = path.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            let metadata = std::fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink() { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if !metadata.is_file() { bail!("copied file {} was replaced; worktree was kept", file.path); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if (metadata.dev(), metadata.ino()) != file.identity { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            if metadata.permissions().mode() & 0o7777 != file.mode { bail!("copied file {} permissions changed; worktree was kept", file.path); }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if (metadata.creation_time(), 0) != file.identity || metadata.file_attributes() != file.mode {
+                bail!("copied file {} metadata changed; worktree was kept", file.path);
+            }
+        }
+        let mut input = std::fs::File::open(&current)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 16384];
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 { break; }
+            hash.update(&buffer[..count]);
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        if digest != file.digest { bail!("copied file {} changed; worktree was kept", file.path); }
     }
+    let status = run(path, &["status", "--porcelain=v1", "--untracked-files=no"])?;
     let staged = run(path, &["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
     let unstaged = run(path, &["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
     if status.is_empty() { return Ok(String::new()); }
@@ -1022,7 +1064,7 @@ pub(crate) fn fork_worktree_snapshot(path: &Path) -> Result<String> {
 }
 
 fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &str, verified: bool) -> Result<()> {
-    if !verified && !fork_worktree_snapshot(path)?.is_empty() { bail!("worktree contains changes; it was kept"); }
+    if !verified && !fork_worktree_snapshot(path, &[])?.is_empty() { bail!("worktree contains changes; it was kept"); }
     if !is_worktree_of(project, path) { bail!("{} is no longer this repository's worktree", path.display()); }
     let actual_branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if actual_branch.trim() != branch { bail!("{} no longer has branch {branch}", path.display()); }

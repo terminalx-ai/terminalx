@@ -59,7 +59,8 @@ impl ForkAllocation {
     }
 
     pub fn worktree(&mut self, project: &Path, worktree: git::CreatedWorktree, created_commit: String) {
-        let snapshot = git::fork_worktree_snapshot(Path::new(&worktree.path)).ok().filter(|snapshot| snapshot.is_empty());
+        let copied = worktree.worktree_base.as_ref().and_then(|base| base.file_copy.as_ref()).map(|report| report.copied_files.as_slice()).unwrap_or_default();
+        let snapshot = git::fork_worktree_snapshot(Path::new(&worktree.path), copied).ok().filter(|snapshot| snapshot.is_empty());
         self.worktree = Some((project.to_owned(), worktree, created_commit, snapshot));
     }
 
@@ -68,7 +69,8 @@ impl ForkAllocation {
     pub fn checkpoint(&mut self, tree: &str, index: &str, checkout: impl FnOnce() -> Result<()>) -> Result<()> {
         let Some((_, wt, _, expected)) = &mut self.worktree else { return checkout(); };
         let path = Path::new(&wt.path);
-        let before = git::fork_worktree_snapshot(path)?;
+        let copied = wt.worktree_base.as_ref().and_then(|base| base.file_copy.as_ref()).map(|report| report.copied_files.as_slice()).unwrap_or_default();
+        let before = git::fork_worktree_snapshot(path, copied)?;
         if expected.as_ref() != Some(&before) { anyhow::bail!("The new worktree contains other changes; its files were kept."); }
         let result = checkout();
         // A failed checkout may have made partial changes, which are not safe
@@ -81,7 +83,7 @@ impl ForkAllocation {
             .context("worktree changed during checkpoint checkout")?;
         let actual_index = git::run(path, &["write-tree"])?;
         anyhow::ensure!(actual_index.trim() == index, "index changed during checkpoint checkout");
-        *expected = Some(git::fork_worktree_snapshot(path)?);
+        *expected = Some(git::fork_worktree_snapshot(path, copied)?);
         Ok(())
     }
 
@@ -188,6 +190,77 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&original_log).unwrap(), "source transcript");
             assert_eq!(std::fs::read_to_string(repo.path().join("source")).unwrap(), "original");
             assert!(git::branch_exists(repo.path(), "main"));
+        }
+    }
+
+    #[test]
+    fn copied_ignored_files_allow_checkpoint_and_persistence_rollback() {
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join(".git/info/exclude"), ".env\n").unwrap();
+        std::fs::write(repo.path().join(".worktreeinclude"), ".env\n").unwrap();
+        std::fs::write(repo.path().join(".env"), "private source").unwrap();
+        std::fs::write(repo.path().join("source"), "checkpoint").unwrap();
+        git::run(repo.path(), &["add", "source"]).unwrap();
+        let tree = git::run(repo.path(), &["write-tree"]).unwrap().trim().to_string();
+        git::run(repo.path(), &["reset", "--hard", "HEAD"]).unwrap();
+        for stage in 0..=2 {
+            let (wt, commit) = git::create_fork_worktree(repo.path(), "copy-test", Some("main")).unwrap();
+            let path = PathBuf::from(&wt.path);
+            let branch = wt.branch.clone();
+            let report = wt.worktree_base.as_ref().unwrap().file_copy.as_ref().unwrap();
+            assert_eq!(report.copied_files.len(), 1);
+            assert!(serde_json::to_value(report).unwrap().get("copiedFiles").is_none());
+            assert_eq!(std::fs::read_to_string(path.join(".env")).unwrap(), "private source");
+            let mut allocation = ForkAllocation::default();
+            allocation.worktree(repo.path(), wt, commit);
+            allocation.checkpoint(&tree, &tree, || crate::checkpoints::check_out_turn(path.to_str().unwrap(), &tree, &tree)).unwrap();
+            assert_eq!(std::fs::read_to_string(path.join("source")).unwrap(), "checkpoint");
+            let mut writes = 0;
+            let native = state.path().join("native");
+            let session = state.path().join("session");
+            let error = allocation.conversation_with(&native, b"native", &session, "tab", b"log", |allocation, path, bytes| {
+                allocation.write(path, bytes)?;
+                let current = writes;
+                writes += 1;
+                if current == stage { anyhow::bail!("injected failure"); }
+                Ok(())
+            }).and_then(|_| if stage == 2 { anyhow::bail!("injected index failure") } else { Ok(()) }).unwrap_err();
+            let error = allocation.rollback(format!("{error:#}"));
+            assert!(!error.contains("cleanup failed"), "{error}");
+            assert!(!path.exists() && !git::branch_exists(repo.path(), &branch));
+            assert!(!native.exists() && !session.exists());
+            assert_eq!(std::fs::read_to_string(repo.path().join(".env")).unwrap(), "private source");
+        }
+    }
+
+    #[test]
+    fn copied_files_modified_or_extra_files_are_preserved() {
+        let _home = crate::store::temp_home();
+        let repo = repo();
+        std::fs::write(repo.path().join(".git/info/exclude"), ".env\nother\n").unwrap();
+        std::fs::write(repo.path().join(".worktreeinclude"), ".env\n").unwrap();
+        std::fs::write(repo.path().join(".env"), "original").unwrap();
+        for kind in ["modified", "extra", "removed", "replaced"] {
+            if kind == "replaced" && !cfg!(any(unix, windows)) { continue; }
+            let (wt, commit) = git::create_fork_worktree(repo.path(), kind, Some("main")).unwrap();
+            let path = PathBuf::from(&wt.path);
+            let mut allocation = ForkAllocation::default();
+            allocation.worktree(repo.path(), wt, commit);
+            match kind {
+                "modified" => std::fs::write(path.join(".env"), "new work").unwrap(),
+                "extra" => std::fs::write(path.join("other"), "new work").unwrap(),
+                "replaced" => {
+                    std::fs::rename(path.join(".env"), path.join("old-copy")).unwrap();
+                    std::fs::write(path.join(".env"), "original").unwrap();
+                    std::fs::remove_file(path.join("old-copy")).unwrap();
+                }
+                _ => std::fs::remove_file(path.join(".env")).unwrap(),
+            }
+            let error = allocation.rollback("index failed".into());
+            assert!(error.contains("cleanup failed"), "{error}");
+            assert!(path.exists());
         }
     }
 
