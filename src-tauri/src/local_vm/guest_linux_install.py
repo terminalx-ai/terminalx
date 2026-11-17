@@ -199,7 +199,7 @@ def open_sealed(expected):
     fd = os.open(SEALED, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == SEALED_OWNER and not info.st_mode & 0o222,
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == SEALED_OWNER and stat.S_IMODE(info.st_mode) == 0o555,
                 "Sealed runtime is not a root-owned read-only file")
         hasher = hashlib.sha256()
         while True:

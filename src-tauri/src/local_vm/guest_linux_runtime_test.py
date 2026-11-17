@@ -96,6 +96,14 @@ class SealedRuntime(unittest.TestCase):
             self.rpc()
         self.assertEqual(self.executed, [])
 
+    def test_setid_sealed_runtime_is_refused_before_the_key_is_read(self):
+        self.seal_input()
+        for mode in (0o4555, 0o2555, 0o1555):
+            os.chmod(SEALED, mode)
+            with self.assertRaises(ValueError):
+                self.rpc()
+        self.assertEqual(self.executed, [])
+
     def test_rpc_account_refusal_leaves_the_key_unread_and_closes_the_runtime(self):
         self.seal_input()
         opened = []
@@ -295,5 +303,167 @@ class OwnerRootBoundary(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         locked_owner_login()
+
+class WorkerBootstrapFixtures(unittest.TestCase):
+    def test_worker_descriptor_collisions_and_clean_identity(self):
+        import contextlib
+        import itertools
+        for sources in itertools.permutations(range(5), 3):
+            table = {fd: ("unrelated", False) for fd in range(10)}
+            for fd, name in zip(sources, ("sealed", "channel", "lifetime-read")):
+                table[fd] = (name, False)
+            table[20] = ("lifetime-write", False)
+            calls = []
+            def duplicate(fd, operation, minimum):
+                self.assertEqual(operation, fcntl.F_DUPFD_CLOEXEC)
+                dest = minimum
+                while dest in table:
+                    dest += 1
+                table[dest] = (table[fd][0], False)
+                return dest
+            def dup2(source, dest, inheritable):
+                table[dest] = (table[source][0], inheritable)
+            def execute(fd, argv, env):
+                self.assertEqual(table, {0: ("null", True), 1: ("null", True),
+                    2: ("null", True), 3: ("channel", True), 4: ("lifetime-read", True),
+                    fd: ("sealed", False)})
+                self.assertGreater(fd, 4)
+                self.assertEqual(argv, [str(SEALED), "local-vm-worker"])
+                self.assertEqual(env, {"HOME": "/home/cua", "USER": "cua", "LOGNAME": "cua",
+                    "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
+                raise SystemExit()
+            def open_null(path, flags):
+                self.assertEqual(path, "/dev/null")
+                table[30] = ("null", False)
+                return 30
+            patches = [
+                mock.patch.object(fcntl, "fcntl", side_effect=duplicate),
+                mock.patch.object(os, "open", side_effect=open_null),
+                mock.patch.object(os, "fstat", return_value=types.SimpleNamespace(st_mode=stat.S_IFCHR, st_rdev=os.makedev(1, 3))),
+                mock.patch.object(os, "dup2", side_effect=dup2),
+                mock.patch.object(os, "listdir", side_effect=lambda path: list(map(str, table))),
+                mock.patch.object(os, "close", side_effect=lambda fd: table.pop(fd)),
+                mock.patch.dict(globals(), drop_worker_privileges=lambda entry: calls.append("dropped")),
+                mock.patch.object(os, "getuid", return_value=1000),
+                mock.patch.object(os, "geteuid", return_value=1000),
+                mock.patch.object(os, "getgid", return_value=1000),
+                mock.patch.object(os, "getegid", return_value=1000),
+                mock.patch.object(os, "getgroups", return_value=[]),
+                mock.patch.object(os, "chdir"),
+                mock.patch.object(os, "umask"),
+            ]
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                with self.assertRaises(SystemExit):
+                    worker_exec(*sources, types.SimpleNamespace(pw_uid=1000, pw_gid=1000,
+                                pw_dir="/home/cua"), execute=execute)
+            self.assertEqual(calls, ["dropped"])
+
+    def test_worker_clears_capabilities_all_ids_and_blocks_future_privileges(self):
+        import contextlib
+        entry = types.SimpleNamespace(pw_uid=1000, pw_gid=1000)
+        for failure in (None, "prctl", "capset", "capget", "ids"):
+            calls = []
+            def prctl(option, value, *unused):
+                calls.append(("prctl", option.value, value.value))
+                if failure == "prctl":
+                    return -1
+                return 1 if option.value == 39 else 0
+            libc = types.SimpleNamespace(prctl=prctl,
+                capset=lambda *args: -1 if failure == "capset" else 0,
+                capget=lambda *args: -1 if failure == "capget" else 0)
+            patches = [
+                mock.patch.object(ctypes, "CDLL", return_value=libc),
+                mock.patch.object(os, "setgroups", side_effect=lambda groups: calls.append(("groups", groups))),
+                mock.patch.object(os, "setresgid", side_effect=lambda *ids: calls.append(("gids", ids)), create=True),
+                mock.patch.object(os, "setresuid", side_effect=lambda *ids: calls.append(("uids", ids)), create=True),
+                mock.patch.object(os, "getresgid", return_value=(1000,) * 3, create=True),
+                mock.patch.object(os, "getresuid", return_value=(0 if failure == "ids" else 1000,) * 3, create=True),
+                mock.patch.object(os, "getgroups", return_value=[]),
+                mock.patch.object(os, "setuid", side_effect=PermissionError()),
+            ]
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                if failure:
+                    with self.assertRaises(ValueError):
+                        drop_worker_privileges(entry)
+                else:
+                    drop_worker_privileges(entry)
+                    self.assertEqual(calls, [("prctl", 8, 0), ("prctl", 47, 4),
+                        ("groups", []), ("gids", (1000,) * 3), ("uids", (1000,) * 3),
+                        ("prctl", 38, 1), ("prctl", 39, 0)])
+
+    def test_parent_endpoints_drop_failure_and_retained_exit(self):
+        import contextlib
+        for fail_drop in (False, True):
+            channels, pipes = [], []
+            real_pair = socket.socketpair
+            def pair(*args):
+                values = real_pair(*args)
+                channels.extend(values)
+                return values
+            def pipe(flags):
+                values = os.pipe()
+                pipes.extend(values)
+                return values
+            runtime_fd = os.open("/dev/null", os.O_RDONLY)
+            owner = {"uid": 991, "gid": 992}
+            def drop():
+                self.assertEqual(channels[1].fileno(), -1)
+                with self.assertRaises(OSError):
+                    os.fstat(pipes[0])
+                if fail_drop:
+                    raise ValueError("drop refused")
+            patches = [
+                mock.patch.object(os, "getuid", side_effect=[0, 991]),
+                mock.patch.object(os, "geteuid", return_value=0),
+                mock.patch.object(os, "getgid", return_value=992),
+                mock.patch.object(os, "fork", return_value=123),
+                mock.patch.object(os, "pipe2", side_effect=pipe, create=True),
+                mock.patch.object(socket, "socketpair", side_effect=pair),
+                mock.patch.dict(globals(), account=lambda: owner, worker_account=lambda owner: None,
+                                open_sealed=lambda sha: runtime_fd, drop_to_account=drop),
+            ]
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                if fail_drop:
+                    with self.assertRaises(WorkerBootstrapFailed) as error:
+                        launch_worker("a" * 64)
+                    child = error.exception.child
+                    self.assertEqual(child.channel.fileno(), -1)
+                    self.assertIsNone(child.lifetime)
+                else:
+                    child = launch_worker("a" * 64)
+                    self.assertGreaterEqual(child.channel.fileno(), 0)
+                    self.assertEqual(child.lifetime, pipes[1])
+                with self.assertRaises(OSError):
+                    os.fstat(runtime_fd)
+                with mock.patch.object(os, "waitpid", side_effect=[(0, 0), (123, 0)]) as wait:
+                    self.assertIsNone(child.poll())
+                    self.assertEqual(child.poll(), 0)
+                    self.assertEqual(child.poll(), 0)
+                    self.assertEqual(wait.call_count, 2)
+                    wait.assert_called_with(123, os.WNOHANG)
+                child.close()
+                child.close()
+            for fd in pipes:
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
+
+    def test_malformed_bootstrap_does_not_fork_or_read_secrets(self):
+        with mock.patch.object(os, "getuid", return_value=0), \
+             mock.patch.object(os, "geteuid", return_value=0), \
+             mock.patch.object(os, "fork", side_effect=AssertionError("must not fork")):
+            for sha in (None, "", "x" * 64, "a" * 65):
+                with self.assertRaises(ValueError):
+                    launch_worker(sha)
+        envelope = base64.b64encode(canonical({"action": "worker", "runtimeSha256": "a" * 64})).decode()
+        with mock.patch.object(os, "geteuid", return_value=SEALED_OWNER):
+            with self.assertRaisesRegex(ValueError, "Unknown runtime action"):
+                runtime_main([envelope], Unread())
+
 
 unittest.main()
