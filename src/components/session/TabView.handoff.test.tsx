@@ -92,9 +92,16 @@ it("hides both actions when the other agent is not installed", async () => {
 });
 
 
-it.each(["Inspect these attachments", ""])("retries the failed prompt %j through the real dialog into a new request with every attachment", async (text) => {
-  const images = [{ url: "/saved/one.png", name: "one.png" }, { url: "/saved/two.png", name: "two.png" }];
-  const files = [{ path: "/saved/notes.md", name: "notes.md", mediaType: "text/markdown", size: 12 }];
+it.each([
+  { text: "Inspect these attachments", image: true, file: true },
+  { text: "Inspect this image", image: true, file: false },
+  { text: "Read this file", image: false, file: true },
+  { text: "", image: true, file: false },
+  { text: "", image: false, file: true },
+  { text: "Text only", image: false, file: false },
+])("retries $text (images: $image, files: $file) through the attachment-capable native request", async ({ text, image, file }) => {
+  const images = image ? [{ url: "/saved/one.png", name: "one.png" }, { url: "/saved/two.png", name: "two.png" }] : [];
+  const files = file ? [{ path: "/saved/notes.md", name: "notes.md", mediaType: "text/markdown", size: 12 }] : [];
   const original = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation(async (command: string, args: any) => {
     if (command === "read_image_file") return { mediaType: "image/png", data: args.path === images[0].url ? "b25l" : "dHdv", name: "stored.png" };
@@ -109,8 +116,11 @@ it.each(["Inspect these attachments", ""])("retries the failed prompt %j through
   emit({ type: "turn_completed", status: "error", authFailed: false });
   fireEvent.click(await screen.findByRole("button", { name: "Retry in a new chat" }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({
-    sessionId: session.id, tabId: "retry-tab", text, files,
-    images: [{ mediaType: "image/png", data: "b25l", name: "one.png" }, { mediaType: "image/png", data: "dHdv", name: "two.png" }],
+    sessionId: session.id, tabId: "retry-tab", text, ...(file ? { files } : {}),
+    // send_message routes true to text-only send_confirmed (and rejects files).
+    // false selects send_pressed, the same attachment-aware path as the composer.
+    confirmDelivery: !image && !file,
+    images: image ? [{ mediaType: "image/png", data: "b25l", name: "one.png" }, { mediaType: "image/png", data: "dHdv", name: "two.png" }] : file ? [] : null,
   })));
   expect(getDraft(session.tabs[0].id)).toBe("Keep my draft");
 });

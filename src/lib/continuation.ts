@@ -83,8 +83,10 @@ async function deliver(launched: Launched, prompt: string, onDelivering?: () => 
   const removedRevision = ownsDraft ? setDraft(launched.tab.id, "") : undefined;
   try {
     onDelivering?.();
-    const out = attachments
-      ? await agent.send(launched.sessionId, launched.tab.id, prompt, attachments.images, true, undefined, attachments.files)
+    // Native confirmed delivery is text-only. Attachment retries must use the
+    // normal composer path, which validates files and forwards image data.
+    const out = attachments?.images?.length || attachments?.files?.length
+      ? await agent.send(launched.sessionId, launched.tab.id, prompt, attachments.images, false, undefined, attachments.files)
       : await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
     for (const event of out.events) applyEvent(event);
     // In the agent's input, not in the composer: it is there to send, once.
