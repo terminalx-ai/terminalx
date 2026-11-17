@@ -1,3 +1,5 @@
+import { agentName } from "@terminalx/portable/agentMarks";
+import type { CloudSessionRow, CloudSessionTab } from "@/lib/cloudSessions";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { TabStatus } from "@/types/session";
 
@@ -53,4 +55,32 @@ export interface CloudSessionTabRowsProps {
   sessionSelected: boolean;
   /** A row was chosen: open the session with that tab in front. */
   onOpen: (tabId: string) => void;
+}
+
+/** One tab's own state; the same rule `cloudSessionStatus` folds over a session's tabs. */
+export function cloudTabStatus(tab: CloudSessionTab): TabStatus {
+  if (tab.status === "waiting" || tab.pendingApprovals > 0) return "waiting";
+  if (tab.status === "in_progress") return "in_progress";
+  if (tab.status === "completed" && tab.unread) return "completed";
+  return "idle";
+}
+
+/** The rows listed under a cloud session: none unless it holds two or more tabs. */
+export function cloudTabRows(row: CloudSessionRow, input: CloudTabRowsInput = {}): CloudTabRow[] {
+  if (row.tabs.length < 2) return [];
+  const has = (id: string | null | undefined) => !!id && row.tabs.some((tab) => tab.tabId === id);
+  const agentId = (tab: SelectedSessionTab | null | undefined) => (tab?.kind === "agent" ? tab.id : null);
+  let frontId: string | null;
+  if (input.shown) frontId = has(agentId(input.shown)) ? agentId(input.shown) : null;
+  else if (has(agentId(input.asked))) frontId = agentId(input.asked);
+  else if (has(row.activeTab)) frontId = row.activeTab ?? null;
+  else frontId = row.tabs[0].tabId;
+  const projected = new Map((input.projected ?? []).map((entry) => [entry.tabId, entry.status]));
+  return row.tabs.map((tab) => ({
+    tabId: tab.tabId,
+    harness: tab.harness,
+    label: tab.title?.trim() || agentName(tab.harness),
+    status: projected.get(tab.tabId) ?? cloudTabStatus(tab),
+    front: tab.tabId === frontId,
+  }));
 }
