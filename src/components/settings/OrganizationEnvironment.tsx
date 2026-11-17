@@ -466,13 +466,13 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
         </p>
       )}
 
+      {status.supported && <ActiveVersion version={active} />}
       {!status.supported ? (
         <p className="text-xs" role="status">
           {name} cannot build environment images yet. Workspaces on {name} clone their repositories when they start, so there is nothing to configure here.
         </p>
       ) : !status.canManage ? (
         <>
-          <ActiveVersion version={active} />
           <p className="text-xs text-muted-foreground">Organization owners and admins set up the environment and build its versions.</p>
         </>
       ) : (

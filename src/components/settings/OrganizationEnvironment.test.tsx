@@ -156,6 +156,40 @@ it("says so when the provider cannot build environment images", async () => {
   expect(environment.recipes).not.toHaveBeenCalled();
 });
 
+it.each([false, true])("shows active repository details independently of the template and build history (canManage=%s)", async (canManage) => {
+  const activeVersion = version({ repositories: [
+    { owner: "acme", name: "widgets", defaultBranch: "release", commit: "abcdef0123456789abcdef0123456789abcdef0123" },
+    { owner: "acme", name: "tools", defaultBranch: "stable", commit: "fedcba9876543210fedcba9876543210fedcba98" },
+  ] });
+  environment.status.mockResolvedValue(status({ canManage, activeVersion }));
+  mount();
+  const active = await screen.findByLabelText("Active environment version");
+  expect(screen.getAllByLabelText("Active environment version")).toHaveLength(1);
+  expect(active.textContent).toMatch(/start from version 2/);
+  expect(within(active).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "acme/widgets on release at abcdef0",
+    "acme/tools on stable at fedcba9",
+  ]);
+  if (canManage) {
+    await settled();
+    expect((screen.getByRole("button", { name: "Build environment" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "Activate" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "History (2)" }));
+    expect(screen.queryByLabelText("Environment versions")).toBeNull();
+    expect(screen.getByLabelText("Active environment version")).toBe(active);
+  } else {
+    expect(screen.queryByRole("button", { name: "Build environment" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
+  }
+});
+
+it.each([false, true])("explains when no version is active (canManage=%s)", async (canManage) => {
+  environment.status.mockResolvedValue(status({ canManage, activeVersion: null }));
+  mount();
+  expect(await screen.findByText(/No version is published yet/)).toBeTruthy();
+  expect(screen.queryByLabelText("Active environment version")).toBeNull();
+});
+
 it("saves an edit against the revision the draft started from, and builds nothing", async () => {
   environment.update.mockResolvedValue(status());
   mount();
