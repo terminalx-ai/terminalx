@@ -138,7 +138,11 @@ const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
  * window, not the DOM; a folder dropped there becomes an `@path` mention.
  *
  * A cloud tab (`mentionFiles` false) takes images only, as before: nothing
- * is stored for it, and its own limit of 8 is checked on upload.
+ * is stored for it, and its own limit of 8 is checked on upload. A machine
+ * tab (`mentionFiles` false, `anyFile` true, PRO-407) takes any file by the
+ * same rules as a local tab; its files are uploaded to the machine when the
+ * message is sent, and a dropped folder is left out, since its path here
+ * names nothing there.
  *
  * Shared by the in-session composer and the new-session screen so the first
  * prompt of a session can carry files like every one after it.
@@ -148,6 +152,7 @@ export function useAttachments({
   draft,
   onDraftChange,
   mentionFiles = true,
+  anyFile = mentionFiles,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
@@ -158,8 +163,14 @@ export function useAttachments({
    * its path here names nothing there.
    */
   mentionFiles?: boolean;
+  /**
+   * Any file attaches, not only images (PRO-407). Defaults to
+   * `mentionFiles`: true for a local tab, false for a cloud tab. A machine
+   * tab sets it without `mentionFiles`.
+   */
+  anyFile?: boolean;
 }): Attachments {
-  const imagesOnly = !mentionFiles;
+  const imagesOnly = !anyFile;
   const [attachments, setAttachmentState] = useState<Attachment[]>([]);
   const current = useRef(attachments);
   // Keep the preservation check and the count current even between an async
@@ -263,12 +274,15 @@ export function useAttachments({
           return;
         }
         // A folder (or anything else that is not a regular file) is not attached: the agent is pointed at it, as before.
-        mention(facts.filter((f) => f.unreadable).map((f) => f.path));
+        // An agent on another computer cannot be pointed at a path of this one, so there it is left out and said.
+        const unreadable = facts.filter((f) => f.unreadable);
+        if (mentionFiles) mention(unreadable.map((f) => f.path));
+        else setNotice(unreadable.length ? notAttachedFolders(unreadable.map((f) => f.name || baseName(f.path))) : null);
         await offer(facts.filter((f) => !f.unreadable).map(pathCandidate), verb);
       }
       textareaRef.current?.focus();
     }),
-    [textareaRef, imagesOnly, mention, offer, addCloudImages, readInput],
+    [textareaRef, imagesOnly, mentionFiles, mention, offer, addCloudImages, readInput],
   );
 
   const chooseFiles = useCallback(() => readInput(async () => {
@@ -407,6 +421,12 @@ export function useAttachments({
 export function notAttached(names: string[]): string {
   const what = names.length === 1 ? `${names[0]} was` : `${names.length} files were`;
   return `${what} not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.`;
+}
+
+/** Said for a folder (or anything not a regular file) dropped on a tab whose agent runs on another computer (PRO-407). */
+export function notAttachedFolders(names: string[]): string {
+  const what = names.length === 1 ? `${names[0]} was` : `${names.length} items were`;
+  return `${what} not attached: only files can be sent to an agent on another computer, not folders.`;
 }
 
 /** The overlay that names what a drop does, shown while a file hovers the frame. */

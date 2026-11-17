@@ -8,6 +8,8 @@ import type { PrConversation, PrConversationAction } from "@terminalx/portable/w
 import { localGitSource } from "@/lib/gitSource";
 import { runSignature, withPendingChecks } from "@/lib/checks";
 import { mergeReadiness, PrPanel } from "./PrPanel";
+import { dropEditors, getEditors } from "@/lib/editors";
+import { dismissError, getErrorToasts } from "@/lib/errorToasts";
 
 const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
 
@@ -39,7 +41,11 @@ beforeEach(() => {
     throw new Error(`Unexpected command: ${command}`);
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  dropEditors(() => true);
+  for (const toast of getErrorToasts()) dismissError(toast.id);
+});
 const show = (inline = true) => render(<PrPanel cwd="/repo" branch="feature" active busy={false} inline={inline} />);
 
 it.each([true, false])("keeps queued checks and deployments when the conversation edits the PR (inline=%s)", async (inline) => {
@@ -63,7 +69,9 @@ it.each([true, false])("keeps queued checks and deployments when the conversatio
   await waitFor(() => expect((rerun as HTMLButtonElement).disabled).toBe(false));
   await act(async () => { fireEvent.click(rerun); });
   await screen.findByLabelText("test: queued");
-  expect((screen.getByRole("button", { name: "Re-run all" }) as HTMLButtonElement).disabled).toBe(true);
+  // Only the external check still fails; another re-run waits for this one.
+  expect(screen.getByText("1 of 4 checks failed")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Re-run failed" }) as HTMLButtonElement).disabled).toBe(true);
   const discoveryReads = mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length;
   fireEvent.click(screen.getByRole("button", { name: "Edit title and description" }));
   fireEvent.change(screen.getByLabelText("Pull request title"), { target: { value: "Updated title" } });
@@ -82,16 +90,19 @@ it.each([true, false])("keeps one checks list with summaries, requirements, queu
   current.requiredChecks = ["test", "lint"];
   current.mergeQueueEntry = { position: 3, state: "AWAITING_CHECKS" };
   current.deployments = [{ name: "Preview", state: "success", url: "https://preview.example.test/" }];
-  show(inline);
+  // A source without a checkout path: the log opens under the list, as a cloud workspace's does.
+  render(<PrPanel source={localGitSource("/repo")} branch="feature" active busy={false} inline={inline} />);
   fireEvent.click(await screen.findByRole("button", { name: "View logs for test" }));
   await screen.findByText("error: assertion failed");
-  expect(screen.getAllByText("3 of 4 failed")).toHaveLength(1);
+  expect(screen.getAllByText("3 of 4 checks failed")).toHaveLength(1);
   expect(screen.getAllByLabelText("test: failure")).toHaveLength(1);
-  expect(screen.getAllByText("Required")).toHaveLength(2);
-  expect(screen.getAllByText("Optional")).toHaveLength(2);
+  // Only a check the merge needs is marked; an optional one carries nothing (PRO-394).
+  expect(screen.getAllByText("required")).toHaveLength(2);
+  expect(screen.queryByText(/^optional$/i)).toBeNull();
   expect(screen.getByText("Queue position 3")).toBeTruthy();
   expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
   expect(screen.getAllByRole("button", { name: "Re-run failed" })).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "Re-run test" })).toBeTruthy();
   expect(mocks.invoke).toHaveBeenCalledWith("pr_check_log", { cwd: "/repo", prUrl: pr.url, checkUrl: pr.checks[0].url, failed: true });
   fireEvent.click(screen.getByRole("button", { name: "Copy log" }));
   await waitFor(() => expect(copyText).toHaveBeenCalledWith("error: assertion failed"));
@@ -101,9 +112,20 @@ it.each([true, false])("keeps one checks list with summaries, requirements, queu
   expect(openUrl).toHaveBeenCalledWith(pr.checks[0].url);
   expect(screen.queryByRole("button", { name: "View logs for external CI" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Open on GitHub: external CI" }));
-  expect(openUrl).toHaveBeenCalledWith(pr.url + "/checks");
+  expect(openUrl).toHaveBeenCalledWith("https://ci.example.com/check/4");
 });
 
+it("opens a check's log in a centre tab of the session, and marks the check while it is shown (PRO-394)", async () => {
+  const backend = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, ...args: unknown[]) => command === "pr_associations" ? [{ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd: "/repo" } }]
+    : command === "pr_details" ? current : backend(command, ...args));
+  render(<PrPanel cwd="/repo" sessionId="s1" branch="feature" active busy={false} inline />);
+  fireEvent.click(await screen.findByRole("button", { name: "View logs for test" }));
+  const tab = getEditors().editors.find((entry) => entry.kind === "checkLog");
+  expect(tab).toMatchObject({ sessionId: "s1", root: "/repo", name: "test · log", failures: 3, check: { prUrl: pr.url, prNumber: 1, name: "test", url: pr.checks[0].url, runId: 12, jobId: 34, state: "failure" } });
+  // Nothing opened under the list.
+  expect(screen.queryByRole("region", { name: "Logs for test" })).toBeNull();
+});
 it("reruns each failing workflow once and keeps it queued through stale GitHub responses", async () => {
   show(false);
   const button = await screen.findByRole("button", { name: "Re-run failed" });
@@ -119,18 +141,19 @@ it("reruns each failing workflow once and keeps it queued through stale GitHub r
   await screen.findByLabelText("test: in_progress");
 });
 
-it("reruns all includes successful workflows, and a refusal never shows queued", async () => {
-  const source = { ...localGitSource("/repo"), rerunCheck: vi.fn().mockRejectedValueOnce(new Error("GitHub denied re-run")).mockResolvedValue(undefined) };
+it("reruns all includes successful workflows, and a refusal says GitHub's reason in a toast, never queued", async () => {
+  current.checks = current.checks.filter((check) => check.actions).map((check) => ({ ...check, state: "success" }));
+  const source = { ...localGitSource("/repo"), rerunCheck: vi.fn().mockRejectedValueOnce(new Error("gh run rerun 12 --repo owner/repo: run 12 cannot be rerun; its workflow file may be broken (HTTP 403)")).mockResolvedValue(undefined) };
   render(<PrPanel source={source} branch="feature" active busy={false} />);
-  const button = await screen.findByRole("button", { name: "Re-run all" });
+  const button = await screen.findByRole("button", { name: "Re-run" });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(button);
-  await screen.findByText("Could not complete Git operation");
-  expect(screen.queryByText("GitHub denied re-run")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-  await screen.findByText("GitHub denied re-run");
+  // PRO-394 (design 05.17): not a Git error card, a toast naming the PR with GitHub's own reason and the run.
+  await waitFor(() => expect(getErrorToasts()).toHaveLength(1));
+  expect(getErrorToasts()[0]).toMatchObject({ title: "Couldn't re-run checks on #1", action: "Run 12 cannot be rerun; its workflow file may be broken", tone: "error" });
+  expect(getErrorToasts()[0].actions?.map((action) => action.label)).toEqual(["Open run on GitHub"]);
+  expect(screen.queryByText("Could not complete Git operation")).toBeNull();
   expect(screen.queryByLabelText("test: queued")).toBeNull();
-  // The refusal remains readable while a fresh snapshot enables another try.
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(button);
   await screen.findByLabelText("deploy: queued");
@@ -166,7 +189,7 @@ it("clears a clipboard error after retry without hiding a failed log download", 
 it("selects the clicked check when several checks share a run-only details URL", async () => {
   current.checks[0].url = current.checks[1].url = "https://github.com/owner/repo/actions/runs/12";
   current.checks[0].actions!.jobId = current.checks[1].actions!.jobId = null;
-  show();
+  render(<PrPanel source={localGitSource("/repo")} branch="feature" active busy={false} inline />);
   fireEvent.click(await screen.findByRole("button", { name: "View logs for lint" }));
   await screen.findByRole("region", { name: "Logs for lint" });
   expect(screen.queryByRole("region", { name: "Logs for test" })).toBeNull();
@@ -178,5 +201,5 @@ it("expires optimistic running state instead of concealing a failed attempt fore
   expect(withPendingChecks(pr, pending, 101)).toBe(pr);
   const passing = { ...pr, checks: pr.checks.filter((c) => c.actions).map((c) => ({ ...c, state: "success" })) };
   expect(mergeReadiness(passing).ok).toBe(true);
-  expect(mergeReadiness(withPendingChecks(passing, [{ ...pending[0], failedOnly: false, signature: runSignature(passing, 12) }], 99))).toEqual({ ok: false, label: "Checks running" });
+  expect(mergeReadiness(withPendingChecks(passing, [{ ...pending[0], failedOnly: false, signature: runSignature(passing, 12) }], 99))).toEqual({ ok: false, label: "Waiting for 2 checks", waiting: 2 });
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// PRO-400 (design 17.01): a confirmation is the app's own card, never a system
-// alert. In the desktop's WebKit, dark and light, 1440 wide: deleting a
+// PRO-400 (design 17.01): in-scope confirmations use the app card. Quit is
+// a native-dialog exception (PRO-455). In desktop WebKit, dark and light,
+// 1440 wide: deleting a
 // session from its sidebar menu asks in a dialog whose title is the question,
 // with what happens below it, Cancel on the left and a red Delete on the
 // right; Return's button holds the focus; Escape cancels and deletes nothing;
