@@ -2514,8 +2514,8 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
   /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[]) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}) }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[], promptRequestId?: string) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}), ...(promptRequestId === undefined ? {} : { promptRequestId }) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
   reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
     invoke<void>("report_terminal_view", { sessionId, tabId, report }),

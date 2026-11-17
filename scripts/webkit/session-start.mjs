@@ -39,13 +39,14 @@ function fixture() {
     store_attachments: (args) => { window.__storedAttachments = args; return files; },
     send_message: (args) => new Promise((resolve, reject) => {
       window.__firstSend = args;
-      const event = { id: "prompt", seq: 1, sessionId: "first", tabId: "tab", ts: at, harness: "claude",
+      const event = { id: "prompt", seq: 1, sessionId: "first", tabId: "tab", ts: at, harness: "claude", promptRequestId: args.promptRequestId,
         payload: { type: "user_message", text: args.text, queued: false, files: args.files } };
-      const otherMessage = (id, seq, text) => ({ ...event, id, seq, payload: { type: "user_message", text, queued: false } });
+      const otherMessage = (id, seq, text) => ({ ...event, id, seq, promptRequestId: undefined, payload: { type: "user_message", text, queued: false } });
       window.__finishSetup = () => stub.emit("workspace_setup_changed", { ...setup, status: "succeeded", exitCode: 0 });
       window.__publishFirstPrompt = () => stub.emit("agent_event", event);
       window.__publishOtherPrompt = () => stub.emit("agent_event", otherMessage("live", 2, "Another live prompt"));
       window.__otherHistory = [otherMessage("history", 3, "Another prompt from history")];
+      window.__firstHistory = [event];
       window.__completeFirstSend = () => resolve({ queued: false, events: [event] });
       window.__failFirstSend = () => reject(new Error("Agent could not start"));
     }),
@@ -61,7 +62,7 @@ let browser;
 try {
   await server.listen();
   browser = await launch();
-  for (const [colorScheme, outcome] of [["dark", "reply"], ["light", "broadcast"], ["light", "failure"]]) {
+  for (const [colorScheme, outcome] of [["dark", "reply"], ["light", "broadcast"], ["light", "recorded-failure"], ["light", "failure"]]) {
     const page = await open(browser, server.resolvedUrls.local[0], { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { colorScheme, extra: `(${fixture.toString()})();` });
     page.setDefaultTimeout(12_000);
     page.on("pageerror", (error) => console.error(error));
@@ -84,6 +85,7 @@ try {
     assert.deepEqual(await page.evaluate(() => [window.__firstSend.text, window.__firstSend.files[0].name]), [prompt, "notes.md"]);
 
     assert.equal(await page.evaluate(() => window.__firstSend.images[0].name), "pixel.png");
+    assert.match(await page.evaluate(() => window.__firstSend.promptRequestId), /^[a-f0-9-]{36}$/);
 
     const chat = page.locator("[data-chat-scroller]:visible");
     const first = chat.getByTestId("first-message");
@@ -117,13 +119,27 @@ try {
       await first.getByText("notes.md", { exact: true }).waitFor();
       await first.getByRole("button", { name: "View pixel.png" }).waitFor();
       assert.equal(await first.getByText("Sending…").count(), 0);
-    } else {
-      if (outcome === "broadcast") {
-        await page.evaluate(() => window.__publishFirstPrompt());
-        await chat.locator("[data-chat-search]").filter({ hasText: "Check the attached notes." }).waitFor();
-      }
-      await page.evaluate(() => window.__completeFirstSend());
+      await page.evaluate(async () => {
+        const { mergeTabEvents } = await import("/src/lib/agentEvents.ts");
+        mergeTabEvents("first", "tab", window.__firstHistory);
+      });
       await first.waitFor({ state: "detached" });
+      assert.equal(await chat.getByText("Check the attached notes.").count(), 1);
+    } else {
+      if (outcome !== "reply") {
+        await page.evaluate(() => window.__publishFirstPrompt());
+        await first.waitFor({ state: "detached" });
+        assert.equal(await chat.getByText("Check the attached notes.").count(), 1);
+      }
+      if (outcome === "recorded-failure") {
+        const rejected = page.waitForEvent("console", { predicate: (message) => message.text().includes("first send failed") });
+        await page.evaluate(() => window.__failFirstSend());
+        await rejected;
+        assert.equal(await first.count(), 0);
+      } else {
+        await page.evaluate(() => window.__completeFirstSend());
+        await first.waitFor({ state: "detached" });
+      }
       const message = chat.getByTestId("reader-message");
       await message.getByText("Check the attached notes.").waitFor();
       await message.getByText("notes.md", { exact: true }).waitFor();

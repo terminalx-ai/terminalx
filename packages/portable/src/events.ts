@@ -14,6 +14,8 @@ export interface AgentEvent {
   ts: string;
   /** Verified source/send time; legacy `ts` may only record when history was imported. */
   messageTs?: string;
+  /** Correlates a recorded desktop Create prompt with its pending preview. */
+  promptRequestId?: string;
   subagent?: SubagentRef;
   payload: Payload;
 }
