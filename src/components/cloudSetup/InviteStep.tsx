@@ -292,6 +292,12 @@ interface Chip {
  * sent from here, since the server gives no link for older ones.
  */
 export function InviteStep(props: StepProps & { onDone: () => void }) {
+  // Discard recipient tokens and pending clipboard feedback on any context change,
+  // including when this step is mounted outside CloudSetupFlow.
+  return <InviteStepContent key={JSON.stringify([props.organization.id, props.contextRevision, props.accountEmail])} {...props} />;
+}
+
+function InviteStepContent(props: StepProps & { onDone: () => void }) {
   const { organization, record, contextRevision } = props;
   const [roster, setRoster] = useState<OrganizationRoster | null>(null);
   const [rosterState, setRosterState] = useState<{ loading: boolean; error: string | null }>({ loading: true, error: null });
@@ -344,7 +350,11 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
       setRosterState({ loading: false, error: null });
       if (!keepError) setError(null);
     } catch (failure) {
-      if (fresh()) setRosterState({ loading: false, error: membersErrorMessage(failure) });
+      if (fresh()) {
+        setRoster(null);
+        setIssued({});
+        setRosterState({ loading: false, error: membersErrorMessage(failure) });
+      }
     }
   }, []);
   useEffect(() => {
@@ -465,7 +475,18 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
     }
   };
 
-  const copyLink = (email: string, url: string) => void navigator.clipboard?.writeText(url).then(() => alive.current && setCopied(email), () => undefined);
+  const copyLink = async (email: string, url: string) => {
+    if (!canInvite || busy || rosterState.loading) return;
+    setCopied(null);
+    setError(null);
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(url);
+      if (alive.current) setCopied(email);
+    } catch {
+      if (alive.current) setError("Couldn't copy the invitation link. Try again.");
+    }
+  };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
@@ -619,6 +640,12 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 </ul>
               )}
               <p className="mt-2 text-[12px] text-faint">Press Enter, a comma or a space after each address. Invitees get no access until they accept.</p>
+              {/* #1114: no domain-join policy exists in the accepted member contract.
+                  Keep this unavailable until the dependency in docs/ACCOUNTS.md ships. */}
+              <p className="mt-2 flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                <Link className="size-3.5 shrink-0" aria-hidden />
+                Shared invite link unavailable. Invite each person by email.
+              </p>
               {outcome && (
                 <p role="status" className="mt-2 text-[12px] text-muted-foreground">
                   {outcome}
@@ -637,6 +664,7 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 const key = lower(invite.email);
                 const own = issued[key];
                 const expired = invite.status === "expired" || (invite.expiresAt !== undefined && invite.expiresAt <= now);
+                const copyable = canInvite && own?.inviteUrl && own.role === invite.role && !expired;
                 return (
                   <li key={invite.email} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5" aria-label={invite.email}>
                     <span className="grid size-7 shrink-0 place-items-center rounded-full text-[12px] font-semibold" style={tint(personColor(invite.email))} aria-hidden>
@@ -645,12 +673,13 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[13px]">{inviteeName(invite.email)}</div>
                       <div className="truncate text-[12px] text-muted-foreground">{invite.email}</div>
-                      {own && !own.emailSent && <div className="text-[12px] text-warning">The email could not be sent. Copy the link and share it with them.</div>}
+                      {copyable && <div className="text-[12px] text-muted-foreground">Only {invite.email} can accept this link, joining as {roleLabel(invite.role)}.</div>}
+                      {copyable && !own.emailSent && <div className="text-[12px] text-warning">The email could not be sent. Copy the link and share it with them.</div>}
                     </div>
                     <span className="text-[12.5px] text-muted-foreground">{roleLabel(invite.role)}</span>
                     <span className={cn("text-[12px]", expired ? "text-warning" : "text-faint")}>{expired ? "Expired" : sentLabel(invite.createdAt, now)}</span>
-                    {own?.inviteUrl && !expired && (
-                      <Button size="xs" variant="ghost" className="text-[12px]" onClick={() => copyLink(key, own.inviteUrl!)}>
+                    {copyable && (
+                      <Button size="xs" variant="ghost" className="text-[12px]" disabled={Boolean(busy) || rosterState.loading} aria-label={`Copy invitation link for ${invite.email}`} onClick={() => void copyLink(key, own.inviteUrl!)}>
                         {copied === key ? <Check /> : <Link />}
                         {copied === key ? "Copied" : "Copy link"}
                       </Button>
