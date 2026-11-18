@@ -194,6 +194,7 @@ fn restore_sessions(expected: &Preview, removed: &RemovedWorkspace, branch: Opti
                 bail!("A conversation moved during restoration. Nothing was restored.");
             }
             session.cwd = expected.path.clone();
+            session.bind_checkout_root(&expected.path);
             session.worktree_name = Some(removed.name.clone());
             session.branch = branch.map(Into::into);
             session.worktree_removed = false;
