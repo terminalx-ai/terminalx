@@ -2058,7 +2058,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
 | Header branch button: diff size, Create PR, push, pull, mark ready, merge, agent steps | Works; read from the machine's `git/1` (`git.status`, `git.prs`, the branch's diff against its base) as files change there, and run there with its Git sign-in; Merge is pinned to the head that was read (`git.prMerge` `head`). A cloud workspace session keeps the branch chip only | 21.08, PRO-404 |
 | Files, editor, file search | Works, rooted at the session's worktree: the repository Changes shows, inside the project or in an absolute worktree folder | PRO-347, PRO-405 |
-| Remove the session's worktree once its PR merged | Works: the chat's Delete workspace and the removal dialog, read and removed on the machine (`workspace/1`) | PRO-406 |
+| Remove the session's worktree once its PR merged | Manual Delete workspace works on the machine (`workspace/1`); automatic cleanup is machine-owned and depends on its own running cleanup passes and settings | PRO-406, [#1212](https://github.com/terminalx-ai/terminalx/issues/1212) |
 | Rename, archive, pin | Works | PRO-346 |
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
@@ -2187,9 +2187,39 @@ it; reading is open to whoever sees the session, running is the manager's.
   machine no longer lists the session.
 - **Left out.** Keeping the conversations (`keepSessions`) is refused, as on a
   cloud workspace: `workspace.remove` deletes the worktree's sessions. This
-  desktop does not run merged clean-up passes on a machine (`workspace/2`):
-  removing by itself after a merge follows the machine's own settings, not
-  this Mac's.
+  desktop does not run merged clean-up passes on a machine (`workspace/2`).
+
+**Parity disposition ([#1212](https://github.com/terminalx-ai/terminalx/issues/1212)).**
+Automatic merged-workspace cleanup is owned by the machine, using its own
+settings and local cleanup driver. PRO-406 does not require a separate desktop
+control or desktop-driven passes for paired machines. No implementation remains
+in this scope; a future remote control would need an explicit product and
+authorization decision, including its settings and safeguards. Connecting a
+machine does not turn cleanup on or copy this Mac's preferences.
+
+This is conditional parity, not a promise of unattended cleanup on every
+machine: `src/lib/mergedCleanup.ts` drives passes in the main app window for
+the local host and connected cloud workspaces, and does not select paired
+machines. A machine with no local driver running will not get automatic passes
+from this desktop. The local `mergedSweep` in
+`src-tauri/src/local_runtime/workspaces.rs` reads that host's enabled projects,
+grace period and conversation setting. The `workspace/2` RPC is a separate
+manager-authorized operation whose caller supplies its scope settings
+(`src-tauri/src/remote/server.rs`); its availability is not itself a scheduler
+or an instruction to apply this Mac's settings.
+
+Acceptance evidence for this disposition:
+
+- `src-tauri/src/store/settings.rs` tests the default-off setting and project
+  overrides; `src-tauri/src/merged_cleanup_tests.rs` covers disabled cleanup,
+  grace periods, dirty and active work, and branch outcomes.
+- `src-tauri/src/remote/cleanup_tests.rs` covers manager/capability gating,
+  held and dirty worktrees, removal records and restore, and verifies that an
+  unconfirmed stop is not reported as removed.
+- `src/lib/machineSession.removableWorkspace.test.ts` covers the manual machine
+  host and its availability; `src/lib/mergedCleanup.ts` defines the current
+  local/cloud host selection. These are source and test evidence, not a claim
+  that a headless machine runs its own timer.
 
 ### As built (PRO-348): a new session on a machine
 
