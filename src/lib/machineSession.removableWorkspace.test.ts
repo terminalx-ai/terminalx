@@ -116,6 +116,25 @@ it("keeps the machine's session checkout available for Fix errors when the panel
   expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
 });
 
+it("withholds Fix errors when a session's worktree is missing, even if the panel falls back to the project", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }], truncated: true });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
+  await waitFor(() => expect(result.current?.repository).toBe("."));
+  expect(result.current?.gitSource).toBeDefined();
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:second");
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:base");
+  expect(result.current?.machine?.checkoutGitSource).toBe(result.current?.gitSource);
+  expect(request.mock.calls.some(([method]) => method === "git.status")).toBe(false);
+});
+
 describe("useMachineSession removable workspace", () => {
   it("binds the machine host, project key, and remote path across session and machine changes", async () => {
     const { mini, studio } = machines();

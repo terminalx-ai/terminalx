@@ -387,6 +387,35 @@ fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_bas
 }
 
 #[test]
+fn machine_pr_creation_records_the_native_session_association() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let session = |id: &str, project: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": project, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session("native", &f.root), session("outside", &f.base)]).unwrap();
+    f.call("git.checkout", json!({ "repo": ".", "branch": "feature/pr", "create": true })).unwrap();
+    f.call("git.push", json!({ "repo": "." })).unwrap();
+    let create = |id: &str| json!({ "repo": ".", "title": "Add pr", "base": "main", "sessionId": id });
+    assert_eq!(f.code("git.prCreate", create("outside")), "not_found");
+    assert!(!f.gh_calls().contains("\"create\""));
+
+    let created = f.call("git.prCreate", create("native")).unwrap();
+    assert_eq!(created["sessionAssociated"], true);
+    let repeat = f.call("git.prCreate", create("native")).unwrap();
+    assert_eq!(repeat["existing"], true);
+    assert_eq!(repeat["sessionAssociated"], true);
+    assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(rows["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["associations"][0]["url"], created["pr"]["url"]);
+    assert_eq!(rows["associations"][0]["linked"], false);
+}
+
+#[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
     let remote = f.remote("origin");
