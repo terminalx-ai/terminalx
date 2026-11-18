@@ -573,6 +573,8 @@ pub(crate) struct MobileConnection {
     polling: std::sync::atomic::AtomicBool,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
     closed: std::sync::atomic::AtomicBool,
+    #[cfg(unix)]
+    authority: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
 }
 
 impl MobileConnection {
@@ -604,6 +606,8 @@ impl MobileConnection {
             terminal_subscriptions: Mutex::new(HashMap::new()),
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(unix)]
+            authority: None,
         })
     }
 
@@ -615,7 +619,16 @@ impl MobileConnection {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
             bail!("The mobile stream disconnected or fell behind. Reconnect to load retained history.");
         }
+        #[cfg(unix)]
+        if let Some(authority) = &self.authority {
+            authority()?;
+        }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn require_authority(&mut self, check: impl Fn() -> Result<()> + Send + Sync + 'static) {
+        self.authority = Some(Box::new(check));
     }
 
     pub(crate) fn check(&self, manager: &PhoneHost) -> Result<()> {

@@ -13,6 +13,8 @@ pub(crate) mod direct;
 pub(crate) mod key;
 pub(crate) mod pairing;
 #[cfg(unix)]
+mod phone_revocations;
+#[cfg(unix)]
 pub(crate) mod phones;
 pub mod registry;
 #[cfg(all(test, feature = "desktop"))]
@@ -393,6 +395,13 @@ impl MachineHost {
                 }
             }) {
                 Ok(phones) => {
+                    if host.keys.needs_window() {
+                        tokio::spawn(phone_revocations::watch(
+                            Arc::downgrade(&host),
+                            phones.watch_account_revocations(),
+                            Arc::new(crate::machine_account::Api::new(&crate::machine_account::api_base_url())),
+                        ));
+                    }
                     let _ = host.phones.set(phones);
                 }
                 Err(error) => log::warn!("machine host: phones cannot be served here: {error:#}"),
@@ -845,7 +854,15 @@ impl MachineHost {
         // Before it registers, so no connection is answered without them.
         host.set_routes(self.clone());
         let sink = self.sink.clone();
-        host.on_pairing_hint(Arc::new(move || sink.emit(wire::RELAY_HINT_EVENT, &json!({}))));
+        #[cfg(unix)]
+        let weak = Arc::downgrade(self);
+        host.on_pairing_hint(Arc::new(move || {
+            #[cfg(unix)]
+            if let Some(phones) = weak.upgrade().and_then(|machine| machine.phones.get().cloned()) {
+                phones.account_revocation_hint();
+            }
+            sink.emit(wire::RELAY_HINT_EVENT, &json!({}));
+        }));
         self.use_relay(&host);
         let mut status = host.status();
         let weak = Arc::downgrade(self);

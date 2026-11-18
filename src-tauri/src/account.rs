@@ -456,7 +456,7 @@ impl AccountManager {
         );
         inner.session = context.map(|context| DesktopSession {
             access_token: context.access_token,
-            refresh_token: "test-refresh".into(),
+            refresh_token: "drt_test-family.test-refresh".into(),
             expires_at: 4_000_000_000_000,
             cloud: CloudIdentity {
                 cloud_profile_id: context.profile_id,

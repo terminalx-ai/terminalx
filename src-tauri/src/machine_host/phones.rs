@@ -205,6 +205,7 @@ pub(crate) struct Phones {
     /// The complete last known binding. Generations are scoped to a user;
     /// switching users can leave the generation unchanged.
     account: Mutex<Option<AccountMirror>>,
+    revocations: std::sync::OnceLock<Arc<super::phone_revocations::Authority>>,
     /// Tells the machine host its status changed.
     changed: Box<dyn Fn() + Send + Sync>,
     relay: Mutex<Option<Weak<crate::remote::host::RelayHost>>>,
@@ -242,10 +243,21 @@ impl Phones {
             generation,
             account_known: AtomicBool::new(first.is_ok()),
             account: Mutex::new(account),
+            revocations: std::sync::OnceLock::new(),
             changed: Box::new(changed),
             relay: Mutex::new(None),
             stopped: watch::channel(0).0,
         }))
+    }
+
+    pub(super) fn watch_account_revocations(&self) -> Arc<super::phone_revocations::Authority> {
+        self.revocations.get_or_init(|| Arc::new(super::phone_revocations::Authority::default())).clone()
+    }
+
+    pub(super) fn account_revocation_hint(&self) {
+        if let Some(revocations) = self.revocations.get() {
+            revocations.hint();
+        }
     }
 
     #[cfg(test)]
@@ -543,12 +555,19 @@ impl Phones {
     /// direct listener's. Blocking: it writes `devices.json`.
     pub(crate) fn create_code(&self, keypair: &HostKeypair, port: Option<u16>, epoch: u64) -> Result<CreatedPhoneCode, ControlError> {
         crate::data_privacy::require_network().map_err(|error| ControlError::new("not_enabled", format!("{error:#}"), None::<String>))?;
-        let device_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut device_id = uuid::Uuid::new_v4().simple().to_string();
         let relay = match self.invite(&device_id, keypair) {
             Ok(relay) => relay,
             Err(error) => {
                 self.retire_invite(&device_id);
-                return Err(ControlError::new("relay_offline", format!("{error:#}"), Some("Try pairing again once Relay responds.".into())));
+                if port.is_none() {
+                    return Err(ControlError::new("relay_offline", format!("{error:#}"), Some("Try pairing again once Relay responds.".into())));
+                }
+                // The first identity may have an invite in Relay. Retiring
+                // it must never revoke the new nearby-only credential.
+                device_id = uuid::Uuid::new_v4().simple().to_string();
+                log::warn!("machine host: using a nearby-only phone code because Relay did not create an invite: {error:#}");
+                None
             }
         };
         if port.is_none() && relay.is_none() {
@@ -738,6 +757,9 @@ impl Phones {
             && current.binding_generation == device.binding_generation
             && current.public_key == client_key, "paired-device identity changed during admission");
         anyhow::ensure!(account_allows(&current, account.as_ref()), "paired-device account changed during admission");
+        if let Some(revocations) = self.revocations.get() {
+            revocations.check(&current)?;
+        }
         self.owner(epoch, &device.id, id)?;
         Ok((tracked, signals))
     }
@@ -846,7 +868,14 @@ impl Phones {
         let (_tracked, signals) = tokio::task::spawn_blocking(move || admitting.admit(&admitting_device, &admitting_key, epoch)).await??;
         let result = async {
             let (outbound, inbound) = mpsc::channel(8);
-            let connection = Arc::new(MobileConnection::open(&self.host, &device, outbound, context.wire_transport()).await?);
+            let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport()).await?;
+            if device.provenance == DeviceProvenance::Automatic {
+                if let Some(revocations) = self.revocations.get().cloned() {
+                    let device = device.clone();
+                    connection.require_authority(move || revocations.check(&device));
+                }
+            }
+            let connection = Arc::new(connection);
             connection.check_off_runtime(&self.host).await?;
             phone::send_authenticated(&mut socket, &mut session).await?;
             log::info!("machine host: phone {} connected through {}", device.id, context.transport_name());

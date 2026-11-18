@@ -25,12 +25,16 @@ const state = vi.hoisted(() => ({
   transports: [] as string[],
   /** An unreachable path fails only after the others have answered. */
   slowFailure: false,
+  onJournalWrite: null as (() => void) | null,
 }));
 vi.mock("expo-crypto", () => ({ getRandomBytesAsync: async (length: number) => new Uint8Array(randomBytes(length)) }));
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1,
   getItemAsync: async (key: string) => state.secrets.get(key) ?? null,
-  setItemAsync: async (key: string, value: string) => { state.secrets.set(key, value); },
+  setItemAsync: async (key: string, value: string) => {
+    state.secrets.set(key, value);
+    if (key.includes("pairing-journal")) state.onJournalWrite?.();
+  },
   deleteItemAsync: async (key: string) => { state.secrets.delete(key); },
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
@@ -97,6 +101,7 @@ beforeEach(() => {
   state.direct = false; state.relay = false; state.failSave = false; state.provisionError = null;
   state.approval = "immediate"; state.describe = "refuse"; state.described = []; state.slowFailure = false;
   state.transports = [];
+  state.onJournalWrite = null;
   state.status = { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" };
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...endpoint, leaseExpiresAt: Date.now() + 60_000 }))));
 });
@@ -134,6 +139,25 @@ it("pairs a relay-only terminal QR and saves a resume credential without a LAN a
   expect(state.transports).toEqual(["relay"]);
   expect(state.installed?.authorizationMode).toBe("relay-basis");
   expect(await readHostCredential(host.id)).toMatchObject({ deviceToken: offer.deviceToken, current: { version: 1 } });
+});
+
+it("allows a fresh scan when a Relay-only code expires while storing its journal", async () => {
+  const payload = { ...freshOffer(), endpoint: "ws://127.0.0.1:0" };
+  const offer = parsePairingCode(btoa(JSON.stringify(payload)))!;
+  const clock = vi.spyOn(Date, "now");
+  state.onJournalWrite = () => clock.mockReturnValue(payload.relay.inviteExpiresAt);
+  try {
+    await expect(pair(offer)).rejects.toThrow("[pairing:parsing/expired-offer]");
+    expect(state.transports).toEqual([]);
+    expect(await readPairingJournal()).toBeNull();
+  } finally {
+    clock.mockRestore();
+    state.onJournalWrite = null;
+  }
+  state.relay = true;
+  const fresh = parsePairingCode(btoa(JSON.stringify({ ...freshOffer(), endpoint: payload.endpoint })))!;
+  const host = await pair(fresh);
+  expect(await readHostCredential(host.id)).toMatchObject({ current: { version: 1 } });
 });
 
 it("recovers a committed install after saving the host failed", async () => {

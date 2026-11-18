@@ -1443,6 +1443,7 @@ impl PairingManager {
     fn revoke_local(&self, device_id: &str) -> Result<()> {
         self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device_id}))?;
         let _ = self.registry.revoke(device_id)?;
+        self.account.sync_runtime_copy();
         self.secrets.delete_device_token(device_id)?;
         self.cancel_connections(device_id);
         self.inner.lock().unwrap().forget_pending(device_id);
@@ -1450,7 +1451,9 @@ impl PairingManager {
     }
 
     fn discard_unclaimed_pairing(&self, device_id: &str) -> Result<()> {
-        let _ = self.registry.discard_unclaimed(device_id)?;
+        if self.registry.discard_unclaimed(device_id)? {
+            self.account.sync_runtime_copy();
+        }
         self.secrets.delete_device_token(device_id)?;
         self.inner.lock().unwrap().forget_pending(device_id);
         Ok(())
@@ -2270,6 +2273,32 @@ mod tests {
         assert_eq!(named, MachineName { name: own_name.clone(), chosen: false, computer_name: computer });
         assert_eq!(PairingManager::host_name("u1"), own_name);
         assert_eq!(crate::store::settings::load().machine_name, None);
+    }
+
+    #[test]
+    fn removing_the_last_phone_with_the_window_open_removes_the_runtime_session() {
+        use crate::keychain::testing::MemorySecrets;
+        use serde_json::json;
+
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let manager = PairingManager::with_secrets_for_test("com.terminalx.fixture", Arc::new(MemorySecrets::default()));
+        manager.account.set_context_for_test(Some(AccountContext {
+            access_token: "fixture-token".into(), user_id: "u1".into(), email: "u1@example.invalid".into(),
+            display_name: "U1".into(), profile_id: "profile".into(), organization_id: "org".into(),
+            relay_entitled: true, generation: 1,
+        }));
+        assert!(!crate::store::settings::load().machines.allow_operating);
+        let devices = json!({"devices":[{
+            "id":"phone", "label":"Phone", "platform":"ios", "token":"fixture-hash",
+            "scope":"driver", "provenance":"explicit", "bindingGeneration":0,
+            "createdAt":"2026-11-01T00:00:00Z", "approvedAt":"2026-11-01T00:00:00Z",
+        }]});
+        crate::store::write_json(&root.join("devices.json"), &devices).unwrap();
+        manager.account.sync_runtime_copy();
+        assert!(crate::machine_account::load(&root).unwrap().is_some());
+        manager.revoke_local("phone").unwrap();
+        assert!(crate::machine_account::load(&root).unwrap().is_none());
     }
 
     #[test]

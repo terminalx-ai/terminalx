@@ -104,8 +104,8 @@ impl Rig {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_seen_at: approved.then(|| chrono::Utc::now().to_rfc3339()),
                 revoked_at: None,
-                installation_id: None,
-                created_request_id: None,
+                installation_id: automatic.then(|| "installation".into()),
+                created_request_id: automatic.then(|| "grant".into()),
                 fingerprint: None,
                 approved_at: None,
                 connection: None,
@@ -159,6 +159,103 @@ impl Rig {
             .unwrap()
             .unwrap()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_runtime_applies_account_revocations_to_direct_phones() {
+    use crate::machine_account::{self, tests::{service, session_body}, Api};
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    let account = AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(),
+        display_name: "Owner".into(), host_display_name: None, binding_generation: 5,
+    };
+    save_account_mirror(&account).unwrap();
+    rig.phones.tick(now_ms());
+    rig.pair("phone", "token", true, true);
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    // The poll and direct listener must work without either desktop or Relay.
+    assert!(!rig.host.window_available());
+    rig.relay.stop();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.enabled = false;
+        state.desktop_phones = true;
+    }
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
+    rig.host.state.lock().unwrap().listening = Some(listener);
+    let connect = || async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &rig.key.public_key_b64(), "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, "token").await
+    };
+
+    let (base, seen, handle) = service(vec![
+        (200, json!({"revocations": []})),
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ]);
+    let authority = rig.phones.watch_account_revocations();
+    assert!(connect().await.read().await.is_none(), "admission requires an account check");
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority.clone(), Arc::new(Api::new(&base))));
+    let entry = DeviceRegistry.find_by_token("token", Some(5)).unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while authority.check(&entry).is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let mut phone = connect().await;
+    phone.authenticated().await;
+    assert_eq!(phone.call("sessions.summaries", json!({})).await["ok"], true);
+    authority.hint();
+    assert!(phone.read().await.is_none(), "revocation closes the active phone");
+    assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
+    assert!(connect().await.read().await.is_none(), "the saved token cannot reconnect");
+    poller.abort();
+    handle.join().unwrap();
+    let seen = seen.lock().unwrap();
+    let root = format!("/v1/desktop/host-account-bindings/{host_id}/revocations");
+    assert_eq!(seen[0], (format!("{root}?bindingGeneration=5"), Value::Null, Some("Bearer access-1".into())));
+    assert_eq!(seen[1], seen[0]);
+    assert_eq!(seen[2], (format!("{root}/revoke-1/acknowledge"), json!({"bindingGeneration": 5}), Some("Bearer access-1".into())));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refusing_a_relay_invite_still_creates_a_nearby_phone_code() {
+    let rig = Rig::new().await;
+    let mut control = rig.relay.phone_test_hold_control();
+    let phones = rig.phones.clone();
+    let key = rig.key.clone();
+    let epoch = *phones.stopped().borrow();
+    let creating = tokio::task::spawn_blocking(move || phones.create_code(&key, Some(6768), epoch));
+    let (invite, reply) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(pending) = control.take() { break pending; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(invite["type"], "invite-create");
+    reply.send(Ok(json!({"type":"control-error", "reqId":invite["reqId"]}))).unwrap();
+    let offer = decode_offer(&creating.await.unwrap().unwrap().link);
+    assert!(offer.relay.is_none());
+    assert!(offer.direct_endpoints.iter().any(|endpoint| endpoint.ends_with(":6768")));
+    assert_ne!(offer.paired_device_id, invite["relayDeviceId"].as_str().unwrap());
+    let (cleanup, _) = control.take().expect("retire the possibly issued invite");
+    assert_eq!(cleanup["relayDeviceId"], invite["relayDeviceId"]);
+    assert!(DeviceRegistry.find_by_token(&offer.device_token, None).unwrap().is_some());
 }
 impl Drop for Rig {
     fn drop(&mut self) {

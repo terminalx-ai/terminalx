@@ -134,7 +134,7 @@ impl AccountLink {
     }
 
     /// The session, with an access token that is not about to expire.
-    fn fresh_session(&self) -> Result<Session> {
+    pub(crate) fn fresh_session(&self) -> Result<Session> {
         let Some(session) = machine_account::load(&self.data_dir)? else { return Err(self.end(Ended::SignedOut)) };
         if session.expires_at > now_ms() + ACCESS_MARGIN_MS {
             return Ok(session);

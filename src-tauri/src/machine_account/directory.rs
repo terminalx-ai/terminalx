@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{api_base_url, load, locked, remove, Answered, Api, Session};
+use super::{api_base_url, load, load_from, locked, save_to, session_path, Answered, Api, Session};
 use crate::relay_e2ee::HostKeypair;
 use crate::remote::{account_link::AccountLink, host::RelayHost};
 
@@ -21,9 +21,10 @@ const HEARTBEAT: Duration = Duration::from_secs(30);
 pub(super) struct Binding {
     host_id: String,
     generation: u64,
-    // If logout could not reach the API, try this generation if the binding
-    // is still active when the same account signs in again.
+    // Older versions can advance the local generation on an offline logout.
     previous_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unbind_generation: Option<u64>,
 }
 
 fn path(data: &Path) -> PathBuf {
@@ -55,9 +56,11 @@ fn register(api: &Api, session: &Session, data: &Path, key: &HostKeypair) -> Res
             host_id,
             generation: 1,
             previous_generation: None,
+            unbind_generation: None,
         });
     // Record the generation before registering. Logout can remove the entry
     // even if the registration response was lost.
+    binding.unbind_generation = None;
     crate::store::write_json(&path, &binding)?;
     let name =
         crate::machine_name::recent_computer_name().unwrap_or_else(|| "TerminalX server".into());
@@ -179,52 +182,70 @@ pub(crate) async fn publish(
     }
 }
 
-/// Remove the listing using a fresh session, under the lock shared with the
-/// publisher. Logout still takes effect locally if the API fails.
-pub(crate) fn sign_out(api: &Api, data: &Path) -> Result<Option<(Session, Result<()>)>> {
+fn pending_sign_out_path(data: &Path) -> PathBuf {
+    session_path(data).with_file_name("logout-session.json")
+}
+
+pub(crate) fn ensure_no_pending_sign_out(data: &Path) -> Result<()> {
+    if pending_sign_out_path(data).try_exists()? {
+        bail!("The previous account is still being removed. Run `terminalx-serve logout` to finish signing out.");
+    }
+    Ok(())
+}
+
+/// Sign out locally by moving the session out of the runtime's reach. Keep
+/// it in the private account directory until unbinding succeeds.
+pub(crate) fn sign_out(api: &Api, data: &Path) -> Result<Option<Session>> {
     locked(data, || {
-        let Some(mut session) = load(data)? else {
-            return Ok(None);
+        let pending = pending_sign_out_path(data);
+        let mut session = match load_from(&pending)? {
+            Some(session) => session,
+            None => {
+                let Some(session) = load(data)? else { return Ok(None) };
+                std::fs::rename(session_path(data), &pending).context("set aside the account session for logout")?;
+                session
+            }
         };
-        let unbound = (|| {
-            let Some(binding) = crate::store::read_json::<Binding>(&path(data))? else {
-                return Ok(());
-            };
+        if let Some(binding) = crate::store::read_json::<Binding>(&path(data))? {
             if session.expires_at <= chrono::Utc::now().timestamp_millis() + 60_000 {
                 session = api.refresh(&session)?;
-                // A crash before local sign-out must leave the rotated token
-                // for the next attempt, rather than the spent refresh token.
-                super::save(data, &session)?;
+                save_to(&pending, &session)?;
             }
-            unbind(api, &session, data, binding)
-        })();
-        remove(data)?;
-        Ok(Some((session, unbound)))
+            unbind(api, &session, data, binding)?;
+        }
+        std::fs::remove_file(&pending).context("clear the account session set aside for logout")?;
+        Ok(Some(session))
     })
 }
 
-fn unbind(api: &Api, session: &Session, data: &Path, binding: Binding) -> Result<()> {
+fn unbind(api: &Api, session: &Session, data: &Path, mut binding: Binding) -> Result<()> {
     let path = path(data);
-    let mut next = Binding {
-        host_id: binding.host_id.clone(),
-        generation: binding.generation + 2,
-        previous_generation: binding.previous_generation.or(Some(binding.generation)),
+    let generation = match binding.unbind_generation {
+        Some(generation) => generation,
+        None => {
+            let generation = binding.generation + 1;
+            binding.generation = generation + 1;
+            binding.unbind_generation = Some(generation);
+            crate::store::write_json(&path, &binding)?;
+            generation
+        }
     };
-    crate::store::write_json(&path, &next)?;
     let answer = request(
         api,
         session,
         "DELETE",
         &format!("{BINDINGS}/{}", binding.host_id),
         json!({
-            "bindingGeneration": next.generation - 1,
+            "bindingGeneration": generation,
             "reason": "host-sign-out",
         }),
     )?;
-    if matches!(&answer, Err(Answered { status: 404, .. })) {
-        return crate::store::write_json(&path, &binding);
+    if !matches!(&answer, Err(Answered { status: 404, code }) if code == "host_binding_not_found") {
+        accepted(answer)?;
     }
-    accepted(answer)?;
-    next.previous_generation = None;
-    crate::store::write_json(&path, &next)
+    binding.previous_generation = None;
+    // Keep the attempted unbind generation until the next registration.
+    // If the process exits before clearing the session, DELETE can be retried
+    // with the same generation.
+    crate::store::write_json(&path, &binding)
 }

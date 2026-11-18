@@ -2009,7 +2009,12 @@ direct port now answers phones too, with nothing new on the phone's wire.
   next request. Each tick, the runtime also closes such phones and ends their
   grants, and it fences by the account mirror's binding generation, as the
   window does. It reads that generation once a tick, not on every message, and
-  judges no phone while `account.json` cannot be read.
+  judges no phone while `account.json` cannot be read. With the window detached,
+  the runtime checks account-pairing revocations directly with the account
+  service, including when Relay is unavailable. It removes affected devices
+  and ends their grants before acknowledging revocation. Account-paired phones
+  need a recent successful check. Explicit pairings can still use the LAN when
+  the account service is unavailable.
 - **Notices stay in their process.** The runtime's phone host publishes its
   `mobile_notification` events on a sink that keeps them in the runtime
   (`phone/sink.rs`). Every runtime event also streams to the window, so the
@@ -2036,7 +2041,8 @@ direct port now answers phones too, with nothing new on the phone's wire.
 - **`terminalx-serve pair --phone`** prints a version-2 `terminalx://pair`
   link. With a live Relay registration it includes a one-time invite, and
   the phone installs a resume credential after approval. With a direct
-  listener it includes nearby endpoints. It prints the link as a
+  listener it includes nearby endpoints, even if Relay could not issue an
+  invite. It prints the link as a
   half-block QR and as text, then asks "Allow? [y/N]" with the fingerprint the
   phone shows. If hosting is off it asks to turn it on first, since phones use
   the same listener. While a TerminalX window is open (`Status.phones.windowOpen`)

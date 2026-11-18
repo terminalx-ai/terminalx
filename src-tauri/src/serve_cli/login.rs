@@ -54,6 +54,7 @@ fn command(name: &str, usage: &str, args: &[String], act: fn(&Path) -> Result<i3
 }
 
 fn login(data: &Path) -> Result<i32> {
+    machine_account::directory::ensure_no_pending_sign_out(data)?;
     if let Some(session) = machine_account::load(data)? {
         println!("This machine is already signed in as {}.", session.who());
         println!("To use another account, run `terminalx-serve logout` first.");
@@ -76,6 +77,7 @@ fn login(data: &Path) -> Result<i32> {
         }
     };
     machine_account::locked(data, || {
+        machine_account::directory::ensure_no_pending_sign_out(data)?;
         if machine_account::load(data)?.is_some() {
             return Err(anyhow!("This machine signed in while the code was pending."));
         }
@@ -87,7 +89,8 @@ fn login(data: &Path) -> Result<i32> {
 
 fn logout(data: &Path) -> Result<i32> {
     let api = Api::new(&machine_account::api_base_url());
-    let Some((session, unbound)) = machine_account::directory::sign_out(&api, data)? else {
+    let Some(session) = machine_account::directory::sign_out(&api, data)
+        .map_err(|error| anyhow!("Could not finish signing out ({error:#}). Run `terminalx-serve logout` to retry."))? else {
         println!("This machine is not signed in.");
         return Ok(0);
     };
@@ -95,9 +98,6 @@ fn logout(data: &Path) -> Result<i32> {
     // it must still be able to sign out. The session then lapses there.
     let told = api.logout(&session);
     println!("Signed out {} on this machine.", session.who());
-    if let Err(error) = unbound {
-        eprintln!("warning: could not remove this machine from the account directory ({error:#}).");
-    }
     if let Err(error) = told {
         eprintln!("warning: the account service was not told ({error:#}); the session ends there when it expires.");
     }

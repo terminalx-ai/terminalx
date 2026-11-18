@@ -157,8 +157,11 @@ pub fn rotated(held: &str, held_expires_at: i64, other: &Session) -> bool {
 
 /// The saved session, if this machine is signed in.
 pub fn load(data_dir: &Path) -> Result<Option<Session>> {
-    let path = session_path(data_dir);
-    let bytes = match std::fs::read(&path) {
+    load_from(&session_path(data_dir))
+}
+
+fn load_from(path: &Path) -> Result<Option<Session>> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
@@ -170,7 +173,10 @@ pub fn load(data_dir: &Path) -> Result<Option<Session>> {
 /// Keep `session`, replacing any other in one rename. The file is created
 /// 0600, so the tokens are never readable by another user, even briefly.
 pub fn save(data_dir: &Path, session: &Session) -> Result<()> {
-    let path = session_path(data_dir);
+    save_to(&session_path(data_dir), session)
+}
+
+fn save_to(path: &Path, session: &Session) -> Result<()> {
     let dir = path.parent().expect("the session file is in a folder");
     crate::machine_host::private_dir(dir)?;
     let temporary = dir.join(format!(".session.{}.json", std::process::id()));
@@ -183,7 +189,7 @@ pub fn save(data_dir: &Path, session: &Session) -> Result<()> {
         let mut file = options.open(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(session)?)?;
         file.sync_all()?;
-        std::fs::rename(&temporary, &path)?;
+        std::fs::rename(&temporary, path)?;
         Ok(())
     };
     write().inspect_err(|_| {
@@ -325,16 +331,48 @@ impl Api {
         Self { base: base.trim_end_matches('/').to_string(), agent: crate::data_privacy::http_agent().timeout(REQUEST_TIMEOUT).redirects(0).build() }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn phone_revocations(&self, session: &Session, host_id: &str, generation: u64) -> Result<Vec<crate::local_runtime::mobile::model::AccountPairingRevocation>> {
+        #[derive(Deserialize)]
+        struct Pending {
+            revocations: Vec<crate::local_runtime::mobile::model::AccountPairingRevocation>,
+        }
+        let path = format!("/v1/desktop/host-account-bindings/{host_id}/revocations?bindingGeneration={generation}");
+        let answer = self.request_with_body("GET", &path, None, Some(&session.access_token), Duration::from_secs(10))?;
+        match answer {
+            Ok(body) => Ok(serde_json::from_value::<Pending>(body).context("decode pending phone revocations")?.revocations),
+            Err(Answered { status, .. }) => bail!("phone revocation poll returned HTTP {status}"),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn acknowledge_phone_revocation(&self, session: &Session, host_id: &str, generation: u64, revocation_id: &str) -> Result<()> {
+        let path = format!("/v1/desktop/host-account-bindings/{host_id}/revocations/{revocation_id}/acknowledge");
+        let answer = self.request("POST", &path, json!({"bindingGeneration": generation}), Some(&session.access_token), Duration::from_secs(10))?;
+        match answer {
+            Ok(_) => Ok(()),
+            Err(Answered { status, .. }) => bail!("phone revocation acknowledgement returned HTTP {status}"),
+        }
+    }
+
     fn post(&self, path: &str, body: Value, bearer: Option<&str>) -> Result<std::result::Result<Value, Answered>> {
         self.request("POST", path, body, bearer, REQUEST_TIMEOUT)
     }
 
     fn request(&self, method: &str, path: &str, body: Value, bearer: Option<&str>, timeout: Duration) -> Result<std::result::Result<Value, Answered>> {
+        self.request_with_body(method, path, Some(body), bearer, timeout)
+    }
+
+    fn request_with_body(&self, method: &str, path: &str, body: Option<Value>, bearer: Option<&str>, timeout: Duration) -> Result<std::result::Result<Value, Answered>> {
         let mut request = self.agent.request(method, &format!("{}{path}", self.base)).timeout(timeout).set("content-type", "application/json");
         if let Some(token) = bearer {
             request = request.set("authorization", &format!("Bearer {token}"));
         }
-        match request.send_json(body) {
+        let answer = match body {
+            Some(body) => request.send_json(body),
+            None => request.call(),
+        };
+        match answer {
             Ok(response) => Ok(Ok(response.into_json().map_err(|_| anyhow!("the account service sent an unreadable answer"))?)),
             Err(ureq::Error::Status(status, response)) => {
                 let code = response.into_json::<Value>().ok().and_then(|body| body["error"].as_str().map(str::to_string)).unwrap_or_default();
@@ -442,17 +480,17 @@ impl Api {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Read;
     use std::sync::{Arc, Mutex};
 
     /// What the service was sent: path, body and authorization.
-    type Seen = Arc<Mutex<Vec<(String, Value, Option<String>)>>>;
+    pub(crate) type Seen = Arc<Mutex<Vec<(String, Value, Option<String>)>>>;
 
     /// A loopback account service answering each request with the next of
     /// `answers` (status, body), recording what it was sent.
-    fn service(answers: Vec<(u16, Value)>) -> (String, Seen, std::thread::JoinHandle<()>) {
+    pub(crate) fn service(answers: Vec<(u16, Value)>) -> (String, Seen, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -481,7 +519,8 @@ mod tests {
                 }
                 let path = head.split_whitespace().nth(1).unwrap().to_string();
                 let bearer = head.lines().find_map(|line| line.to_ascii_lowercase().starts_with("authorization:").then(|| line[14..].trim().to_string()));
-                record.lock().unwrap().push((path, serde_json::from_slice(&request[head_end..]).unwrap(), bearer));
+                let request_body = if length == 0 { Value::Null } else { serde_json::from_slice(&request[head_end..]).unwrap() };
+                record.lock().unwrap().push((path, request_body, bearer));
                 let text = body.to_string();
                 let reason = if status == 200 { "OK" } else { "Bad Request" };
                 write!(stream, "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}", text.len()).unwrap();
@@ -490,7 +529,7 @@ mod tests {
         (base, seen, handle)
     }
 
-    fn session_body() -> Value {
+    pub(crate) fn session_body() -> Value {
         json!({
             "accessToken": "access-1",
             "refreshToken": "refresh-1",
@@ -516,8 +555,7 @@ mod tests {
         let mut binding = None;
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
-        let (_, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
-        unbound.unwrap();
+        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
         assert!(load(data.path()).unwrap().is_none());
         save(data.path(), &session).unwrap();
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
@@ -541,10 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn an_offline_sign_out_can_reuse_the_surviving_binding() {
+    fn failed_unbind_can_be_retried_as_the_former_account() {
         let (base, seen, handle) = service(vec![
             (201, json!({})), (503, json!({})),
-            (409, json!({"error": "host_binding_generation_conflict"})), (201, json!({})),
+            (200, json!({})), (503, json!({})), (200, json!({})),
         ]);
         let api = Api::new(&base);
         let data = tempfile::tempdir().unwrap();
@@ -553,14 +591,27 @@ mod tests {
         save(data.path(), &session).unwrap();
         let mut binding = None;
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
-        let (_, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
-        assert!(unbound.is_err());
+        assert!(directory::sign_out(&api, data.path()).is_err());
         assert!(load(data.path()).unwrap().is_none());
-        save(data.path(), &session).unwrap();
-        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        assert!(directory::ensure_no_pending_sign_out(data.path()).is_err());
+        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
+        directory::ensure_no_pending_sign_out(data.path()).unwrap();
+        let mut new_owner = session;
+        new_owner.access_token = "new-account-token".into();
+        new_owner.cloud.user_id = "new-account".into();
+        save(data.path(), &new_owner).unwrap();
+        // The new owner's register can succeed remotely before its reply is
+        // lost. Its logout must advance past that attempt's generation.
+        assert!(directory::refresh(&api, &new_owner, data.path(), &key, &mut binding).is_err());
+        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
         handle.join().unwrap();
-        let generations: Vec<_> = seen.lock().unwrap().iter().map(|(_, body, _)| body["bindingGeneration"].as_u64().unwrap()).collect();
-        assert_eq!(generations, [1, 2, 3, 1]);
+        let seen = seen.lock().unwrap();
+        let generations: Vec<_> = seen.iter().map(|(_, body, _)| body["bindingGeneration"].as_u64().unwrap()).collect();
+        assert_eq!(generations, [1, 2, 2, 3, 4]);
+        assert_eq!(seen[1], seen[2]);
+        assert_eq!(seen[2].2.as_deref(), Some("Bearer access-1"));
+        assert_eq!(seen[3].2.as_deref(), Some("Bearer new-account-token"));
+        assert_eq!(seen[4].2, seen[3].2);
     }
 
     #[test]
@@ -568,7 +619,7 @@ mod tests {
         let mut renewed = session_body();
         renewed["accessToken"] = json!("fresh-access");
         renewed["refreshToken"] = json!("fresh-refresh");
-        let (base, seen, handle) = service(vec![(201, json!({})), (200, renewed), (200, json!({})), (200, json!({}))]);
+        let (base, seen, handle) = service(vec![(201, json!({})), (503, json!({})), (200, renewed), (503, json!({})), (200, json!({})), (200, json!({}))]);
         let api = Api::new(&base);
         let data = tempfile::tempdir().unwrap();
         let mut session: Session = serde_json::from_value(session_body()).unwrap();
@@ -578,17 +629,21 @@ mod tests {
         session.expires_at = 1;
         save(data.path(), &session).unwrap();
 
-        let (signed_out, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
-        unbound.unwrap();
+        assert!(directory::sign_out(&api, data.path()).is_err(), "temporary refresh failure");
+        assert!(load(data.path()).unwrap().is_none());
+        assert!(directory::sign_out(&api, data.path()).is_err(), "temporary unbind failure");
+        let signed_out = directory::sign_out(&api, data.path()).unwrap().unwrap();
         assert!(load(data.path()).unwrap().is_none());
         api.logout(&signed_out).unwrap();
         handle.join().unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen[1], (REFRESH_PATH.into(), json!({"refreshToken": "refresh-1"}), None));
-        assert_eq!(seen[2].0, format!("/v1/desktop/host-account-bindings/{}", key.host_id()));
-        assert_eq!(seen[2].1["bindingGeneration"], 2);
-        assert_eq!(seen[2].2.as_deref(), Some("Bearer fresh-access"));
-        assert_eq!(seen[3], (LOGOUT_PATH.into(), json!({"refreshToken": "fresh-refresh"}), Some("Bearer fresh-access".into())));
+        assert_eq!(seen[1], seen[2]);
+        assert_eq!(seen[3].0, format!("/v1/desktop/host-account-bindings/{}", key.host_id()));
+        assert_eq!(seen[3].1["bindingGeneration"], 2);
+        assert_eq!(seen[3].2.as_deref(), Some("Bearer fresh-access"));
+        assert_eq!(seen[3], seen[4]);
+        assert_eq!(seen[5], (LOGOUT_PATH.into(), json!({"refreshToken": "fresh-refresh"}), Some("Bearer fresh-access".into())));
     }
 
     #[test]
