@@ -159,7 +159,7 @@ const fixture = (paired) => `(() => {
         break;
       case "git.fetch": reply(frame.id, { repo: worktree }); break;
       case "git.branchDiffSize":
-        reply(frame.id, { additions: params.base === "release/2.x" ? 42 : 99, deletions: 0 });
+        reply(frame.id, { additions: params.base === "release/2.x" ? 42 : 99, deletions: 0, aheadOfBase: 1, head: "abc" });
         break;
       case "git.workingChanges": reply(frame.id, { head: "abc", files: [], truncated: false }); break;
       case "git.prs": reply(frame.id, { branch: params.branch, prs: [] }); break;

@@ -89,6 +89,13 @@ describe("composeMachineSnapshot (branch_step::compose)", () => {
     expect(snapshot).toMatchObject({ state: "noPr", actions: ["createPr"], base: "main", branch: "feature", head: HEAD });
   });
 
+  it("requires commits against the actual base before offering Create PR", () => {
+    const input = { work: work({ ahead: 2 }), remote: REMOTE, pr: null, known: true, working: false, baseRef: "release/2.x" };
+    expect(composeMachineSnapshot(input)?.actions).toEqual(["push"]);
+    expect(composeMachineSnapshot({ ...input, aheadOfBase: 0 })?.actions).toEqual(["push"]);
+    expect(composeMachineSnapshot({ ...input, aheadOfBase: 1 })?.actions).toEqual(["push", "createPr"]);
+  });
+
   it("keeps the local steps when GitHub could not be read, and never claims there is no PR", () => {
     expect(composeMachineSnapshot({ work: work({ ahead: 1 }), remote: REMOTE, pr: null, known: false, working: false })).toMatchObject({ state: "ahead", actions: ["push"] });
     expect(composeMachineSnapshot({ work: work(), remote: REMOTE, pr: null, known: false, working: false })).toBeNull();

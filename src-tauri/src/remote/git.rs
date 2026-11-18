@@ -44,6 +44,7 @@ const MAX_DIFF_BYTES: usize = 768 * 1024;
 const MAX_CONTENT_BYTES: usize = 384 * 1024;
 const MAX_CHANGED_FILES: usize = 2000;
 const MAX_BODY_BYTES: usize = 4096;
+const HEADER_DIFF_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Per repository in `lifecycle.dispositionFacts`.
@@ -227,6 +228,105 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
         // A grandchild may still hold the pipes; the readers finish on their own.
         None => Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }),
     }
+}
+
+/// Compare the worktree to the merge base. An intent-to-add index brings
+/// untracked files into the diff without writing their contents as objects.
+/// The index and any synthetic empty blob live in private scratch storage.
+fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, RpcError> {
+    let run = |mut command: Command, args: &[&str]| {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(RpcError::new("timeout", "Reading the branch diff took too long."));
+        }
+        command.args(args);
+        let output = run_bounded(command, remaining).map_err(RpcError::internal)?;
+        if output.timed_out || Instant::now() >= deadline {
+            return Err(RpcError::new("timeout", "Reading the branch diff took too long."));
+        }
+        if !output.ok {
+            return Err(failure_error("git diff size", &output.text(), Failure::Other));
+        }
+        Ok(output.stdout)
+    };
+    let read = |args: &[&str]| run(git_command(cwd), args);
+    let head = match read(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) {
+        Ok(sha) => Some(sha.trim().to_string()),
+        Err(error) if error.code == "git_failed" => None,
+        Err(error) => return Err(error),
+    };
+    let (base_commit, ahead_of_base) = if let Some(head) = &head {
+        let remote = format!("refs/remotes/origin/{base}^{{commit}}");
+        let local = format!("refs/heads/{base}^{{commit}}");
+        let target = read(&["rev-parse", "--verify", "--end-of-options", &remote])
+            .or_else(|error| if error.code == "git_failed" {
+                read(&["rev-parse", "--verify", "--end-of-options", &local])
+            } else {
+                Err(error)
+            })?;
+        let target = target.trim();
+        let count = read(&["rev-list", "--count", &format!("{target}..{head}")])?;
+        let count = count.trim().parse::<u64>().map_err(RpcError::internal)?;
+        (read(&["merge-base", head, target])?, count)
+    } else {
+        (read(&["hash-object", "-t", "tree", "--stdin"])?, 0)
+    };
+
+    let mut scratch = tempfile::Builder::new();
+    scratch.prefix("terminalx-git-diff-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        scratch.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+    let index = scratch.path().join("index");
+    let current_index = read(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+    let current_index = Path::new(current_index.strip_suffix('\n').unwrap_or(&current_index));
+    if current_index.exists() {
+        std::fs::copy(current_index, &index).map_err(RpcError::internal)?;
+    }
+    let objects = scratch.path().join("objects");
+    std::fs::create_dir_all(objects.join("info")).map_err(RpcError::internal)?;
+    let alternate = read(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+    let alternate = alternate.strip_suffix('\n').unwrap_or(&alternate);
+    if alternate.contains(['\r', '\n']) {
+        return Err(RpcError::invalid("Git object directory contains a line break"));
+    }
+    std::fs::write(objects.join("info/alternates"), format!("{alternate}\n")).map_err(RpcError::internal)?;
+    // A clean filter can write outside Git's object directory (for example,
+    // Git LFS). Do not run filters, index hooks or fsmonitor during polling.
+    let config = read(&["config", "--null", "--name-only", "--list"])?;
+    let filters: std::collections::BTreeSet<_> = config.split('\0')
+        .filter_map(|key| key.strip_prefix("filter.")?.rsplit_once('.').map(|(name, _)| name))
+        .collect();
+    let hooks = format!("core.hooksPath={}", scratch.path().join("hooks").display());
+    let command = || {
+        let mut command = git_command(cwd);
+        command.env("GIT_INDEX_FILE", &index).env("GIT_OBJECT_DIRECTORY", &objects)
+            .args(["-c", &hooks, "-c", "core.splitIndex=false", "-c", "core.fsmonitor=false"]);
+        for filter in &filters {
+            for setting in ["clean=", "process=", "required=false"] {
+                command.args(["-c", &format!("filter.{filter}.{setting}")]);
+            }
+        }
+        command
+    };
+    run(command(), &["add", "--intent-to-add", "-A", "--", "."])?;
+    let output = run(command(), &["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", base_commit.trim(), "--"])?;
+    let (mut additions, mut deletions) = (0, 0);
+    for line in output.lines() {
+        let mut fields = line.splitn(3, '\t');
+        match (fields.next(), fields.next()) {
+            (Some("-"), Some("-")) => {}
+            (Some(added), Some(deleted)) => {
+                additions += added.parse::<u64>().map_err(RpcError::internal)?;
+                deletions += deleted.parse::<u64>().map_err(RpcError::internal)?;
+            }
+            _ => return Err(RpcError::internal("Malformed Git diff statistics")),
+        }
+    }
+    Ok(json!({ "additions": additions, "deletions": deletions, "aheadOfBase": ahead_of_base, "head": head }))
 }
 
 /// Only app-owned network operations use this boundary. Local Git inspection,
@@ -659,8 +759,7 @@ impl WorkspaceGit {
     fn branch_diff_size(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
-        let (additions, deletions) = crate::git::branch_diff_size(&repo.dir, base).map_err(git_error)?;
-        Ok(json!({ "additions": additions, "deletions": deletions }))
+        branch_diff_size(&repo.dir, base, Instant::now() + HEADER_DIFF_TIMEOUT)
     }
 
     fn review_range(&self, params: &Value) -> Result<Value, RpcError> {

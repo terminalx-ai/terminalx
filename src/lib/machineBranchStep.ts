@@ -75,14 +75,13 @@ function bucket(state: string): Bucket {
 type LocalStep = "conflicts" | "reconcile" | "pull" | "commit" | "push" | null;
 
 /** `branch_overview::next_step` for a supported branch (named, not the default, with a remote). */
-function localStep(work: SourceStatus, baseConflicts: boolean, aheadOfBase: number): LocalStep {
+function localStep(work: SourceStatus, baseConflicts: boolean, aheadOfBase: number | null): LocalStep {
   if (work.conflicted?.length || work.operation) return "conflicts";
   if (work.ahead > 0 && work.behind > 0) return "reconcile";
   if (work.behind > 0) return "pull";
   if (baseConflicts) return "conflicts";
   if (work.dirty) return "commit";
-  if (aheadOfBase === 0 && work.ahead === 0) return null;
-  if (work.ahead > 0 || !work.upstream) return "push";
+  if (work.ahead > 0 || (!work.upstream && (aheadOfBase ?? 0) > 0)) return "push";
   return null;
 }
 
@@ -93,7 +92,7 @@ export function resolveMachineStep(work: SourceStatus, pr: MachinePr | null, wor
   const current = pr && pr.state === "OPEN" && !!pr.headSha && work.head === pr.headSha ? pr : null;
   const baseConflicts = !!current && (current.mergeable === "CONFLICTING" || current.mergeState === "DIRTY");
   const baseBehind = !!current && current.mergeState === "BEHIND";
-  const local = localStep(work, baseConflicts, aheadOfBase ?? 1);
+  const local = localStep(work, baseConflicts, aheadOfBase);
   if (local === "conflicts") return "conflicts";
   if (local === "reconcile") return "diverged";
   if (local === "pull") return "behind";
@@ -138,20 +137,20 @@ export function machineActions(step: BranchState, pr: MachinePr | null): BranchA
  * the PR read succeeded; without it only local steps show, never Create PR or
  * a hosted state (`branch_step::compose`).
  */
-export function composeMachineSnapshot(input: { work: SourceStatus; remote: string | null; pr: MachinePr | null; known: boolean; working: boolean; baseRef?: string | null }): MachineBranchSnapshot | null {
+export function composeMachineSnapshot(input: { work: SourceStatus; remote: string | null; pr: MachinePr | null; known: boolean; working: boolean; baseRef?: string | null; aheadOfBase?: number | null }): MachineBranchSnapshot | null {
   const { work, known, working } = input;
   if (!work.isRepo || !work.branch || !work.head || work.branch === work.defaultBranch || !isGithubRemote(input.remote)) return null;
   const pr = known ? input.pr : null;
   const base = machineBranchBase(work, pr, input.baseRef);
   if (!base || base === work.branch) return null;
-  // `aheadOfBase` is counted against the default branch; another base is not counted, as branch_step's unwrap_or(1).
-  const aheadOfBase = base === work.defaultBranch ? work.aheadOfBase : null;
-  let state = resolveMachineStep(work, pr, working, aheadOfBase);
+  const aheadOfBase = input.aheadOfBase === undefined ? (base === work.defaultBranch ? work.aheadOfBase : null) : input.aheadOfBase;
+  const canCreate = known && (aheadOfBase ?? 0) > 0;
+  const state = resolveMachineStep(work, pr, working, aheadOfBase);
   if (!known && !["agentWorking", "conflicts", "diverged", "behind", "uncommitted", "ahead"].includes(state)) return null;
-  if (state === "noPr" && aheadOfBase === 0) return null;
+  if (state === "noPr" && !canCreate) return null;
   if (state === "hidden") return null;
   let actions = machineActions(state, pr);
-  if (!known) actions = actions.filter((action) => action !== "createPr");
+  if (!canCreate) actions = actions.filter((action) => action !== "createPr");
   return {
     branch: work.branch,
     head: work.head,

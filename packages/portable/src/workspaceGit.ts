@@ -278,7 +278,7 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
-  branchDiffSize(base: string): Promise<{ additions: number; deletions: number }> {
+  branchDiffSize(base: string): Promise<{ additions: number; deletions: number; aheadOfBase: number; head: string | null }> {
     return this.read("git.branchDiffSize", { base });
   }
 

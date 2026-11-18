@@ -44,11 +44,12 @@ interface Read {
   prCount: number | null;
   snapshot: MachineBranchSnapshot | null;
   diff: { additions: number; deletions: number; base: string } | null;
+  diffNeedsUpdate: boolean;
   error: string | null;
   refreshing: boolean;
 }
 
-const EMPTY_READ: Read = { currentBranch: undefined, prCount: null, snapshot: null, diff: null, error: null, refreshing: false };
+const EMPTY_READ: Read = { currentBranch: undefined, prCount: null, snapshot: null, diff: null, diffNeedsUpdate: false, error: null, refreshing: false };
 const errorText = (source: GitSource | undefined, error: unknown) => (source ? source.errorMessage(error) : error instanceof Error ? error.message : String(error));
 
 /**
@@ -111,11 +112,16 @@ export function useMachineBranch(input: MachineBranchInput) {
           hostedState = null;
         }
         const prCount = hostedState?.count ?? null;
-        const snapshot = composeMachineSnapshot({ work, remote, pr: hostedState?.pr ?? null, known: prCount !== null, working: workingRef.current, baseRef });
-        const base = machineBranchBase(work, hostedState?.pr ?? null, baseRef);
+        const pr = hostedState?.pr ?? null;
+        const base = machineBranchBase(work, pr, baseRef);
         const size = work.isRepo && base ? await source.branchDiffSize?.(base).catch(() => null) : null;
         if (disposed) return null;
-        setRead({ currentBranch, prCount, snapshot, diff: size && base ? { ...size, base } : null, error: null, refreshing: false });
+        const comparison = size && size !== "unsupported" ? size : null;
+        const current = comparison?.head === work.head ? comparison : null;
+        const aheadOfBase = comparison ? current?.aheadOfBase ?? null : undefined;
+        const snapshot = composeMachineSnapshot({ work, remote, pr, known: prCount !== null, working: workingRef.current, baseRef, aheadOfBase });
+        const diff = current && base ? { additions: current.additions, deletions: current.deletions, base } : null;
+        setRead({ currentBranch, prCount, snapshot, diff, diffNeedsUpdate: size === "unsupported", error: null, refreshing: false });
         return snapshot;
       } catch (error) {
         if (!disposed) setRead({ ...EMPTY_READ, error: errorText(source, error) });
@@ -199,6 +205,10 @@ export type MachineBranch = ReturnType<typeof useMachineBranch>;
 /** The branch's lines added and removed against its base, after the branch chip (21.08). */
 export function MachineDiffSize({ branch, className }: { branch: MachineBranch; className?: string }) {
   const { diff, currentBranch } = branch;
+  if (branch.diffNeedsUpdate) {
+    const notice = `Update ${branch.input.machineName} for diff totals`;
+    return <span role="status" className={className}><span className="max-w-48 truncate text-xs text-warning" title={notice}>{notice}</span></span>;
+  }
   if (!diff || (!diff.additions && !diff.deletions)) return null;
   return (
     <span className={className} title={`Changes on ${currentBranch ?? "detached HEAD"} against ${diff.base}, uncommitted work included`} data-testid="machine-diff-size">

@@ -39,7 +39,7 @@ export interface GitSource {
   fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>;
   mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
-  branchDiffSize?(base: string): Promise<{ additions: number; deletions: number } | null>;
+  branchDiffSize?(base: string): Promise<Awaited<ReturnType<RemoteGit["branchDiffSize"]>> | "unsupported">;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
@@ -224,13 +224,13 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     mediaContentAt: (path, tree) => remote.mediaContent(path, tree),
     workStatus: statusOf,
     branchDiffSize: async (base) => {
-      if (!servesBranchDiffSize) return null;
+      if (!servesBranchDiffSize) return "unsupported";
       try {
         return await remote.branchDiffSize(base);
       } catch (error) {
         if (!(error instanceof WorkspaceRpcError) || error.code !== "method_not_found") throw error;
         servesBranchDiffSize = false;
-        return null;
+        return "unsupported";
       }
     },
     landed: input.canWrite ? async () => {

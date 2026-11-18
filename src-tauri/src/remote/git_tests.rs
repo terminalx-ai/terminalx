@@ -148,6 +148,13 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
     git(&project, &["commit", "-qm", "release"]);
     let checkout = project.join("worktrees/topic");
     git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+    let diff_size = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
+    };
+    let base = git(&checkout, &["rev-parse", "HEAD"]);
+    assert_eq!(diff_size(), json!({ "additions": 0, "deletions": 0, "aheadOfBase": 0, "head": base }));
     std::fs::write(checkout.join("committed.txt"), "committed\n").unwrap();
     git(&checkout, &["add", "committed.txt"]);
     git(&checkout, &["commit", "-qm", "topic"]);
@@ -160,20 +167,21 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
     git(&project, &["config", "filter.test.required", "true"]);
     let index = git(&checkout, &["ls-files", "--stage"]);
     let objects = git(&project, &["count-objects", "-v"]);
-    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
-    let diff_size = || {
-        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
-        runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
-    };
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
 
-    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1 }));
+    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1, "aheadOfBase": 1, "head": head }));
     std::fs::write(checkout.join("draft.txt"), "one\ntwo\n").unwrap();
-    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1 }));
+    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1, "aheadOfBase": 1, "head": head }));
     std::fs::remove_file(checkout.join("draft.txt")).unwrap();
-    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1 }));
+    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1, "aheadOfBase": 1, "head": head }));
     assert_eq!(git(&project, &["count-objects", "-v"]), objects);
     assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
     assert!(!checkout.join("filter-ran").exists());
+}
+
+#[test]
+fn branch_diff_size_refuses_to_start_after_its_deadline() {
+    assert_eq!(branch_diff_size(Path::new("."), "main", Instant::now()).unwrap_err().code, "timeout");
 }
 
 #[test]

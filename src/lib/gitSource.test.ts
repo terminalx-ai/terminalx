@@ -6,13 +6,13 @@ vi.mock("@/lib/api", () => ({ api: {}, gh: {}, git: {}, errorMessage: (error: un
 
 const { cloudGitSource, runtimeSessionIn } = await import("./gitSource");
 
-it("omits the header totals when a runtime has no safe diff size method", async () => {
+it("reports unsupported header totals on an older runtime without falling back to snapshots", async () => {
   const call = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.branchDiffSize"));
   const remote = new RemoteGit({ call } as unknown as WorkspaceRpcClient, "topic");
   const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
 
-  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBeNull();
-  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBeNull();
+  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBe("unsupported");
+  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBe("unsupported");
   expect(call.mock.calls).toEqual([["git.branchDiffSize", { repo: "topic", base: "release/2.x" }]]);
 });
 

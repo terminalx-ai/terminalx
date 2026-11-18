@@ -36,7 +36,7 @@ function makeSource(): GitSource {
     workStatus: vi.fn(async () => ({ ...status })),
     fetch: vi.fn(async () => null),
     prs: vi.fn(async () => { if (prsFail) throw prsFail; return prs; }),
-    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9 })),
+    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9, aheadOfBase: status.aheadOfBase, head: status.head })),
     commit: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1 }; return null; }),
     push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
     pull: vi.fn(async () => null),
@@ -103,6 +103,36 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     // The PR state follows: the new PR is read back and is ready to merge.
     expect((await screen.findByRole("button", { name: "Merge" })).hasAttribute("disabled")).toBe(false);
     expect(screen.getByTestId("pr-count").textContent).toBe("1");
+  });
+
+  it("offers no publishing action on a fresh branch from a release base", async () => {
+    render(idle, "origin/release/2.x");
+    git.branchDiffSize.mockResolvedValue({ additions: 0, deletions: 0, aheadOfBase: 0, head: HEAD });
+    await waitFor(() => expect(screen.getByTestId("current-branch").textContent).toBe("feature"));
+    expect(screen.queryByTestId("machine-branch-button")).toBeNull();
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the selected base before publishing from a Create PR dialog", async () => {
+    render(idle, "origin/release/2.x");
+    await screen.findByRole("button", { name: "Push" });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Create PR/ }));
+    const dialog = await screen.findByRole("dialog");
+    git.branchDiffSize.mockResolvedValue({ additions: 0, deletions: 0, aheadOfBase: 0, head: HEAD });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("The branch changed");
+    expect(git.push).not.toHaveBeenCalled();
+    expect(git.createPr).not.toHaveBeenCalled();
+  });
+
+  it("shows a diff-specific update indication for an older machine", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render();
+    git.branchDiffSize.mockResolvedValue("unsupported");
+    expect((await screen.findByRole("status")).textContent).toBe("Update Mac mini for diff totals");
+    expect(screen.queryByTestId("machine-diff-size")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create PR" })).toBeTruthy();
   });
 
   it("pushes a branch the machine never pushed before opening its pull request", async () => {
@@ -205,7 +235,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     render();
     await screen.findByRole("button", { name: "Merge" });
     status = { ...status, dirty: true };
-    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9 });
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9, aheadOfBase: 2, head: HEAD });
     await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
     expect((await screen.findByRole("button", { name: "Commit and push" })).hasAttribute("disabled")).toBe(false);
     expect((screen.getByTestId("machine-diff-size")).textContent).toContain("+150 −9");
@@ -216,7 +246,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     status = { ...status, dirty: true };
     await act(async () => { render(); });
     expect(screen.getByTestId("machine-diff-size").textContent).toContain("+142 −9");
-    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9 });
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9, aheadOfBase: 2, head: HEAD });
     await act(async () => { await vi.advanceTimersByTimeAsync(MACHINE_STATUS_EVERY_MS); });
     expect(screen.getByTestId("machine-diff-size").textContent).toContain("+150 −9");
   });

@@ -50,6 +50,7 @@ const SLOW_METHODS: &[&str] = &[
     "git.checkout",
     "git.repositories",
     "git.status",
+    "git.branchDiffSize",
     "git.workingChanges",
     "git.reviewRange",
     "git.changesBetween",
@@ -1600,6 +1601,19 @@ where
     Ok(())
 }
 
+async fn before_rpc_close<T>(
+    cancel: &mut mpsc::UnboundedReceiver<()>,
+    peer: &Peer,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        _ = cancel.recv() => None,
+        _ = peer.closed() => None,
+        result = operation => Some(result),
+    }
+}
+
 /// Serve workspace RPC to an authenticated peer on an E2EE socket until
 /// either side closes, `cancel` fires (a revocation) or the peer loses access.
 /// Every route of a host serves through here: the relay's data legs and a
@@ -1643,7 +1657,11 @@ where
                 }
                 answer = answers.recv() => {
                     if let Some(answer) = answer {
-                        send_sealed(socket, session, &answer).await?;
+                        let Some(sent) = before_rpc_close(cancel, peer, send_sealed(socket, session, &answer)).await else {
+                            // Drop the socket without flushing a partially queued reply.
+                            return Ok(());
+                        };
+                        sent?;
                     }
                 }
                 incoming = socket.next() => {
@@ -1760,6 +1778,15 @@ mod tests {
         assert!(SLOW_METHODS.contains(&"session.commands"));
         // Terminal calls stay in order: that is what keeps keystrokes ordered.
         assert!(!SLOW_METHODS.iter().any(|method| method.starts_with("pty.")));
+    }
+
+    #[tokio::test]
+    async fn branch_diff_replies_yield_to_connection_revocation() {
+        assert!(SLOW_METHODS.contains(&"git.branchDiffSize"));
+        let (peer, _notifications) = Peer::new("device".into(), Authority::Manage);
+        let (close, mut cancel) = mpsc::unbounded_channel();
+        close.send(()).unwrap();
+        assert_eq!(before_rpc_close(&mut cancel, &peer, std::future::ready("diff")).await, None);
     }
 
     #[test]
