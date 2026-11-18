@@ -33,7 +33,8 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  *   command goes live (`agent-commands/1`); nothing is queued on this Mac
  *   while the machine is away.
  * - Files and Git are the project's (`forProject`: each `fs.*`/`git.*` call
- *   names it), rooted at the session's worktree when it is inside the project.
+ *   names it), rooted at the session's worktree, inside the project or in an
+ *   absolute worktree folder (PRO-405, `sessionFilesBase`).
  * - Terminals are the machine's, created in the session (`pty/2`).
  * - Nothing of an organization is here: no sharing, presence, leases, wake or
  *   sleep, price or mirror. `orgId` is empty and `collab` is never live.
@@ -71,6 +72,26 @@ export function sessionRepository(repositories: readonly RemoteRepository[], pro
   const rel = worktreeInProject(project?.path, session?.cwd);
   const wanted = rel ?? session?.cwd ?? null;
   return repositories.find((repo) => repo.repo === wanted)?.repo ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0].repo;
+}
+
+/**
+ * Where Files, the editor and search are rooted for the session, as its
+ * project's `fs/1` names the folder: "" for the project's own folder, a
+ * relative path for a worktree inside it, or the absolute path of a worktree
+ * outside it (PRO-405). Once the repositories are known it is the one Changes
+ * shows for the session (`sessionRepository`), so the two always agree; before
+ * that, a worktree inside the project is rooted at once, and one outside it
+ * waits for the list (null), since only `git.repositories` names it.
+ */
+export function sessionFilesBase(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
+  const inside = worktreeInProject(project?.path, session?.cwd);
+  if (!repositories?.length) {
+    // Not listed yet: a worktree outside the project has no name to use until it is.
+    if (repositories === null && inside === null && project?.path && session?.cwd) return null;
+    return inside && inside !== "." ? inside : "";
+  }
+  const repo = sessionRepository(repositories, project, session);
+  return !repo || repo === "." ? "" : repo;
 }
 
 /** The header's connection word for a machine: what its chip says (21.09). */
@@ -210,13 +231,18 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     [connected, projectClient, repository, projectKey, manage],
   );
 
-  // Files: the session's worktree when it is inside the project (as a local session's files are its `cwd`), else the project's folder.
-  const worktree = worktreeInProject(project?.path, ownSession?.cwd);
-  const base = worktree && worktree !== "." ? worktree : "";
+  // Files: the session's worktree, as a local session's files are its `cwd`: the repository Changes shows for it.
+  // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
+  const filesBase = sessionFilesBase(repositories, project, ownSession);
+  const base = filesBase ?? "";
   const projectRoot = machineProjectRoot(machineId, projectId);
   const root = (base ? `${projectRoot}/${base}` : projectRoot) as RemotePath;
   const fileKey = base ? `${projectKey}/${base}` : projectKey;
-  const fileSource = useMemo(() => (connected && projectClient ? cloudFileSource(fileKey, projectClient, !manage, base) : undefined), [connected, projectClient, fileKey, manage, base]);
+  const filesReady = filesBase !== null;
+  const fileSource = useMemo(
+    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base) : undefined),
+    [connected, projectClient, filesReady, fileKey, manage, base],
+  );
   useEffect(() => {
     if (!fileSource) return;
     const unregister = registerFileSource(fileSource);
