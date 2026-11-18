@@ -2872,6 +2872,7 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             if let Some(provenance) = &mut wt.worktree_base { provenance.from = None; }
         }
         entry.cwd = wt.path.clone();
+        entry.set_checkout_root(Some(&wt.path));
         entry.worktree_name = Some(wt.name.clone());
         entry.branch = Some(wt.branch.clone());
         entry.base_ref = Some(wt.base_tree.clone());
@@ -4982,7 +4983,31 @@ mod command_tests {
         assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2), &mut allocation).unwrap().is_none());
         assert_eq!(std::path::Path::new(&dest.cwd).file_name().unwrap(), "kept");
         assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("file")).unwrap(), "turn end\n");
-        assert_eq!(allocation.rollback("failed".into()), "failed");
+        let fork_root = std::path::Path::new(&dest.cwd).parent().unwrap().to_path_buf();
+        dest.id = "fork-subdirectory-test".into();
+        let mut companion = dest.clone();
+        companion.id = "fork-root-companion-test".into();
+        companion.cwd = fork_root.to_string_lossy().into_owned();
+        store::index::save(&[src.clone(), dest.clone(), companion.clone()]).unwrap();
+        allocation.commit();
+        assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
+        assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
+        let sink = crate::sink::BroadcastSink::new(16);
+        std::fs::remove_dir_all(&dest.cwd).unwrap();
+        assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
+        assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
+        session_ops::delete_session_blocking(&sink, &companion.id, &|_| {}).unwrap();
+        let path = session_ops::sole_workspace_of(&dest.id).unwrap().unwrap();
+        assert_eq!(std::path::Path::new(&path), fork_root);
+        let request = session_ops::WorkspaceRemoval {
+            project_path: &dest.project_path, path: &path, sessions: session_ops::SessionsFate::Delete,
+            delete_branch: true, confirmation: session_ops::Confirmation::Forced, expected_sessions: None,
+            direct: git::DirectDelete::Allowed, fetch: crate::landed::Fetch::Skip,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
+        };
+        session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap();
+        assert!(!fork_root.exists());
+        assert!(store::index::get(&dest.id).is_err());
 
         std::fs::create_dir(root.join("later")).unwrap();
         std::fs::write(root.join("later/file"), "source only\n").unwrap();
