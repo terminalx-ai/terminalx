@@ -35,10 +35,10 @@
 //! witness can answer.
 //!
 //! What no check here can tell from a person: a process of the same user that
-//! detaches and opens a new pseudo-terminal of its own to run `pair` in. And a
-//! desktop-launched runtime that keeps its own host key (not on a Mac), which
-//! holds nothing only the window knows, so it still lets a caller with no
-//! terminal through there.
+//! detaches and opens a new pseudo-terminal of its own to run `pair` in. A
+//! desktop runtime without a window-owned key cannot identify its window, so
+//! guarded pairing actions are unavailable there, including when macOS app
+//! identification fails.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -92,6 +92,8 @@ pub enum Refusal {
     /// A process with no controlling terminal that did not prove it is the
     /// window, asking a runtime the desktop launched.
     NotWindow,
+    /// A desktop runtime cannot establish window provenance.
+    UnsupportedDesktop,
 }
 
 impl Refusal {
@@ -102,6 +104,7 @@ impl Refusal {
             Self::RuntimeTerminal => "it was asked from a terminal this runtime runs",
             Self::NoTerminal => "it was asked by a process with no terminal, on a server with no window",
             Self::NotWindow => "it was asked by a process with no terminal that is not the TerminalX window",
+            Self::UnsupportedDesktop => "this desktop cannot verify its window's identity; pairing is unavailable",
         }
     }
 }
@@ -138,12 +141,15 @@ pub enum Window {
     /// the desktop launched on a Mac. `None` until the window has handed the
     /// key over, when no caller can prove it.
     Keyed(Option<zeroize::Zeroizing<[u8; 32]>>),
-    /// Anyone: a runtime the desktop launched that keeps its own host key,
-    /// so nothing tells the window from another process (see the module).
+    /// A desktop with no window-owned key: guarded actions are unavailable.
     Unrecognisable,
 }
 
 impl Window {
+    pub(crate) fn desktop(window_owned: bool, key: Option<zeroize::Zeroizing<[u8; 32]>>) -> Self {
+        if window_owned { Self::Keyed(key) } else { Self::Unrecognisable }
+    }
+
     /// This runtime's: from `TERMINALX_LOCAL_DESKTOP` and its machine host.
     fn current() -> Self {
         if headless() {
@@ -151,8 +157,7 @@ impl Window {
         }
         match crate::machine_host::installed() {
             Some(host) => host.consent_window(),
-            None if crate::machine_host::window_owns_key() => Self::Keyed(None),
-            None => Self::Unrecognisable,
+            None => Self::desktop(crate::machine_host::window_owns_key(), None),
         }
     }
 
@@ -169,13 +174,16 @@ impl Window {
 /// runtime whose window is `window`; `proven` says the caller proved it is
 /// the window.
 pub fn terminal_rule(window: &Window, has_terminal: bool, proven: bool) -> Option<Refusal> {
+    if matches!(window, Window::Unrecognisable) {
+        return Some(Refusal::UnsupportedDesktop);
+    }
     if has_terminal {
         return None;
     }
     match window {
         Window::Headless => Some(Refusal::NoTerminal),
         Window::Keyed(_) => (!proven).then_some(Refusal::NotWindow),
-        Window::Unrecognisable => None,
+        Window::Unrecognisable => Some(Refusal::UnsupportedDesktop),
     }
 }
 
@@ -374,6 +382,9 @@ pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(),
     });
     if let Some(refusal) = refusal {
         log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
+        if refusal == Refusal::UnsupportedDesktop {
+            return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("Restart TerminalX with a supported desktop configuration. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
+        }
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }
     Ok(())
@@ -733,7 +744,7 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let unavailable: WindowKey = Box::new(|| anyhow::bail!("window key unavailable"));
         let available: WindowKey = Box::new(|| Ok(zeroize::Zeroizing::new([7; 32])));
-        for command in [machine_wire::CREATE_CODE, machine_wire::APPROVE] {
+        for command in GUARDED {
             let mut params = json!({});
             let error = witness_with_window_key(command, dir.path(), &mut params, Some(&unavailable))
                 .err().expect("a key read error stops the request locally");
@@ -772,8 +783,15 @@ mod tests {
         let unkeyed = Window::Keyed(None);
         let socket = Path::new("/run/cw-a.sock");
         assert!(!unkeyed.proven(Some(&window_proof(&[7; 32], socket, "n")), socket, "n"));
-        // A runtime that keeps its own key cannot tell, and refuses no one.
-        assert_eq!(terminal_rule(&Window::Unrecognisable, false, false), None);
+    }
+
+    #[test]
+    fn an_unrecognisable_desktop_refuses_pairing_even_with_a_terminal_or_proof() {
+        for terminal in [false, true] {
+            for proof in [false, true] {
+                assert_eq!(terminal_rule(&Window::Unrecognisable, terminal, proof), Some(Refusal::UnsupportedDesktop));
+            }
+        }
     }
 
     #[test]
@@ -886,15 +904,16 @@ mod tests {
             assert_eq!(error.code, "person_required", "{case}: {error:?}");
             assert!(error.message.contains("not the TerminalX window"), "{case}: {}", error.message);
         };
-        for command in [machine_wire::CREATE_CODE, machine_wire::APPROVE] {
+        for command in GUARDED {
             // The agent: detached with `setsid`, no terminal, no key.
             let (pid, terminal, mut params) = detached_request(&run, command, None);
             assert!(!terminal, "a process in a new session has no terminal");
             assert!(!descends_from(pid, me()), "{command}: the agent no longer descends from the runtime");
             not_window(verify_for(&run, &mut params, &desktop), &format!("{command}: a detached agent"));
-            // Today's gap, where the runtime keeps its own key.
+            // A desktop that keeps its own key cannot identify its window.
             let (_, _, mut params) = detached_request(&run, command, None);
-            assert!(verify_for(&run, &mut params, &Window::Unrecognisable).is_ok(), "{command}");
+            let error = verify_for(&run, &mut params, &Window::Unrecognisable).unwrap_err();
+            assert_eq!(error.code, "pairing_unavailable", "{command}");
 
             // The window, which holds the key: the same kind of process, with its proof.
             let (_, _, mut params) = detached_request(&run, command, Some(&key));

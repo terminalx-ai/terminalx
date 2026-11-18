@@ -307,11 +307,8 @@ impl MachineHost {
     #[cfg(unix)]
     pub fn consent_window(&self) -> crate::serve_cli::consent::Window {
         use crate::serve_cli::consent::Window;
-        if !self.keys.needs_window() {
-            return Window::Unrecognisable;
-        }
         let state = self.state.lock().unwrap();
-        Window::Keyed(state.keypair.as_ref().map(|keypair| zeroize::Zeroizing::new(*keypair.secret())))
+        Window::desktop(self.keys.needs_window(), state.keypair.as_ref().map(|keypair| zeroize::Zeroizing::new(*keypair.secret())))
     }
 }
 

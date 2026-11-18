@@ -50,7 +50,11 @@ struct KeyFile {
 /// The Keychain service of a desktop-launched runtime, from the variables the
 /// app's launcher sets (`local_runtime/launch.rs`). `None` elsewhere.
 fn desktop_service(desktop: Option<&str>, application: Option<&str>) -> Option<String> {
-    if !cfg!(target_os = "macos") || desktop != Some("1") {
+    desktop_service_for(cfg!(target_os = "macos"), desktop, application)
+}
+
+fn desktop_service_for(macos: bool, desktop: Option<&str>, application: Option<&str>) -> Option<String> {
+    if !macos || desktop != Some("1") {
         return None;
     }
     let application = application?;
@@ -198,6 +202,23 @@ mod tests {
         assert_eq!(desktop_service(Some("1"), None), None);
         assert_eq!(desktop_service(Some("1"), Some("no-dot")), None);
         assert_eq!(desktop_service(Some("1"), Some("com.x/../y")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_consent_fails_closed_when_the_window_cannot_own_the_key() {
+        use crate::serve_cli::consent::{terminal_rule, Refusal, Window};
+        for (macos, application, supported) in [
+            (true, Some("com.terminalx.next"), true),
+            (false, Some("com.terminalx.next"), false),
+            (true, None, false),
+            (true, Some("invalid"), false),
+        ] {
+            let owned = desktop_service_for(macos, Some("1"), application).is_some();
+            let window = Window::desktop(owned, Some(zeroize::Zeroizing::new([7; 32])));
+            assert_eq!(terminal_rule(&window, false, true), if supported { None } else { Some(Refusal::UnsupportedDesktop) });
+            assert_eq!(terminal_rule(&window, true, false), if supported { None } else { Some(Refusal::UnsupportedDesktop) });
+        }
     }
 
     #[test]
