@@ -2782,16 +2782,25 @@ fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) 
 /// Allocate and restore the fork's checkout under the same rollback guard as its conversation.
 fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, at: Option<u64>, allocation: &mut crate::fork_allocation::ForkAllocation) -> Result<Option<String>, String> {
     let project_path = Path::new(&src.project_path);
-    let main_git_turn = at.is_some() && !src.is_quick() && git::is_repo(Path::new(&src.cwd));
+    let project_repo = git::common_dir(project_path);
+    let source_repo = git::common_dir(Path::new(&src.cwd));
+    let main_git_turn = at.is_some() && !src.is_quick() && project_repo.is_some() && project_repo == source_repo;
     if !src.worktree_removed && (src.worktree_name.is_some() || main_git_turn) {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = names::unclaimed(&taken);
         // A main checkout may have switched branches since the session was created.
+        let source_branch = git::current_branch(Path::new(&src.cwd));
         let base = if src.worktree_name.is_none() {
-            Some(git::run(Path::new(&src.cwd), &["rev-parse", "HEAD"]).map_err(err)?.trim().to_owned())
+            Some(match &source_branch {
+                Some(branch) => branch.clone(),
+                None => git::run(Path::new(&src.cwd), &["rev-parse", "HEAD"]).map_err(err)?.trim().to_owned(),
+            })
         } else { src.branch.clone() };
-        let (wt, created_commit) = git::create_fork_worktree(project_path, &name, base.as_deref()).map_err(err)?;
+        let (mut wt, created_commit) = git::create_fork_worktree(project_path, &name, base.as_deref()).map_err(err)?;
+        if src.worktree_name.is_none() && source_branch.is_none() {
+            if let Some(provenance) = &mut wt.worktree_base { provenance.from = None; }
+        }
         entry.cwd = wt.path.clone();
         entry.worktree_name = Some(wt.name.clone());
         entry.branch = Some(wt.branch.clone());
@@ -4848,9 +4857,53 @@ mod command_tests {
             assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
             assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
             if !worktree {
+                assert_eq!(published.worktree_base.as_ref().unwrap().from.as_deref(), Some("main"));
+                let next = git::run(cwd, &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "advance"]).unwrap();
+                git::run(cwd, &["update-ref", "refs/heads/main", next.trim()]).unwrap();
+                let incoming = git::run(std::path::Path::new(&published.cwd), &["rev-list", "--count", "HEAD..main"]).unwrap();
+                assert_eq!(incoming.trim(), "1");
                 git::run(cwd, &["reset", "--hard", "HEAD"]).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn turn_fork_does_not_use_a_different_project_repository() {
+        use crate::{git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let foreign = root.path().join("foreign");
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("a.txt"), "initial\n").unwrap();
+        git::run(&project, &["add", "a.txt"]).unwrap();
+        git::run(&project, &["commit", "-qm", "initial"]).unwrap();
+        git::run(root.path(), &["clone", "-q", project.to_str().unwrap(), foreign.to_str().unwrap()]).unwrap();
+        assert_eq!(git::run(&project, &["rev-parse", "HEAD"]).unwrap(), git::run(&foreign, &["rev-parse", "HEAD"]).unwrap());
+        std::fs::write(foreign.join("a.txt"), "foreign changes\n").unwrap();
+        for project_path in [&project, &folder] {
+            let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+                cwd: Some(foreign.to_str().unwrap().into()),
+                tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+                ..Default::default()
+            }).unwrap();
+            src.kind = SessionKind::Project;
+            src.project_path = project_path.to_str().unwrap().into();
+            let mut dest = src.clone();
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&src, &src.tabs[0], &mut dest, Some(1), &mut allocation).unwrap().unwrap();
+            assert!(note.contains("shares this checkout"), "{note}");
+            assert_eq!(dest.cwd, src.cwd);
+            assert!(dest.worktree_name.is_none());
+            assert_eq!(std::fs::read_to_string(foreign.join("a.txt")).unwrap(), "foreign changes\n");
+            assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "initial\n");
+        }
+        assert_eq!(git::run(&project, &["worktree", "list", "--porcelain"]).unwrap().matches("worktree ").count(), 1);
     }
 
     #[test]
