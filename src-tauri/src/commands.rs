@@ -2806,8 +2806,8 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             let source_root = std::fs::canonicalize(source_root.trim()).map_err(err)?;
             source_cwd.strip_prefix(source_root).map_err(err)?.to_path_buf()
         } else if let Some(name) = &src.worktree_name {
-            // Git's worktree records retain the original location even after
-            // the configured worktree directory changes or the checkout vanishes.
+            // A live checkout can verify its repository even when the stored
+            // working directory inside it has disappeared.
             if !matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [std::path::Component::Normal(_)]) {
                 return Err("Cannot verify the source worktree name.".into());
             }
@@ -2817,10 +2817,10 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             let resolved_cwd = resolve_missing_path(source_cwd)?;
             let mut candidates = git::list_worktrees(project_path).map_err(err)?.into_iter()
                 .filter(|(path, _)| Path::new(path).file_name() == Some(std::ffi::OsStr::new(name)))
-                .map(|(path, _)| (std::path::PathBuf::from(path), true)).collect::<Vec<_>>();
-            candidates.push((git::worktree_path(project_path, name), false));
+                .map(|(path, _)| std::path::PathBuf::from(path)).collect::<Vec<_>>();
+            candidates.push(git::worktree_path(project_path, name));
             let mut found = None;
-            for (candidate, recorded) in candidates {
+            for candidate in candidates {
                 let root = resolve_missing_path(&candidate)?;
                 let Ok(relative) = resolved_cwd.strip_prefix(&root) else { continue };
                 if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) { continue; }
@@ -2833,13 +2833,10 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
                         return Err("The source working directory escapes its worktree.".into());
                     }
                 } else {
-                    // A guessed path or matching branch cannot establish who
-                    // owned a missing checkout after its record was pruned.
-                    if !recorded { continue; }
-                    let ancestor = root.ancestors().find(|path| path.exists()).ok_or("Missing source ancestor")?;
-                    if git::common_dir(ancestor).is_some_and(|repo| Some(repo) != project_repo) {
-                        return Err("The source location belongs to a different repository.".into());
-                    }
+                    // Even a Git record can belong to a later checkout that
+                    // reused this path. The session has no instance identity
+                    // with which to distinguish it from the original.
+                    continue;
                 }
                 found = Some(relative.to_path_buf());
                 break;
@@ -5148,7 +5145,7 @@ mod command_tests {
                 let mut dest = src.clone();
                 dest.worktree_name = None;
                 let mut allocation = crate::fork_allocation::ForkAllocation::default();
-                if state == 2 {
+                if state >= 1 {
                     let before = git::list_worktrees(root).unwrap();
                     assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
                     assert_eq!(dest.cwd, src.cwd);
@@ -5214,6 +5211,12 @@ mod command_tests {
         git::run(&project, &["add", "."]).unwrap();
         git::run(&project, &["commit", "-qm", "replacement"]).unwrap();
         git::run(&project, &["branch", &wt.branch]).unwrap();
+        // The replacement can register a different checkout at the exact old
+        // path, then lose its directory while retaining its Git record.
+        git::run(&project, &["worktree", "add", "-q", "-b", "replacement-checkout", &wt.path, "main"]).unwrap();
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        let old_root = super::resolve_missing_path(std::path::Path::new(&wt.path)).unwrap();
+        assert!(git::list_worktrees(&project).unwrap().iter().any(|(path, branch)| super::resolve_missing_path(std::path::Path::new(path)).unwrap() == old_root && branch.as_deref() == Some("replacement-checkout")));
         // Exercise both a missing ancestor in the replacement and one outside Git.
         for cwd in [std::path::PathBuf::from(&wt.path), temp.path().join("outside/missing-source/sub")] {
             src.cwd = cwd.to_string_lossy().into_owned();
