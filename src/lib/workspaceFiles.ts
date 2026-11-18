@@ -310,41 +310,43 @@ export function cloudFileSource(
     },
     changes: async () => {
       type Status = { repository: boolean; repo?: string; files?: { path: string; index: string; worktree: string }[] };
-      const under = (repo: string | undefined) => (repo && repo !== "." ? `${repo}/` : "");
-      const badges = (status: Status, prefix: string) =>
-        (status.files ?? []).flatMap((file) => {
+      const repoRoot = (repo: string | undefined) => (repo && repo !== "." ? repo : "");
+      const badges = (status: Status, repo: string | undefined) => {
+        const base = repoRoot(repo);
+        const prefix = base ? `${base}/` : "";
+        return (status.repository ? status.files ?? [] : []).flatMap((file) => {
           const path = outside(prefix + file.path);
           const code = file.index === "?" ? "?" : file.worktree !== " " ? file.worktree : file.index;
           const change = PORCELAIN[code];
           return path && change ? [{ path, status: change }] : [];
         });
-      // A session folder can be below a repository root. Status paths are relative to that repository.
+      };
+      const badgesFor = async (repositories: readonly RemoteRepository[]) => {
+        const each = await Promise.all(repositories.map(({ repo }) =>
+          live(client.call<Status>("git.status", { repo }))
+            .then((status) => badges(status, repo))
+            .catch(() => []),
+        ));
+        return each.flat();
+      };
+      // Include the closest containing repository and every repository visible beneath the Files root.
       if (root) {
         const repositories = await live(discoverRepositories());
         const containing = repositories
-          .filter(({ repo }) => pathInFileRoot(repo === "." ? "" : repo, root) !== null)
-          .sort((a, b) => under(b.repo).length - under(a.repo).length)[0];
-        if (!containing) return [];
-        const status = await live(client.call<Status>("git.status", { repo: containing.repo }));
-        return status.repository ? badges(status, under(containing.repo)) : [];
+          .filter(({ repo }) => pathInFileRoot(repoRoot(repo), root) !== null)
+          .sort((a, b) => repoRoot(b.repo).length - repoRoot(a.repo).length)[0];
+        const nested = repositories.filter(({ repo }) => pathInFileRoot(root, repoRoot(repo)));
+        return badgesFor(containing ? [containing, ...nested] : nested);
       }
       try {
         const status = await live(client.call<Status>("git.status"));
         // Paths are the repository's; a lone clone below the root is prefixed too.
-        return status.repository ? badges(status, under(status.repo)) : [];
+        return badges(status, status.repo);
       } catch (error) {
         if (!(error instanceof WorkspaceRpcError) || error.code !== "ambiguous_repository") throw error;
       }
       // Several repositories (PRO-27): each one's badges, under its directory.
-      const repositories = await live(listRepositories(client));
-      const each = await Promise.all(
-        repositories.map((repository) =>
-          live(client.call<Status>("git.status", { repo: repository.repo }))
-            .then((status) => badges(status, under(repository.repo)))
-            .catch(() => []),
-        ),
-      );
-      return each.flat();
+      return badgesFor(await live(listRepositories(client)));
     },
     search: async (query, signal) => {
       const controller = new AbortController();
