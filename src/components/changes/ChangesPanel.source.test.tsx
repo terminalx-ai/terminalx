@@ -652,7 +652,7 @@ it("passes revision byte sizes and the host's open action through the real Chang
     ? { before: "<file too large to show>", after: null, beforeSize: 6 * 1024 * 1024 }
     : { before: null, after: "small", afterSize: 5 });
   const open = vi.fn();
-  render(<ChangesPanel source={source} onOpenFile={open} events={[]} version={0} active live={false} />);
+  render(<ChangesPanel source={source} openFileAction={(path) => () => open(path)} events={[]} version={0} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
   expect(await screen.findByText("6.0 MB")).toBeTruthy();
   expect(screen.getByTestId("changes-empty-state").textContent).toContain("6.0 MB, over the text preview limit");
@@ -665,7 +665,7 @@ it("keeps missing size metadata unknown and never opens a deleted file", async (
   const source = fakeSource("large-deleted");
   source.changesBetween.mockResolvedValue([{ path: "gone.ts", status: "deleted", additions: 0, deletions: 0 }]);
   source.fileContentsAt.mockResolvedValue({ before: "<file too large to show>", after: null });
-  render(<ChangesPanel source={source} onOpenFile={vi.fn()} events={[]} version={0} active live={false} />);
+  render(<ChangesPanel source={source} openFileAction={() => vi.fn()} events={[]} version={0} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: /gone.ts/ }));
   expect((await screen.findByTestId("changes-empty-state")).textContent).toContain("size unknown");
   expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();

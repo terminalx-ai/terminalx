@@ -19,6 +19,8 @@ pub mod registry;
 mod pairing_tests;
 #[cfg(all(test, feature = "desktop"))]
 mod security_tests;
+#[cfg(all(test, feature = "desktop", target_os = "macos"))]
+mod window_consent_tests;
 #[cfg(test)]
 mod relay_tests;
 
@@ -292,6 +294,27 @@ pub fn installed() -> Option<&'static Arc<MachineHost>> {
     INSTALLED.get()
 }
 
+/// Whether a desktop-launched runtime keeps the window's host key, which
+/// only the window and the runtime hold (`key::window_owned`).
+pub fn window_owns_key() -> bool {
+    key::window_owned()
+}
+
+impl MachineHost {
+    /// Who the pairing guard may let through with no terminal
+    /// (`serve_cli::consent`): the window, by the host key it handed over,
+    /// where the key is the window's.
+    #[cfg(unix)]
+    pub fn consent_window(&self) -> crate::serve_cli::consent::Window {
+        use crate::serve_cli::consent::Window;
+        if !self.keys.needs_window() {
+            return Window::Unrecognisable;
+        }
+        let state = self.state.lock().unwrap();
+        Window::Keyed(state.keypair.as_ref().map(|keypair| zeroize::Zeroizing::new(*keypair.secret())))
+    }
+}
+
 /// The listener's port: [`PORT`], or `TERMINALX_MACHINE_HOST_PORT` for tests.
 fn configured_port() -> u16 {
     match std::env::var(wire::PORT_ENV) {
@@ -318,25 +341,15 @@ impl MachineHost {
         let sink = parts.sink.clone();
         #[cfg(unix)]
         let sessions = parts.sessions.clone();
-        let host = Arc::new(Self {
-            data_dir: data_dir.to_path_buf(),
-            keys: key::KeyStore::for_runtime(data_dir),
-            registry: registry::Registry::in_data_dir(data_dir),
-            activity: activity::Log::in_dir(&data_dir.join(DIR)),
-            sink: sink.clone(),
-            rpc: Mutex::new(if awaiting_rpc { Rpc::Awaiting } else { Rpc::Build(Box::new(parts)) }),
-            state: Mutex::new(State::default()),
+        let host = Self::new(
+            data_dir.to_path_buf(),
+            key::KeyStore::for_runtime(data_dir),
+            sink.clone(),
+            if awaiting_rpc { Rpc::Awaiting } else { Rpc::Build(Box::new(parts)) },
             lifetime,
-            port: configured_port(),
-            wake: Notify::new(),
-            settings_changed: Notify::new(),
-            next_connection: std::sync::atomic::AtomicU64::new(1),
-            relay: Mutex::new(None),
-            #[cfg(unix)]
-            phones: OnceLock::new(),
-            account_relay_allowed: !awaiting_rpc,
-            account_relay: Mutex::new(None),
-        });
+            configured_port(),
+            !awaiting_rpc,
+        );
         let weak = Arc::downgrade(&host);
         sink.listen(
             "settings_file_changed",
@@ -380,6 +393,36 @@ impl MachineHost {
         }
         tokio::spawn(host.clone().supervise());
         host
+    }
+
+    fn new(
+        data_dir: PathBuf,
+        keys: key::KeyStore,
+        sink: Arc<dyn EventSink>,
+        rpc: Rpc,
+        lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
+        port: u16,
+        account_relay_allowed: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            keys,
+            registry: registry::Registry::in_data_dir(&data_dir),
+            activity: activity::Log::in_dir(&data_dir.join(DIR)),
+            data_dir,
+            sink,
+            rpc: Mutex::new(rpc),
+            state: Mutex::new(State::default()),
+            lifetime,
+            port,
+            wake: Notify::new(),
+            settings_changed: Notify::new(),
+            next_connection: std::sync::atomic::AtomicU64::new(1),
+            relay: Mutex::new(None),
+            #[cfg(unix)]
+            phones: OnceLock::new(),
+            account_relay_allowed,
+            account_relay: Mutex::new(None),
+        })
     }
 
     /// The relay host's RPC, which the direct listener serves too.

@@ -26,6 +26,7 @@ export interface DashboardSession {
   hasMessages?: boolean;
   archived: boolean;
   tabs: DashboardTab[];
+  rowStatus?: { tabs: readonly { activity?: string | null }[] } | null;
 }
 
 export type ColumnId = "needs" | "working" | "done" | "not-started";
@@ -69,7 +70,7 @@ export function toggleFilter<T extends string>(list: T[], value: T): T[] {
 
 export function sessionColumn(session: DashboardSession): ColumnId {
   if (session.tabs.some((tab) => tab.status === "waiting")) return "needs";
-  if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
+  if (session.tabs.some((tab) => tab.status === "in_progress") || session.rowStatus?.tabs.some((tab) => tab.activity === "background")) return "working";
   // Opening, renaming or configuring a chat changes `modified`, but starts no turn.
   if (session.hasMessages || session.lastMessageAt || session.tabs.some((tab) => tab.hasMessages || tab.lastMessageAt || tab.status === "completed")) return "done";
   return "not-started";

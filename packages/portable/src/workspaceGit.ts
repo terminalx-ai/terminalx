@@ -84,6 +84,8 @@ export interface RemotePullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has for the pull request. Empty or absent on older runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
@@ -365,8 +367,12 @@ export class RemoteGit {
     return this.write("git.prReady", { number });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
-    return this.write("git.prMerge", { number, method });
+  /**
+   * `head` pins the merge to the commit the person saw: GitHub refuses it
+   * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
+   */
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
+    return this.write("git.prMerge", head ? { number, method, head } : { number, method });
   }
 }
 

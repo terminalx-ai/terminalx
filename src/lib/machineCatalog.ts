@@ -459,6 +459,18 @@ export async function updateMachineSession(key: string, patch: RuntimeSessionPat
   }
 }
 
+/**
+ * Drop sessions the machine has deleted (their worktree was removed with
+ * them) from its rows at once, before its `session.sessions` says so.
+ */
+export function forgetMachineSessions(machineId: string, sessionIds: readonly string[]) {
+  const entry = state.machines[machineId];
+  if (!entry || !sessionIds.length) return;
+  const gone = new Set(sessionIds);
+  const sessions = entry.sessions.filter((session) => !gone.has(session.id));
+  if (sessions.length !== entry.sessions.length) setEntry(machineId, { sessions });
+}
+
 /** Live tabs reported for a machine, applied as the view would (for tests and the demo). */
 export function applyMachineTabs(machineId: string, tabs: AgentTabInfo[]) {
   applyLiveTabs(machineAgentScope(machineId), tabs);

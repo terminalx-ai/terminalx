@@ -623,12 +623,17 @@ async fn each_connection_is_told_of_changes_without_itself_as_another_computer()
         ..Record::default()
     };
     updates::write_record(&updates::status_path(&m.path("data")), &failed).unwrap();
-    // A change announced before the record was written (the connection's own setup, under load)
-    // carries no progress yet: wait for the one that reports the rolled-back update.
-    let changed = loop {
-        let changed = next_event(&mut events, "machine.updateChanged").await;
-        if changed["status"]["progress"] != Value::Null { break changed; }
-    };
+    // A notification from connection setup can still report idle progress.
+    let changed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let changed = next_event(&mut events, "machine.updateChanged").await;
+            if changed["status"]["progress"]["phase"] == "failed" {
+                break changed;
+            }
+        }
+    })
+    .await
+    .expect("no failed machine update notification");
     assert_eq!(changed["status"]["progress"]["rolledBack"], true, "{changed}");
     assert_eq!(changed["status"]["otherComputers"], json!([{ "id": "studio", "label": "Studio" }]), "{changed}");
     assert!(tokio::time::timeout(Duration::from_millis(300), async {
@@ -982,6 +987,125 @@ async fn a_machine_sessions_setup_and_actions_run_on_the_machine() {
     for method in ["machine.runAction", "machine.setupRerun", "machine.setupStop"] {
         assert!(call(&m.rpc, &viewer, method, json!({ "sessionId": session.id, "actionId": "hello", "paneId": pane })).await.is_err(), "{method} is the manager's");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_machine_runs_stay_evicted_when_their_runtime_panes_are_listed() {
+    let m = machine_rpc();
+    let (path, _) = project(&m.path("code"), "api");
+    crate::store::projects::update(&path.to_string_lossy(), crate::store::projects::ProjectPatch {
+        actions: Some(vec![crate::store::projects::RepositoryActionEntry {
+            id: "quick".into(),
+            name: "Quick".into(),
+            command: "printf run-output; exit 0".into(),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    }).unwrap();
+    let session = workspace_session(&path, "retention");
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    // The three oldest exits are runs. The next oldest is a shell whose
+    // output should survive both listing and the eleventh exit.
+    let mut ids = Vec::new();
+    for n in 0..11 {
+        let id = if matches!(n, 0..=2 | 4 | 6 | 8) {
+            let ran = call(&m.rpc, &peer, "machine.runAction", json!({ "sessionId": session.id, "actionId": "quick" })).await.unwrap();
+            ran["run"]["ptyId"].as_str().unwrap().to_string()
+        } else {
+            let shell = call(&m.rpc, &peer, "pty.create", json!({ "sessionId": session.id, "clientRequestId": format!("retention-{n}") })).await.unwrap();
+            let id = shell["ptyId"].as_str().unwrap().to_string();
+            let data = "printf '%s%s\\n' retained- shell; exit 0\n";
+            call(&m.rpc, &peer, "pty.write", json!({ "ptyId": id, "data": data, "seq": 1 })).await.unwrap();
+            id
+        };
+        listed_until(&m.rpc, &peer, "terminal exit", |terminal| terminal["ptyId"] == id.as_str() && terminal["exitCode"] == 0).await;
+        ids.push(id);
+
+        if n >= 9 {
+            let first_retained = ids.len() - 8;
+            for id in &ids[..first_retained] {
+                assert!(m.terminals.shell(id).is_some(), "runtime still owns {id}");
+            }
+            for _ in 0..3 {
+                let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+                let mut retained: Vec<_> = listed["terminals"].as_array().unwrap().iter().map(|terminal| {
+                    assert_eq!(terminal["exited"], true);
+                    terminal["ptyId"].as_str().unwrap()
+                }).collect();
+                retained.sort_unstable();
+                let mut expected: Vec<_> = ids[first_retained..].iter().map(String::as_str).collect();
+                expected.sort_unstable();
+                assert_eq!(retained, expected);
+            }
+            assert!(output_of(&m.rpc, &peer, &ids[3]).await.contains("retained-shell"));
+        }
+    }
+
+    // Even with a free retention slot, the evicted panes stay undiscoverable.
+    call(&m.rpc, &peer, "pty.kill", json!({ "ptyId": ids[3] })).await.unwrap();
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"].as_array().unwrap().len(), 7, "{listed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_run_exit_gets_observed_priority_after_backfill_eviction() {
+    let m = machine_rpc();
+    let (path, _) = project(&m.path("code"), "api");
+    let session = workspace_session(&path, "delayed-exit");
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    let exit_shell = |n| {
+        let rpc = &m.rpc;
+        let peer = &peer;
+        let session_id = &session.id;
+        async move {
+            let shell = call(rpc, peer, "pty.create", json!({ "sessionId": session_id, "clientRequestId": format!("delayed-exit-{n}") })).await.unwrap();
+            let id = shell["ptyId"].as_str().unwrap().to_string();
+            call(rpc, peer, "pty.write", json!({ "ptyId": id, "data": "exit 0\n", "seq": 1 })).await.unwrap();
+            listed_until(rpc, peer, "shell exit", |terminal| terminal["ptyId"] == id.as_str() && terminal["exitCode"] == 0).await;
+            id
+        }
+    };
+    let oldest = exit_shell(0).await;
+    for n in 1..MAX_EXITED_PTYS - 1 {
+        exit_shell(n).await;
+    }
+
+    // Capture the runtime's actual exit on a separate sink so the RPC sees
+    // the finished pane on listing before it receives the exit event.
+    let pane = format!("{}:action-{}-717569636b", session.id, uuid::Uuid::now_v7().simple());
+    let delayed = Arc::new(BroadcastSink::new(16));
+    let mut events = delayed.subscribe_app();
+    m.terminals.spawn(delayed, &pane, crate::pty::PaneSpec {
+        cwd: &session.cwd, cols: 80, rows: 24, command: Some("/bin/sh -c 'printf delayed-run-output; exit 7'"), env: &[],
+    }).unwrap();
+    let exit: PtyExit = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event.as_ref() == "pty_exit" {
+                break serde_json::from_str(&event.payload).unwrap();
+            }
+        }
+    }).await.expect("the run exited");
+    assert!(!m.terminals.is_running(&pane));
+    let backfilled = listed_until(&m.rpc, &peer, "backfilled run", |terminal| terminal["ptyId"] == pane.as_str()).await;
+    assert_eq!(backfilled["exited"], true);
+    assert_eq!(backfilled["exitCode"], Value::Null);
+
+    exit_shell(MAX_EXITED_PTYS - 1).await;
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"].as_array().unwrap().iter().all(|terminal| terminal["ptyId"] != pane.as_str()));
+    assert!(m.terminals.shell(&pane).is_some());
+
+    m.rpc.on_pty_exit(exit);
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    let terminals = listed["terminals"].as_array().unwrap();
+    assert_eq!(terminals.len(), MAX_EXITED_PTYS);
+    assert!(terminals.iter().all(|terminal| terminal["ptyId"] != oldest.as_str()));
+    let restored = terminals.iter().find(|terminal| terminal["ptyId"] == pane.as_str()).expect("the observed exit displaced the oldest shell");
+    assert_eq!(restored["exitCode"], 7);
+    assert!(output_of(&m.rpc, &peer, &pane).await.contains("delayed-run-output"));
 }
 
 /// A one-root runtime has no machine/7: its sessions' scripts are its own window's.

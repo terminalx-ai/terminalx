@@ -1,4 +1,4 @@
-import { CloudApiError, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
+import { CloudApiError, SUPPORTED_PROVIDERS, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
 import { CloudPeople } from "./people";
 import { keyItemName, type SecretStorage } from "./keys";
 import type { CloudLinkOptions } from "./link";
@@ -28,7 +28,11 @@ import { CloudWorkspaceSession } from "./workspace";
  *
  * The last list read is kept on the phone, so the Cloud tab shows it at once
  * the next time while the list is read again (#988). It is only shown: what
- * it says of access opens nothing until the list was read again. Each
+ * it says of access opens nothing until the list was read again. An
+ * organization whose list was never read is kept as not read, not as empty,
+ * and a list read while the phone asked for other providers is not shown at
+ * all (PRO-456): either would put an organization with workspaces under "no
+ * workspaces". Each
  * workspace's generated title (its agent tab's, learned when it was open) is
  * kept beside the keys, since it comes from the encrypted conversation.
  */
@@ -104,6 +108,8 @@ export class CloudCatalog {
   private refreshedAt: number | null = null;
   private saved = false;
   private titles: Record<string, string> = {};
+  /** Organizations whose workspaces came from a successful read, in this run or the saved one: what is shown for them is a list, not a guess. */
+  private everRead = new Set<string>();
   private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
@@ -310,6 +316,7 @@ export class CloudCatalog {
     await this.options.secrets.delete(TITLES).catch(() => undefined);
     await this.options.storage.removeItem(SAVED_LIST).catch(() => undefined);
     this.organizations = [];
+    this.everRead = new Set();
     this.titles = {};
     this.saved = false;
     this.publish();
@@ -345,6 +352,7 @@ export class CloudCatalog {
           const workspaces = list.workspaces.filter((item) => !item.workspace.deletedAt).sort((left, right) => (right.workspace.lastActivityAt ?? 0) - (left.workspace.lastActivityAt ?? 0));
           for (const tombstone of list.tombstones) this.deleted.add(sessionKey(organization.orgId, tombstone.id));
           for (const item of list.workspaces) if (item.workspace.deletedAt) this.deleted.add(sessionKey(organization.orgId, item.workspace.id));
+          this.everRead.add(organization.orgId);
           return { organization, workspaces, error: null, loaded: true, gone: list.tombstones.map((tombstone) => tombstone.id) };
         } catch (error) {
           // Not read: what was shown stays, and nothing is concluded from the silence.
@@ -425,18 +433,28 @@ export class CloudCatalog {
     ]);
     if (this.closed) return;
     this.titles = { ...parseTitles(titles), ...this.titles };
-    const organizations = parseSavedList(list);
-    if (organizations && this.refreshedAt === null && !this.organizations.length) {
-      this.organizations = organizations;
+    const saved = parseSavedList(list);
+    if (saved && this.refreshedAt === null && !this.organizations.length) {
+      this.organizations = saved.organizations;
+      // Merged: a read in flight may already have marked an organization.
+      for (const orgId of saved.read) this.everRead.add(orgId);
       this.saved = true;
     }
     this.publish();
   }
 
-  /** The list as it was read, for the next time the tab opens. An organization whose list could not be read is kept as it was shown. */
+  /**
+   * The list as it was read, for the next time the tab opens. An organization
+   * whose list could not be read is kept as it was shown; one that was never
+   * read keeps why, so it is not taken for one with no workspaces.
+   */
   private async saveList(): Promise<void> {
-    const organizations = this.organizations.map((entry) => ({ organization: entry.organization, workspaces: entry.workspaces }));
-    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, organizations })).catch(() => undefined);
+    const organizations = this.organizations.map((entry) =>
+      this.everRead.has(entry.organization.orgId)
+        ? { organization: entry.organization, workspaces: entry.workspaces }
+        : { organization: entry.organization, workspaces: entry.workspaces, unread: entry.error ?? "cloud_workspace_unavailable" },
+    );
+    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations })).catch(() => undefined);
   }
 
   /** The runtime named the workspace's agent tab: that is its title, here and in the list. */
@@ -520,19 +538,27 @@ function parseTitles(raw: string | null): Record<string, string> {
   }
 }
 
-/** The list kept from before, or null when there is none this app can read. */
-function parseSavedList(raw: string | null): CatalogOrganization[] | null {
+/**
+ * The list kept from before, with the organizations it had read, or null when
+ * there is none this app can use. A list read while this app asked for other
+ * providers is none: it may lack whole providers' workspaces (PRO-456).
+ */
+function parseSavedList(raw: string | null): { organizations: CatalogOrganization[]; read: Set<string> } | null {
   try {
-    const parsed = raw ? (JSON.parse(raw) as { v?: unknown; organizations?: unknown }) : null;
-    if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.organizations)) return null;
-    const out: CatalogOrganization[] = [];
-    for (const entry of parsed.organizations as { organization?: CloudOrganization; workspaces?: CloudWorkspaceItem[] }[]) {
+    const parsed = raw ? (JSON.parse(raw) as { v?: unknown; providers?: unknown; organizations?: unknown }) : null;
+    if (!parsed || parsed.v !== 1 || parsed.providers !== SUPPORTED_PROVIDERS || !Array.isArray(parsed.organizations)) return null;
+    const organizations: CatalogOrganization[] = [];
+    const read = new Set<string>();
+    for (const entry of parsed.organizations as { organization?: CloudOrganization; workspaces?: CloudWorkspaceItem[]; unread?: unknown }[]) {
       const organization = entry?.organization;
       if (!organization || typeof organization.orgId !== "string" || typeof organization.name !== "string" || !Array.isArray(entry.workspaces)) return null;
       const workspaces = entry.workspaces.filter((item) => item?.workspace && typeof item.workspace.id === "string" && item.workspace.orgId === organization.orgId && typeof item.workspace.name === "string" && typeof item.workspace.state === "string");
-      out.push({ organization, workspaces, error: null, loaded: false });
+      // Never read: shown as not read (its code), never as an organization with no workspaces.
+      const unread = entry.unread === undefined ? null : typeof entry.unread === "string" && /^[a-z0-9_.-]{1,96}$/i.test(entry.unread) ? entry.unread : "cloud_workspace_unavailable";
+      if (unread === null) read.add(organization.orgId);
+      organizations.push({ organization, workspaces, error: unread, loaded: false });
     }
-    return out;
+    return { organizations, read };
   } catch {
     return null;
   }

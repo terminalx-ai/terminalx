@@ -385,14 +385,15 @@ function RunTable({ runs, loading, expandedRun, onExpandedRunChange }: { runs: A
           const end = run.endedAt ? Date.parse(run.endedAt) : Date.now();
           const duration = Number.isFinite(start) ? formatDuration(Math.max(0, end - start)) : null;
           const session = sessionStore.sessions.find((value) => value.id === run.sessionId);
-          return <RunTableRows key={run.runId} run={run} expanded={expanded} duration={duration} sessionTitle={session?.title ?? null} sessionArchived={!!session?.archived} onToggle={() => onExpandedRunChange(expanded ? null : run.runId)} />;
+          const waiting = (run.status === "running" || run.status === "pending") && session?.tabs?.find((tab) => tab.id === run.tabId)?.status === "waiting";
+          return <RunTableRows key={run.runId} run={run} waiting={waiting} expanded={expanded} duration={duration} sessionTitle={session?.title ?? null} sessionArchived={!!session?.archived} onToggle={() => onExpandedRunChange(expanded ? null : run.runId)} />;
         })}
       </tbody>
     </table>
   );
 }
 
-function RunTableRows({ run, expanded, duration, sessionTitle, sessionArchived, onToggle }: { run: AutomationRun; expanded: boolean; duration: string | null; sessionTitle: string | null; sessionArchived: boolean; onToggle: () => void }) {
+function RunTableRows({ run, waiting, expanded, duration, sessionTitle, sessionArchived, onToggle }: { run: AutomationRun; waiting: boolean; expanded: boolean; duration: string | null; sessionTitle: string | null; sessionArchived: boolean; onToggle: () => void }) {
   const repeated = run.repeatCount > 1 ? `${run.repeatCount}× · ${relativeTime(run.lastRepeatAt ?? run.endedAt ?? "")}` : null;
   return (
     <>
@@ -413,7 +414,7 @@ function RunTableRows({ run, expanded, duration, sessionTitle, sessionArchived, 
             </button>
           ) : <span className="capitalize text-muted-foreground">{run.trigger}</span>}
         </td>
-        <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span aria-hidden className={cn("size-1.5 rounded-full", statusColor(run.status))} />{STATUS_LABEL[run.status]}</span></td>
+        <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span aria-hidden className={cn("size-1.5 rounded-full", waiting ? "bg-warning" : statusColor(run.status))} />{waiting ? "Waiting" : STATUS_LABEL[run.status]}</span></td>
         <td className="automation-column-timing px-3 py-2.5 text-muted-foreground"><div>{relativeTime(run.startedAt ?? run.endedAt ?? "")}</div><div className="text-[10px] text-faint">{duration ?? "—"}</div></td>
         <td className="automation-column-workspace px-3 py-2.5">
           {sessionArchived && <div className="mb-0.5 text-[10px] text-faint">Archived</div>}

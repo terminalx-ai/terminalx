@@ -296,19 +296,20 @@ export async function storeOnce(sessionId: string, files: FileInput[]): Promise<
  * here and go with the message by reference. Without files it is sent exactly
  * as any first prompt was.
  */
-export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<SendOutcome> {
-  if (!files?.length) return agent.send(sessionId, tabId, text, images);
+export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[], promptRequestId?: string): Promise<SendOutcome> {
   // Tell the reader which attachments could not be stored.
-  const stored = await storeOnce(sessionId, files).catch((error) => {
+  const stored = files?.length ? await storeOnce(sessionId, files).catch((error) => {
     showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
     throw error;
-  });
-  return agent.send(sessionId, tabId, text, images, false, undefined, stored);
+  }) : undefined;
+  return agent.send(sessionId, tabId, text, images, false, undefined, stored, promptRequestId);
 }
 
 /** Show the local Create prompt immediately, using the same send and attachment storage as before. */
 export async function sendHeldFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<void> {
+  const requestId = crypto.randomUUID();
   const finish = showFirstMessage(sessionId, tabId, {
+    requestId,
     text,
     images: (images ?? []).map(({ mediaType, data, name }) => ({ url: `data:${mediaType};base64,${data}`, name })),
     files: (files ?? []).map(({ name }) => ({ name })),
@@ -316,7 +317,7 @@ export async function sendHeldFirstMessage(sessionId: string, tabId: string, tex
     error: null,
   });
   try {
-    const { events } = await sendFirstMessage(sessionId, tabId, text, images, files);
+    const { events } = await sendFirstMessage(sessionId, tabId, text, images, files, requestId);
     events.forEach(applyEvent);
     finish();
   } catch (error) {

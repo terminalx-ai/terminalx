@@ -8,6 +8,8 @@
  *
  * `fixtureCloud: loading` (a launch argument) holds the first read of the
  * list, so the Cloud tab shows what it draws while the list is read.
+ * `fixtureCloudRole: driver` makes this person a driver of "Warm-up run", so
+ * its screen shows the composer (sending would start it) instead of Start.
  */
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type PropsWithChildren } from "react";
 import { Settings } from "react-native";
@@ -53,7 +55,8 @@ function workspace(orgId: string, id: string, name: string, state: string, idleM
 const WORKSPACES: Record<string, ReturnType<typeof workspace>[]> = {
   [ACME]: [
     workspace(ACME, "ws-checkout", "Checkout redesign", "ready", 0, "acme/app", "checkout-redesign", "manager", { activeTurns: 1 }, "fixture-compute"),
-    workspace(ACME, "ws-warm-up", "Warm-up run", "suspended", 2 * 24 * 60, "acme/app", "warm-up", "manager", {}, "fixture-compute"),
+    // `fixtureCloudRole: driver` (a launch argument): its saved conversation with the composer a driver keeps, in place of Start.
+    workspace(ACME, "ws-warm-up", "Warm-up run", "suspended", 2 * 24 * 60, "acme/app", "warm-up", Settings.get("fixtureCloudRole") === "driver" ? "driver" : "manager", {}, "fixture-compute"),
     workspace(ACME, "ws-warm-up-five", "Warm-up run, five issues", "suspended", 3 * 24 * 60, "acme/app", "warm-up-five", "manager"),
   ],
   [NORTHWIND]: [workspace(NORTHWIND, "ws-billing", "Billing export", "ready", 6, "northwind/api", "billing-export", "driver", { pendingApprovals: 1 })],

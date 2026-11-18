@@ -58,6 +58,19 @@ pub struct CopyReport {
     pub warnings: Vec<SkippedFile>,
     pub skipped: Vec<SkippedFile>,
     pub error: Option<String>,
+    /// Ephemeral ownership evidence; never stored in the session index.
+    #[serde(skip)]
+    pub(crate) copied_files: Vec<CopiedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CopiedFile {
+    pub path: String,
+    pub digest: [u8; 32],
+    #[cfg(any(unix, windows))]
+    pub mode: u32,
+    #[cfg(any(unix, windows))]
+    pub identity: (u64, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,7 +310,10 @@ impl CopyPlan {
                 continue;
             }
             match copy_one(&project, &destination, Path::new(&path), max_bytes - report.copied_bytes) {
-                Ok((bytes, warning)) => {
+                Ok((bytes, warning, digest, mode, identity)) => {
+                    report.copied_files.push(CopiedFile { path: path.clone(), digest, #[cfg(any(unix, windows))] mode, #[cfg(any(unix, windows))] identity });
+                    #[cfg(not(any(unix, windows)))]
+                    let _ = (mode, identity);
                     if report.first_copied.is_none() { report.first_copied = Some(path.clone()); }
                     report.copied_count += 1;
                     report.copied_bytes += bytes;
@@ -355,7 +371,9 @@ impl CopyDestination {
     }
 }
 
-fn copy_one(project: &safe_open::Directory, destination: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+type CopyOutcome = (u64, Option<String>, [u8; 32], u32, (u64, u64));
+
+fn copy_one(project: &safe_open::Directory, destination: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<CopyOutcome> {
     anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
     // A copied nested ignore file could unignore secrets that were eligible
     // under the new checkout's original rules. Preserve those rules throughout.
@@ -366,10 +384,22 @@ fn copy_one(project: &safe_open::Directory, destination: &CopyDestination, relat
     safe_open::copy(&mut source, destination, relative, remaining_bytes)
 }
 
-fn copy_bounded(source: &mut impl Read, target: &mut File, remaining_bytes: u64) -> Result<u64> {
-    let bytes = std::io::copy(&mut source.take(remaining_bytes + 1), target)?;
-    anyhow::ensure!(bytes <= remaining_bytes, "Workspace copy byte limit reached");
-    Ok(bytes)
+fn copy_bounded(source: &mut impl Read, target: &mut File, remaining_bytes: u64) -> Result<(u64, [u8; 32])> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let mut source = source.take(remaining_bytes + 1);
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 16384];
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 { break; }
+        bytes += count as u64;
+        anyhow::ensure!(bytes <= remaining_bytes, "Workspace copy byte limit reached");
+        target.write_all(&buffer[..count])?;
+        hash.update(&buffer[..count]);
+    }
+    Ok((bytes, hash.finalize().into()))
 }
 
 /// A published file remains copied even if removing its temporary link fails.
@@ -497,16 +527,21 @@ mod safe_open {
         Ok(file)
     }
 
-    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
-        use std::os::unix::fs::PermissionsExt;
+    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<CopyOutcome> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let mut bytes = 0;
+        let mut digest = [0; 32];
+        let mut identity = (0, 0);
+        let mode = 0o600 | (source.metadata()?.permissions().mode() & 0o100);
         let warning = write_atomic(root, relative, |target| {
-            bytes = copy_bounded(source, target, remaining_bytes)?;
+            (bytes, digest) = copy_bounded(source, target, remaining_bytes)?;
             // Keep executable local scripts usable, without broadening access to secrets.
-            target.set_permissions(fs::Permissions::from_mode(0o600 | (source.metadata()?.permissions().mode() & 0o100)))?;
+            target.set_permissions(fs::Permissions::from_mode(mode))?;
+            let metadata = target.metadata()?;
+            identity = (metadata.dev(), metadata.ino());
             Ok(())
         })?;
-        Ok((bytes, warning))
+        Ok((bytes, warning, digest, mode, identity))
     }
 
     pub(super) fn write_atomic(root: &CopyDestination, relative: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<Option<String>> {
@@ -587,18 +622,26 @@ mod safe_open {
         anyhow::ensure!(file.metadata()?.is_file(), "Only regular files can be copied");
         Ok(file)
     }
-    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
+    pub(super) fn copy(source: &mut File, root: &CopyDestination, relative: &Path, remaining_bytes: u64) -> Result<CopyOutcome> {
         let destination = checked(&root.root.0, relative, true)?;
         let temporary = root.staging.0.join(format!(".terminalx-copy-{}", uuid::Uuid::new_v4()));
         let mut target = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
         let mut bytes = 0;
+        let mut digest = [0; 32];
         let result = copy_bounded(source, &mut target, remaining_bytes).and_then(|copied| {
-            bytes = copied;
+            (bytes, digest) = copied;
             fs::hard_link(&temporary, &destination).map_err(Into::into)
         });
+        #[cfg(windows)]
+        let (mode, identity) = {
+            use std::os::windows::fs::MetadataExt;
+            target.metadata().map(|metadata| (metadata.file_attributes(), (metadata.creation_time(), 0))).unwrap_or((0, (0, 0)))
+        };
+        #[cfg(not(windows))]
+        let (mode, identity) = (0, (0, 0));
         drop(target);
         let warning = finish_publication(result, fs::remove_file(temporary))?;
-        Ok((bytes, warning))
+        Ok((bytes, warning, digest, mode, identity))
     }
 }
 

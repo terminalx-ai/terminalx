@@ -48,7 +48,7 @@ runtime.
 | `git.fetch` / `git.pull` | manage | `fetch --prune origin`; `pull --ff-only` (divergence is `conflict`). |
 | `git.push` | manage | `branch` (default current) to `origin`, never forced. See below. |
 | `git.prCreate` | manage | `title`, `body`, `base` (default: the default branch), `draft`. See below. |
-| `git.prReady` / `git.prMerge` | manage | Answered by what GitHub reports afterwards (a merge that went through before an error is a success). |
+| `git.prReady` / `git.prMerge` | manage | Answered by what GitHub reports afterwards (a merge that went through before an error is a success). `git.prMerge` takes an optional `head` (a commit id): GitHub refuses the merge (`conflict`) once the pull request's head is another commit (PRO-404). |
 | `lifecycle.dispositionFacts` | participate | saas contract 10.2; see below. |
 
 Network calls are bounded (120 s; the process group is killed on timeout,

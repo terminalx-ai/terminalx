@@ -26,6 +26,7 @@ export interface StreamBlock {
 }
 
 export interface FirstMessagePreview {
+  requestId: string;
   text: string;
   images: { url: string; name?: string }[];
   files: { name: string }[];
@@ -34,7 +35,7 @@ export interface FirstMessagePreview {
 }
 
 export interface TabLog {
-  /** The local Create prompt, until the runtime records it or reports an error. */
+  /** The local Create prompt while sending, or with its error until it is recorded. */
   firstMessage?: FirstMessagePreview;
   loaded: boolean;
   /**
@@ -103,13 +104,17 @@ export function showFirstMessage(sessionId: string, tabId: string, message: Firs
   const k = key(sessionId, tabId);
   getLog(k).firstMessage = message;
   touch(k, true);
-  // A broadcast, history load, or tab removal may have overtaken the send.
+  // The runtime may record the prompt before the send settles, even on error.
   return (error?: string) => {
     const log = logs.get(k);
     if (log?.firstMessage !== message) return;
     log.firstMessage = error ? { ...message, error } : undefined;
     touch(k, true);
   };
+}
+
+function recordsFirstMessage(message: FirstMessagePreview, event: AgentEvent) {
+  return event.payload.type === "user_message" && event.promptRequestId === message.requestId;
 }
 
 function historyReadToken(log: StoredLog) {
@@ -142,7 +147,8 @@ export function applyEvent(ev: AgentEvent) {
   const p = ev.payload;
   // The send reply and the broadcast both carry the reader's own prompt.
   if (p.type !== "delta") {
-    for (let i = log.events.length - 1; i >= Math.max(0, log.events.length - 8); i--) {
+    const first = ev.promptRequestId ? 0 : Math.max(0, log.events.length - 8);
+    for (let i = log.events.length - 1; i >= first; i--) {
       if (log.events[i].id === ev.id) return;
     }
   }
@@ -201,7 +207,7 @@ export function applyEvent(ev: AgentEvent) {
     log.stream = [];
   }
   log.events.push(ev);
-  if (p.type === "user_message") log.firstMessage = undefined;
+  if (log.firstMessage && recordsFirstMessage(log.firstMessage, ev)) log.firstMessage = undefined;
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
   // A reader's message is drawn in the frame it arrives in: the composer's own
   // stops being drawn as sending as soon as the runtime answers (#727).
@@ -315,7 +321,8 @@ export function mergeTabEvents(sessionId: string, tabId: string, events: AgentEv
   const log = getLog(k);
   const committed = events.filter((ev) => ev.payload.type !== "delta");
   if (committed.length) {
-    if (log.firstMessage && committed.some((ev) => ev.payload.type === "user_message")) log.firstMessage = undefined;
+    const firstMessage = log.firstMessage;
+    if (firstMessage && committed.some((ev) => recordsFirstMessage(firstMessage, ev))) log.firstMessage = undefined;
     const byId = new Map(log.events.map((ev) => [ev.id, ev]));
     for (const ev of committed) byId.set(ev.id, ev);
     const savedSeqs = new Set([...byId.values()].filter((ev) => !transient(ev)).map((ev) => ev.seq));

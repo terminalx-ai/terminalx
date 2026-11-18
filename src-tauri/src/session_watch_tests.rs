@@ -27,6 +27,57 @@ const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
 #[test]
+fn automation_completion_waits_for_a_followup_turn_already_open() {
+    let rig = Rig::new();
+    rig.start_turn();
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+}
+
+#[test]
+fn automation_completion_holds_the_tab_lock_through_the_transition() {
+    let rig = Rig::new();
+    let manager = rig.manager.clone();
+    let runtime = rig.rt.clone();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let task = scope.spawn(move || manager.with_automation_quiescent(SESSION, TAB, None, || {
+            entered.send(()).unwrap();
+            proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(runtime.try_lock().is_err(), "a new turn must wait until the transition finishes");
+        release.send(()).unwrap();
+        assert_eq!(task.join().unwrap(), Some(()));
+        runtime.lock().unwrap().open_turn();
+    });
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+    // Even if the new turn closes before an older callback acquires the lock,
+    // its generation cannot be mistaken for the previous turn's.
+    runtime.lock().unwrap().turn_open = false;
+    assert_eq!(rig.manager.with_automation_quiescent(SESSION, TAB, Some(0), || "stale"), None);
+}
+
+#[test]
+fn deferred_automation_keeps_tab_working_until_reconciled() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "automation", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.manager.set_display_status(&mut rig.rt.lock().unwrap(), TabStatus::Completed);
+    rig.manager.automation_deferred_status(SESSION, TAB, true);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::InProgress);
+    assert!(rig.manager.idle_for(SESSION, TAB, Instant::now()).is_none());
+    rig.manager.automation_deferred_status(SESSION, TAB, false);
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::Completed);
+}
+
+#[test]
 fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
     let rig = Rig::new();
     for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
@@ -80,7 +131,7 @@ impl SessionObserver for Observer {
     fn answered(&self, session: &str, tab: &str) {
         self.answered.lock().unwrap().push((session.into(), tab.into()));
     }
-    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
+    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>, _generation: u64) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
         // Another thread may hold the lock for a moment, as the input thread a
         // typed `/effort` starts does. Only the caller holding it never lets go.
@@ -330,6 +381,8 @@ impl Rig {
             queued: Vec::new(),
             held_queue: Default::default(),
             turn_open: false,
+            turn_generation: 0,
+            automation_completions_in_flight: 0,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
@@ -1224,7 +1277,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1499,7 +1552,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -3166,6 +3219,55 @@ fn a_handover_reads_which_cards_hooks_still_wait_on() {
     assert!(awaited().is_empty(), "answered, whether or not its hook has woken to say so");
     let reply = worker.join().unwrap();
     assert_eq!(reply.output, Some(codex::pty::permission_decision(true)), "the answer reaches the agent");
+}
+
+#[test]
+fn handover_keeps_handled_background_reports_from_becoming_pending_again() {
+    use std::io::Write;
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().background = Some(Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone()))));
+    let now = index::now();
+    let records = [
+        json!({ "type": "assistant", "timestamp": now, "message": { "content": [{ "type": "tool_use", "id": "ci", "name": "Bash", "input": { "run_in_background": true } }] } }),
+        json!({ "type": "user", "timestamp": now, "message": { "content": [{ "type": "tool_result", "tool_use_id": "ci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }),
+        json!({ "type": "user", "timestamp": now, "turnOrigin": "task_notification", "message": { "content": "<task-notification><task-id>bci</task-id><tool-use-id>ci</tool-use-id><status>completed</status></task-notification>" } }),
+    ];
+    let mut file = std::fs::OpenOptions::new().append(true).open(&rig.transcript).unwrap();
+    for record in records { writeln!(file, "{record}").unwrap(); }
+    let watch = rig.rt.lock().unwrap().background.clone().unwrap();
+    let start = chrono::Utc::now() + chrono::TimeDelta::seconds(1);
+    watch.lock().unwrap().automation_turn_completed(Some(start), start + chrono::TimeDelta::seconds(1), Some("Handled"));
+    assert!(watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+
+    let record = rig.manager.hold_tabs(Duration::from_secs(5), |mut held| held.tabs.remove(0)).unwrap();
+    let record = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+    rig.manager.adopt_tab(record).unwrap();
+    let adopted = rig.rt.lock().unwrap().background.clone().unwrap();
+    assert!(adopted.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+    rig.manager.terminals.kill_all();
+}
+
+#[test]
+fn handover_keeps_its_deadline_when_background_work_is_being_read() {
+    let rig = Rig::with_live_pane();
+    let watch = Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone())));
+    rig.rt.lock().unwrap().background = Some(watch.clone());
+    let reading = watch.lock().unwrap();
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(reading);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
+}
+
+#[test]
+fn handover_keeps_a_completion_callback_from_being_lost() {
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().automation_completions_in_flight = 1;
+    let completion = AutomationCompletionGuard(rig.rt.clone());
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(completion);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
 }
 
 /// What an issue pipeline stopped on its author's answer hears (#725): a

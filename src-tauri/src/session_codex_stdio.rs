@@ -361,9 +361,9 @@ impl SessionManager {
             anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.failed() && !engine.exited && !engine.blocked),
                 "Codex's connection ended. Stop the session before sending again; this message was not queued.");
             if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
-            let event = self.publish(rt, Payload::UserMessage {
+            let event = self.publish_prompt(rt, Payload::UserMessage {
                 author: prompt.author, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
-            }, None);
+            }, prompt.request_id);
             let privacy = crate::data_privacy::remote_ticket();
             if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() || prompt.collaboration.is_some() {
                 rt.stdio_followups.authorities.insert(event.seq, Authority {
@@ -390,9 +390,9 @@ impl SessionManager {
         // No user message or user turn for manual compaction (#524/#566).
         let events = if manual { Vec::new() } else {
             let baseline = rt.baseline_for(&entry.cwd);
-            vec![self.publish(rt, Payload::UserMessage {
+            vec![self.publish_prompt(rt, Payload::UserMessage {
                 author: prompt.author, text: prompt.display, images, files: prompt.files, baseline, queued: true, cwd: Some(entry.cwd.clone()),
-            }, None)]
+            }, prompt.request_id)]
         };
         // Even a send just after completion is pending until Codex's RPC
         // response or turn/started acknowledges it. The send outcome below

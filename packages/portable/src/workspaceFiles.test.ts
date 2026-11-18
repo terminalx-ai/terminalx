@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RpcWireRequest } from "./rpc";
 import { WorkspaceRpcClient, type WorkspaceConnectionState, type WorkspaceTransport } from "./workspace";
-import { FS_PART_BYTES, readRemoteFile, remotePath, searchRemote, writeRemoteFile } from "./workspaceFiles";
+import { FS_PART_BYTES, readRemoteFile, remoteFilePath, remotePath, searchRemote, writeRemoteFile } from "./workspaceFiles";
 
 const connected: WorkspaceConnectionState = {
   state: "connected",
@@ -100,6 +100,15 @@ describe("workspace files", () => {
     expect(remotePath("src/./a.ts")).toBe("src/a.ts");
     expect(remotePath("")).toBe("");
     for (const bad of ["../x", "a/../../x", "/etc/hosts", "C:\\x", "\\\\server\\share"]) expect(() => remotePath(bad)).toThrow();
+  });
+
+  it("names a machine project's worktree outside its folder absolutely, never climbing out of it (PRO-405)", () => {
+    expect(remoteFilePath("src/./a.ts", true)).toBe("src/a.ts");
+    expect(remoteFilePath("/Users/me/worktrees//read/src/", true)).toBe("/Users/me/worktrees/read/src");
+    // Only a caller rooted at such a worktree may name one; every other call stays workspace-relative.
+    expect(() => remoteFilePath("/Users/me/worktrees/read")).toThrow();
+    // The runtime decides which absolute paths are the project's worktrees; these never leave as typed.
+    for (const bad of ["/", "/Users/me/worktrees/read/../other", "/Users/me/./worktrees", "/a\\..\\b", "/a\0b", "../x", "C:\\x"]) expect(() => remoteFilePath(bad, true), bad).toThrow();
   });
 
   it("reads a large file part by part under one version, starting over once if it changes", async () => {

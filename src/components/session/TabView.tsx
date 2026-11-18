@@ -887,6 +887,7 @@ export function TabView({
     <RecoveryReports.Provider value={reporter}>
     <Chat
       sessionId={backend.logSessionId}
+      tabId={tab.id}
       checkpointTabId={local && !readOnly ? tab.id : undefined}
       transcript={asksInChat ? transcript : { ...transcript, pendingAsks: [] }}
       active={active}
