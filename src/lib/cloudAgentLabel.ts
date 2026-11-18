@@ -7,5 +7,6 @@ const AGENT_LABELS: Record<string, string> = { claude: "Claude Code", codex: "Co
  * never "Claude" in one menu and "Claude Code" in the next.
  */
 export function cloudAgentLabel(harness: string): string {
-  return AGENT_LABELS[harness.toLowerCase()] ?? (harness.trim() || "Agent");
+  const key = harness.toLowerCase();
+  return Object.prototype.hasOwnProperty.call(AGENT_LABELS, key) ? AGENT_LABELS[key] : (harness.trim() || "Agent");
 }

@@ -184,7 +184,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     this.actedOn = listed;
     // Never asked of a workspace that is not running: asking is how a desktop
     // wakes one, and a phone only looks.
-    if (listed !== "ready") {
+    if (listed !== "ready" && listed !== "attention-required") {
       this.issue = null;
       if (listed === "provisioning" || listed === "resuming") {
         // Nothing to ask yet; the list says when it runs (`listChanged`).
@@ -192,7 +192,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       } else if (listed === "suspended" || listed === "archived") {
         this.setState({ state: "suspended" });
       } else {
-        // Not listed for this person, deleted, or needing attention: nothing to connect to.
+        // Not listed for this person, or deleted: nothing to connect to.
         this.setState({ state: "stopped" });
       }
       return;

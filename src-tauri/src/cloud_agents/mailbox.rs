@@ -21,6 +21,8 @@ const IDLE_POLL: Duration = Duration::from_secs(20);
 const MAX_TEXT: usize = 48 * 1024;
 /// Receipt category of a message that names an image the runtime does not hold.
 pub const ATTACHMENT_MISSING: &str = "attachment-missing";
+/// Said when a file a message names did not reach the runtime in full (PRO-407).
+pub const FILE_MISSING_MESSAGE: &str = "Not sent: a file of this message did not arrive in full. Attach it and send again.";
 
 pub fn run(agents: &CloudAgents) {
     let mut failures = 0u32;
@@ -211,9 +213,8 @@ pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> an
         Decided::MarkFailed => true,
     };
     if rejected && command.kind == "send" {
-        if let Some(ids) = attachments::named(command.plaintext) {
-            agents.attachments.remove_owned(command.actor_id, &ids);
-        }
+        // Every id it names, even in a list that made it invalid.
+        agents.attachments.remove_owned(command.actor_id, &attachments::named_any(command.plaintext));
     }
     decided
 }
@@ -342,12 +343,12 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
     };
     let result = match command.kind {
         "send" | "steer" => {
-            // Images ride with a prompt, never with a steer into a running turn.
-            let image_ids = match attachments::named(plaintext) {
-                Some(ids) if ids.is_empty() || command.kind == "send" => ids,
+            // Images and files ride with a prompt, never with a steer into a running turn.
+            let (image_ids, file_ids) = match (attachments::named(plaintext), attachments::named_files(plaintext)) {
+                (Some(images), Some(files)) if (images.is_empty() && files.is_empty()) || command.kind == "send" => (images, files),
                 _ => return ("rejected", Some("payload-invalid"), json!({})),
             };
-            let Some(text) = text(!image_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
+            let Some(text) = text(!image_ids.is_empty() || !file_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
             // Uploaded by the sender, in full, before the message: checked
             // before anything about the tab changes.
             let images = match agents.attachments.load(command.actor_id, &image_ids) {
@@ -360,6 +361,9 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                     )
                 }
             };
+            if agents.attachments.check_files(command.actor_id, &file_ids).is_err() {
+                return ("rejected", Some(ATTACHMENT_MISSING), json!({ "message": FILE_MISSING_MESSAGE }));
+            }
             let settings = match Settings::from_json(plaintext) {
                 Ok(settings) => settings,
                 Err(_) => return ("rejected", Some("payload-invalid"), json!({})),
@@ -385,6 +389,13 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                 extra
             };
             let queue = command.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
+            // Into the session's attachments folder here, queued or not: the
+            // agent is handed their paths on this computer (PRO-407).
+            let files = match agents.attachments.take_files(command.actor_id, session_id, &file_ids) {
+                Ok(files) => files,
+                Err(attachments::FilesError::Missing(_)) => return ("rejected", Some(ATTACHMENT_MISSING), json!({ "message": FILE_MISSING_MESSAGE })),
+                Err(attachments::FilesError::Failed(error)) => return failed(error),
+            };
             if queue {
                 let follow_up = FollowUp {
                     policy_stamp: command.policy_stamp.clone(),
@@ -393,6 +404,7 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                     text,
                     actor_id: command.actor_id.to_string(),
                     images: image_ids,
+                    files,
                 };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {
                     return failed(error);
@@ -401,7 +413,7 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                 agents.nudge_follow_ups(tab_id);
                 ("applied", None, mark(json!({ "queued": true })))
             } else {
-                let sent = ops.send_with_images(session_id, tab_id, &text, images);
+                let sent = ops.send_attached(session_id, tab_id, &text, images, files);
                 // Typed or not, this message is settled: its uploads are done with.
                 agents.attachments.remove(&image_ids);
                 match sent {

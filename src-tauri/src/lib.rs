@@ -101,6 +101,7 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+mod fork_allocation;
 #[cfg(feature = "desktop")]
 mod repo_mirror;
 mod checkpoints;
@@ -482,6 +483,13 @@ pub fn run() {
             account.configure(&app.config().identifier)?;
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
+            // Pairing codes and approvals from this window prove it is the
+            // window, which has no terminal (PRO-369).
+            #[cfg(unix)]
+            {
+                let keys = Arc::downgrade(&pairing);
+                serve_cli::consent::speak_as_window(Box::new(move || keys.upgrade()?.consent_key()));
+            }
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
@@ -898,6 +906,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::store_attachments,
+            commands::read_attachment_part,
             commands::inspect_attachments,
             commands::save_attachment_copy,
             commands::report_send_shown,
@@ -1125,6 +1134,7 @@ pub fn run() {
             commands::orchestration_resolve_in_lead,
             commands::orchestration_take_over,
             commands::orchestration_finish,
+            commands::orchestration_finish_widens,
             commands::orchestration_widen,
             commands::orchestration_note,
             commands::orchestration_skip,

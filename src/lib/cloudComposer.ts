@@ -1,7 +1,8 @@
 import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
-import type { FileHit, ImageInput, SlashCommand } from "@/lib/api";
+import { attachments, type FileHit, type FileInput, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
 import { mayConfigure } from "@/lib/cloudCollab";
+import { MAX_ATTACHMENT_BYTES, MAX_FILES_PER_MESSAGE } from "@/lib/attachmentRules";
 
 /** The slash commands a composer offers, and why some are not among them (null when all are). */
 export interface ComposerCommandList {
@@ -149,9 +150,9 @@ export const CLOUD_IMAGES_OLD_RUNTIME = "Images need a newer workspace runtime. 
 export const CLOUD_IMAGES_NEED_RUNNING = "Starting the workspace: images are uploaded straight to it. Send again once it is running.";
 /** Not connected for another reason (reconnecting, offline): nothing is started, and the message stays in the composer. */
 export const CLOUD_IMAGES_NEED_CONNECTION = "Not connected to the workspace: images are uploaded straight to it. Send again once it is connected.";
-/** As many as the runtime takes with one message. */
-/** A cloud agent takes images only (PRO-290): any other file stays on this computer. */
+/** A cloud agent takes images only (PRO-290): any other file stays on this computer. A machine takes them (PRO-407). */
 export const CLOUD_FILES_REFUSED = "Only images can be sent to a cloud agent. Other files can be attached to a session on this computer.";
+/** As many as the runtime takes with one message. */
 export const CLOUD_MAX_IMAGES = 8;
 export const CLOUD_TOO_MANY_IMAGES = `A message to a cloud agent carries at most ${CLOUD_MAX_IMAGES} images.`;
 
@@ -201,14 +202,83 @@ export async function uploadCloudImages(client: WorkspaceRpcClient, where: { ses
   return refs;
 }
 
-/** The upload id of each image a composer has handed over, for as long as the composer keeps that image. */
-const attachmentIds = new WeakMap<ImageInput, string>();
+/** A machine from before `composer/4` takes images only. */
+export const MACHINE_FILES_OLD_RUNTIME = "This machine runs an older TerminalX that takes images only. Update it to send files from here.";
+export const MACHINE_TOO_MANY_FILES = `A message carries at most ${MAX_FILES_PER_MESSAGE} files, images included.`;
 
-function attachmentId(image: ImageInput): string {
-  const known = attachmentIds.get(image);
+/** What a message to a machine names an uploaded file by (`files: [{ id }]`). */
+export interface MachineFileRef {
+  id: string;
+  name: string;
+  mediaType?: string;
+}
+
+/**
+ * Upload `files` other than images to a machine's runtime for the message
+ * about to be sent to `tabId` (PRO-407): `session.attach` with `kind: "file"`,
+ * in parts, as images go. The machine keeps them until the message is typed,
+ * then stores them in the session's attachments folder there and hands the
+ * agent those paths. Only a file's bytes and its last name segment leave this
+ * computer, never a path of it: a picked or dropped file is read here part by
+ * part (`attachments.readPart`).
+ */
+export async function uploadMachineFiles(client: WorkspaceRpcClient, where: { sessionId: string; tabId: string }, files: FileInput[], images = 0): Promise<MachineFileRef[]> {
+  if (!client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
+  if (files.length + images > MAX_FILES_PER_MESSAGE) throw new CloudImageError(MACHINE_TOO_MANY_FILES);
+  const refs: MachineFileRef[] = [];
+  for (const file of files) {
+    const id = attachmentId(file);
+    if (refs.some((ref) => ref.id === id)) continue;
+    const name = baseName(file.name);
+    const mediaType = file.mediaType ?? "";
+    const refuse = (error: unknown): never => {
+      // The machine's own sentence (too large, a reserved name), with the file's name.
+      if (error instanceof WorkspaceRpcError) throw new CloudImageError(`${name} was not sent: ${error.message}.`);
+      throw error;
+    };
+    const send = (offset: number, data: string, last: boolean) =>
+      client.mutate("session.attach", { sessionId: where.sessionId, tabId: where.tabId, attachmentId: id, kind: "file", name, mediaType, offset, data, last }).catch(refuse);
+    if (file.path) {
+      // Read here, one part at a time; the machine is never told where it was.
+      let offset = 0;
+      for (;;) {
+        const part = await attachments.readPart(file.path, offset).catch((error: unknown) => {
+          throw new CloudImageError(`${name} was not sent: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        if (part.size > MAX_ATTACHMENT_BYTES) throw new CloudImageError(`${name} was not sent: it is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`);
+        const next = offset + part.bytes;
+        const last = next >= part.size;
+        // An empty file goes as one empty last part; an empty part before the end means the file shrank while it was read.
+        if (part.bytes === 0 && !last) throw new CloudImageError(`${name} was not sent: it changed while it was read. Attach it again.`);
+        await send(offset, part.data, last);
+        if (last) break;
+        offset = next;
+      }
+    } else if (file.data !== undefined) {
+      const parts = Math.max(1, Math.ceil(file.data.length / PART_CHARS));
+      for (let part = 0; part < parts; part++) {
+        await send((part * PART_CHARS * 3) / 4, file.data.slice(part * PART_CHARS, (part + 1) * PART_CHARS), part === parts - 1);
+      }
+    } else {
+      throw new CloudImageError(`${name} was not sent: it could not be read.`);
+    }
+    refs.push({ id, name, ...(file.mediaType ? { mediaType: file.mediaType } : {}) });
+  }
+  return refs;
+}
+
+function baseName(name: string): string {
+  return name.split(/[\\/]/).pop() || name;
+}
+
+/** The upload id of each image or file a composer has handed over, for as long as the composer keeps it. */
+const attachmentIds = new WeakMap<ImageInput | FileInput, string>();
+
+function attachmentId(item: ImageInput | FileInput): string {
+  const known = attachmentIds.get(item);
   if (known) return known;
   const id = `att-${crypto.randomUUID().replace(/-/g, "")}`;
-  attachmentIds.set(image, id);
+  attachmentIds.set(item, id);
   return id;
 }
 

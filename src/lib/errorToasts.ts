@@ -53,7 +53,7 @@ export interface ErrorToast {
  */
 export interface ErrorToastAction {
   label: string;
-  icon?: "retry" | "branch" | "branch-plus" | "bot";
+  icon?: "retry" | "branch" | "branch-plus" | "external" | "bot";
   /** The one thing to do next, filled in: "Create a branch here". */
   primary?: boolean;
   run: () => unknown;

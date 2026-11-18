@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CloudApiError } from "./api";
+import { CloudApiError, SUPPORTED_PROVIDERS } from "./api";
 import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle } from "./catalog";
 import { keyItemName } from "./keys";
-import { cloudSections } from "./list";
+import { cloudSections, emptyOrganizationsLabel } from "./list";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
 
@@ -448,7 +448,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
   });
 
   it("does not put an old list over one already read, and keeps none it cannot read", async () => {
-    const blobs = new Map([[SAVED_LIST, JSON.stringify({ v: 1, organizations: [{ organization: { orgId: "org-9", name: "Old", role: "member" }, workspaces: [] }] })]]);
+    const blobs = new Map([[SAVED_LIST, JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations: [{ organization: { orgId: "org-9", name: "Old", role: "member" }, workspaces: [] }] })]]);
     const h = harness({ blobs });
     await h.catalog.refresh();
     await h.catalog.restored;
@@ -456,6 +456,113 @@ describe("what the phone keeps of the list between runs (#988)", () => {
     const broken = harness({ blobs: new Map([[SAVED_LIST, "{not json"]]) });
     await broken.catalog.restored;
     expect(broken.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [] });
+  });
+
+  describe("an organization with a workspace from a provider the old build did not ask for (PRO-456)", () => {
+    const AGENT37 = { orgId: "org-37", name: "Agent37 Demo", role: "owner" };
+    const others = Array.from({ length: 10 }, (_, index) => ({ orgId: `org-e${index}`, name: `Empty ${index}`, role: "member" }));
+    const workspace = (state: string) => ({
+      workspace: { id: "ws-37", orgId: "org-37", name: "Check the latest commits of this", provider: "agent37", state, accessMode: "private", you: { role: "manager", canApprove: true }, lastActivityAt: 7, repositories: [{ fullName: "Cassini-Research/landing-page", primary: true }], launch: { workBranch: "terminalx/check-the-latest-commits" } },
+      latestOperation: null,
+    });
+    /** The list the reporter's phone kept: written before `described` was asked for, Agent37 Demo among the empty ones. */
+    const keptByOldBuild = () => new Map([[SAVED_LIST, JSON.stringify({ v: 1, organizations: [AGENT37, ...others].map((organization) => ({ organization, workspaces: [] })) })]]);
+    const answering = (h: ReturnType<typeof harness>, state: () => string) => {
+      h.api.organizations.mockImplementation(async () => [AGENT37, ...others]);
+      h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-37" ? [workspace(state())] : [], tombstones: [] }));
+    };
+
+    it("does not show the old build's list, and lists the workspace once under its organization after the refresh", async () => {
+      const h = harness({ blobs: keptByOldBuild() });
+      await h.catalog.restored;
+      // A list read for fewer providers says nothing about the others': it is not shown as "no workspaces".
+      expect(h.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [] });
+      expect(cloudSections(h.catalog.getSnapshot().organizations).empty).toEqual([]);
+
+      answering(h, () => "suspended");
+      await h.catalog.refresh();
+      const { sections, empty } = cloudSections(h.catalog.getSnapshot().organizations);
+      expect(sections).toEqual([{ key: "org-37", title: "Agent37 Demo", error: null, data: [workspace("suspended")] }]);
+      expect(empty.map((organization) => organization.orgId)).not.toContain("org-37");
+      expect(emptyOrganizationsLabel(empty.length)).toBe("10 organizations with no workspaces");
+      expect(h.catalog.access("org-37", "ws-37")).toBe("ok");
+      // What it keeps now is this list, for the providers it asked for.
+      const kept = JSON.parse(h.blobs.get(SAVED_LIST)!);
+      expect(kept.providers).toBe(SUPPORTED_PROVIDERS);
+      expect(kept.organizations.find((entry: { organization: { orgId: string } }) => entry.organization.orgId === "org-37").workspaces).toHaveLength(1);
+      h.catalog.close();
+    });
+
+    it("reports the workspace's state as it changes, and listing or opening it changes no lifecycle", async () => {
+      const h = harness();
+      let state = "suspended";
+      answering(h, () => state);
+      await h.catalog.refresh();
+      expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "suspended" });
+      // The stopped detail: its session reads checkpoints and asks for no attachment.
+      const release = h.catalog.retain("org-37", "ws-37");
+      await vi.waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-37", "ws-37"));
+      await h.catalog.refresh();
+      expect(h.api.open).not.toHaveBeenCalled();
+
+      // Started from elsewhere: the next read says so, and the open screen connects to this workspace.
+      state = "ready";
+      h.api.open.mockResolvedValue({ id: "a1", workspaceId: "ws-37", state: "waiting-for-runtime", authority: "participate", expiresAt: Date.now() + 60_000 });
+      await h.catalog.refresh();
+      expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "ready" });
+      expect(cloudSections(h.catalog.getSnapshot().organizations).sections[0].data[0].workspace.state).toBe("ready");
+      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-37", "ws-37", "mobile-1", expect.anything()));
+      // Nothing here asked the server to start, stop or queue anything.
+      expect(h.api.resume).not.toHaveBeenCalled();
+      expect(h.api.enqueue).not.toHaveBeenCalled();
+      release();
+      h.catalog.close();
+    });
+  });
+
+  it("keeps an organization never read as not read, not as one with no workspaces, and recovers on the next read", async () => {
+    const first = harness();
+    first.api.workspaces.mockImplementation(async (orgId: string) => {
+      if (orgId === "org-2") throw new CloudApiError("cloud_workspace_unavailable", 503);
+      return { workspaces: [item("ws-new")], tombstones: [] };
+    });
+    await first.catalog.refresh();
+    // This run: shown as a section that could not be read, with a reason, not in the footer.
+    const live = cloudSections(first.catalog.getSnapshot().organizations);
+    expect(live.sections.map((section) => [section.key, section.error])).toEqual([["org-1", null], ["org-2", "cloud_workspace_unavailable"]]);
+    expect(live.empty).toEqual([]);
+
+    // The next cold launch shows the same, before the list is read again.
+    const next = harness({ secrets: first.secrets, blobs: first.blobs });
+    let answer: (value: unknown) => void = () => undefined;
+    next.api.organizations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve as never; }));
+    const reading = next.catalog.refresh();
+    await next.catalog.restored;
+    const restored = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(restored.sections.map((section) => [section.key, section.error])).toEqual([["org-1", null], ["org-2", "cloud_workspace_unavailable"]]);
+    expect(restored.empty).toEqual([]);
+
+    // A read that succeeds: org-2 has a workspace now, and an organization truly empty goes to the footer.
+    next.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-2" ? [item("ws-b", { orgId: "org-2" })] : [], tombstones: [] }));
+    answer([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "admin" }]);
+    await reading;
+    const read = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(read.sections.map((section) => [section.key, section.error, section.data.map((entry) => entry.workspace.id)])).toEqual([["org-2", null, ["ws-b"]]]);
+    expect(read.empty.map((organization) => organization.orgId)).toEqual(["org-1"]);
+    next.catalog.close();
+  });
+
+  it("keeps a read organization's list when a later read fails, and its truly empty organizations in the footer", async () => {
+    const first = harness();
+    await first.catalog.refresh();
+    first.api.workspaces.mockRejectedValue(new CloudApiError("cloud_workspace_unavailable", null));
+    await first.catalog.refresh();
+    const next = harness({ secrets: first.secrets, blobs: first.blobs });
+    await next.catalog.restored;
+    const restored = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(restored.sections.map((section) => [section.key, section.error, section.data.length])).toEqual([["org-1", null, 2]]);
+    expect(restored.empty.map((organization) => organization.orgId)).toEqual(["org-2"]);
+    next.catalog.close();
   });
 
   it("learns a workspace's generated title from its agent tab, keeps it beside the keys, and forgets it with the workspace", async () => {

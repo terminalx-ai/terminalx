@@ -25,6 +25,9 @@ pub struct AgentEvent {
     /// may be an import time, so consumers must not use it as a message time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ts: Option<String>,
+    /// Request identity for a desktop Create prompt, persisted for history reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_request_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentRef>,
     pub payload: Payload,

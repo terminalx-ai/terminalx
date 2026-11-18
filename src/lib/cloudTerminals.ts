@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type PtyRun, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { disposeInstance, getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 import { countTerminalData } from "@/lib/terminalCounters";
 import { acknowledgeTerminalResize, coordinateTerminalResize, followTerminalOutputSize, isOutputResize, reassertTerminalResize, requestTerminalResize, stopTerminalOutput, writeTerminalOutput, type OutputSize } from "@/lib/terminalOutput";
@@ -45,6 +45,10 @@ export interface CloudTerminal {
   sessionId: string | null;
   /** The agent tab whose own terminal this is (PRO-86); null for a shell. */
   tabId: string | null;
+  /** One of its session's script runs on a machine (`machine/7`): shown under the dock's Setup and Run, not as a numbered shell. */
+  run?: PtyRun | null;
+  /** When the runtime opened it (ms since the epoch); absent for an agent tab's terminal. */
+  createdAt?: number;
   /** Its output is streaming to this window now, so `control` and the size are the runtime's word. */
   live: boolean;
 }
@@ -143,6 +147,8 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     inputError: null,
     sessionId: info.sessionId ?? null,
     tabId: null,
+    run: info.run ?? null,
+    createdAt: info.createdAt,
     live: false,
   };
 }
@@ -518,7 +524,12 @@ export async function syncCloudTerminals(
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      if (info) {
+        const next = fromInfo(workspace, info);
+        // The same run as before stays the same object, so a poll that found nothing new re-renders nothing.
+        const run = JSON.stringify(terminal.run ?? null) === JSON.stringify(next.run) ? terminal.run : next.run;
+        return unchanged(terminal, { ...next, run, number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      }
       // Gone already, or opened here after this list was asked for.
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };

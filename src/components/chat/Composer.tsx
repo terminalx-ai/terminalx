@@ -99,6 +99,7 @@ export function Composer({
   commands: givenCommands,
   files: givenFiles,
   remote = false,
+  attachFiles,
   busy,
   setupRunning = false,
   draft,
@@ -144,6 +145,11 @@ export function Composer({
   files?: ComposerFiles | null;
   /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
   remote?: boolean;
+  /**
+   * Files other than images attach (PRO-290; on a machine, PRO-407). Defaults
+   * to `!remote`: a local tab takes any file, a cloud tab images only.
+   */
+  attachFiles?: boolean;
   busy: boolean;
   setupRunning?: boolean;
   draft: string;
@@ -245,7 +251,7 @@ export function Composer({
   const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
   const mentionDropped = !remote;
-  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
+  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped, anyFile: attachFiles ?? !remote });
   // Refused chips stay above the draft but are never sent, and alone do not make a message.
   const sendable = useMemo(() => attach.attachments.filter((a) => !a.refused), [attach.attachments]);
 
@@ -608,7 +614,7 @@ export function Composer({
           />
         )}
         {prMention.menu}
-        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
+        <DropHint dragging={attach.dragging} mentionFiles={!attach.imagesOnly} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (

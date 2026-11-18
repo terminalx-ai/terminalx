@@ -864,6 +864,7 @@ function CloudAgentPane({
           <Chat
             active={active}
             sessionId={info.sessionId}
+            tabId={tab.tabId}
             transcript={transcript}
             stream={log.stream}
             live={live}

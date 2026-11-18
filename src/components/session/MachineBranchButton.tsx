@@ -1,0 +1,405 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ChevronDown, GitBranch, Loader2 } from "@/icons";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { DiffStats } from "@/components/changes/FileDiff";
+import { isMac } from "@/lib/shortcuts";
+import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
+import { BRANCH_ACTIONS, BRANCH_STATES, type BranchAction } from "@/lib/branchStep";
+import { currentMergeMethod, noteMerge, type MergeMethod } from "@/lib/mergeMethods";
+import type { GitSource } from "@/lib/gitSource";
+import type { FileSource } from "@/lib/workspaceFiles";
+import type { SessionBackend } from "@/lib/sessionBackend";
+import { agentPrompt, branchDiffSize, branchPr, composeMachineSnapshot, isAgentAction, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
+import type { SessionEntry } from "@/types/session";
+
+/** How often the machine's `git.status` is read while the window shows; file changes on the machine read it sooner. */
+export const MACHINE_STATUS_EVERY_MS = 15_000;
+/** How often the branch's pull request is read from GitHub through the machine. */
+export const MACHINE_PR_EVERY_MS = 2 * 60_000;
+/** File changes on the machine come in bursts (a save, an install): read once they settle. */
+const SETTLE_MS = 800;
+
+/** The pieces of a machine session the header's Git step reads and runs through (`CloudSessionModel`). */
+export interface MachineBranchInput {
+  session: SessionEntry;
+  /** The machine's name, for the words that say where an action runs. */
+  machineName: string;
+  backend: SessionBackend;
+  gitSource: GitSource | undefined;
+  fileSource: FileSource | undefined;
+  /** `origin`'s URL on the machine, for the repository the session works in. */
+  remote: string | null;
+  connected: boolean;
+  tabId?: string;
+}
+
+interface Read { snapshot: MachineBranchSnapshot | null; diff: { additions: number; deletions: number } | null; error: string | null; refreshing: boolean }
+
+const errorText = (source: GitSource | undefined, error: unknown) => (source ? source.errorMessage(error) : error instanceof Error ? error.message : String(error));
+
+/**
+ * The branch, its diff size and its next step, read from the machine (21.08).
+ * Local Git (`git.status`) is read often and on every file change there; the
+ * pull request (`git.prs`, GitHub through the machine's sign-in) is read on a
+ * slower clock, after each action and when the window comes back. Every read
+ * belongs to one source: a source that changed (another repository, a
+ * reconnect) drops what the last one said.
+ */
+export function useMachineBranch(input: MachineBranchInput) {
+  const { gitSource: source, fileSource, remote, connected, session } = input;
+  const busyTabs = session.tabs.some((tab) => tab.status === "in_progress" || tab.status === "waiting");
+  const [agentPending, setAgentPending] = useState(false);
+  const working = agentPending || busyTabs;
+  const baseRef = input.session.baseRef ?? null;
+  const [read, setRead] = useState<Read>({ snapshot: null, diff: null, error: null, refreshing: false });
+  const refreshRef = useRef<(hosted: boolean) => Promise<MachineBranchSnapshot | null>>(async () => null);
+  const workingRef = useRef(working);
+  workingRef.current = working;
+  const refresh = useCallback((hosted = true) => refreshRef.current(hosted), []);
+
+  useEffect(() => {
+    setRead({ snapshot: null, diff: null, error: null, refreshing: false });
+    if (!source || !connected) {
+      refreshRef.current = async () => null;
+      return;
+    }
+    let disposed = false;
+    let pr: { value: ReturnType<typeof branchPr>; branch: string; known: boolean } | null = null;
+    let diffKey = "";
+    let fileTick = 0;
+    let running: Promise<MachineBranchSnapshot | null> | null = null;
+    let again: boolean | null = null;
+
+    const once = async (hosted: boolean): Promise<MachineBranchSnapshot | null> => {
+      setRead((current) => ({ ...current, refreshing: true }));
+      try {
+        let work = await source.workStatus();
+        if (disposed) return null;
+        if (work.branch && (hosted || !pr || pr.branch !== work.branch)) {
+          // Fetch first, as a local refresh does, so "behind" is what the remote has now.
+          if (hosted && source.canWrite && source.fetch) {
+            try {
+              await source.fetch();
+              work = await source.workStatus();
+            } catch { /* offline: the local steps still stand */ }
+          }
+          const branch = work.branch!;
+          try { pr = { value: branchPr(await source.prs(branch), branch), branch, known: true }; }
+          catch { pr = { value: null, branch, known: false }; }
+          if (disposed) return null;
+        }
+        const known = !!pr && pr.branch === work.branch && pr.known;
+        const snapshot = composeMachineSnapshot({ work, remote, pr: known ? pr!.value : null, known, working: workingRef.current, baseRef });
+        let diff: Read["diff"] | undefined;
+        const key = snapshot ? `${snapshot.head}\0${snapshot.base}\0${work.dirty}\0${fileTick}` : "";
+        if (snapshot && key !== diffKey) {
+          diffKey = key;
+          diff = await branchDiffSize(source, snapshot.base);
+          if (disposed) return null;
+        }
+        setRead((current) => ({ snapshot, diff: snapshot ? (diff === undefined ? current.diff : diff) : null, error: null, refreshing: false }));
+        return snapshot;
+      } catch (error) {
+        if (!disposed) setRead({ snapshot: null, diff: null, error: errorText(source, error), refreshing: false });
+        return null;
+      }
+    };
+    // One read at a time; a request while one runs is folded into one more after it (a hosted one wins).
+    const run = (hosted: boolean): Promise<MachineBranchSnapshot | null> => {
+      if (running) {
+        again = again || hosted;
+        return running.then(() => (running ?? Promise.resolve(null)));
+      }
+      running = once(hosted).finally(() => {
+        running = null;
+        const next = again;
+        again = null;
+        if (next !== null && !disposed) void run(next);
+      });
+      return running;
+    };
+    refreshRef.current = run;
+    void run(true);
+
+    const statusTimer = setInterval(() => { if (!document.hidden) void run(false); }, MACHINE_STATUS_EVERY_MS);
+    const prTimer = setInterval(() => { if (!document.hidden) void run(true); }, MACHINE_PR_EVERY_MS);
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const stopWatch = fileSource?.watch?.(() => {
+      fileTick += 1;
+      clearTimeout(settle);
+      settle = setTimeout(() => void run(false), SETTLE_MS);
+    });
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
+    const visible = () => {
+      if (document.hidden) return;
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => void run(true), 600);
+    };
+    window.addEventListener("focus", visible);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      disposed = true;
+      clearInterval(statusTimer);
+      clearInterval(prTimer);
+      clearTimeout(settle);
+      clearTimeout(focusTimer);
+      stopWatch?.();
+      window.removeEventListener("focus", visible);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [source, fileSource, remote, connected, baseRef]);
+
+  // An agent step is over once its tab has worked and gone idle again; read the branch then.
+  const agentRun = useRef<{ tabId: string; started: boolean } | null>(null);
+  const [agentDone, setAgentDone] = useState(0);
+  useEffect(() => {
+    const tracked = agentRun.current;
+    if (!tracked) return;
+    const tab = session.tabs.find((entry) => entry.id === tracked.tabId);
+    if (tab?.status === "in_progress" || tab?.status === "waiting") tracked.started = true;
+    else if (tracked.started || !tab) {
+      agentRun.current = null;
+      setAgentPending(false);
+      setAgentDone((count) => count + 1);
+      void refresh(true);
+    }
+  }, [session.tabs, refresh]);
+  // Any agent turn that ends may have changed the branch (a commit, a push): read it then, not at the next poll.
+  const wasWorking = useRef(working);
+  useEffect(() => {
+    if (wasWorking.current && !working) void refresh(false);
+    wasWorking.current = working;
+  }, [working, refresh]);
+  const agent = useMemo(() => ({
+    start(tabId: string) { agentRun.current = { tabId, started: false }; setAgentPending(true); },
+    cancel() { agentRun.current = null; setAgentPending(false); },
+  }), []);
+
+  return { ...read, refresh, working, agent, agentDone, input };
+}
+
+export type MachineBranch = ReturnType<typeof useMachineBranch>;
+
+/** The branch's lines added and removed against its base, after the branch chip (21.08). */
+export function MachineDiffSize({ branch, className }: { branch: MachineBranch; className?: string }) {
+  const { diff, snapshot } = branch;
+  if (!diff || !snapshot) return null;
+  return (
+    <span className={className} title={`Changes on ${snapshot.branch} against ${snapshot.base}, uncommitted work included`} data-testid="machine-diff-size">
+      <DiffStats additions={diff.additions} deletions={diff.deletions} />
+    </span>
+  );
+}
+
+/** The pending confirmation: what will run, on which snapshot, and the merge method a Merge uses. */
+interface Pending { action: BranchAction; expected: MachineBranchSnapshot; method?: MergeMethod }
+
+/**
+ * The header's branch actions for a session on a paired machine (21.08):
+ * the branch's diff size, and the same split button as a local session's, whose
+ * actions run on the machine through its `git/1` with the machine's Git
+ * sign-in. Commits carry this computer's Git identity, as in Changes.
+ */
+export function MachineBranchButton({ branch }: { branch: MachineBranch }) {
+  const { session, backend, gitSource: source, machineName, tabId } = branch.input;
+  const { snapshot, error: readError, refreshing, refresh, working, agent: agentRun, agentDone } = branch;
+  const [running, setRunning] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [message, setMessage] = useState("");
+  const [body, setBody] = useState("");
+  const lock = useRef(false);
+  const alive = useRef(true);
+  // Publishing from this session through the machine's sign-in, allowed once per branch while the view is open.
+  const approved = useRef(new Set<string>());
+  const keycaps = useShortcutKeycaps();
+  const canWrite = !!source?.canWrite;
+
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { if (agentDone) setNotice("Agent finished. Review the changes before committing and pushing."); }, [agentDone]);
+
+  const state = working ? BRANCH_STATES.agentWorking : snapshot ? BRANCH_STATES[snapshot.state] : null;
+  const enabled = (action: BranchAction) => canWrite && !!snapshot?.actions.includes(action) && !readError && !working && !running
+    && (!isAgentAction(action, snapshot) || !!tabId);
+
+  const run = async (request: Pending, text: { message: string; body: string }) => {
+    if (!source) return;
+    lock.current = true;
+    setPending(null);
+    setError(null);
+    setNotice(null);
+    const agent = isAgentAction(request.action, request.expected);
+    setRunning(agent ? "Sending to agent…" : BRANCH_ACTIONS[request.action].progress);
+    try {
+      // The branch is read again on the machine; an action prepared on an older state does not run.
+      const now = await refresh(true);
+      if (!now || !sameBranchState(request.expected, now) || !now.actions.includes(request.action)) {
+        throw new Error("The branch changed on the machine while preparing the action. Refresh and try again.");
+      }
+      let result: string | null = null;
+      if (agent) {
+        if (!tabId) throw new Error("Open an agent tab to send this to the agent.");
+        agentRun.start(tabId);
+        await backend.send(tabId, agentPrompt(request.action, now), []);
+      } else {
+        const pr = now.pr?.state === "OPEN" ? now.pr : null;
+        switch (request.action) {
+          case "commitPush": {
+            await source.commit(text.message.trim());
+            try { result = await source.push(); }
+            catch (reason) { throw new Error(`Committed on ${machineName}, but the push failed: ${errorText(source, reason)} Your commit is safe; refresh to see the next step.`); }
+            break;
+          }
+          case "push":
+            result = await source.push();
+            break;
+          case "createPr": {
+            // The machine opens a pull request only for a pushed head: publish first, as a local Create PR does.
+            const status = await source.workStatus();
+            if (status.ahead > 0 || !status.upstream) await source.push();
+            result = await source.createPr({ title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id });
+            break;
+          }
+          case "pull":
+            result = await source.pull();
+            break;
+          case "markReady":
+            if (!pr) throw new Error("There is no open pull request.");
+            await source.readyPr(pr.number);
+            break;
+          case "merge": {
+            if (!pr?.headSha) throw new Error("There is no open pull request to merge. Refresh and try again.");
+            const method = request.method ?? currentMergeMethod(pr.url, null);
+            // Pinned to the head that was checked: GitHub refuses it once the head has moved.
+            await source.mergePr(pr.number, method, pr.headSha);
+            noteMerge(pr.url, method);
+            result = "Merged";
+            break;
+          }
+          default:
+            throw new Error("This action is not available in the branch's current state. Refresh and try again.");
+        }
+      }
+      if (!agent && alive.current) setNotice(result ?? `${BRANCH_ACTIONS[request.action].label}: done on ${machineName}.`);
+    } catch (reason) {
+      if (agent) agentRun.cancel();
+      if (alive.current) setError(errorText(source, reason));
+    } finally {
+      lock.current = false;
+      if (alive.current) setRunning(null);
+      void refresh(true);
+    }
+  };
+
+  const prepare = async (action: BranchAction) => {
+    if (lock.current || pending || !snapshot || !enabled(action) || !source) return;
+    setError(null);
+    setNotice(null);
+    const request: Pending = { action, expected: snapshot };
+    if (action === "merge" && snapshot.pr) {
+      lock.current = true;
+      setRunning("Reading merge methods…");
+      try {
+        const methods = source.conversation ? (await source.conversation(snapshot.pr).read()).mergeMethods : null;
+        request.method = currentMergeMethod(snapshot.pr.url, methods);
+      } catch {
+        request.method = currentMergeMethod(snapshot.pr.url, null);
+      } finally {
+        lock.current = false;
+        if (alive.current) setRunning(null);
+      }
+      if (!alive.current) return;
+    }
+    const publishes = !!BRANCH_ACTIONS[action].publishes;
+    if (action === "commitPush" || action === "createPr" || action === "merge" || (publishes && !approved.current.has(snapshot.branch))) {
+      setMessage(action === "createPr" ? session.title : "");
+      setBody("");
+      setPending(request);
+      return;
+    }
+    await run(request, { message: "", body: "" });
+  };
+
+  const latest = useRef({ prepare, enabled, pending, snapshot });
+  latest.current = { prepare, enabled, pending, snapshot };
+  // Stable registrations keep shortcut precedence unchanged as status updates (as BranchGitButton's).
+  const shortcuts = useMemo(() => {
+    const handler = (action: BranchAction) => (event: KeyboardEvent) => {
+      if (!isMac && event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "c" && event.target instanceof Element && event.target.closest(".xterm, .terminal-host")) return false;
+      const now = latest.current;
+      const actual = action === "commitPush" && now.snapshot?.state === "ahead" ? "push" : action;
+      if (lock.current || now.pending || !now.enabled(actual) || document.querySelector('[role="dialog"], [role="alertdialog"]')) return false;
+      void now.prepare(actual);
+    };
+    return { commitPush: handler("commitPush"), createPr: handler("createPr"), pull: handler("pull"), fixChecks: handler("fixChecks"), merge: handler("merge") };
+  }, []);
+  useShortcut("git.commitPush", shortcuts.commitPush);
+  useShortcut("git.createPr", shortcuts.createPr);
+  useShortcut("git.pull", shortcuts.pull);
+  useShortcut("git.fixChecks", shortcuts.fixChecks);
+  useShortcut("git.merge", shortcuts.merge);
+
+  const failure = error ?? readError;
+  if ((!snapshot || snapshot.state === "merged") && !failure && !running && !pending) return null;
+  const where = `Runs on ${machineName} with its Git sign-in.`;
+  const tooltip = snapshot
+    ? `${state?.detail}. Base: ${snapshot.base}. ${where}${snapshot.state === "behind" ? (snapshot.pullNeedsAgent ? (snapshot.behindUpstream ? " The agent preserves uncommitted work while pulling." : " The agent merges the latest base into this branch.") : " Pull fast-forwards from the upstream branch.") : ""}${canWrite ? "" : " You may only read this machine's Git."}`
+    : "Reading branch status";
+  const needsMessage = pending?.action === "commitPush" || pending?.action === "createPr";
+  return (
+    <div className="flex min-w-0 items-center gap-2" data-testid="machine-branch-button">
+      {snapshot && <div className="flex shrink-0 items-center">
+        <WithTooltip label={tooltip} shortcut={state?.action ? BRANCH_ACTIONS[state.action].shortcut : undefined}>
+          <Button variant="outline" size="sm" className="max-w-44 rounded-r-none border-r-0" aria-label={running ?? (state?.label || "Git actions")} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
+            {running || refreshing || working ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />}
+            <span className="truncate @max-[520px]/session-header:hidden">{running ?? (state?.label || "Git actions")}</span>
+          </Button>
+        </WithTooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="rounded-l-none px-1.5" aria-label="Git actions"><ChevronDown className="size-3" /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {(Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
+              <DropdownMenuItem key={action} disabled={!enabled(action) || !!pending} onSelect={() => void prepare(action)}>
+                {action === "resolveConflicts" && snapshot.state === "diverged" ? BRANCH_STATES.diverged.label : definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{keycaps(definition.shortcut).join("")}</span>}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            {snapshot.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(errorText(source, reason)))}>Open pull request</DropdownMenuItem>}
+            <DropdownMenuItem disabled={refreshing} onSelect={() => void refresh(true)}>Refresh Git status</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>}
+      {failure ? <span role="alert" className="max-w-48 truncate text-xs text-destructive" title={failure}>{failure}</span>
+        : notice && <span role="status" className="max-w-48 truncate text-xs text-muted-foreground" title={notice}>{notice}</span>}
+      <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{pending ? BRANCH_ACTIONS[pending.action].label : "Git action"}</DialogTitle>
+            <DialogDescription>
+              {pending?.action === "commitPush" ? `Commit all staged, unstaged and new files in this checkout on ${machineName}, then push to origin. ` : null}
+              {pending?.action === "createPr" ? `Push ${pending.expected.branch} and open a pull request into ${pending.expected.base}. ` : null}
+              {pending?.action === "merge" ? `Merge #${pending.expected.pr?.number} into ${pending.expected.base} using ${pending.method}. ` : null}
+              {pending?.action === "push" ? `Push ${pending.expected.branch} to origin. ` : null}
+              {where}
+            </DialogDescription>
+          </DialogHeader>
+          {needsMessage && <label className="block text-sm">{pending?.action === "createPr" ? "PR title" : "Commit message"}<input autoFocus className="mt-1 w-full rounded-md border border-hairline bg-transparent px-3 py-2" value={message} onChange={(event) => setMessage(event.target.value)} /></label>}
+          {pending?.action === "createPr" && <label className="mt-3 block text-sm">Description<textarea className="mt-1 min-h-24 w-full rounded-md border border-hairline bg-transparent px-3 py-2" value={body} onChange={(event) => setBody(event.target.value)} /></label>}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPending(null)}>Cancel</Button>
+            <Button disabled={!pending || (needsMessage && !message.trim())} onClick={() => {
+              if (!pending) return;
+              if (BRANCH_ACTIONS[pending.action].publishes) approved.current.add(pending.expected.branch);
+              void run(pending, { message, body });
+            }}>{pending ? BRANCH_ACTIONS[pending.action].label : "Continue"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

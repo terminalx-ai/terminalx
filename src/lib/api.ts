@@ -2444,6 +2444,8 @@ export const attachments = {
   inspect: (paths: string[]) => invoke<FileFacts[]>("inspect_attachments", { paths }),
   /** Copy the files into one new folder of the session's attachments folder. Refuses reserved names, files over the size limit, and more than 10. */
   store: (sessionId: string, files: FileInput[]) => invoke<FileRef[]>("store_attachments", { sessionId, files }),
+  /** One part (at most 384 KiB, base64) of a file on this computer from `offset`, for an upload to a machine (PRO-407). */
+  readPart: (path: string, offset: number) => invoke<{ data: string; bytes: number; size: number }>("read_attachment_part", { path, offset }),
   /** Write a copy of a stored attachment to `to` (the file tab's Download). `path` must be inside an attachments folder. */
   saveCopy: (path: string, to: string) => invoke<void>("save_attachment_copy", { path, to }),
 };
@@ -2512,8 +2514,8 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   /** `pressedAt`: when Send was pressed (ms since the epoch), for the tab's send timings (#727). */
   /** `files`: attachments already stored with `attachments.store` for this session (PRO-290). */
-  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[]) =>
-    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}) }),
+  send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false, pressedAt?: number, files?: FileRef[], promptRequestId?: string) =>
+    invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery, ...(pressedAt === undefined ? {} : { pressedAt }), ...(files?.length ? { files } : {}), ...(promptRequestId === undefined ? {} : { promptRequestId }) }),
   /** The chat drew the message `seq` it sent: its timings join the runtime's in the tab's diagnostics (#727). */
   reportTerminalView: (sessionId: string, tabId: string, report: { transitionId: string; sequence: number; elapsedMs: number; surface: "window"; stage: "requested" | "waiting_for_turn" | "starting_terminal" | "attaching" | "opened" | "cancelled" | "failed"; errorCategory: "handoff" | "start" | "attach" | null }) =>
     invoke<void>("report_terminal_view", { sessionId, tabId, report }),
@@ -2689,6 +2691,8 @@ export interface PullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has. Empty or absent on older workspace runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
@@ -3277,7 +3281,9 @@ export const orchestration = {
   /** A blocked piece (PRO-361, 18.03): the lead takes it over and finishes it in its own checkout. */
   takeOver: (id: string, piece: string) => invoke<Run>("orchestration_take_over", { id, piece }),
   /** Check what the lead committed for a piece it took over; done once its checks pass there. */
-  finish: (id: string, piece: string) => invoke<Run>("orchestration_finish", { id, piece }),
+  finish: (id: string, piece: string, accept: string[] = []) => invoke<Run>("orchestration_finish", { id, piece, accept }),
+  /** The files outside a held piece's own that its Check and finish would add to it: shown and confirmed first. */
+  finishWidens: (id: string, piece: string) => invoke<string[]>("orchestration_finish_widens", { id, piece }),
   /** Give a blocked piece more files (its report's outside files when `own` is empty) and a fresh worker. */
   widen: (id: string, piece: string, own: string[] = []) => invoke<Run>("orchestration_widen", { id, piece, own }),
   /** Send a blocked piece's worker a note: its try opens again. */

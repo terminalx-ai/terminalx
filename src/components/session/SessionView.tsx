@@ -68,6 +68,7 @@ import { PortForwardChip } from "@/components/cloud/PortForwardChip";
 import { PortToasts } from "@/components/cloud/PortToast";
 import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
+import { MachineRunMenu } from "@/components/machines/MachineRunPanes";
 import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
@@ -80,6 +81,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { MachineBranchButton, MachineDiffSize, useMachineBranch } from "./MachineBranchButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 
@@ -536,10 +538,25 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
+  // PRO-404: a machine session's branch, diff size and next Git step, read and run on the machine (21.08). Nothing is read for any other session.
+  const machineBranch = useMachineBranch({
+    session,
+    machineName: machine?.name ?? "",
+    backend,
+    gitSource: machine && !cloud?.locked ? cloud?.gitSource : undefined,
+    fileSource: machine ? cloud?.fileSource : undefined,
+    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === cloud.repository)?.remote) || null,
+    connected: !!machine && !!cloud?.connected,
+    tabId: activeTab?.id,
+  });
   // The side panel follows the agent tab while a review, terminal or page is on screen (PRO-392): swapping it for a
   // working-tree panel remounted it on Overview, and its "Latest turn" scope had no turn to read.
   const panelTab = activeTab ?? (selected ? session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0] : undefined);
-  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: panelTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!panelTab && !isTerminalTab(panelTab) });
+  // With a check's log (or another review tab) on screen, Fix errors still goes to the session's
+  // agent: its last chat tab, so the log tab's hand-off bar has somewhere to send (PRO-394).
+  const fixTab = selected?.kind === "agent" ? activeTab
+    : session.tabs.find((tab) => tab.id === session.activeTab && !isTerminalTab(tab)) ?? session.tabs.find((tab) => !isTerminalTab(tab));
+  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!fixTab && !isTerminalTab(fixTab) });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -618,8 +635,9 @@ export function SessionView({
 
   useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
-    else if (machine && cloud && cloudTerminals.length) {
-      selectCloudTerminal(cloud.workspaceKey, cloudTerminals[cloudTerminals.length - 1].id);
+    else if (machine && cloud && cloudTerminals.some((terminal) => !terminal.run)) {
+      // The latest shell, not a script's run (PRO-403): those are under Setup and Run.
+      selectCloudTerminal(cloud.workspaceKey, cloudTerminals.filter((terminal) => !terminal.run).at(-1)!.id);
       setPrefs({ panelOpen: true, panelTerminalOpen: true });
     } else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
@@ -799,6 +817,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
+            {machine && <MachineDiffSize branch={machineBranch} className={cn("ml-1.5 flex shrink-0 items-center", HEADER_TIGHT)} />}
             {/* The base commit is a detail (the branch's tooltip and the ··· menu have it); only a doubt about it stays on the bar. A cloud session has no menu, so it keeps the note. */}
             {session.worktreeBase && (session.worktreeBase.warning || !local) && (
               <span
@@ -842,7 +861,10 @@ export function SessionView({
             {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
+            {/* A machine session's are the machine's, run there (PRO-403). */}
+            {machine && cloud && !compact && <MachineRunMenu key={`run-menu:${session.id}`} cloud={cloud} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
+            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
@@ -930,11 +952,12 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
-        {local && !cloud && <RunRestartOffer session={session} />}
+        {((local && !cloud) || (machine && cloud)) && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
-        {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
-          <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
-          {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
+        {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
+        {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
+          <span className="min-w-0 flex-1 text-muted-foreground">{checkFix.busy ? "Collecting failed check logs…" : checkFix.notice}</span>
+          {!checkFix.busy && <Button size="sm" variant="ghost" className="h-6" onClick={checkFix.clear}>Dismiss</Button>}
         </div>}
         {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
         <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>

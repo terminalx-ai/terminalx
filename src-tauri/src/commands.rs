@@ -2779,30 +2779,31 @@ fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) 
     Ok(ForkedTurn { session, tab_id: new_tab.id, note: None })
 }
 
-/// Create the fork's checkout and, for a turn fork, restore its saved files.
-fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, at: Option<u64>) -> Result<Option<String>, String> {
+/// Allocate and restore the fork's checkout under the same rollback guard as its conversation.
+fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, at: Option<u64>, allocation: &mut crate::fork_allocation::ForkAllocation) -> Result<Option<String>, String> {
     let project_path = Path::new(&src.project_path);
     let main_git_turn = at.is_some() && !src.is_quick() && git::is_repo(Path::new(&src.cwd));
     if !src.worktree_removed && (src.worktree_name.is_some() || main_git_turn) {
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = names::unclaimed(&taken);
-        // The main checkout may have changed branches since the session was created.
+        // A main checkout may have switched branches since the session was created.
         let base = if src.worktree_name.is_none() {
             Some(git::run(Path::new(&src.cwd), &["rev-parse", "HEAD"]).map_err(err)?.trim().to_owned())
         } else { src.branch.clone() };
-        let wt = git::create_worktree(project_path, &name, base.as_deref()).map_err(err)?;
-        entry.cwd = wt.path;
-        entry.worktree_name = Some(wt.name);
-        entry.branch = Some(wt.branch);
-        entry.base_ref = Some(wt.base_tree);
-        entry.worktree_base = wt.worktree_base;
+        let (wt, created_commit) = git::create_fork_worktree(project_path, &name, base.as_deref()).map_err(err)?;
+        entry.cwd = wt.path.clone();
+        entry.worktree_name = Some(wt.name.clone());
+        entry.branch = Some(wt.branch.clone());
+        entry.base_ref = Some(wt.base_tree.clone());
+        entry.worktree_base = wt.worktree_base.clone();
+        allocation.worktree(project_path, wt, created_commit);
     }
     let Some(end_seq) = at else { return Ok(None) };
     if entry.worktree_name.is_some() {
         match crate::checkpoints::turn_end(&src.id, &tab.id, end_seq) {
             Err(error) => Ok(Some(format!("The new worktree has the branch's latest files: {error:#}"))),
-            Ok((tree, index)) => Ok(crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index)
+            Ok((tree, index)) => Ok(allocation.checkpoint(&tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index))
                 .err().map(|error| format!("The turn's files could not be fully restored in the new worktree: {error:#}"))),
         }
     } else {
@@ -2828,77 +2829,103 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
         // conversation refers to it.
-        let scratch = if src.is_quick() { Some(store::quick::create(&id).map_err(err)?) } else { None };
-        let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
-        if let (Some(scratch), true) = (&scratch, in_scratch) {
-            let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
-            // The fork's CLI reopens the parent conversation from the new
-            // directory, and Claude Code looks for it under that directory's name.
-            if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
-                let _ = crate::harness::claude::transcript::rehome_in(&projects, &src.cwd, scratch, parent, true);
-            }
-        }
-        let mut entry = SessionEntry {
-            id: id.clone(),
-            kind: src.kind,
-            project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
-            cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
-            worktree_name: None,
-            branch: src.branch.clone(),
-            base_ref: None,
-            worktree_base: None,
-            worktree_removed: false,
-            removed_workspace: None,
-            issue: src.issue.clone(),
-            issue_work: src.issue_work.clone(),
-            automation: src.automation.clone(),
-            title: format!("{} (fork)", src.title),
-            created: now.clone(),
-            modified: now,
-            archived: false,
-            archive: Default::default(),
-            pinned: false,
-            manual_status: Default::default(),
-            tabs: vec![new_tab.clone()],
-            active_tab: Some(new_tab.id.clone()),
-            link: None,
-            parent: None,
-            unknown: BTreeMap::new(),
-        };
-        let note = fork_workspace(&src, &tab, &mut entry, at)?;
-        if let Some(conversation) = &conversation {
-            conversation.write(&entry.cwd, &id, &new_tab.id)?;
-        }
-        // Copy the log, re-stamping envelopes so the new tab owns them.
-        if let (None, Ok(dir)) = (&conversation, store::sessions_dir()) {
-            let from = store::log_path(&src.id, &tab.id).map_err(err)?;
-            if let Ok(text) = std::fs::read_to_string(&from) {
-                let to_dir = dir.join(&id);
-                let _ = std::fs::create_dir_all(&to_dir);
-                let mut out = String::with_capacity(text.len());
-                for line in text.lines() {
-                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
-                        v["sessionId"] = serde_json::Value::String(id.clone());
-                        v["tabId"] = serde_json::Value::String(new_tab.id.clone());
-                        out.push_str(&v.to_string());
-                        out.push('\n');
-                    }
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        let result = (|| -> Result<(SessionEntry, Option<String>), String> {
+            let scratch = if src.is_quick() {
+                let path = store::quick::dir(&id).map_err(err)?;
+                allocation.directory(&path).map_err(err)?;
+                Some(std::fs::canonicalize(&path).map_err(err)?.to_string_lossy().into_owned())
+            } else { None };
+            let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
+            if let (Some(scratch), true) = (&scratch, in_scratch) {
+                let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
+                // The fork's CLI reopens the parent conversation from the new
+                // directory, and Claude Code looks for it under that directory's name.
+                if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
+                    allocation.rehome_claude(&projects, &src.cwd, scratch, parent).map_err(err)?;
                 }
-                let _ = std::fs::write(to_dir.join(format!("{}.jsonl", new_tab.id)), out);
             }
-        }
-        if let Ok(root) = store::root() {
-            let from = root.join("attachments").join(&src.id);
-            if from.is_dir() {
-                let to = root.join("attachments").join(&id);
-                let _ = copy_dir(&from, &to);
+            let mut entry = SessionEntry {
+                id: id.clone(),
+                kind: src.kind,
+                project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
+                cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
+                worktree_name: None,
+                branch: src.branch.clone(),
+                base_ref: None,
+                worktree_base: None,
+                worktree_removed: false,
+                removed_workspace: None,
+                issue: src.issue.clone(),
+                issue_work: src.issue_work.clone(),
+                automation: src.automation.clone(),
+                title: format!("{} (fork)", src.title),
+                created: now.clone(),
+                modified: now,
+                archived: false,
+                archive: Default::default(),
+                pinned: false,
+                manual_status: Default::default(),
+                tabs: vec![new_tab.clone()],
+                active_tab: Some(new_tab.id.clone()),
+                link: None,
+                parent: None,
+                unknown: BTreeMap::new(),
+            };
+            let note = fork_workspace(&src, &tab, &mut entry, at, &mut allocation)?;
+            if let Some(conversation) = &conversation {
+                let native = crate::session::fork_conversation_destination(&conversation.harness, &entry.cwd, &conversation.provider).map_err(err)?;
+                let lines = conversation.events.iter().map(|event| serde_json::to_value(event).map_err(err)).collect::<Result<Vec<_>, String>>()?;
+                let mut out = String::new();
+                for mut value in lines {
+                    value["sessionId"] = serde_json::Value::String(id.clone());
+                    value["tabId"] = serde_json::Value::String(new_tab.id.clone());
+                    out.push_str(&value.to_string());
+                    out.push('\n');
+                }
+                let dir = store::sessions_dir().map_err(err)?.join(&id);
+                allocation.conversation(&native, conversation.native.as_bytes(), &dir, &new_tab.id, out.as_bytes()).map_err(err)?;
             }
-        }
-        index::update(|sessions| {
-            sessions.push(entry.clone());
-            Ok(())
-        })
-        .map_err(err)?;
+            // Copy the log, re-stamping envelopes so the new tab owns them.
+            if let (None, Ok(dir)) = (&conversation, store::sessions_dir()) {
+                let from = store::log_path(&src.id, &tab.id).map_err(err)?;
+                if let Ok(text) = std::fs::read_to_string(&from) {
+                    let to_dir = dir.join(&id);
+                    allocation.directory(&to_dir).map_err(err)?;
+                    let mut out = String::with_capacity(text.len());
+                    for line in text.lines() {
+                        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+                            v["sessionId"] = serde_json::Value::String(id.clone());
+                            v["tabId"] = serde_json::Value::String(new_tab.id.clone());
+                            out.push_str(&v.to_string());
+                            out.push('\n');
+                        }
+                    }
+                    allocation.write(&to_dir.join(format!("{}.jsonl", new_tab.id)), out.as_bytes()).map_err(err)?;
+                }
+            }
+            if let Ok(root) = store::root() {
+                let from = root.join("attachments").join(&src.id);
+                if from.is_dir() {
+                    let parent = root.join("attachments");
+                    std::fs::create_dir_all(&parent).map_err(err)?;
+                    let to = parent.join(&id);
+                    allocation.directory(&to).map_err(err)?;
+                    copy_dir(&from, &to).map_err(err)?;
+                }
+            }
+            index::update(|sessions| {
+                if sessions.iter().any(|session| session.id == id) { anyhow::bail!("Session id already exists"); }
+                sessions.push(entry.clone());
+                Ok(())
+            })
+            .map_err(err)?;
+            Ok((entry, note))
+        })();
+        let (entry, note) = match result {
+            Ok(result) => { allocation.commit(); result }
+            Err(error) => return Err(allocation.rollback(error)),
+        };
         let _ = app.emit("session_created", &entry);
         // A fork with a worktree always creates it above; other forks share a checkout.
         if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
@@ -3045,6 +3072,7 @@ pub async fn send_message(
     confirm_delivery: Option<bool>,
     pressed_at: Option<i64>,
     files: Option<Vec<crate::events::FileRef>>,
+    prompt_request_id: Option<uuid::Uuid>,
 ) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -3053,7 +3081,7 @@ pub async fn send_message(
             if !files.is_empty() { return Err(err("A handoff cannot carry attached files.")); }
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
         } else {
-            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files).map_err(err)
+            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files, prompt_request_id).map_err(err)
         }
     })
         .await
@@ -3072,6 +3100,13 @@ pub async fn store_attachments(session_id: String, files: Vec<crate::attachments
 #[tauri::command]
 pub async fn inspect_attachments(paths: Vec<String>) -> CmdResult<Vec<crate::attachments::FileFacts>> {
     tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect(&paths))).await.map_err(err)?
+}
+
+/// One part of a file attached to a message for a machine (PRO-407), read
+/// here so only its bytes are uploaded, never its path.
+#[tauri::command]
+pub async fn read_attachment_part(path: String, offset: u64) -> CmdResult<crate::attachments::FilePart> {
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::read_part(&path, offset).map_err(err)).await.map_err(err)?
 }
 
 /// A file tab's Download: a copy of a stored attachment, written where the
@@ -4782,7 +4817,8 @@ mod command_tests {
             let status = git::run(cwd, &["status", "--porcelain"]).unwrap();
             let mut dest = src.clone();
             dest.worktree_name = None;
-            assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2)).unwrap().is_none());
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2), &mut allocation).unwrap().is_none());
             assert_ne!(dest.cwd, src.cwd);
             assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("a.txt")).unwrap(), "turn end\n");
             assert_eq!(git::run(std::path::Path::new(&dest.cwd), &["show", ":a.txt"]).unwrap(), "staged\n");
@@ -4790,10 +4826,27 @@ mod command_tests {
             assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
             let mut missing = src.clone();
             missing.worktree_name = None;
-            let note = super::fork_workspace(&src, &tab, &mut missing, Some(0)).unwrap().unwrap();
+            let mut missing_allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&src, &tab, &mut missing, Some(0), &mut missing_allocation).unwrap().unwrap();
             assert!(note.contains("no saved file checkpoint"), "{note}");
             assert_ne!(missing.cwd, src.cwd);
             assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            let dest_branch = dest.branch.clone().unwrap();
+            assert_eq!(allocation.rollback("persistence failed".into()), "persistence failed");
+            assert!(!std::path::Path::new(&dest.cwd).exists());
+            assert!(!git::run(cwd, &["branch", "--list", &dest_branch]).unwrap().contains(&dest_branch));
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
+            assert_eq!(missing_allocation.rollback("persistence failed".into()), "persistence failed");
+            assert!(!std::path::Path::new(&missing.cwd).exists());
+            let mut published = src.clone();
+            published.worktree_name = None;
+            let mut published_allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&src, &tab, &mut published, Some(2), &mut published_allocation).unwrap().is_none());
+            published_allocation.commit();
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&published.cwd).join("a.txt")).unwrap(), "turn end\n");
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
             if !worktree {
                 git::run(cwd, &["reset", "--hard", "HEAD"]).unwrap();
             }
@@ -6091,9 +6144,17 @@ pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) 
 
 /// Check what the lead committed for a piece it took over, and make it done when its checks pass.
 #[tauri::command]
-pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+/// `accept`: the files outside a held piece's own the person confirmed adding to it.
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String, accept: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece, "accept": accept.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// The files outside a held piece's own that Check and finish would add to it, as the lead's checkout stands.
+#[tauri::command]
+pub async fn orchestration_finish_widens(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finishWidens", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
 /// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.

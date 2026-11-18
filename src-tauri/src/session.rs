@@ -63,7 +63,7 @@ pub mod held;
 #[path = "session_reset.rs"]
 mod reset;
 #[cfg(feature = "desktop")]
-pub(crate) use reset::{fork_conversation, write_forked_conversation};
+pub(crate) use reset::{destination as fork_conversation_destination, fork_conversation, write_forked_conversation};
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -1090,6 +1090,8 @@ pub struct TabRuntime {
     pub queued: Vec<PendingMessage>,
     pub held_queue: held::Queue,
     pub turn_open: bool,
+    turn_generation: u64,
+    automation_completions_in_flight: usize,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
     /// A compact boundary observed during this command, not proof a model turn ended.
@@ -1156,6 +1158,17 @@ struct CliRestart {
     _privacy: Vec<crate::data_privacy::RemoteWrite>,
 }
 
+/// Prevent handover from capturing a closed turn before its automation
+/// acknowledgment and durable completion have both been applied.
+struct AutomationCompletionGuard(Arc<Mutex<TabRuntime>>);
+
+impl Drop for AutomationCompletionGuard {
+    fn drop(&mut self) {
+        let mut rt = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        rt.automation_completions_in_flight = rt.automation_completions_in_flight.saturating_sub(1);
+    }
+}
+
 impl TabRuntime {
     /// A prompt sent now would be queued behind the open turn (and so take
     /// no baseline). A slash command's turn that saw no work is not one.
@@ -1177,6 +1190,7 @@ impl TabRuntime {
     /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
         if !self.turn_open {
+            self.turn_generation = self.turn_generation.saturating_add(1);
             self.turn_by_command = false;
             self.signed_out_in_turn = false;
             self.turn_opener = Some(("session", "prompt"));
@@ -1199,8 +1213,10 @@ impl TabRuntime {
         let ended = matches!(&self.engine, Engine::Cli(p) if p.transcript_turn.is_some_and(tui::TurnMark::ends));
         let fresh = !self.turn_open || (self.turn_by_command && !command)
             || (compact && (self.turn_by_command || ended));
+        let was_open = self.turn_open;
         self.open_turn();
         if fresh {
+            if was_open { self.turn_generation = self.turn_generation.saturating_add(1); }
             self.turn_started_at = Some(Instant::now());
             self.turn_by_command = command;
             self.compact_completed = false;
@@ -1450,6 +1466,7 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    request_id: Option<uuid::Uuid>,
     collaboration: Option<CollaborationPermit>,
     /// A new desktop follow-up: decide again under the final send lock.
     /// Some(true) requests interrupt-and-send; Some(false) holds it.
@@ -1906,8 +1923,9 @@ impl SessionManager {
                 // never reset it. Left to the latch, such a turn would not
                 // close here, and skipping the rest of the pass for it would
                 // leave the tab "Working" for good with no warning either.
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(&rt_arc, rt, final_message);
+                self.after_turn_completed(&rt_arc, rt, final_message, completed);
                 continue;
             }
             self.nudge_if_due(&mut rt, now);
@@ -2192,8 +2210,11 @@ impl SessionManager {
             }
             "finish" => {
                 self.accepting_work()?;
-                engine::shown(&engine::finish(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?.run)
+                let accept: Vec<String> = params["accept"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                engine::shown(&engine::finish_accepting(&host, string("id")?, string("piece")?, engine::By::Person, false, &accept).map_err(refused)?.run)
             }
+            // What Check and finish would add to a held piece's files, shown before it is pressed.
+            "finishWidens" => serde_json::to_value(engine::finish_widens(&host, string("id")?, string("piece")?).map_err(refused)?)?,
             "widen" => {
                 self.accepting_work()?;
                 let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
@@ -2280,6 +2301,8 @@ impl SessionManager {
                 queued: Vec::new(),
                 held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
+                turn_generation: 0,
+                automation_completions_in_flight: 0,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
@@ -2318,7 +2341,15 @@ impl SessionManager {
     }
 
     /// Stamp, persist, emit. The one path every event takes.
-    fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+    fn publish(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+        self.publish_event(rt, payload, subagent, None)
+    }
+
+    fn publish_prompt(&self, rt: &mut TabRuntime, payload: Payload, request_id: Option<uuid::Uuid>) -> AgentEvent {
+        self.publish_event(rt, payload, None, request_id)
+    }
+
+    fn publish_event(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
@@ -2359,6 +2390,7 @@ impl SessionManager {
             )).then(|| ts.clone()),
             ts,
             subagent,
+            prompt_request_id,
             payload,
         };
         if ev.payload.is_persisted() {
@@ -3071,14 +3103,28 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        self.send_pressed_with_request(session_id, tab_id, text, images, pressed_at, files, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pressed_with_request(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+        pressed_at: Option<i64>,
+        files: Vec<FileRef>,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<SendOutcome> {
         let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
         crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
-            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id)
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3092,13 +3138,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -3175,7 +3221,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3195,7 +3241,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3327,9 +3373,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3369,7 +3415,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3379,7 +3425,7 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -3545,7 +3591,7 @@ impl SessionManager {
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            let ev = self.publish(
+            let ev = self.publish_prompt(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
@@ -3555,7 +3601,7 @@ impl SessionManager {
                     queued: true,
                     cwd: Some(entry.cwd.clone()),
                 },
-                None,
+                prompt.request_id,
             );
             let privacy = crate::data_privacy::remote_ticket();
             let binding = self.provider_binding(&rt).context("provider association missing before queue")?;
@@ -3578,7 +3624,7 @@ impl SessionManager {
         }
 
         let baseline = rt.baseline_for(&entry.cwd);
-        let events = vec![self.publish(
+        let events = vec![self.publish_prompt(
             &mut rt,
             Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
@@ -3588,7 +3634,7 @@ impl SessionManager {
                 queued: false,
                 cwd: Some(entry.cwd.clone()),
             },
-            None,
+            prompt.request_id,
         )];
 
         let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
@@ -4342,7 +4388,9 @@ impl SessionManager {
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        self.stop_with(session_id, tab_id, false)
+        self.stop_with(session_id, tab_id, false)?;
+        self.observer.automation_cancelled(session_id, tab_id, "The automation agent was stopped.");
+        Ok(())
     }
 
     /// Stop a tab's agent, and whatever it left running, if nothing is using
@@ -4374,6 +4422,7 @@ impl SessionManager {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
+        self.observer.automation_execution_lost(session_id, tab_id, "The agent stopped before the automation run completed.");
         // Kept with the tab, so a runtime started since knows it too.
         if let Err(error) = index::set_parked(session_id, tab_id, true) {
             log::warn!("mark {session_id}:{tab_id} as stopped for sitting idle: {error:#}");
@@ -4414,6 +4463,63 @@ impl SessionManager {
             return Some(what);
         }
         crate::idle_agents::left_running(leader?)
+    }
+
+    /// A new turn may already have started by the time the previous turn's
+    /// completion is delivered. Background work can also wake a later turn.
+    pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
+        let watch = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return true; }
+            rt.background.clone()
+        };
+        if watch.is_some_and(|watch| watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_some()) { return true; }
+        self.background_work(session_id, tab_id).is_some()
+    }
+
+    fn automation_runtime_busy(rt: &TabRuntime) -> bool {
+        rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
+            || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
+    }
+
+    /// Serialize the durable completion transition with turn admission. The
+    /// potentially slow process/transcript scan is outside the tab lock, then
+    /// the live state is checked again while that lock is held.
+    pub(crate) fn with_automation_quiescent<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let observed = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return None; }
+            rt.seq
+        };
+        if self.automation_execution_continues(session_id, tab_id) { return None; }
+        let rt = runtime.lock().unwrap();
+        if Self::automation_runtime_busy(&rt) || rt.seq != observed || generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    pub(crate) fn with_automation_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = runtime.lock().unwrap();
+        if generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    /// A deferred automation still owns work while its CLI waits at a prompt.
+    /// Keep this status persisted so all windows and the idle reaper agree.
+    pub(crate) fn automation_deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return };
+        let mut rt = runtime.lock().unwrap();
+        if rt.turn_open || rt.stopping || !rt.pending.is_empty() || rt.recovery.is_some() { return; }
+        if !active && (!rt.queued.is_empty() || rt.held_queue.keeps_runtime_busy()
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))) { return; }
+        if active && rt.status == TabStatus::Completed {
+            self.set_display_status(&mut rt, TabStatus::InProgress);
+        } else if !active && rt.status == TabStatus::InProgress {
+            self.set_display_status(&mut rt, TabStatus::Completed);
+        }
     }
 
     /// Every running agent that has nothing to do, with how long it has had
@@ -6598,9 +6704,10 @@ impl SessionManager {
                 drop(application);
                 self.observer.automation_failed(&session, &tab, "The automation turn was interrupted.");
             } else {
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
                 drop(application);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             self.judge_reported_mode(rt_arc, tail);
             return;
@@ -6781,7 +6888,7 @@ impl SessionManager {
         let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { rt.baseline_for(cwd) };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
-        let ev = self.publish(rt, message, None);
+        let ev = self.publish_prompt(rt, message, prompt.request_id);
         echo.continuation = receipt.is_some();
         echo.receipt = receipt;
         echo.seq = ev.seq;
@@ -7740,8 +7847,9 @@ impl SessionManager {
                 if !mine(&rt) { return HookReply::default(); }
                 rt.last_activity = Instant::now();
                 if rt.turn_open {
+                    let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                     self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
-                    self.after_turn_completed(&rt_arc, rt, final_text);
+                    self.after_turn_completed(&rt_arc, rt, final_text, completed);
                     return HookReply::default();
                 }
             }
@@ -7780,6 +7888,8 @@ impl SessionManager {
                         &frame.tab,
                         "The agent session ended before the automation turn completed.",
                     );
+                } else {
+                    self.observer.automation_execution_lost(&frame.session, &frame.tab, "The agent session ended before the automation run completed.");
                 }
             }
             _ => {}
@@ -7791,11 +7901,18 @@ impl SessionManager {
     /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
     /// before notifying automation or scheduling a settings restart that may
     /// re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        let (generation, started_at, finished) = completed;
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
+        let started = started_at.and_then(|at| chrono::TimeDelta::from_std(at.elapsed()).ok()).map(|elapsed| chrono::Utc::now() - elapsed);
+        let watch = rt.background.clone();
+        rt.automation_completions_in_flight += 1;
+        let completion = AutomationCompletionGuard(rt_arc.clone());
         drop(rt);
-        self.observer.automation_completed(&session, &tab, final_message);
+        if let Some(watch) = watch { watch.lock().unwrap().automation_turn_completed(started, finished, final_message.as_deref()); }
+        self.observer.automation_completed(&session, &tab, final_message, generation);
+        drop(completion);
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
@@ -8650,7 +8767,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -8670,7 +8787,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));

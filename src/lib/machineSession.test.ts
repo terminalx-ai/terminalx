@@ -3,7 +3,7 @@ import type { MachineProject, RuntimeSession } from "@terminalx/portable/workspa
 
 vi.mock("@/components/terminal/TerminalView", () => ({ createTerminal: vi.fn() }));
 
-const { machinePortsOffered, machineSendBlocked, resetMachinePortsGrants, sessionRepository, worktreeInProject } = await import("./machineSession");
+const { machinePortsOffered, machineSendBlocked, resetMachinePortsGrants, sessionFilesBase, sessionRepository, worktreeInProject } = await import("./machineSession");
 
 const project = { projectId: "p1", name: "terminalx", path: "/Users/me/code/terminalx", kind: "git", defaultBranch: "main", archived: false } as MachineProject;
 const session = (cwd: string) => ({ id: "s1", projectId: "p1", cwd }) as RuntimeSession;
@@ -41,6 +41,30 @@ describe("the repository Changes shows for a machine session", () => {
     expect(sessionRepository(repositories, project, session("/Users/me/worktrees/gone"))).toBe(".");
     expect(sessionRepository([{ repo: "lib" }] as never[], project, null)).toBe("lib");
     expect(sessionRepository([], project, null)).toBeNull();
+  });
+});
+
+describe("where a machine session's Files are rooted (PRO-405)", () => {
+  const repositories = [{ repo: "." }, { repo: ".raccoon/worktrees/read" }, { repo: "/Users/me/worktrees/elsewhere" }] as never[];
+
+  it("is the repository Changes shows, so the two agree", () => {
+    for (const cwd of ["/Users/me/code/terminalx", "/Users/me/code/terminalx/.raccoon/worktrees/read", "/Users/me/worktrees/elsewhere", "/Users/me/worktrees/gone"]) {
+      const shown = sessionRepository(repositories, project, session(cwd));
+      expect(sessionFilesBase(repositories, project, session(cwd))).toBe(shown === "." ? "" : shown);
+    }
+    expect(sessionFilesBase(repositories, project, session("/Users/me/worktrees/elsewhere"))).toBe("/Users/me/worktrees/elsewhere");
+  });
+
+  it("roots a worktree inside the project at once, and waits for the list for one outside it", () => {
+    expect(sessionFilesBase(null, project, session("/Users/me/code/terminalx/.raccoon/worktrees/read"))).toBe(".raccoon/worktrees/read");
+    expect(sessionFilesBase(null, project, session("/Users/me/code/terminalx"))).toBe("");
+    expect(sessionFilesBase(null, project, session("/Users/me/worktrees/elsewhere"))).toBeNull();
+  });
+
+  it("is the project's folder when nothing names the worktree", () => {
+    expect(sessionFilesBase([], project, session("/Users/me/worktrees/elsewhere"))).toBe("");
+    expect(sessionFilesBase([], project, session("/Users/me/code/terminalx/.raccoon/worktrees/read"))).toBe(".raccoon/worktrees/read");
+    expect(sessionFilesBase(null, project, null)).toBe("");
   });
 });
 
