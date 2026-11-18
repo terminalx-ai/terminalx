@@ -1851,11 +1851,19 @@ impl ControlService {
                 .map_err(ControlError::internal)?;
             let mut listed = Vec::with_capacity(worktrees.len());
             for worktree in worktrees {
-                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path).map_err(ControlError::internal)?;
                 let mut value = serde_json::to_value(&worktree).map_err(ControlError::internal)?;
-                value["sessionCount"] = json!(held.len());
-                if !worktree.is_main {
-                    value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                match crate::worktree_control::sessions_in(&sessions, &worktree.path) {
+                    Ok(held) => {
+                        value["sessionCount"] = json!(held.len());
+                        if !worktree.is_main {
+                            value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                        }
+                    }
+                    Err(error) => {
+                        value["sessionCount"] = Value::Null;
+                        if !worktree.is_main { value["sessions"] = Value::Null; }
+                        value["sessionError"] = json!(error);
+                    }
                 }
                 listed.push(value);
             }
@@ -3173,6 +3181,54 @@ mod tests {
 
     fn ids(sessions: &Value) -> std::collections::BTreeSet<String> {
         sessions.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn worktree_listing_keeps_other_results_when_session_identity_is_uncertain() {
+        let _home = crate::store::temp_home();
+        let (repo, other_repo) = (git_repo(), git_repo());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let other = projects::add(other_repo.path().to_str().unwrap()).unwrap();
+        let sub = Path::new(&project.path).join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": sub, "title": "Legacy subdirectory", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let isolated = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": true, "title": "Isolated", "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let (service, _sink) = headless_service();
+        let listed = service.execute("worktrees.list", json!({}), "r").unwrap();
+        let groups = listed["projects"].as_array().unwrap();
+        let group = |path: &str| groups.iter().find(|group| group["project"]["path"] == path).unwrap();
+        let worktrees = group(&project.path)["worktrees"].as_array().unwrap();
+        let main = worktrees.iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert!(main["sessionCount"].is_null());
+        assert!(main["sessionError"].as_str().unwrap().contains("Legacy subdirectory"));
+        assert!(main.get("sessions").is_none());
+        let tree = worktrees.iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert_eq!(tree["sessionCount"], 1);
+        assert_eq!(ids(&tree["sessions"]), std::collections::BTreeSet::from([isolated.id.clone()]));
+        assert!(tree.get("sessionError").is_none());
+        let other_main = group(&other.path)["worktrees"].as_array().unwrap().iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert_eq!(other_main["sessionCount"], 0);
+        assert!(other_main.get("sessionError").is_none());
+
+        // The same uncertainty in a non-main worktree must not look like
+        // an empty session list either.
+        let nested = Path::new(&isolated.cwd).join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": nested, "title": "Nested legacy", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&nested_legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let listed = service.execute("worktrees.list", json!({"project": project.path}), "r2").unwrap();
+        let tree = listed["projects"][0]["worktrees"].as_array().unwrap().iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert!(tree["sessionCount"].is_null() && tree["sessions"].is_null());
+        assert!(tree["sessionError"].as_str().unwrap().contains("Nested legacy"));
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&isolated.cwd), false).is_err());
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&project.path), false).is_err());
     }
 
     /// #719: a session of another project and a quick chat run in the
