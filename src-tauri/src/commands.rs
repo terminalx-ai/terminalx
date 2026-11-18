@@ -3062,6 +3062,7 @@ pub async fn send_message(
     confirm_delivery: Option<bool>,
     pressed_at: Option<i64>,
     files: Option<Vec<crate::events::FileRef>>,
+    prompt_request_id: Option<uuid::Uuid>,
 ) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -3070,7 +3071,7 @@ pub async fn send_message(
             if !files.is_empty() { return Err(err("A handoff cannot carry attached files.")); }
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
         } else {
-            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files).map_err(err)
+            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files, prompt_request_id).map_err(err)
         }
     })
         .await

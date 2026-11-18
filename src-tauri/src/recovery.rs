@@ -616,7 +616,7 @@ mod lifecycle_tests {
     use super::*;
     use crate::events::*;
     fn event(payload: Payload) -> AgentEvent {
-        AgentEvent { id: "e".into(), session_id: "s".into(), tab_id: "t".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, subagent: None, payload }
+        AgentEvent { id: "e".into(), session_id: "s".into(), tab_id: "t".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, prompt_request_id: None, subagent: None, payload }
     }
     #[test]
     fn silence_only_pauses_work_and_never_expires_a_permission() {

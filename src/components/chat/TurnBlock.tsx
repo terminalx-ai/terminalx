@@ -591,14 +591,14 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string }) {
+export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string; failed?: boolean }) {
   const layout = usePrefs().transcriptLayout;
   return (
-    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy>
+    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy={!failed}>
       <ReaderMessage message={message} cwd={cwd} className="mb-1 opacity-70" />
-      <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
+      {!failed && <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
         Sending…
-      </div>
+      </div>}
     </div>
   );
 }

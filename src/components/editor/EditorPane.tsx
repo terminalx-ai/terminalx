@@ -555,10 +555,10 @@ export function EditorPane({ entry, visible, embedded = false }: { entry: FileEd
       )}
       {preview && status === "ready" && (
         // Focusable, so ⌥⌘C copies the file while reading its preview.
-        <div tabIndex={-1} className="min-h-0 flex-1 overflow-auto scrollbar-thin px-6 py-4 outline-none select-text">
+        <div tabIndex={-1} className="min-h-0 flex-1 overflow-auto scrollbar-thin py-4 pr-6 pl-12 outline-none select-text">
           <Markdown
             text={docText}
-            className="prose-chat"
+            className="prose-preview max-w-[624px]"
             linkContext={cloud ? undefined : linkContext}
           />
         </div>

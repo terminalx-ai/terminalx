@@ -1466,6 +1466,7 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    request_id: Option<uuid::Uuid>,
     collaboration: Option<CollaborationPermit>,
     /// A new desktop follow-up: decide again under the final send lock.
     /// Some(true) requests interrupt-and-send; Some(false) holds it.
@@ -2340,7 +2341,15 @@ impl SessionManager {
     }
 
     /// Stamp, persist, emit. The one path every event takes.
-    fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+    fn publish(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+        self.publish_event(rt, payload, subagent, None)
+    }
+
+    fn publish_prompt(&self, rt: &mut TabRuntime, payload: Payload, request_id: Option<uuid::Uuid>) -> AgentEvent {
+        self.publish_event(rt, payload, None, request_id)
+    }
+
+    fn publish_event(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
@@ -2381,6 +2390,7 @@ impl SessionManager {
             )).then(|| ts.clone()),
             ts,
             subagent,
+            prompt_request_id,
             payload,
         };
         if ev.payload.is_persisted() {
@@ -3093,14 +3103,28 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        self.send_pressed_with_request(session_id, tab_id, text, images, pressed_at, files, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pressed_with_request(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+        pressed_at: Option<i64>,
+        files: Vec<FileRef>,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<SendOutcome> {
         let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
         crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
-            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id)
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3114,13 +3138,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -3197,7 +3221,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3217,7 +3241,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3349,9 +3373,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3391,7 +3415,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3401,7 +3425,7 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -3567,7 +3591,7 @@ impl SessionManager {
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            let ev = self.publish(
+            let ev = self.publish_prompt(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
@@ -3577,7 +3601,7 @@ impl SessionManager {
                     queued: true,
                     cwd: Some(entry.cwd.clone()),
                 },
-                None,
+                prompt.request_id,
             );
             let privacy = crate::data_privacy::remote_ticket();
             let binding = self.provider_binding(&rt).context("provider association missing before queue")?;
@@ -3600,7 +3624,7 @@ impl SessionManager {
         }
 
         let baseline = rt.baseline_for(&entry.cwd);
-        let events = vec![self.publish(
+        let events = vec![self.publish_prompt(
             &mut rt,
             Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
@@ -3610,7 +3634,7 @@ impl SessionManager {
                 queued: false,
                 cwd: Some(entry.cwd.clone()),
             },
-            None,
+            prompt.request_id,
         )];
 
         let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
@@ -6864,7 +6888,7 @@ impl SessionManager {
         let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { rt.baseline_for(cwd) };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
-        let ev = self.publish(rt, message, None);
+        let ev = self.publish_prompt(rt, message, prompt.request_id);
         echo.continuation = receipt.is_some();
         echo.receipt = receipt;
         echo.seq = ev.seq;
@@ -8743,7 +8767,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -8763,7 +8787,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
