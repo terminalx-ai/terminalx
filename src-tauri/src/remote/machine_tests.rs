@@ -989,6 +989,65 @@ async fn a_machine_sessions_setup_and_actions_run_on_the_machine() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_machine_runs_stay_evicted_when_their_runtime_panes_are_listed() {
+    let m = machine_rpc();
+    let (path, _) = project(&m.path("code"), "api");
+    crate::store::projects::update(&path.to_string_lossy(), crate::store::projects::ProjectPatch {
+        actions: Some(vec![crate::store::projects::RepositoryActionEntry {
+            id: "quick".into(),
+            name: "Quick".into(),
+            command: "printf run-output; exit 0".into(),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    }).unwrap();
+    let session = workspace_session(&path, "retention");
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    // The three oldest exits are runs. The next oldest is a shell whose
+    // output should survive both listing and the eleventh exit.
+    let mut ids = Vec::new();
+    for n in 0..11 {
+        let id = if matches!(n, 0..=2 | 4 | 6 | 8) {
+            let ran = call(&m.rpc, &peer, "machine.runAction", json!({ "sessionId": session.id, "actionId": "quick" })).await.unwrap();
+            ran["run"]["ptyId"].as_str().unwrap().to_string()
+        } else {
+            let shell = call(&m.rpc, &peer, "pty.create", json!({ "sessionId": session.id, "clientRequestId": format!("retention-{n}") })).await.unwrap();
+            let id = shell["ptyId"].as_str().unwrap().to_string();
+            let data = "printf '%s%s\\n' retained- shell; exit 0\n";
+            call(&m.rpc, &peer, "pty.write", json!({ "ptyId": id, "data": data, "seq": 1 })).await.unwrap();
+            id
+        };
+        listed_until(&m.rpc, &peer, "terminal exit", |terminal| terminal["ptyId"] == id.as_str() && terminal["exitCode"] == 0).await;
+        ids.push(id);
+
+        if n >= 9 {
+            let first_retained = ids.len() - 8;
+            for id in &ids[..first_retained] {
+                assert!(m.terminals.shell(id).is_some(), "runtime still owns {id}");
+            }
+            for _ in 0..3 {
+                let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+                let mut retained: Vec<_> = listed["terminals"].as_array().unwrap().iter().map(|terminal| {
+                    assert_eq!(terminal["exited"], true);
+                    terminal["ptyId"].as_str().unwrap()
+                }).collect();
+                retained.sort_unstable();
+                let mut expected: Vec<_> = ids[first_retained..].iter().map(String::as_str).collect();
+                expected.sort_unstable();
+                assert_eq!(retained, expected);
+            }
+            assert!(output_of(&m.rpc, &peer, &ids[3]).await.contains("retained-shell"));
+        }
+    }
+
+    // Even with a free retention slot, the evicted panes stay undiscoverable.
+    call(&m.rpc, &peer, "pty.kill", json!({ "ptyId": ids[3] })).await.unwrap();
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert_eq!(listed["terminals"].as_array().unwrap().len(), 7, "{listed}");
+}
+
 /// A one-root runtime has no machine/7: its sessions' scripts are its own window's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_one_root_runtime_has_no_machine_7() {
