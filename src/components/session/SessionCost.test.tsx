@@ -189,6 +189,26 @@ describe("usage arithmetic", () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
+  // PRO-408 review: each read makes the machine re-read every transcript, so a parent render must not ask again.
+  it("reads a machine session's usage once per opening, however often its view renders", async () => {
+    const answer = { usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] };
+    const read = vi.fn(async () => answer);
+    // A new `read` on every render, as SessionView builds it.
+    const view = (current: ReturnType<typeof twoModels>) => <SessionCost session={current} machine={{ name: "Mac mini", sessionId: "rt-1", read: () => read() }} />;
+    const { rerender } = render(view(twoModels()));
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    await screen.findByRole("dialog", { name: "Session usage" });
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    for (let i = 0; i < 3; i++) rerender(view({ ...twoModels() }));
+    await act(async () => {});
+    expect(read).toHaveBeenCalledOnce();
+    // Closing and opening again reads again.
+    fireEvent.click(chip());
+    fireEvent.click(chip());
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
   it("formats tokens and dollars as the design does", () => {
     expect([formatTokens(412_000), formatTokens(999), formatTokens(1_250_000), formatTokens(12_400_000)]).toEqual(["412k", "999", "1.3M", "12M"]);
     expect([formatCost(0.84), formatCost(0.004), formatCost(0), formatCost(null), formatCost(123.4)]).toEqual(["$0.84", "< $0.01", "$0.00", "—", "$123"]);

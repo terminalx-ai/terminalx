@@ -56,8 +56,8 @@ fn a_tab_names_the_account_it_ran_on_only_when_its_agent_has_several() {
     assert_eq!(wire["tabs"][0]["accountLabel"], "work@acme.dev · max");
     // What its last launch resolved comes before what it asks for.
     assert_eq!(wire["tabs"][1]["accountLabel"], "Home key");
-    // A tab that names none is on the machine's own login.
-    assert_eq!(wire["tabs"][2]["accountLabel"], "This Mac");
+    // A tab that names none is on the machine's own login, never named as this computer's.
+    assert_eq!(wire["tabs"][2]["accountLabel"], MACHINE_LOGIN);
     assert!(wire["tabs"][3].get("accountLabel").is_none(), "a terminal has no account");
 
     let mut one = listed(vec![]);

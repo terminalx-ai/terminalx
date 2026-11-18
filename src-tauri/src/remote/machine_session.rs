@@ -45,6 +45,9 @@ fn running_account(tab: &TabEntry) -> &str {
     crate::session_ops::tab_running_account(tab).unwrap_or(LOCAL)
 }
 
+/// The label a tab on the machine's own login gets on another computer.
+pub(super) const MACHINE_LOGIN: &str = "The machine's own login";
+
 /// The label of the account `tab` runs on, only when its agent has more than
 /// one account there: with one, nothing is shown (#980).
 pub(super) fn account_label(accounts: &mut Accounts, tab: &TabEntry) -> Option<String> {
@@ -53,7 +56,9 @@ pub(super) fn account_label(accounts: &mut Accounts, tab: &TabEntry) -> Option<S
         return None;
     }
     let id = running_account(tab);
-    listed.accounts.iter().find(|account| account.id == id).map(|account| account.label.clone())
+    // The machine's own login is labelled for its own window ("This Mac's
+    // login"); read on another computer that would name that computer.
+    listed.accounts.iter().find(|account| account.id == id).map(|account| if account.local { MACHINE_LOGIN.to_string() } else { account.label.clone() })
 }
 
 /// Put each tab's `accountLabel` on a session as it is sent: absent with one

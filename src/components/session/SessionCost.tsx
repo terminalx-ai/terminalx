@@ -247,9 +247,15 @@ export function SessionCost({ session, className, machine }: { session: SessionE
     backfilled.current = session.id;
     void reread();
   }, [enabled, unread, readable, session.id, reread]);
+  // Read again once each time the popover opens. Keyed on `open` alone: the
+  // caller's `read` is a new function on every render, and on a machine each
+  // read re-reads every tab's transcripts there, whose move renders this
+  // again (PRO-408 review).
+  const latestReread = useRef(reread);
+  latestReread.current = reread;
   useEffect(() => {
-    if (open) void reread();
-  }, [open, reread]);
+    if (open) void latestReread.current();
+  }, [open, session.id]);
   if (!enabled || !models.length) return null;
   // A cost that leaves models out says so: "+" for the tokens it could not price.
   const partial = total.costUsd != null && total.unpricedModels.length > 0;

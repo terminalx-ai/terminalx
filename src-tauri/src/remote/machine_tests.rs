@@ -1168,7 +1168,7 @@ async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
     // A session-scoped participant reads no logs.
     let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
     call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/8"] })).await.unwrap();
-    assert!(call(&m.rpc, &viewer, "session.checkFailures", json!({ "sessionId": session_id, "tabId": tab_id, "prUrl": "https://github.com/acme/api/pull/1" })).await.is_err());
+    assert_eq!(code(call(&m.rpc, &viewer, "session.checkFailures", json!({ "sessionId": session_id, "tabId": tab_id, "prUrl": "https://github.com/acme/api/pull/1" })).await), "forbidden");
 }
 
 /// A one-root runtime has no machine/8: its sessions' parity is the cloud's.
