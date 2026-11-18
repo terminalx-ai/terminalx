@@ -2819,7 +2819,9 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             } else if src.unknown.contains_key("checkoutIdentity") {
                 return Err(unavailable.into());
             } else {
-                crate::checkpoints::legacy_fork_workspace(src, project_path, common, branch).ok_or(unavailable)?
+                crate::checkpoints::legacy_fork_workspace(src, project_path, common, branch).ok_or(
+                    "This older session has no saved evidence that verifies the missing checkout's original Git registration.",
+                )?
             };
             relative_cwd = Some(relative);
             if git::run(project_path, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
@@ -5095,6 +5097,64 @@ mod command_tests {
                 assert_eq!(incoming.trim(), "1");
                 git::run(cwd, &["reset", "--hard", "HEAD"]).unwrap();
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normally_created_worktree_requires_persisted_identity_when_checkpoint_free() {
+        use crate::{git, session_ops, store};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(repo.path()).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial", "--allow-empty"]).unwrap();
+
+        let session = session_ops::create_session_entry(session_ops::NewSession {
+            project_path: project.to_str().unwrap().into(),
+            use_worktree: true,
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            parent: None, section_id: None, title: None, base_ref: None, worktree_name: None,
+            checkout_branch: None, checkout_pr: None, on_main: false, issue: None, automation: None,
+            cwd: None, orchestrate: false,
+        }).unwrap();
+        let saved = store::index::get(&session.id).unwrap();
+        let checkout = std::path::Path::new(&saved.cwd);
+        let branch = saved.branch.as_deref().unwrap();
+        let created: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(&saved.created).unwrap().into();
+        assert!(std::fs::metadata(checkout).unwrap().created().unwrap() > created);
+        assert!(saved.checkout_identity().is_some());
+        assert_eq!(saved.checkout_root(), Some(saved.cwd.as_str()));
+        let mut legacy = saved.clone();
+        legacy.unknown.remove("checkoutIdentity");
+        store::index::save(&[legacy.clone()]).unwrap();
+        let legacy = store::index::get(&session.id).unwrap();
+        assert!(legacy.checkout_identity().is_none());
+        std::fs::remove_dir_all(checkout).unwrap();
+        let registered = git::list_worktrees(&project).unwrap();
+        assert!(registered.contains(&(saved.cwd.clone(), Some(branch.into()))));
+
+        for at in [None, Some(1)] {
+            let mut dest = legacy.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let error = super::fork_workspace(&legacy, &legacy.tabs[0], &mut dest, at, &mut allocation).unwrap_err();
+            assert!(error.contains("no saved evidence"), "{error}");
+            assert_eq!(allocation.rollback(error.clone()), error);
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+        }
+
+        store::index::save(std::slice::from_ref(&saved)).unwrap();
+        for at in [None, Some(1)] {
+            let mut dest = saved.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&saved, &saved.tabs[0], &mut dest, at, &mut allocation).unwrap();
+            assert_eq!(note.as_deref().is_some_and(|note| note.contains("no saved file checkpoint")), at.is_some());
+            assert_ne!(dest.cwd, saved.cwd);
+            assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            assert!(!checkout.exists());
         }
     }
 
