@@ -244,10 +244,12 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
-  const gitSource = useMemo(
-    () => (connected && projectClient && repository ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repository), canWrite: manage, author: desktopGitIdentity }) : undefined),
-    [connected, projectClient, repository, projectKey, manage],
+  const gitSourceFor = useCallback(
+    (repo: string | null) => connected && projectClient && repo ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity }) : undefined,
+    [connected, projectClient, projectKey, manage],
   );
+  const checkoutGitSource = useMemo(() => gitSourceFor(defaultRepository), [gitSourceFor, defaultRepository]);
+  const gitSource = useMemo(() => repository === defaultRepository ? checkoutGitSource : gitSourceFor(repository), [repository, defaultRepository, checkoutGitSource, gitSourceFor]);
 
   // Files use the session's cwd, just as they do for a local session.
   // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
@@ -438,7 +440,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState },
+    machine: { machineId, projectId, record: machine, name, state: machineState, checkoutGitSource },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,

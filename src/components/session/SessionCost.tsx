@@ -221,16 +221,31 @@ export function SessionCost({ session, className, machine }: { session: SessionE
   const enabled = settings?.sessionCost === true;
   const [open, setOpen] = useState(false);
   const [answer, setAnswer] = useState<{ sessionId: string; usage: RuntimeSessionUsage } | null>(null);
-  const models = useMemo(() => sessionModels(session), [session]);
-  const total = useMemo(() => totals(models), [models]);
   const read = machine?.read ?? null;
   const machineSession = machine?.sessionId ?? null;
+  const machineAnswer = answer?.sessionId === session.id ? answer.usage : null;
+  const usageSession = useMemo(() => {
+    if (!machineAnswer) return session;
+    const refreshed = new Map(machineAnswer.usage.tabs.map((tab) => [tab.tabId, tab]));
+    return { ...session, tabs: session.tabs.map((tab) => {
+      const usage = refreshed.get(tab.id);
+      // Turn-end updates from the session list can arrive after this refresh.
+      if (!usage || (tab.usage && tab.usage.updated >= usage.updated)) return tab;
+      return { ...tab, usage: { models: usage.models, updated: usage.updated } };
+    }) };
+  }, [session, machineAnswer]);
+  const models = useMemo(() => sessionModels(usageSession), [usageSession]);
+  const total = useMemo(() => totals(models), [models]);
+  const latestRequest = useRef(0);
   const reread = useMemo(() => machine
     ? async () => {
       if (!read) return;
+      const request = ++latestRequest.current;
       try {
         const usage = await read();
-        setAnswer({ sessionId: machineSession!, usage });
+        if (request === latestRequest.current && usage.usage.sessionId === machineSession) {
+          setAnswer({ sessionId: session.id, usage });
+        }
       } catch {
         // Not reachable or refused: the totals the session list carries stay.
       }
@@ -277,8 +292,8 @@ export function SessionCost({ session, className, machine }: { session: SessionE
     <Popover.Portal>
       <Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={12} aria-label="Session usage"
         className="z-(--z-menu) w-[400px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl border border-hairline bg-popover text-sm text-popover-foreground shadow-surface outline-none">
-        <UsagePopover session={session} models={models} total={total} onClose={() => setOpen(false)}
-          machine={machine ? { name: machine.name, sessionId: machine.sessionId, answer: answer?.sessionId === machine.sessionId ? answer.usage : null } : undefined} />
+        <UsagePopover session={usageSession} models={models} total={total} onClose={() => setOpen(false)}
+          machine={machine ? { name: machine.name, sessionId: machine.sessionId, answer: machineAnswer } : undefined} />
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>;

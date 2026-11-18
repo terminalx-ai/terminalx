@@ -1,4 +1,4 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type RuntimeSession } from "@terminalx/portable/workspace";
 import { invoke } from "@tauri-apps/api/core";
@@ -97,6 +97,23 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+it("keeps the machine's session checkout available for Fix errors when the panel switches repositories", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }, { repo: firstPath }] });
+    if (method === "git.status") return Promise.resolve({ branch: "first" });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result } = renderHook(() => useMachineSession(firstKey));
+  await waitFor(() => expect(result.current?.repository).toBe(firstPath));
+  act(() => result.current?.selectRepository("."));
+  expect(result.current?.repository).toBe(".");
+  await result.current!.machine!.checkoutGitSource!.workStatus();
+  expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
 });
 
 describe("useMachineSession removable workspace", () => {

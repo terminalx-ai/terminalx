@@ -65,6 +65,7 @@ export function failingPr(rows: readonly SessionPr[], url?: string): PullRequest
  */
 export interface MachineCheckFix {
   name: string;
+  generation: string;
   /** The machine's Git for the session; absent while it is not connected. */
   source?: GitSource;
   /** `session.checkFailures`; `null` while not connected, or on a machine too old to read them. */
@@ -78,7 +79,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
   machine?: MachineCheckFix;
 }) {
   const prefs = usePrefs();
-  const key = `${sessionId}\0${tabId ?? ""}\0${cwd}\0${branch ?? ""}\0${enabled}\0${machine?.source?.key ?? ""}`;
+  const key = `${sessionId}\0${tabId ?? ""}\0${cwd}\0${branch ?? ""}\0${enabled}\0${machine?.source?.key ?? ""}\0${machine?.generation ?? ""}`;
   const current = useRef({ key, generation: 0 });
   if (current.current.key !== key) current.current = { key, generation: current.current.generation + 1 };
   const generation = current.current.generation;
@@ -93,7 +94,7 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
    * A failure is said as a toast with Try again (PRO-394), and thrown.
    */
   const fix = async (given?: PullRequest | string): Promise<void> => {
-    if (!enabled || !tabId || locked.current === generation) return;
+    if (!enabled || !tabId || !isCurrent() || locked.current === generation) return;
     locked.current = generation;
     setState({ key, busy: true });
     let found: PullRequest | undefined = typeof given === "string" ? undefined : given;

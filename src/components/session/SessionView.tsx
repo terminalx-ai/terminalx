@@ -561,14 +561,15 @@ export function SessionView({
   // A machine session's checks are read on the machine and sent to its tab there (PRO-408).
   const machineCheckFix = machine && cloud ? {
     name: machine.name,
-    source: cloud.gitSource,
+    source: machine.checkoutGitSource,
+    generation: cloud.backend.generation,
     attach: cloud.client?.hasCapability("machine/8") && cloud.manage ? (tabId: string, prUrl: string) => cloud.client!.checkFailures(cloud.backend.logSessionId, tabId, prUrl) : null,
     send: (tabId: string, text: string) => cloud.backend.send(tabId, text, []),
   } : undefined;
   const checkFix = useFixCheckErrors({
     sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch,
     // A machine that cannot read check logs (an older TerminalX, or no manage access) offers none: its strip says to update it.
-    enabled: (machine ? !!cloud?.gitSource && !!machineCheckFix?.attach : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
+    enabled: (machine ? !!machine.checkoutGitSource && !!machineCheckFix?.attach : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
     machine: machineCheckFix,
   });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;

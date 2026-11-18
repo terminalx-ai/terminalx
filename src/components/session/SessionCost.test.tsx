@@ -180,11 +180,20 @@ describe("usage arithmetic", () => {
   });
 
   it("reads a machine session's totals once when its tabs have messages and none yet", async () => {
-    const read = vi.fn(async () => ({ usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] }));
+    const models = [row("claude-sonnet-5-5", 9_000, 6_000, 88_000, 0.13)];
+    const read = vi.fn(async () => ({
+      usage: { sessionId: "rt-1", title: "Work", tabs: [{ tabId: "t1", agent: "claude", models, updated: "2026-11-11T10:00:00Z" }], models, estimate: true as const },
+      loginMethods: {}, windows: [],
+    }));
     const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
-    const { rerender } = render(<SessionCost session={unread} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    const machine = { name: "Mac mini", sessionId: "rt-1", read };
+    const { rerender } = render(<SessionCost session={unread} machine={machine} />);
+    // The RPC reply is sufficient even if a session-list update has not arrived.
+    expect((await screen.findByTestId("session-cost")).textContent).toBe("≈ $0.13");
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
-    rerender(<SessionCost session={{ ...unread }} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    const newer = { ...unread.tabs[0], usage: { updated: "2026-11-11T10:01:00Z", models: [row("claude-sonnet-5-5", 12_000, 8_000, 88_000, 0.25)] } };
+    rerender(<SessionCost session={{ ...unread, tabs: [newer] }} machine={machine} />);
+    expect(chip().textContent).toBe("≈ $0.25");
     expect(read).toHaveBeenCalledOnce();
     expect(mocks.invoke).not.toHaveBeenCalled();
   });

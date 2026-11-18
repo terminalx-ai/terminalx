@@ -123,7 +123,7 @@ const machineInput = (overrides: Partial<{ attach: ReturnType<typeof vi.fn> | nu
   const source = { key: "machine-git", workStatus: vi.fn().mockResolvedValue({ branch: "feature", defaultBranch: "main" }) };
   const attach = overrides.attach === undefined ? vi.fn().mockResolvedValue({ path: "/home/dev/.terminalx/attachments/s/check-failures.log", truncated: false }) : overrides.attach;
   const send = overrides.send ?? vi.fn().mockResolvedValue({ events: [], queued: false });
-  return { source, attach, send, input: { ...input, sessionId: "machine:m:p:s", machine: { name: "Mac mini", source: source as never, attach: attach as never, send: send as never } } };
+  return { source, attach, send, input: { ...input, sessionId: "machine:m:p:s", machine: { name: "Mac mini", generation: "1", source: source as never, attach: attach as never, send: send as never } } };
 };
 
 it("on a machine, finds the PR through the machine's Git, reads its logs there and sends to the machine's tab", async () => {
@@ -150,14 +150,15 @@ it("on a machine that cannot read check logs, says so and sends nothing", async 
   expect(hook.result.current.error).toContain("Mac mini");
 });
 
-it("on a machine, never sends logs read for a tab the reader has left", async () => {
+it.each(["tab change", "reconnect"])("on a machine, discards pending check logs after a %s", async (change) => {
   let resolve!: (value: { path: string; truncated: boolean }) => void;
   const attach = vi.fn().mockImplementation(() => new Promise((done) => { resolve = done; }));
   const { send, input: machine } = machineInput({ attach });
   const hook = renderHook((props) => useFixCheckErrors(props), { initialProps: machine });
   let pending!: Promise<void>;
   await act(async () => { pending = hook.result.current.fix(pr); });
-  hook.rerender({ ...machine, tabId: "another-agent" });
+  hook.rerender(change === "tab change" ? { ...machine, tabId: "another-agent" }
+    : { ...machine, machine: { ...machine.machine, generation: "2" } });
   await act(async () => { resolve({ path: "/old.log", truncated: false }); await pending; });
   expect(send).not.toHaveBeenCalled();
 });
