@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 import { DEFAULT_DASHBOARD_PREFERENCES } from "@terminalx/portable/dashboard";
@@ -10,18 +10,17 @@ import { setPrefs } from "@/lib/prefs";
 import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
 import { AgentDashboard } from "./AgentDashboard";
 
-/** PRO-346: machine sessions in the overview, with a Where column and an All machines menu while a machine is paired and Machines is on. */
+/** PRO-346: machine sessions in the overview, with a Where column and an All machines menu while a machine is paired. */
 const state = vi.hoisted(() => ({
   sessions: [] as SessionEntry[],
   cloud: [] as unknown[],
   machineSessions: [] as unknown[],
-  machinesOn: false,
   machines: [] as PairedMachine[],
   states: {} as Record<string, MachineConnectionState>,
   select: vi.fn(),
   openMachine: vi.fn(),
 }));
-vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ sessions: state.sessions, loaded: true, projects: [], harnesses: [] }), selectSession: state.select }));
+vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ sessions: state.sessions, loaded: true, projects: [], harnesses: [] }), selectSession: state.select, openNewSession: vi.fn() }));
 vi.mock("@/lib/summaries", () => ({ useSessionSummaries: () => ({ get: () => undefined, loading: false }) }));
 vi.mock("@/lib/cloudDashboard", () => ({
   useCloudDashboard: () => state.cloud,
@@ -31,12 +30,12 @@ vi.mock("@/lib/cloudDashboard", () => ({
 }));
 vi.mock("@/lib/organizationVisibility", () => ({ useOrganizationVisibility: () => ({ visibleIds: new Set(["org"]) }) }));
 vi.mock("@/lib/dashboardPrs", () => ({ useDashboardPrs: () => new Map() }));
-vi.mock("@/lib/cloudPeople", () => ({ usePeople: () => (id: string) => id, loadRosterIn: vi.fn(async () => []) }));
+vi.mock("@/lib/cloudPeople", () => ({ usePeople: () => (id: string) => id, loadRosterIn: vi.fn(async () => []), userIdForEmail: () => null, initials: (name: string) => name.slice(0, 2).toUpperCase() }));
 vi.mock("@/lib/machineConnections", () => ({ useMachineConnections: () => ({ machines: state.machines, states: state.states }) }));
 vi.mock("@/lib/machineDashboard", async (original) => ({
   ...(await original<typeof import("@/lib/machineDashboard")>()),
-  useMachineDashboardEnabled: () => state.machinesOn,
-  useMachineDashboard: () => (state.machinesOn ? state.machineSessions : []),
+  // As the store does: no paired machine, no machine session.
+  useMachineDashboard: () => (state.machines.length ? state.machineSessions : []),
   openMachineSession: state.openMachine,
 }));
 vi.mock("@/components/dashboard/AgentCard", () => ({
@@ -79,12 +78,18 @@ async function machineSessions(machine: PairedMachine, sessions: { id: string; s
 
 const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelector("[data-session-title]")?.textContent);
 const openMenu = (name: string | RegExp) => fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+/** The view lives in the Display menu (02.15). */
+async function showTable() {
+  openMenu("Display");
+  fireEvent.click(await screen.findByRole("button", { name: "Table" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+}
 
 beforeEach(async () => {
   setPrefs({ dashboard: DEFAULT_DASHBOARD_PREFERENCES });
   state.sessions = [local("Notarize release builds")];
   state.cloud = [cloudSession("Push org events")];
-  state.machinesOn = true;
   state.machines = [MINI, SERVER];
   state.states = { [MINI.machineId]: { state: "direct", route: { kind: "lan" }, rttMs: 4 } as MachineConnectionState };
   state.machineSessions = [
@@ -99,20 +104,19 @@ afterEach(cleanup);
 
 it("shows machine sessions on the board, opening them in their machine's view", () => {
   render(<AgentDashboard />);
-  expect(screen.getByText("5 total")).toBeDefined();
   const needs = within(screen.getByRole("region", { name: "Needs you" }));
   fireEvent.click(needs.getByRole("button", { name: "Bisect the flaky relay e2e on Mac mini" }));
   expect(state.openMachine).toHaveBeenCalledWith(`machine:${MINI.machineId}:P1:Bisect the flaky relay e2e`);
   expect(within(screen.getByRole("region", { name: "Working" })).getByText("Nightly soak run on dev-server")).toBeDefined();
 });
 
-it("adds a Where column after Project: This Mac, the machine's name, or Cloud", () => {
+it("adds a Where column after Project: This Mac, the machine's name, or Cloud", async () => {
   render(<AgentDashboard />);
-  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  await showTable();
   const table = within(screen.getByRole("table", { name: "Sessions" }));
   const headers = table.getAllByRole("columnheader").map((header) => header.textContent);
-  expect(headers.slice(0, 4)).toEqual(["Status", "Name", "Project", "Where"]);
-  const where = (name: string) => within(screen.getByRole("row", { name: new RegExp(name) })).getAllByRole("cell")[3];
+  expect(headers.slice(0, 3)).toEqual(["Session", "Project", "Where"]);
+  const where = (name: string) => within(screen.getByRole("row", { name: new RegExp(name) })).getAllByRole("cell")[2];
   expect(where("Notarize").textContent).toBe("This Mac");
   expect(where("Bisect").textContent).toBe("Mac mini");
   expect(where("Bisect").querySelector('[data-icon="monitor"]')).not.toBeNull();
@@ -127,7 +131,7 @@ it("adds a Where column after Project: This Mac, the machine's name, or Cloud", 
 
 it("filters by machine from the All machines menu, with a count for each", async () => {
   render(<AgentDashboard />);
-  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  await showTable();
   openMenu(/All machines/);
   const menu = within(await screen.findByRole("menu"));
   const count = (name: string) => menu.getByRole("menuitem", { name: new RegExp(name) }).getAttribute("data-place-count");
@@ -149,15 +153,12 @@ it("leaves out Cloud when there is no cloud session", async () => {
   expect(menu.queryByRole("menuitem", { name: /Cloud/ })).toBeNull();
 });
 
-it.each([
-  ["Machines is off", () => { state.machinesOn = false; }],
-  ["no machine is paired", () => { state.machines = []; }],
-])("looks as it always did while %s", (_case, set) => {
-  set();
+it("looks as it always did while no machine is paired (PRO-360)", async () => {
+  state.machines = [];
   render(<AgentDashboard />);
   expect(screen.queryByRole("button", { name: /All machines/ })).toBeNull();
   expect(screen.queryByText(/on Mac mini/)).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  await showTable();
   const table = within(screen.getByRole("table", { name: "Sessions" }));
   expect(table.queryByRole("columnheader", { name: "Where" })).toBeNull();
   expect(rowNames()?.sort()).toEqual(["Notarize release builds", "Push org events"]);

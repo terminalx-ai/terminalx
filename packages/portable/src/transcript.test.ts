@@ -456,3 +456,38 @@ describe("an agent's question (#979)", () => {
     expect([questionsLabel(1), questionsLabel(3)]).toEqual(["Question", "3 questions"]);
   });
 });
+
+describe("a turn's settings (PRO-379)", () => {
+  const event = (seq: number, payload: Payload): AgentEvent => ({ id: `s-${seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-11-07T10:00:00Z", payload });
+
+  it("records the settings last changed before each turn ended, and says which ones changed at all", () => {
+    const transcript = buildTranscript([
+      event(1, { type: "turn_started" }),
+      event(2, { type: "turn_completed", status: "ok", authFailed: false }),
+      event(3, { type: "settings_changed", permissionMode: "plan" }),
+      event(4, { type: "turn_started" }),
+      event(5, { type: "settings_changed", effort: "high" }),
+      event(6, { type: "turn_completed", status: "ok", authFailed: false }),
+    ], false);
+    expect(transcript.turns.map((turn) => turn.settings)).toEqual([undefined, { permissionMode: "plan", effort: "high" }]);
+    expect(transcript.changedSettings).toEqual({ effort: true, permissionMode: true });
+    expect(buildTranscript([event(1, { type: "turn_started" })], false).changedSettings).toBeUndefined();
+  });
+});
+
+// PRO-378: a finished thought says how long it took; a tool call keeps when it started and ended.
+describe("times the transcript keeps for its rows", () => {
+  it("measures a thought from the event before it, and a call from its start to its result", () => {
+    const base = { sessionId: "s", tabId: "t", harness: "claude" } as const;
+    const turn = buildTranscript([
+      { ...base, id: "1", seq: 1, ts: "2026-11-16T10:00:00Z", payload: { type: "user_message", text: "go", queued: false } },
+      { ...base, id: "2", seq: 2, ts: "2026-11-16T10:00:09Z", payload: { type: "reasoning", text: "thinking" } },
+      { ...base, id: "3", seq: 3, ts: "2026-11-16T10:00:10Z", payload: { type: "tool_call_started", callId: "c", name: "Bash", toolType: "shell", input: { command: "ls" } } },
+      { ...base, id: "4", seq: 4, ts: "2026-11-16T10:00:11.5Z", payload: { type: "tool_call_completed", callId: "c", result: { text: "a", isError: false } } },
+    ] as AgentEvent[], true).turns[0];
+    const thought = turn.work.find((w) => w.kind === "reasoning");
+    expect(thought && "durationMs" in thought ? thought.durationMs : null).toBe(9000);
+    const call = turn.work.find((w) => w.kind === "tool");
+    expect(call?.kind === "tool" ? [call.call.startedTs, call.call.endedTs] : null).toEqual(["2026-11-16T10:00:10Z", "2026-11-16T10:00:11.5Z"]);
+  });
+});

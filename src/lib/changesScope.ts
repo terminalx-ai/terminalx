@@ -19,21 +19,49 @@ export function readChangesChoice(source: string): ChangesChoice {
   return { scope: "all", target: null, commit: null };
 }
 
-/** Resolve only checkpoints in this conversation's events, never a saved tree from another tab. */
-export function checkpointChoices(events: AgentEvent[]) {
+/** A prompt as a turn's name: whitespace folded, cut at a word (never mid-word), with the whole prompt kept for its title. */
+export function turnName(prompt: string, max = 48): string {
+  const text = prompt.replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max + 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : text.slice(0, max)).replace(/[\s,.;:–—-]+$/, "")}…`;
+}
+
+export interface TurnCheckpoint {
+  id: string;
+  /** 1 for the conversation's first turn with a snapshot. */
+  number: number;
+  /** "Turn 3 · Sort by any column", or "Latest turn · …" for the newest. */
+  label: string;
+  /** The whole prompt, folded to one line. */
+  prompt: string;
+  /** When the turn's snapshot was taken (ISO), when the event says. */
+  at: string | null;
+  base: string;
+  head: string;
+}
+
+/** Resolve only checkpoints in this conversation's events, never a saved tree from another tab. Newest first. */
+export function checkpointChoices(events: AgentEvent[]): TurnCheckpoint[] {
   const key = (event: AgentEvent, seq: number) => JSON.stringify([event.sessionId, event.tabId, seq]);
   const prompts = new Map<string, string>();
-  const checkpoints = new Map<string, { id: string; label: string; base: string; head: string }>();
+  const checkpoints = new Map<string, Omit<TurnCheckpoint, "number" | "label">>();
   for (const event of events) {
     if (event.subagent) continue;
     const payload = event.payload;
     if (payload.type === "user_message" && !payload.queued) prompts.set(key(event, event.seq), payload.text);
     if (payload.type !== "turn_checkpoint") continue;
     const id = key(event, payload.seq);
-    const prompt = prompts.get(id)?.replace(/\s+/g, " ").trim().slice(0, 80);
-    checkpoints.set(id, { id, label: `Turn · ${prompt || `checkpoint ${payload.seq}`}`, base: payload.base, head: payload.head });
+    const prompt = (prompts.get(id) ?? "").replace(/\s+/g, " ").trim();
+    checkpoints.set(id, { id, prompt, at: event.ts || null, base: payload.base, head: payload.head });
   }
-  return [...checkpoints.values()].reverse();
+  const list = [...checkpoints.values()];
+  return list.map((entry, index) => {
+    const number = index + 1;
+    const name = turnName(entry.prompt) || `checkpoint ${number}`;
+    return { ...entry, number, label: `${index === list.length - 1 ? "Latest turn" : `Turn ${number}`} · ${name}` };
+  }).reverse();
 }
 
 export function saveChangesChoice(source: string, choice: ChangesChoice) {

@@ -103,6 +103,75 @@ const choose = (id: string, title: string, which: "model" | "effort", name: stri
   fireEvent.click(within(groups[which]).getByRole("menuitemradio", { name }));
 };
 
+describe("brief edits across column changes", () => {
+  it.each(["resize", "right panel toggle"])("keeps the edit and saves its draft after the width change from %s", async (change) => {
+    const run = waiting();
+    answers.orchestration_run_for_session = run;
+    answers.orchestration_update_plan = run;
+    let availableWidth = change === "resize" ? 900 : 1200;
+    const observers = new Set<ResizeObserverCallback>();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private callback: ResizeObserverCallback) { observers.add(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() { observers.delete(this.callback); }
+    });
+    const column = document.createElement("div");
+    document.body.append(column);
+    const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const columnWidth = column.childElementCount ? 420 : 0;
+      const width = this === column ? columnWidth : this.dataset.testid === "run-view" ? availableWidth - columnWidth : 0;
+      return { width, height: 0, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 0, toJSON() {} };
+    });
+    const resize = (width: number) => act(() => {
+      availableWidth = width;
+      for (const callback of observers) callback([], {} as ResizeObserver);
+    });
+    try {
+      render(<RunView session={session} onShowChat={() => {}} pieceColumn={column} />);
+      await waitFor(() => expect(column.contains(detail())).toBe(true));
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Unsaved title" } });
+      fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Unsaved goal" } });
+      fireEvent.change(screen.getByLabelText("Known", { exact: false }), { target: { value: "First fact\nSecond fact" } });
+      const assertDraft = () => {
+        expect(screen.getByRole("form", { name: "Edit the brief of Map every settings read" })).toBeTruthy();
+        expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Unsaved title");
+        expect((screen.getByLabelText("Goal") as HTMLTextAreaElement).value).toBe("Unsaved goal");
+        expect((screen.getByLabelText("Known", { exact: false }) as HTMLTextAreaElement).value).toBe("First fact\nSecond fact");
+        expect(calls("orchestration_update_plan")).toEqual([]);
+      };
+      // SessionView keeps pieceColumn mounted when its right panel toggles.
+      // The sibling panel takes space from the run, notifying this ResizeObserver.
+      resize(change === "resize" ? 899 : 800);
+      expect(screen.getByTestId("run-view").contains(detail())).toBe(true);
+      assertDraft();
+      resize(change === "resize" ? 900 : 1200);
+      expect(column.contains(detail())).toBe(true);
+      assertDraft();
+      fireEvent.click(screen.getByRole("button", { name: "Save brief" }));
+      await waitFor(() => expect(calls("orchestration_update_plan")).toHaveLength(1));
+      expect(calls("orchestration_update_plan")[0].plan.pieces[0]).toMatchObject({
+        id: "map", title: "Unsaved title", goal: "Unsaved goal", known: ["First fact", "Second fact"],
+      });
+      await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
+      // Cancel discards the draft, and selecting another piece starts with its own brief.
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe(run.pieces[0].title);
+      fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Discard me" } });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(row("store"));
+      fireEvent.click(within(detail()).getByRole("button", { name: "Edit brief" }));
+      expect((screen.getByLabelText("Title") as HTMLInputElement).value).toBe("Typed store module");
+    } finally {
+      cleanup();
+      column.remove();
+      measure.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("a plan waiting for approval (PRO-274)", () => {
   it("shows the plan a person approves: each piece with its model, effort, done-check, what it waits on and its estimate", async () => {
     await open(waiting());
@@ -729,6 +798,8 @@ describe("a planned run in a project that asks for no approval (PRO-365)", () =>
     answers.orchestration_start = () => ({ run: startedBy({ ...run, limits: { workers: 4, dollars: 15, points: 10, ceiling: 95 } }), started: ["map"], waiting: [], failed: [] });
     await open(run);
     const start = screen.getByRole("button", { name: "Start run" }) as HTMLButtonElement;
+    // The plan card's limits open from its Budget chip (18.02, PRO-383).
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
     const points = screen.getByRole("spinbutton", { name: "Points of a window this run may use" });
     fireEvent.change(points, { target: { value: "10" } });
     fireEvent.blur(points);
@@ -1000,7 +1071,7 @@ describe("merging accepted pieces into the lead's branch (PRO-279)", () => {
     const plan = { ...waiting(), integrationCheck: "cargo t && pnpm test" };
     answers.orchestration_update_plan = (args: unknown) => ({ ...plan, integrationCheck: (args as { plan: RunPlan }).plan.integrationCheck });
     await open(plan);
-    expect(screen.getByTestId("plan-integration-check").textContent).toContain("After each mergecargo t && pnpm test");
+    expect(screen.getByTestId("plan-integration-check").textContent).toBe("After each merge cargo t && pnpm test runs in the lead's checkout.");
     fireEvent.click(screen.getByRole("button", { name: "Edit plan" }));
     fireEvent.change(screen.getByLabelText(/^Integration check/), { target: { value: "  just check  " } });
     fireEvent.click(screen.getByRole("button", { name: "Save plan" }));
@@ -1037,9 +1108,12 @@ describe("limits and budget (PRO-280)", () => {
   it("shows a subscription run's points of its window, the window and its reset, and its worker limit", async () => {
     await open(running());
     const budget = screen.getByTestId("run-budget").textContent ?? "";
-    // Dollars first, the subscription's points as a second line (owner decision, PRO-361).
-    expect(budget).toContain("Spend$0.00 of $15.00");
-    expect(screen.getByTestId("run-points").textContent).toBe("9 of 25 points · 5h window at 41% · resets 16:10 · pauses past 85%");
+    // A subscription's points lead, its window under them, and the dollars it would cost on an API key last (18.01, PRO-383).
+    expect(budget.startsWith("Budget")).toBe(true);
+    expect(screen.getByTestId("run-points").textContent).toBe("subscription 9 of 25 points");
+    expect(screen.getByTestId("run-window").textContent).toBe("5h window at 41% · resets 16:10");
+    expect(screen.getByTestId("run-window").title).toBe("The run pauses past 85% of the window");
+    expect(screen.getByTestId("run-spend").textContent).toBe("$0.00 API-equivalent, not billed");
     expect(screen.getByTestId("run-workers").textContent).toContain("1 running·4 workers at a time");
     expect(row("store").getAttribute("data-piece-state")).toBe("stalled");
     expect(row("store").textContent).toContain("Stalled");
@@ -1093,6 +1167,10 @@ describe("limits and budget (PRO-280)", () => {
     const summary = screen.getByRole("region", { name: "Plan summary" });
     expect(within(summary).getByRole("alert").textContent).toBe(warning);
     expect(summary.textContent).toContain("Budget25 points");
+    // The window and the run's own limits are under the Budget chip; the warning is shown without it.
+    expect(screen.queryByTestId("run-windows")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
+
     expect(screen.getByTestId("run-windows").textContent).toContain("Claude 5h at 70%, resets 16:10");
     expect(screen.getByTestId("run-windows").textContent).toContain("the window is shared with everything else you run");
     const workers = within(summary).getByRole("spinbutton", { name: "Workers at once in this run" });
@@ -1112,9 +1190,10 @@ describe("limits and budget (PRO-280)", () => {
     expect(budget).toContain("9 points usedNo limit");
     expect(budget).toContain("$12345.60 spentNo limit");
     expect(budget).not.toContain(" of $");
-    expect(budget).toContain("5h window at 41% · pauses past 85%");
-    // Dollars come first.
-    expect(budget.indexOf("$12345.60")).toBeLessThan(budget.indexOf("9 points"));
+    expect(budget).toContain("5h window at 41%");
+    expect(screen.getByTestId("run-window").title).toBe("The run pauses past 85% of the window");
+    // The subscription's points come first (PRO-383).
+    expect(budget.indexOf("9 points")).toBeLessThan(budget.indexOf("$12345.60"));
     expect(screen.getAllByTestId("run-no-limit")).toHaveLength(2);
   });
 
@@ -1133,6 +1212,7 @@ describe("limits and budget (PRO-280)", () => {
     const summary = screen.getByRole("region", { name: "Plan summary" });
     expect(within(summary).getAllByRole("alert").map((alert) => alert.textContent)).toEqual([warning]);
     expect(summary.textContent).toContain("BudgetNo points limit");
+    fireEvent.click(screen.getByRole("button", { name: /^Budget: .*Change this run's limits$/ }));
     expect(within(summary).queryByRole("spinbutton", { name: "Points of a window this run may use" })).toBeNull();
 
     // Back to a bound, starting from the default; then the window level off.
@@ -1312,7 +1392,8 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     expect(detail().textContent).toContain("With the lead");
     fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("is not done: `cargo t` exited 1 in the lead's checkout"));
-    expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]);
+    expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store", accept: [] }]);
+    expect(calls("orchestration_finish_widens")).toEqual([]);
     fireEvent.click(within(detail()).getByRole("button", { name: "Open lead chat" }));
     expect(onShowChat).toHaveBeenCalled();
     expect(within(detail()).getByRole("button", { name: "Skip piece" })).toBeTruthy();
@@ -1324,14 +1405,47 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     const store = run.pieces[1];
     const held = { ...store, state: "lead" as const, note: "Taken over by the lead: it finishes the piece in its own checkout.", tries: [...(store.tries ?? []), { step: "lead" as const, model: "opus", fromCommit: "4d1c0e7", heldToOwns: true }] };
     const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
+    answers.orchestration_finish_widens = () => Promise.resolve(["src/store/projects.rs"]);
+    // The lead committed another file outside it after the list was shown: the person is asked again.
+    answers.orchestration_finish = (args: unknown) => (args as { accept: string[] }).accept.includes("src/store/index.rs")
+      ? Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] })
+      : Promise.reject(new Error(JSON.stringify({ code: "confirm_widening", message: "Finishing piece store adds files outside the files it owns to it.", details: { piece: "store", files: ["src/store/projects.rs", "src/store/index.rs"] } })));
+    await open(heldRun);
+    pick("store", "Typed store module");
+    expect(within(detail()).getByTestId("piece-held-to-owns").textContent).toBe("The lead is held to this piece's files. Check and finish lists any it changed outside them and asks before adding them to the piece.");
+    // Check and finish lists what it would add, and runs nothing until the person confirms.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(within(detail()).getByTestId("finish-widens")).toBeTruthy());
+    expect([...within(detail()).getByTestId("finish-widens").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["src/store/projects.rs"]);
+    expect(calls("orchestration_finish_widens")).toEqual([{ id: "run-1", piece: "store" }]);
+    expect(calls("orchestration_finish")).toEqual([]);
+    // Cancel leaves it as it was.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Cancel" }));
+    expect(within(detail()).queryByTestId("finish-widens")).toBeNull();
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(within(detail()).getByTestId("finish-widens")).toBeTruthy());
+    fireEvent.click(within(detail()).getByRole("button", { name: "Add and finish" }));
+    await waitFor(() => expect([...within(detail()).getByTestId("finish-widens").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["src/store/projects.rs", "src/store/index.rs"]));
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(within(detail()).getByRole("button", { name: "Add and finish" }));
+    await waitFor(() => expect(calls("orchestration_finish")).toEqual([
+      { id: "run-1", piece: "store", accept: ["src/store/projects.rs"] },
+      { id: "run-1", piece: "store", accept: ["src/store/projects.rs", "src/store/index.rs"] },
+    ]));
+  });
+
+  it("finishes a held piece at once when the lead changed nothing outside it", async () => {
+    const run = blockedRun();
+    const store = run.pieces[1];
+    const held = { ...store, state: "lead" as const, tries: [...(store.tries ?? []), { step: "lead" as const, model: "opus", fromCommit: "4d1c0e7", heldToOwns: true }] };
+    const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
+    answers.orchestration_finish_widens = () => Promise.resolve([]);
     answers.orchestration_finish = () => Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] });
     await open(heldRun);
     pick("store", "Typed store module");
-    expect(within(detail()).getByTestId("piece-held-to-owns").textContent).toBe("The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.");
-    const finish = within(detail()).getByRole("button", { name: "Check and finish" });
-    expect(finish.getAttribute("title")).toContain("files it changed outside the piece become the piece's");
-    fireEvent.click(finish);
-    await waitFor(() => expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store", accept: [] }]));
+    expect(within(detail()).queryByTestId("finish-widens")).toBeNull();
   });
 
   it("lets a piece title wrap rather than cut it short", async () => {
@@ -1427,5 +1541,50 @@ describe("what a run decides on its own (#1004)", () => {
     expect(notice.textContent).toContain("no new piece starts before the reset. You need do nothing.");
     expect(within(notice).getByTestId("run-resumes-at").textContent).toContain("Goes on by itself at");
     expect(within(notice).queryByRole("button", { name: "Resume now" })).toBeNull();
+  });
+});
+
+describe("what a queued piece waits for (PRO-383)", () => {
+  /** 18.03: pieces 1 and 2 done, 3 blocked, and 4 depends on all three. */
+  const held = (): Run => {
+    const run = waiting();
+    return {
+      ...run, state: "running", approval: { at: "2026-11-11T00:00:00Z" },
+      pieces: [
+        piece("map", "Map every settings read", { state: "done", attempts: 1, tier: "small", model: "haiku" }),
+        piece("store", "Typed store module", { state: "done", attempts: 1, tier: "large", model: "opus" }),
+        piece("cli", "Move CLI code", { state: "blocked", attempts: 3 }),
+        piece("docs", "Update the docs", { dependsOn: ["map", "store", "cli"] }),
+      ],
+      waiting: [{ piece: "docs", on: ["cli"] }],
+    };
+  };
+
+  it("names only the pieces not done, and calls one held by a blocked piece Waiting", async () => {
+    await open(held());
+    const report = within(row("docs")).getByTestId("piece-report").textContent;
+    expect(report).toBe("Waits for 3");
+    expect(row("docs").getAttribute("data-piece-state")).toBe("queued");
+    expect(row("docs").getAttribute("data-shown-state")).toBe("waiting");
+    expect(row("docs").textContent).toContain("Waiting");
+    fireEvent.click(within(row("docs")).getByTestId("piece-title"));
+    expect(detail().textContent).toContain("Waits for 3.");
+    expect(detail().textContent).not.toMatch(/Waits for [^.]*\b[12]\b/);
+  });
+
+  it("gives a queued piece its model's tier dot, and its panel no extra label", async () => {
+    await open(held());
+    expect(within(row("docs")).getByTestId("model-dot").className).toContain("text-add");
+    fireEvent.click(within(row("docs")).getByTestId("piece-title"));
+    expect(within(detail()).getByRole("heading").textContent).toBe("Update the docs");
+    expect(within(detail()).queryByText("piece")).toBeNull();
+  });
+
+  it("is Queued, not Waiting, while what it waits for is still going", async () => {
+    const run = held();
+    run.pieces[2] = { ...run.pieces[2], state: "running" };
+    await open(run);
+    expect(row("docs").getAttribute("data-shown-state")).toBe("queued");
+    expect(within(row("docs")).getByTestId("piece-report").textContent).toBe("Waits for 3");
   });
 });

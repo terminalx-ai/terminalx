@@ -49,7 +49,7 @@ fn native_path(entry: &index::SessionEntry, tab: &TabEntry) -> Result<PathBuf> {
     }
 }
 
-fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
+pub(crate) fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
     match harness {
         "claude" => Ok(claude::transcript::transcript_in(&crate::agent_data::claude_projects_root().context("No Claude home.")?, cwd, id)),
         "codex" => {
@@ -59,6 +59,38 @@ fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf> {
         }
         _ => bail!("Unsupported agent."),
     }
+}
+
+/// A copy of a tab's conversation that ends at the turn `end_seq`, for a fork
+/// (PRO-379): the agent's own transcript under the id `provider`, and the app
+/// log's events up to that turn. Read-only: [`write_forked_conversation`]
+/// puts the transcript where the agent looks for it once the fork's
+/// directory is known. Nothing of the source tab changes.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn fork_conversation(entry: &index::SessionEntry, tab: &TabEntry, end_seq: u64, provider: &str) -> Result<(String, Vec<AgentEvent>)> {
+    anyhow::ensure!(matches!(tab.harness.as_str(), "claude" | "codex") && !tab.by_hand() && !tab.is_terminal()
+        && tab.follow.history.is_empty() && tab.follow.conversation.is_none(),
+        "Forking from a turn is available for managed Claude Code and Codex CLI chats with a single conversation.");
+    anyhow::ensure!(uuid::Uuid::parse_str(provider).is_ok(), "Invalid provider conversation id.");
+    let events = log_events(&read(&store::log_path(&entry.id, &tab.id)?)?)?;
+    let (end, answer) = anchor(&events, end_seq)?;
+    let future_prompts: std::collections::HashSet<u64> = events[end + 1..].iter().filter_map(|event| match &event.payload {
+        Payload::TurnStarted { prompt_seq, .. } => *prompt_seq,
+        _ => None,
+    }).collect();
+    anyhow::ensure!(!events[..=end].iter().any(|event| future_prompts.contains(&event.seq)),
+        "This turn has a prompt queued for a later turn. Choose a turn without queued follow-ups.");
+    let source = read(&native_path(entry, tab)?)?;
+    let native = duplicate(&tab.harness, &source, tab.provider_session_id.as_deref().context("This tab has no saved agent conversation yet.")?, provider, Some(&answer))?;
+    Ok((native, events[..=end].to_vec()))
+}
+
+/// Write a [`fork_conversation`] transcript where the agent finds it from `cwd`.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn write_forked_conversation(harness: &str, cwd: &str, provider: &str, native: &str) -> Result<()> {
+    let path = destination(harness, cwd, provider)?;
+    store::ensure_dir(path.parent().context("No transcript directory.")?.to_path_buf())?;
+    store::write_atomic(&path, native.as_bytes())
 }
 
 /// Puts back the files a reset restored when the conversation commit fails.
@@ -347,6 +379,45 @@ mod tests {
         assert!(read(&native_path(&restored, &restored.tabs[0]).unwrap()).unwrap().contains("LATER_RESET_SECRET"));
         restarted.closing();
         restarted.terminals.kill_all();
+    }
+
+    /// PRO-379: a fork from a turn copies the conversation up to that turn,
+    /// under a new id, and leaves the source as it was.
+    #[test]
+    fn a_fork_from_a_turn_copies_the_conversation_up_to_it_and_nothing_later() {
+        let _home = store::temp_home();
+        let cwd = store::root().unwrap().join("checkout");
+        std::fs::create_dir(&cwd).unwrap();
+        let provider = "32610000-0000-4000-8000-000000000001";
+        let entry: index::SessionEntry = serde_json::from_value(json!({"id":"fork-s", "projectPath":cwd,"cwd":cwd,"title":"Fork", "created":"now", "modified":"now", "tabs":[{"id":"fork-t","harness":"claude","providerSessionId":provider,"created":"now"}]})).unwrap();
+        index::save(std::slice::from_ref(&entry)).unwrap();
+        let native = native_path(&entry, &entry.tabs[0]).unwrap();
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        let fixture = include_str!("harness/fixtures/claude-reset.jsonl");
+        std::fs::write(&native, fixture).unwrap();
+        let log = store::log_path("fork-s", "fork-t").unwrap();
+        for (seq, payload) in [
+            (1, json!({"type":"turn_started"})),
+            (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"})),
+            (3, json!({"type":"turn_completed","status":"ok"})),
+            (4, json!({"type":"user_message","text":"LATER_RESET_SECRET","images":[],"queued":false})),
+            (5, json!({"type":"turn_completed","status":"ok"})),
+        ] {
+            store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":"fork-s","tabId":"fork-t","harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+        }
+        let before = read(&log).unwrap();
+        let fork = "32610000-0000-4000-8000-000000000003";
+        // Only a turn that finished well is a place to fork from.
+        assert!(fork_conversation(&entry, &entry.tabs[0], 2, fork).is_err());
+        let (copy, events) = fork_conversation(&entry, &entry.tabs[0], 3, fork).unwrap();
+        assert_eq!(events.iter().map(|event| event.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(!copy.contains("LATER_RESET_SECRET") && !copy.contains(provider) && copy.contains(fork));
+        let elsewhere = store::root().unwrap().join("fork-worktree");
+        write_forked_conversation("claude", elsewhere.to_str().unwrap(), fork, &copy).unwrap();
+        assert_eq!(read(&destination("claude", elsewhere.to_str().unwrap(), fork).unwrap()).unwrap(), copy);
+        // The source keeps everything.
+        assert_eq!(read(&log).unwrap(), before);
+        assert_eq!(read(&native).unwrap(), fixture);
     }
 
     /// PRO-261: "Also reset files" puts the checkout back to the end of the

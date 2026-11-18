@@ -17,32 +17,73 @@ const userFiles: SettingsFileLayer[] = [
 ];
 beforeEach(() => { vi.clearAllMocks(); listeners.clear(); watch.mockResolvedValue(vi.fn()); resolve.mockResolvedValue(fixture()); write.mockResolvedValue(undefined); review.mockResolvedValue(false); files.mockResolvedValue(userFiles); openPath.mockResolvedValue(undefined); });
 
+const customField = () => screen.getByLabelText("Custom prefix") as HTMLInputElement;
+const radio = (name: string) => screen.getByRole("radio", { name: new RegExp(`^${name}`) }) as HTMLInputElement;
+const enter = (element: HTMLElement) => fireEvent.keyDown(element, { key: "Enter" });
+
+// PRO-374 (design 09.23): the prefix is a choice of TerminalX default, GitHub username, Custom and None.
 it("defaults every editor to user writes and explicitly selects repository local or shared", async () => {
   render(<LayeredConfiguration />);
   await screen.findByDisplayValue("team/");
   expect(screen.queryByText("Remote")).toBeNull();
-  expect((screen.getByLabelText("Save to") as HTMLSelectElement).value).toBe("user");
-  fireEvent.change(screen.getByLabelText("Branch prefix"), { target: { value: "mine/" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save prefix" }));
+  expect(radio("Custom").checked).toBe(true);
+  expect(screen.getByText(/Next branch:/).textContent).toBe("Next branch: team/fix-login-bug");
+  // User settings write to the user file: no Save to.
+  expect(screen.queryByLabelText("Save to")).toBeNull();
+  fireEvent.change(customField(), { target: { value: "mine/" } });
+  enter(customField());
   await waitFor(() => expect(write).toHaveBeenCalledWith(null, "user", "branchPrefix", "mine/"));
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/repo" } });
   await waitFor(() => expect(resolve).toHaveBeenCalledWith("/repo"));
   await screen.findByDisplayValue("team/");
+  expect((screen.getByLabelText("Save to") as HTMLSelectElement).value).toBe("user");
   fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryLocal" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save prefix" }));
-  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryLocal", "branchPrefix", "team/"));
-  await waitFor(() => expect((screen.getByRole("button", { name: "Reset selected layer" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(radio("None"));
+  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryLocal", "branchPrefix", ""));
+  // TerminalX default removes the layer's value (nothing below it), so a later default still applies.
   fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryShared" } });
-  fireEvent.click(screen.getByRole("button", { name: "Reset selected layer" }));
+  fireEvent.click(radio("TerminalX default"));
   await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryShared", "branchPrefix", null));
+});
+
+it("TerminalX default clears your own value, and is written only over a layer below that would win", async () => {
+  resolve.mockResolvedValue(withLayers(at("user", "me/"), at("defaults", "raccoon/")));
+  render(<LayeredConfiguration />);
+  await screen.findByDisplayValue("me/");
+  fireEvent.click(radio("TerminalX default"));
+  await waitFor(() => expect(write).toHaveBeenCalledWith(null, "user", "branchPrefix", null));
+  write.mockClear();
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "/repo" } });
+  await waitFor(() => expect(resolve).toHaveBeenCalledWith("/repo"));
+  await screen.findByDisplayValue("me/");
+  fireEvent.change(screen.getByLabelText("Save to"), { target: { value: "repositoryLocal" } });
+  fireEvent.click(radio("TerminalX default"));
+  await waitFor(() => expect(write).toHaveBeenCalledWith("/repo", "repositoryLocal", "branchPrefix", "raccoon/"));
+});
+
+it("previews the saved prefix, not an empty Custom field", async () => {
+  resolve.mockResolvedValue(withLayers(at("user", "raccoon/"), at("defaults", "raccoon/")));
+  render(<LayeredConfiguration />);
+  await waitFor(() => expect(radio("TerminalX default").checked).toBe(true));
+  fireEvent.click(radio("Custom"));
+  expect(customField().value).toBe("");
+  expect(screen.getByText(/Next branch:/).textContent).toBe("Next branch: raccoon/fix-login-bug");
+  expect(write).not.toHaveBeenCalled();
+});
+
+it("offers the GitHub username only once it is known", async () => {
+  render(<LayeredConfiguration />);
+  await screen.findByDisplayValue("team/");
+  expect(radio("GitHub username").disabled).toBe(true);
+  expect(screen.getByText("not signed in")).toBeTruthy();
 });
 
 it("shows managed source and locks editing, saving and resetting", async () => {
   resolve.mockResolvedValue(fixture(true));
   render(<LayeredConfiguration />);
   await screen.findByText(/Locked by managed configuration/);
-  for (const name of ["Save prefix", "Reset selected layer"]) expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
-  expect((screen.getByLabelText("Branch prefix") as HTMLInputElement).disabled).toBe(true);
+  for (const name of ["TerminalX default", "Custom", "None"]) expect(radio(name).disabled).toBe(true);
+  expect(customField().disabled).toBe(true);
 });
 
 it("a declined native trust review leaves shared values blocked", async () => {
@@ -62,7 +103,8 @@ it("displays a failed save and never claims it succeeded", async () => {
   write.mockRejectedValue(new Error("This setting is locked by managed configuration."));
   render(<LayeredConfiguration />);
   await screen.findByDisplayValue("team/");
-  fireEvent.click(screen.getByRole("button", { name: "Save prefix" }));
+  fireEvent.change(customField(), { target: { value: "mine/" } });
+  enter(customField());
   expect((await screen.findByRole("alert")).textContent).toContain("locked");
   expect(screen.queryByText("Saved to User.")).toBeNull();
 });
@@ -71,7 +113,7 @@ it("displays a failed save and never claims it succeeded", async () => {
 it("loads in React StrictMode after the first effect is cancelled", async () => {
   render(<StrictMode><LayeredConfiguration /></StrictMode>);
   await screen.findByDisplayValue("team/");
-  await waitFor(() => expect((screen.getByRole("button", { name: "Save prefix" }) as HTMLButtonElement).disabled).toBe(false));
+  await waitFor(() => expect(customField().disabled).toBe(false));
 });
 
 it("refreshes sources and trust after file changes without erasing an unsaved prefix", async () => {
@@ -79,15 +121,15 @@ it("refreshes sources and trust after file changes without erasing an unsaved pr
   watch.mockResolvedValue(stop);
   const { unmount } = render(<LayeredConfiguration />);
   await screen.findByDisplayValue("team/");
-  fireEvent.change(screen.getByLabelText("Branch prefix"), { target: { value: "draft/" } });
+  fireEvent.change(customField(), { target: { value: "draft/" } });
   resolve.mockResolvedValue({ ...fixture(), trust: { hash: "changed", required: true, keys: ["branchPrefix"] } });
   watch.mock.calls.at(-1)![1]();
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
-  expect((screen.getByLabelText("Branch prefix") as HTMLInputElement).value).toBe("draft/");
+  expect(customField().value).toBe("draft/");
   resolve.mockResolvedValue(fixture(true));
   watch.mock.calls.at(-1)![1]();
   await screen.findByText(/Locked by managed configuration/);
-  expect((screen.getByLabelText("Branch prefix") as HTMLInputElement).value).toBe("team/");
+  expect(customField().value).toBe("team/");
   unmount();
   expect(stop).toHaveBeenCalledOnce();
 });
@@ -98,7 +140,7 @@ it("disables stale editing when a watched policy becomes unreadable", async () =
   resolve.mockRejectedValueOnce(new Error("Cannot safely read managed configuration."));
   watch.mock.calls.at(-1)![1]();
   await screen.findByRole("alert");
-  expect((screen.getByRole("button", { name: "Save prefix" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(radio("None").disabled).toBe(true);
 });
 
 it("closes a watcher that finishes subscribing after unmount", async () => {
@@ -132,7 +174,7 @@ it("shows no badge for a default value", async () => {
   resolve.mockResolvedValue(withLayers(at("defaults", "")));
   render(<LayeredConfiguration />);
   await waitFor(() => expect(resolve).toHaveBeenCalled());
-  await screen.findByText(/Source: Default/);
+  await waitFor(() => expect(radio("TerminalX default").checked).toBe(true));
   expect(screen.queryByRole("button", { name: /where this value comes from/ })).toBeNull();
 });
 
@@ -188,8 +230,8 @@ it("Settings files lists each layer with its chips and an error naming file, lin
   expect(within(items[3]).getByText("14 keys")).toBeTruthy();
   expect(within(items[4]).getByText("built into TerminalX")).toBeTruthy();
   const error = within(items[1]).getByRole("alert");
-  expect(error.textContent).toBe("~/repo/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting. That key is ignored; the rest of the file applies.Open");
-  fireEvent.click(within(error).getByRole("button", { name: "Open" }));
+  expect(error.textContent).toBe("~/repo/.terminalx/settings.local.json line 7: scripts.teardown isn’t a setting. That key is ignored; the rest of the file applies.Open file");
+  fireEvent.click(within(error).getByRole("button", { name: "Open file" }));
   await waitFor(() => expect(openPath).toHaveBeenCalledWith("/repo/.terminalx/settings.local.json", null));
 });
 

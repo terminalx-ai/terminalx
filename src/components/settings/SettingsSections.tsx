@@ -1,11 +1,12 @@
-import { DataPrivacySettings } from "./DataPrivacySettings";
+import { SettingsDescription } from "./SettingsDescription";
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { saveSidebarOrder, useSidebarOrder } from "@/lib/sidebarOrder";
 import { SidebarOrderError } from "@/components/layout/SidebarSort";
 import { RegisteredSetting } from "./settingsRegistry";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { Check, CircleAlert, ExternalLink, Loader2, RefreshCw } from "@/icons";
+import { Check, ChevronsUpDown, CircleAlert, ExternalLink, Loader2, Monitor, Moon, RefreshCw, Sun } from "@/icons";
+import { bindingText, useKeymap } from "@/lib/shortcuts";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
@@ -33,8 +34,11 @@ import { LayeredConfiguration } from "./LayeredConfiguration";
 import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 
-export function GeneralTab() {
+export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   const prefs = usePrefs();
+  // PRO-377: the layout, sidebar and status bar rows live here; Appearance keeps the design's rows (09.08).
+  const order = useSidebarOrder();
+  const status = useStatus();
   // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
   const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
   const [cloudControlReason, setCloudControlReason] = useState<string | null>(null);
@@ -60,7 +64,6 @@ export function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
-      <DataPrivacySettings />
       <SettingsFileRow />
       <RegisteredSetting setting="general.websiteLinks" control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <RegisteredSetting setting="general.linkActions" control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
@@ -119,6 +122,101 @@ export function GeneralTab() {
       <RegisteredSetting setting="general.promptMap"
         control={<Switch aria-label="Prompt map" checked={prefs.promptMap} onCheckedChange={(v) => setPrefs({ promptMap: v })} />}
       />
+      <RegisteredSetting setting="general.textSize"
+        control={
+          <Segmented
+            aria-label="Text size"
+            value={prefs.fontScale}
+            onChange={(v) => setPrefs({ fontScale: v })}
+            options={[
+              { value: "sm", label: "Small" },
+              { value: "md", label: "Default" },
+              { value: "lg", label: "Large" },
+            ]}
+          />
+        }
+      />
+      <RegisteredSetting setting="general.transcriptLayout"
+        control={
+          <Segmented
+            aria-label="Transcript layout"
+            value={prefs.transcriptLayout}
+            onChange={(v) => setPrefs({ transcriptLayout: v })}
+            options={[
+              { value: "wide", label: "Wide" },
+              { value: "chat", label: "Chat" },
+            ]}
+          />
+        }
+      />
+      <RegisteredSetting setting="general.customOrder"
+        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
+      />
+      <SidebarOrderError />
+      <RegisteredSetting setting="general.tabBar"
+        control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
+      />
+      <RegisteredSetting setting="general.branchSessions"
+        control={
+          <Segmented<"tabs" | "sidebar">
+            aria-label="Sessions on a branch"
+            value={prefs.tabStrip ? prefs.branchSessions : "sidebar"}
+            disabled={!prefs.tabStrip}
+            onChange={(v) => setPrefs({ branchSessions: v })}
+            options={[
+              { value: "tabs", label: "Tabs" },
+              { value: "sidebar", label: "Sidebar" },
+            ]}
+          />
+        }
+      />
+      {onOpenUsage && (
+        <RegisteredSetting setting="general.openUsage"
+          control={
+            <Button size="sm" variant="outline" onClick={onOpenUsage}>
+              Open usage <ExternalLink />
+            </Button>
+          }
+        />
+      )}
+      <RegisteredSetting setting="general.statusBar"
+        control={<Switch checked={status.settings.visible} onCheckedChange={(visible) => void setStatusSettings({ visible })} />}
+      />
+      <RegisteredSetting setting="general.usage"
+        disabled={!status.settings.visible}
+        control={<Switch checked={status.settings.usage} disabled={!status.settings.visible} onCheckedChange={(usage) => void setStatusSettings({ usage })} />}
+      />
+      <RegisteredSetting setting="general.resources"
+        disabled={!status.settings.visible}
+        control={<Switch checked={status.settings.resources} disabled={!status.settings.visible} onCheckedChange={(resources) => void setStatusSettings({ resources })} />}
+      />
+      <RegisteredSetting setting="general.usageDisplay"
+        disabled={!status.settings.visible || !status.settings.usage}
+        control={
+          <Segmented
+            aria-label="Usage display"
+            disabled={!status.settings.visible || !status.settings.usage}
+            value={status.settings.percent}
+            onChange={(percent) => void setStatusSettings({ percent })}
+            options={[
+              { value: "used", label: "Used" },
+              { value: "remaining", label: "Remaining" },
+            ]}
+          />
+        }
+      />
+      <RegisteredSetting setting="general.usageRefresh"
+        disabled={!status.settings.visible || !status.settings.usage}
+        control={
+          <Segmented
+            aria-label="Usage auto-refresh interval"
+            disabled={!status.settings.visible || !status.settings.usage}
+            value={String(status.settings.usageRefreshMinutes)}
+            onChange={(minutes) => void setStatusSettings({ usageRefreshMinutes: Number(minutes) })}
+            options={USAGE_REFRESH_MINUTES.map((minutes) => ({ value: String(minutes), label: minutes === 0 ? "Off" : `${minutes} min` }))}
+          />
+        }
+      />
       <RegisteredSetting setting="general.fixErrorsInstructions" stacked
         control={<textarea aria-label="Fix errors instructions" value={prefs.fixErrorsInstructions} maxLength={8000} rows={3}
           onChange={(event) => setPrefs({ fixErrorsInstructions: event.target.value })}
@@ -138,172 +236,115 @@ export function GeneralTab() {
   );
 }
 
-export function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
-  const order = useSidebarOrder();
+const SIDEBAR_LINES = ["80%", "64%", "72%", "56%", "68%"];
+
+/**
+ * The window in miniature, drawn in a theme's own colours (design 17.07): a
+ * sidebar with the traffic lights and five rows, then the chat with a
+ * message, two lines of reply, an accent button beside a plain one, and the
+ * composer. The tokens are that theme's, scoped by `data-theme` and
+ * `data-mode`, so a palette change redraws its card with no second list.
+ */
+function ThemePreview({ theme, mode }: { theme: ThemeId; mode: "light" | "dark" }) {
+  const edge = "1px solid var(--border)";
+  const card = { background: "var(--surface-card)", border: edge };
+  return (
+    <span
+      aria-hidden
+      data-theme={theme}
+      data-mode={mode}
+      data-theme-preview
+      className="flex h-[124px] w-[200px] overflow-hidden rounded-lg"
+      style={{ background: "var(--surface-page)", border: edge }}
+    >
+      <span className="grid w-[54px] shrink-0 content-start gap-1.5 p-1.5" style={{ borderRight: edge }}>
+        <span className="flex gap-0.5">
+          {["#ff5f57", "#febc2e", "#28c840"].map((light) => <span key={light} className="size-1.5 rounded-full" style={{ background: light }} />)}
+        </span>
+        {SIDEBAR_LINES.map((width) => <span key={width} className="h-1.5 rounded" style={{ width, background: "var(--ink-muted)", opacity: 0.35 }} />)}
+      </span>
+      <span className="grid min-w-0 flex-1 content-start gap-1.5 p-2" style={{ background: "var(--surface-chat)" }}>
+        <span className="ml-auto h-[18px] w-20 rounded" style={card} />
+        <span className="h-[5px] w-[90%] rounded" style={{ background: "var(--ink-strong)", opacity: 0.6 }} />
+        <span className="h-[5px] w-[70%] rounded" style={{ background: "var(--ink-strong)", opacity: 0.6 }} />
+        <span className="flex gap-1">
+          <span data-theme-accent className="h-2.5 w-[30px] rounded" style={{ background: "var(--accent)" }} />
+          <span className="h-2.5 w-6 rounded" style={card} />
+        </span>
+        <span className="mt-1 h-6 rounded" style={card} />
+      </span>
+    </span>
+  );
+}
+
+export function AppearanceTab() {
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
-  const status = useStatus();
+  const toggleKeys = useKeymap()["app.toggleMode"][0];
   return (
     <div className="flex flex-col">
       <RegisteredSetting setting="appearance.theme"
         id="theme-label"
         stacked
         control={
-          <div role="radiogroup" aria-labelledby="theme-label" className="grid grid-cols-4 gap-2">
-            {THEMES.map((t) => {
-              const swatchMode = hasLightMode(t.id) ? resolvedMode : "dark";
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === t.id}
-                  onClick={() => setTheme(t.id as ThemeId)}
-                  className={cn(
-                    "group flex flex-col gap-1.5 rounded-lg border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                    theme === t.id ? "border-ring" : "border-transparent hover:border-border",
-                  )}
-                >
-                  <div
-                    data-theme={t.id}
-                    data-mode={swatchMode}
-                    className="relative h-14 w-full overflow-hidden rounded-md"
-                    style={{ background: "var(--surface-page)" }}
-                  >
-                    <div
-                      className="absolute left-2 top-2 h-8 w-[60%] rounded-sm"
-                      style={{ background: "var(--surface-card)", boxShadow: "inset 0 0 0 1px var(--hairline-strong)" }}
-                    />
-                    <div className="absolute bottom-2 left-2 h-1.5 w-8 rounded-full" style={{ background: "var(--accent)" }} />
-                    <div className="absolute bottom-2 left-11 h-1.5 w-4 rounded-full" style={{ background: "var(--ink-muted)" }} />
-                  </div>
-                  <div className="flex items-center justify-between px-0.5">
-                    <span className="text-xs font-medium">{t.name}</span>
-                    {t.darkOnly && <span className="text-[10px] text-faint">dark</span>}
-                  </div>
-                </button>
-              );
-            })}
+          // Design 17.07: each card is a 200 by 124 drawing of the window in that theme, then its name and a caption.
+          // The cards keep that size and wrap where the column is narrower than four of them.
+          <div role="radiogroup" aria-labelledby="theme-label" className="-m-1.5 flex flex-wrap gap-x-0.5 gap-y-2">
+            {THEMES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={theme === t.id}
+                data-theme-card={t.id}
+                onClick={() => setTheme(t.id as ThemeId)}
+                className={cn(
+                  "group grid gap-1.5 rounded-xl border p-1.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  theme === t.id ? "border-ring" : "border-transparent hover:border-border",
+                )}
+              >
+                <ThemePreview theme={t.id} mode={hasLightMode(t.id) ? resolvedMode : "dark"} />
+                <span className="px-0.5 text-[12.5px] font-medium leading-4">{t.name}</span>
+                <span className="-mt-1 px-0.5 text-xs leading-4 text-faint">{t.caption}</span>
+              </button>
+            ))}
           </div>
         }
       />
       <RegisteredSetting setting="appearance.mode"
-        description={light ? "System follows macOS and switches with it." : "This theme has no light palette, so the mode control is disabled."}
+        description={light ? <>
+          System follows macOS.
+          {toggleKeys && <span className="mt-0.5 block text-faint">{bindingText(toggleKeys)} switches light and dark</span>}
+        </> : "This theme has no light palette, so the mode control is disabled."}
         disabled={!light}
-        control={
-          <Segmented<Mode>
-            aria-label="Mode"
-            disabled={!light}
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "system", label: "System" },
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-            ]}
-          />
-        }
-      />
-      <RegisteredSetting setting="appearance.textSize"
-        control={
-          <Segmented
-            aria-label="Text size"
-            value={prefs.fontScale}
-            onChange={(v) => setPrefs({ fontScale: v })}
-            options={[
-              { value: "sm", label: "Small" },
-              { value: "md", label: "Default" },
-              { value: "lg", label: "Large" },
-            ]}
-          />
-        }
-      />
-      <RegisteredSetting setting="appearance.transcriptLayout"
-        control={
-          <Segmented
-            aria-label="Transcript layout"
-            value={prefs.transcriptLayout}
-            onChange={(v) => setPrefs({ transcriptLayout: v })}
-            options={[
-              { value: "wide", label: "Wide" },
-              { value: "chat", label: "Chat" },
-            ]}
-          />
-        }
-      />
-      <RegisteredSetting setting="appearance.customOrder"
-        control={<Switch aria-label="Custom order" checked={order.custom} disabled={!order.loaded || order.pending} onCheckedChange={(custom) => void saveSidebarOrder({ custom })} />}
-      />
-      <SidebarOrderError />
-      <RegisteredSetting setting="appearance.tabBar"
-        control={<Switch aria-label="Tab bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
-      />
-      <RegisteredSetting setting="appearance.branchSessions"
-        control={
-          <Segmented<"tabs" | "sidebar">
-            aria-label="Sessions on a branch"
-            value={prefs.tabStrip ? prefs.branchSessions : "sidebar"}
-            disabled={!prefs.tabStrip}
-            onChange={(v) => setPrefs({ branchSessions: v })}
-            options={[
-              { value: "tabs", label: "Tabs" },
-              { value: "sidebar", label: "Sidebar" },
-            ]}
-          />
-        }
+        control={<ModeSelect value={light ? mode : "dark"} disabled={!light} onChange={setMode} />}
       />
       <RegisteredSetting setting="appearance.colourLineCounts"
-        control={<Switch aria-label="Colour line counts on every row" checked={prefs.colourLineCounts} onCheckedChange={(colourLineCounts) => setPrefs({ colourLineCounts })} />}
-      />
-      {onOpenUsage && (
-        <RegisteredSetting setting="appearance.openUsage"
-          control={
-            <Button size="sm" variant="outline" onClick={onOpenUsage}>
-              Open usage <ExternalLink />
-            </Button>
-          }
-        />
-      )}
-      <RegisteredSetting setting="appearance.statusBar"
-        control={<Switch checked={status.settings.visible} onCheckedChange={(visible) => void setStatusSettings({ visible })} />}
-      />
-      <RegisteredSetting setting="appearance.usage"
-        disabled={!status.settings.visible}
-        control={<Switch checked={status.settings.usage} disabled={!status.settings.visible} onCheckedChange={(usage) => void setStatusSettings({ usage })} />}
-      />
-      <RegisteredSetting setting="appearance.resources"
-        disabled={!status.settings.visible}
-        control={<Switch checked={status.settings.resources} disabled={!status.settings.visible} onCheckedChange={(resources) => void setStatusSettings({ resources })} />}
-      />
-      <RegisteredSetting setting="appearance.usageDisplay"
-        disabled={!status.settings.visible || !status.settings.usage}
-        control={
-          <Segmented
-            aria-label="Usage display"
-            disabled={!status.settings.visible || !status.settings.usage}
-            value={status.settings.percent}
-            onChange={(percent) => void setStatusSettings({ percent })}
-            options={[
-              { value: "used", label: "Used" },
-              { value: "remaining", label: "Remaining" },
-            ]}
-          />
-        }
-      />
-      <RegisteredSetting setting="appearance.usageRefresh"
-        disabled={!status.settings.visible || !status.settings.usage}
-        control={
-          <Segmented
-            aria-label="Usage auto-refresh interval"
-            disabled={!status.settings.visible || !status.settings.usage}
-            value={String(status.settings.usageRefreshMinutes)}
-            onChange={(minutes) => void setStatusSettings({ usageRefreshMinutes: Number(minutes) })}
-            options={USAGE_REFRESH_MINUTES.map((minutes) => ({ value: String(minutes), label: minutes === 0 ? "Off" : `${minutes} min` }))}
-          />
-        }
+        control={<Switch aria-label="Colored sidebar diffs" checked={prefs.colourLineCounts} onCheckedChange={(colourLineCounts) => setPrefs({ colourLineCounts })} />}
       />
     </div>
+  );
+}
+
+const MODES: { value: Mode; label: string; icon: typeof Moon }[] = [
+  { value: "system", label: "System", icon: Monitor },
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
+];
+
+/** Appearance → Mode as a select, its icon before the name (design 09.08). */
+function ModeSelect({ value, disabled, onChange }: { value: Mode; disabled: boolean; onChange: (mode: Mode) => void }) {
+  const Icon = (MODES.find((m) => m.value === value) ?? MODES[0]).icon;
+  return (
+    <span className={cn("relative inline-flex h-7 w-[120px] items-center rounded-md bg-well text-xs hairline focus-within:ring-2 focus-within:ring-ring/40", disabled && "opacity-50")}>
+      <Icon aria-hidden className="pointer-events-none absolute left-2 size-3.5 text-muted-foreground" />
+      <select aria-label="Mode" value={value} disabled={disabled} onChange={(e) => onChange(e.target.value as Mode)}
+        className="h-full w-full cursor-default appearance-none bg-transparent pl-7 pr-7 text-xs text-foreground outline-none disabled:cursor-not-allowed">
+        {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+      </select>
+      <ChevronsUpDown aria-hidden className="pointer-events-none absolute right-2 size-3 text-faint" />
+    </span>
   );
 }
 
@@ -372,7 +413,7 @@ function BrowserRuntimeRow() {
 }
 
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
-export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
+export function AgentsTab({ onOpenSkills, showIntroduction = true }: { onOpenSkills?: () => void; showIntroduction?: boolean }) {
   const prefs = usePrefs();
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
@@ -407,7 +448,7 @@ export function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   };
   return (
     <div className="flex flex-col gap-3">
-      <p className="-mt-4 text-[13px] text-muted-foreground">The agent CLIs TerminalX runs on this Mac. Each keeps its own login; local work needs no TerminalX account.</p>
+      {showIntroduction && <SettingsDescription section="agents" />}
       <RegisteredSetting setting="agents.setup"><div>
         <AgentsPanel harnesses={store.harnesses} checkRun={checkRun} busy={busy} onRecheck={() => void recheck()} />
       </div></RegisteredSetting>

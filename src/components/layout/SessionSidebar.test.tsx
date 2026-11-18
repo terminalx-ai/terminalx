@@ -6,7 +6,9 @@ import type { Project, SessionEntry } from "@/types/session";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+// Confirmations are the app's own dialog (PRO-400): one request object, answered true or false.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(), chooseInApp: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("./AppShell", () => ({ TITLEBAR_INSET: 78 }));
 vi.mock("@/components/account/AccountSidebarEntry", () => ({ AccountSidebarEntry: () => null }));
@@ -51,7 +53,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const rowsIn = (element: HTMLElement) => within(element).getAllByRole("listitem").map((row) => row.querySelector("[title]")?.getAttribute("title"));
 
 async function boot(list: SessionEntry[]) {
@@ -69,32 +71,62 @@ describe("new-chat entry points", () => {
     expect(screen.getByRole("button", { name: "main, Talk here", description: /Status: In review$/ })).toBeTruthy();
   });
 
-  it("opens the same composer from the sidebar plus menu and its project option without creating a session", async () => {
+  it("opens the composer from the New session destination and a project's +, without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
-    mount();
-    const titlebar = screen.getByTestId("sidebar-titlebar");
-    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "New chat" }));
-    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: true, selectedSessionId: null });
-    fireEvent.keyDown(within(titlebar).getByRole("button", { name: "New chat" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "web" }));
+    const onNewSession = vi.fn();
+    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+    // The titlebar only hides the sidebar: New session and Search are destinations (02.01).
+    expect(within(screen.getByTestId("sidebar-titlebar")).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Hide sidebar"]);
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Destinations" })).getByRole("button", { name: "New session" }));
+    expect(onNewSession).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "New chat in web" }));
     expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionChat: false, newSessionPreset: { projectPath: "/repos/web", cwd: null }, selectedSessionId: null });
     expect(mocks.invoke.mock.calls.some(([command]) => ["create_session", "create_quick_chat"].includes(command))).toBe(false);
   });
 });
 
-describe("Home navigation (PRO-183)", () => {
+describe("Home navigation (#1103)", () => {
+  it.each(["simple", "list"] as const)("returns from a session by mouse and keyboard in the %s sidebar", async (sidebarLayout) => {
+    const { useShortcut } = await import("@/lib/hotkeys");
+    function HomeShortcut() {
+      useShortcut("app.home", store.openHome);
+      return null;
+    }
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    prefs.setPrefs({ sidebarLayout, shortcuts: {} });
+    store.selectSession("here");
+    mount();
+    render(<HomeShortcut />);
+    const home = screen.getByRole("button", { name: "Home" });
+    expect(home.getAttribute("aria-pressed")).toBe("false");
+    expect(home.textContent).toContain("CtrlAlt0");
+    fireEvent.click(home);
+    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
+    expect(home.getAttribute("aria-pressed")).toBe("true");
+
+    act(() => store.selectSession("here"));
+    expect(home.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.keyDown(window, { key: "0", code: "Digit0", ctrlKey: true, altKey: true });
+    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().selectedSessionId).toBeNull();
+    expect(home.getAttribute("aria-pressed")).toBe("true");
+    expect(store.getSessionStore().sessions).toHaveLength(1);
+  });
+});
+
+describe("Overview navigation (PRO-183, PRO-384)", () => {
   it.each(["simple", "list"] as const)("returns from a session in the %s sidebar", async (sidebarLayout) => {
     await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
     prefs.setPrefs({ sidebarLayout });
     store.selectSession("here");
     mount();
-    const home = screen.getByRole("button", { name: "Home" });
+    const home = screen.getByRole("button", { name: /^Overview/ });
     expect(home.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(home);
 
-    expect(store.getSessionStore().view).toBe("home");
+    expect(store.getSessionStore().view).toBe("agents");
     expect(store.getSessionStore().selectedSessionId).toBeNull();
     expect(home.getAttribute("aria-pressed")).toBe("true");
     expect(store.getSessionStore().sessions).toHaveLength(1);
@@ -156,10 +188,15 @@ describe("project context menus (PRO-187)", () => {
     else if (input === "Shift+F10") fireEvent.keyDown(title, { key: "F10", shiftKey: true });
     else fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
     const menu = await screen.findByRole("menu");
+    // The designed project menu (02.14, PRO-386), with the project's appearance and pipeline kept beside its settings.
+    const keys = (await import("@/lib/hotkeys")).shortcutKeys;
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
-      "New chat in web", "Reveal in Finder", "Pin project", "Name and appearance", "Issue pipeline…", "Remove from TerminalX…",
+      `New session${keys("app.newSession").join("")}`, `Start from a branch, issue or PR…${keys("app.startFrom").join("")}`,
+      "Project settings", "Scripts and actions", "Name and appearance", "Issue pipeline…", "Open in",
+      "Pin project", "Hide projectHidden from the sidebar; sessions keep running", "Remove project…The folder on disk is left as it is.",
     ]);
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Reveal in Finder" }));
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Finder" }));
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     expect(revealItemInDir).toHaveBeenCalledWith("/repos/web");
   });
@@ -180,9 +217,11 @@ describe("project context menus (PRO-187)", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk here" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
     let menu = await screen.findByRole("menu");
     const expected = items(menu);
-    expect(within(menu).getByRole("menuitem", { name: linked ? "Unlink #187" : "Link to issue…" })).toBeTruthy();
-    expect(within(menu).getByRole("menuitemcheckbox", { name: "Don’t share this session" }).getAttribute("aria-checked")).toBe(String(linked));
-    expect(within(menu).getByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /^Remove workspace…/ })).toBeTruthy();
+    // The issue and PR links are a submenu away (PRO-386).
+    fireEvent.keyDown(within(menu).getByRole("menuitem", { name: "Issue and pull request" }), { key: "ArrowRight" });
+    expect(await screen.findByRole("menuitem", { name: linked ? "Unlink #187" : "Link to issue…" })).toBeTruthy();
+    expect(screen.getByRole("menuitemcheckbox", { name: "Don’t share this session" }).getAttribute("aria-checked")).toBe(String(linked));
     for (const input of ["right-click", "Shift+F10"]) {
       fireEvent.keyDown(menu, { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
@@ -191,6 +230,60 @@ describe("project context menus (PRO-187)", () => {
       menu = await screen.findByRole("menu");
       expect(items(menu), input).toEqual(expected);
     }
+  });
+});
+
+describe("project menu and listing (PRO-386)", () => {
+  it("says a project whose chats are all archived has them, and shows them on a click", async () => {
+    await boot([session("old", "/repos/web", "2026-11-05T00:00:00Z", { archived: true })]);
+    mount();
+    expect(screen.queryByText("No chats yet")).toBeNull();
+    fireEvent.click(screen.getByTestId("only-archived"));
+    expect(store.getSessionStore().showArchived).toBe(true);
+    expect(await screen.findByTestId("archived-sessions")).toBeTruthy();
+    act(() => store.setShowArchived(false));
+  });
+
+  it("opens Start from a branch, issue or PR, and each settings page, for the project", async () => {
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    const { onProjectSettingsRequest } = await import("@/lib/projectAdded");
+    const requested = vi.fn();
+    const stop = onProjectSettingsRequest(requested);
+    mount();
+    const pick = async (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    };
+    const before = store.getSessionStore().startFromRequest;
+    await pick("Start from a branch, issue or PR…");
+    expect(store.getSessionStore()).toMatchObject({ view: "new", newSessionPreset: { projectPath: "/repos/web", cwd: null }, startFromRequest: before + 1 });
+    await pick("Project settings");
+    await pick("Scripts and actions");
+    expect(requested.mock.calls).toEqual([["/repos/web", "general"], ["/repos/web", "scripts"]]);
+    stop();
+  });
+
+  it("hides a project from the sidebar, and its hidden line shows it again", async () => {
+    let hidden = false;
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "list_projects") return { projects: [{ ...projects[0], hidden }], lastSelected: null };
+      if (command === "update_project") {
+        hidden = !!(args as { patch: { hidden?: boolean } }).patch.hidden;
+        return { ...projects[0], hidden };
+      }
+      return base(command, args);
+    });
+    await boot([session("here", "/repos/web", "2026-11-05T00:00:00Z")]);
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
+    await act(async () => fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Hide project/ })));
+    expect(mocks.invoke).toHaveBeenCalledWith("update_project", expect.objectContaining({ patch: { hidden: true } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "web overview" })).toBeNull());
+    fireEvent.click(within(screen.getByTestId("hidden-projects")).getByRole("button", { name: /1 hidden project/ }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Show web in the sidebar" })));
+    expect(await screen.findByRole("button", { name: "web overview" })).toBeTruthy();
   });
 });
 
@@ -362,12 +455,12 @@ describe("the conversation list", () => {
   it("removes a project from its menu after asking, archiving its conversations rather than deleting them", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([session("here", "/repos/web", at(1)), session("there", "/repos/web", at(2), { branch: "old" }), session("done", "/repos/web", at(3), { archived: true })]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockResolvedValue(true);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockResolvedValue(true);
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Project menu for web" }));
-    await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: "Remove from TerminalX…" })); });
-    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toBe("Remove web from TerminalX? Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.");
+    await act(async () => { fireEvent.click(await screen.findByRole("menuitem", { name: /^Remove project…/ })); });
+    expect(vi.mocked(dialog.confirmInApp).mock.calls[0][0]).toEqual({ title: "Remove web from TerminalX?", body: "Its 2 conversations are archived (View → Show archived lists them), and the folder on disk is left as it is.", action: "Remove", destructive: true });
     // Archived together, in one change, before the project goes.
     const calls = mocks.invoke.mock.calls.filter(([command]) => command === "set_sessions_archived" || command === "remove_project").map(([command, args]) => [command, args]);
     expect(calls).toEqual([["set_sessions_archived", { sessionIds: ["there", "here"], archived: true }], ["remove_project", { path: "/repos/web" }]]);
@@ -383,7 +476,7 @@ describe("the conversation list", () => {
     expect(screen.getByRole("region", { name: "Chats" }).querySelectorAll("[data-agent-id]")).toHaveLength(0);
   });
 
-  it("gathers the conversations on one branch under it, and shows a project's latest few branches before View all", async () => {
+  it("gathers the conversations on one branch under it, and lists all of a project's branches (no View all)", async () => {
     const at = (n: number) => new Date(Date.UTC(2026, 9, n)).toISOString();
     await boot([
       session("m1", "/repos/web", at(9)),
@@ -399,9 +492,8 @@ describe("the conversation list", () => {
     expect(within(web).getByText("Talk m1")).toBeTruthy();
     expect(within(web).getByText("Talk m2")).toBeTruthy();
 
-    expect(within(web).queryByRole("button", { name: "b1, Talk w1" })).toBeNull();
-    fireEvent.click(within(web).getByRole("button", { name: "View all" }));
     expect(within(web).getByRole("button", { name: "b1, Talk w1" })).toBeTruthy();
+    expect(within(web).queryByRole("button", { name: "View all" })).toBeNull();
   });
 
   it("keeps a branch to one row, for whichever of its sessions is open, when its sessions are tabs in the tab bar", async () => {
@@ -410,16 +502,15 @@ describe("the conversation list", () => {
     await boot([session("m1", "/repos/web", at(9)), session("m2", "/repos/web", at(8), { tabs: [{ id: "m2-tab", title: "Talk m2", harness: "claude", model: "", permissionMode: "auto", status: "waiting", created: "", modified: "" }] })]);
     mount();
     const web = screen.getByRole("group", { name: "web" });
-    // Not a count with the sessions under it: one row, named by the branch, that opens its latest session.
-    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
-    expect(within(web).queryByText("Talk m1")).toBeNull();
-    expect(within(web).queryByText("Talk m2")).toBeNull();
+    // Not a count with the sessions under it: one row, read out by its branch and named by its latest session, that opens it.
+    const main = within(web).getByRole("button", { name: "main, Talk m1" });
+    expect(within(web).getAllByText(/^Talk m/)).toHaveLength(1);
     // The row's state is the most pressing among them: its mark, with no label on the row.
     expect(main.querySelector("[data-session-status]")?.getAttribute("data-status-label")).toBe("Needs you");
     expect(within(main).queryByText("Needs you")).toBeNull();
     fireEvent.click(main);
-    expect(within(web).getByRole("button", { name: "main, 2 sessions" }).getAttribute("aria-current")).toBe("true");
-    expect(within(web).queryByText("Talk m1")).toBeNull();
+    expect(within(web).getByRole("button", { name: "main, Talk m1" }).getAttribute("aria-current")).toBe("true");
+    expect(within(web).getAllByText(/^Talk m/)).toHaveLength(1);
     expect(store.getSessionStore().selectedSessionId).toBe("m1");
   });
 
@@ -432,14 +523,14 @@ describe("the conversation list", () => {
     mount();
     const web = screen.getByRole("group", { name: "web" });
     // The branch's row stands for the sessions whose tabs are in its row of tabs.
-    const main = within(web).getByRole("button", { name: "main, 2 sessions" });
+    const main = within(web).getByRole("button", { name: "main, Talk m2" });
     const bare = within(web).getByRole("button", { name: /^Session m1/ });
     fireEvent.click(bare);
     expect(store.getSessionStore().selectedSessionId).toBe("m1");
     expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBe("true");
     expect(main.getAttribute("aria-current")).toBeNull();
     // The branch's row opens a session with tabs: the latest of them.
-    fireEvent.click(within(web).getByRole("button", { name: "main, 2 sessions" }));
+    fireEvent.click(within(web).getByRole("button", { name: "main, Talk m2" }));
     expect(store.getSessionStore().selectedSessionId).toBe("m2");
     expect(within(web).getByRole("button", { name: /^Session m1/ }).getAttribute("aria-current")).toBeNull();
   });
@@ -452,11 +543,14 @@ describe("the conversation list", () => {
     expect(within(screen.getByTestId("conversation-list")).getByRole("button", { name: /Start a chat/ })).toBeTruthy();
   });
 
-  it("names the app's destinations above the conversations, Home first", async () => {
+  it("names the app's destinations above the conversations as 02.01 does, with their shortcuts", async () => {
     await boot([]);
     mount();
     const destinations = screen.getByRole("toolbar", { name: "Destinations" });
-    expect(within(destinations).getAllByRole("button").map((button) => button.textContent)).toEqual(["Home", "Dashboard", "Issues", "Automations"]);
+    const ownText = (button: HTMLElement) => [...button.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("");
+    expect(within(destinations).getAllByRole("button").map(ownText)).toEqual(["Home", "Overview", "New session", "Search", "Automations", "Issues"]);
+    // A key chip on the first four, as bound now; none on the others.
+    expect(within(destinations).getAllByRole("button").map((button) => !!button.querySelector("kbd"))).toEqual([true, true, true, true, false, false]);
     expect(destinations.compareDocumentPosition(screen.getByTestId("conversation-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
@@ -495,7 +589,7 @@ describe("renaming from the sidebar", () => {
     mount();
     try {
       fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
-      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
       // No dialog for a branch that is not there: the toast says why, and what to do.
       expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
       const toast = await screen.findByRole("alert");
@@ -530,12 +624,12 @@ describe("renaming from the sidebar", () => {
     mount();
     try {
       fireEvent.contextMenu(screen.getByRole("button", { name: "detached at 3f2a91c, Talk crane" }));
-      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
       await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
       const alerts = await screen.findAllByRole("alert");
       expect(alerts.map((alert) => alert.textContent)).toEqual([
         expect.stringContaining("Check out a branch before renaming"),
-        expect.stringContaining("Couldn't create a branch at 3f2a91c: Repository configuration needs trust."),
+        expect.stringContaining("Couldn't create a branch at 3f2a91c:Repository configuration needs trust."),
       ]);
     } finally {
       for (const toast of getErrorToasts()) dismissError(toast.id);
@@ -553,7 +647,7 @@ describe("renaming from the sidebar", () => {
   };
   const createBranchFrom = async (row: HTMLElement) => {
     fireEvent.contextMenu(row);
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     await act(async () => fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Create a branch here" })));
   };
 
@@ -608,7 +702,8 @@ describe("renaming from the sidebar", () => {
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Remove workspace, keep conversations…", "Delete…"]);
+    // The designed order (02.13, PRO-386): keys shown only where one is bound.
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Rename branch…", "Copy link", "Share session…", "Issue and pull request", "Remove workspace…The conversations are kept", "Archive", "Delete session…"]);
   });
 
   it("renames a branch's row by its label, never showing its worktree, and its git branch only when asked", async () => {
@@ -616,7 +711,7 @@ describe("renaming from the sidebar", () => {
     await bootTwo();
     mount();
     fireEvent.contextMenu(screen.getByRole("button", { name: "dc/crane, Talk crane" }));
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /Rename/ }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
     expect(name.value).toBe("dc/crane");
     fireEvent.change(name, { target: { value: "Pricing research" } });
@@ -632,13 +727,55 @@ describe("renaming from the sidebar", () => {
     await bootTwo();
     mount();
     const row = screen.getByRole("button", { name: "Payments, Talk crane" });
-    fireEvent.doubleClick(row);
+    fireEvent.contextMenu(row);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename branch…" }));
     const name = (await screen.findByRole("textbox", { name: "Name" })) as HTMLInputElement;
     expect(name.value).toBe("Payments");
     fireEvent.change(name, { target: { value: "Billing" } });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
     expect(mocks.invoke.mock.calls.some(([command]) => command === "rename_branch")).toBe(false);
     expect(mocks.invoke).toHaveBeenCalledWith("update_project", { path: "/repos/web", patch: { branchLabel: { branch: "dc/crane", label: "Billing" } } });
+  });
+
+  it.each(["double-click", "context menu", "dropdown"])("renames the displayed session on a named branch via %s without changing Git", async (entry) => {
+    withTrees({ "dc/crane": "Payments" });
+    await bootTwo();
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "rename_session" || command === "rename_tab") {
+        const { sessionId, tabId, title } = args as { sessionId: string; tabId?: string; title: string };
+        sessions = sessions.map((s) => s.id !== sessionId ? s : command === "rename_session"
+          ? { ...s, title }
+          : { ...s, tabs: s.tabs.map((tab) => tab.id === tabId ? { ...tab, title } : tab) });
+        return;
+      }
+      return base(command, args);
+    });
+    const { SessionDialogs } = await import("@/components/session/SessionDialogs");
+    const { closeRenameSession } = await import("@/lib/dialogs");
+    act(() => closeRenameSession());
+    render(<SessionDialogs />);
+    mount();
+    const row = screen.getByRole("button", { name: "Payments, Talk crane" });
+    expect(row.querySelector("[data-row-title]")?.textContent).toBe("Talk crane");
+    if (entry === "double-click") fireEvent.doubleClick(row);
+    else {
+      if (entry === "context menu") fireEvent.contextMenu(row);
+      else fireEvent.keyDown(screen.getByRole("button", { name: "Menu for Talk crane" }), { key: "ArrowDown" });
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename…" }));
+    }
+    const input = await screen.findByRole("textbox", { name: "Session title" });
+    expect((input as HTMLInputElement).value).toBe("Talk crane");
+    expect(screen.queryByRole("checkbox", { name: "Also rename branch" })).toBeNull();
+    fireEvent.change(input, { target: { value: "Investigate billing" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Rename" })));
+    expect(mocks.invoke).toHaveBeenCalledWith("rename_session", { sessionId: "crane", title: "Investigate billing" });
+    // Reload persisted titles, as native session-change events do in the app.
+    await act(async () => store.refreshEverything());
+    expect(screen.getByRole("button", { name: "Payments, Investigate billing" }).querySelector("[data-row-title]")?.textContent).toBe("Investigate billing");
+    expect(store.getSessionStore().sessions.find((s) => s.id === "crane")?.branch).toBe("dc/crane");
+    expect(store.getSessionStore().workspaces["/repos/web"].find((w) => w.name === "crane")?.branch).toBe("dc/crane");
+    expect(mocks.invoke.mock.calls.some(([command]) => ["rename_branch", "update_project", "git_branch_here"].includes(command))).toBe(false);
   });
 
   it("renames a conversation by its title where the row shows its title", async () => {
@@ -701,8 +838,8 @@ it("offers checkout cleanup separately from conversation deletion in the active 
   await boot([session("cleanup", "/repos/web", new Date().toISOString(), { cwd: "/repos/web/.raccoon/worktrees/cleanup", worktreeName: "cleanup" })]);
   mount();
   fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk cleanup" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
-  const item = await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" });
-  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+  const item = await screen.findByRole("menuitem", { name: /^Remove workspace…/ });
+  expect(screen.getByRole("menuitem", { name: "Delete session…" })).toBeTruthy();
   fireEvent.click(item);
   const dialogs = await import("@/lib/dialogs");
   const Probe = () => <div data-testid="cleanup-request">{JSON.stringify(dialogs.useDialogs().workspaceRemove)}</div>;
@@ -859,8 +996,8 @@ describe("the archive (#718)", () => {
 
   it("picks several rows and archives, brings back or deletes them together", async () => {
     await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4)), session("c", chatsPath, at(3)), session("d", chatsPath, at(2))]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockReset().mockResolvedValue(true);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockReset().mockResolvedValue(true);
     mount();
     const row = (id: string) => screen.getByRole("button", { name: new RegExp(`^Talk ${id}`) });
     expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
@@ -901,16 +1038,16 @@ describe("the archive (#718)", () => {
     act(() => { fireEvent.click(row("b"), { metaKey: true }); });
     act(() => { fireEvent.click(row("d")); });
     await act(async () => { fireEvent.click(within(screen.getByRole("toolbar", { name: "2 conversations selected" })).getByRole("button", { name: /Delete/ })); });
-    expect(vi.mocked(dialog.ask)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(dialog.ask).mock.calls[0][0]).toMatch(/^Delete 2 sessions\? Their transcripts and attachments are removed\./);
+    expect(vi.mocked(dialog.confirmInApp)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(dialog.confirmInApp).mock.calls[0][0]).toMatchObject({ title: "Delete 2 sessions?", body: expect.stringMatching(/^Their transcripts and attachments are removed\./), destructive: true });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "delete_session").map(([, args]) => args)).toEqual([{ sessionId: "b" }, { sessionId: "d" }]);
     expect(screen.queryByTestId("sidebar-bulk-bar")).toBeNull();
   });
 
   it("leaves the rows picked when the delete is cancelled", async () => {
     await boot([session("a", chatsPath, at(5)), session("b", chatsPath, at(4))]);
-    const dialog = await import("@tauri-apps/plugin-dialog");
-    vi.mocked(dialog.ask).mockReset().mockResolvedValue(false);
+    const dialog = await import("@/lib/confirm");
+    vi.mocked(dialog.confirmInApp).mockReset().mockResolvedValue(false);
     mount();
     act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk a/ }), { metaKey: true }); });
     act(() => { fireEvent.click(screen.getByRole("button", { name: /^Talk b/ }), { metaKey: true }); });
@@ -952,14 +1089,9 @@ describe("row extras and unread reminders (PRO-179)", () => {
     await boot([row]);
     prefs.setPrefs({ sidebarLayout, colourLineCounts: false });
     mount();
-    if (sidebarLayout === "simple") {
-      // A working row ends in its time, as 02.04 draws it; its lines show once it stops.
-      await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
-      expect(screen.queryByText("+12")).toBeNull();
-    } else {
-      // The chat list keeps its own time column, and its lines beside it.
-      expect(await screen.findByText("+12")).toBeTruthy();
-    }
+    // A working row ends in its time, as 02.04 draws it, in either layout; its lines show once it stops.
+    await waitFor(() => expect(document.querySelector('[data-row-meta="time"]')).toBeTruthy());
+    expect(screen.queryByText("+12")).toBeNull();
     expect(store.getSessionStore().selectedSessionId).not.toBe("background");
     additions = 27;
     await act(async () => setTabStatus(row.id, row.tabs[0].id, "completed"));
@@ -1038,10 +1170,9 @@ describe("custom order (PRO-169)", () => {
     await act(async () => { await ordering.saveSidebarOrder({ custom: false }); });
     mount();
     fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
-    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Sort by: Updated" }), { key: "ArrowRight" });
-    expect(screen.queryByRole("menuitemcheckbox", { name: "Custom order" })).toBeNull();
     expect((await screen.findByRole("menuitemradio", { name: "Updated" })).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Custom" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Custom order" }).getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Custom order" }));
     // The handle names the displayed conversation, not its hidden generated branch.
     await screen.findByRole("button", { name: "Reorder Talk older" });
     const rowIds = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
@@ -1049,12 +1180,12 @@ describe("custom order (PRO-169)", () => {
     act(() => prefs.setPrefs({ sidebarLayout: "list" }));
     await screen.findByRole("button", { name: "Reorder Talk older" });
     expect(rowIds()).toEqual(["older", "recent"]);
+    // Updated and Created are one choice; Custom order is a checkbox beside them, and checked it wins.
     const choose = async (current: string, next: string) => {
       fireEvent.keyDown(screen.getByTestId("sidebar-filter"), { key: "ArrowDown" });
-      fireEvent.keyDown(await screen.findByRole("menuitem", { name: `Sort by: ${current}` }), { key: "ArrowRight" });
-      const choices = await Promise.all(["Updated", "Created", "Custom"].map((name) => screen.findByRole("menuitemradio", { name })));
-      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current]);
-      fireEvent.click(screen.getByRole("menuitemradio", { name: next }));
+      const choices = [...await Promise.all(["Updated", "Created"].map((name) => screen.findByRole("menuitemradio", { name }))), screen.getByRole("menuitemcheckbox", { name: "Custom order" })];
+      expect(choices.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent)).toEqual([current === "Custom" ? "Custom order" : current]);
+      fireEvent.click(next === "Custom" ? screen.getByRole("menuitemcheckbox", { name: "Custom order" }) : screen.getByRole("menuitemradio", { name: next }));
       await waitFor(() => expect(prefs.getPrefs().sidebarSort).toBe(next.toLowerCase()));
     };
     await choose("Custom", "Created");
@@ -1070,7 +1201,7 @@ describe("custom order (PRO-169)", () => {
 });
 
 describe("the Machines section (PRO-345)", () => {
-  const machines = async (on: boolean) => {
+  const machines = async (paired: boolean) => {
     const experimental = await import("@/lib/experimentalSettings");
     const connections = await import("@/lib/machineConnections");
     const { pairedMachine } = await import("@/components/machines/machineFixtures.test-utils");
@@ -1078,9 +1209,8 @@ describe("the Machines section (PRO-345)", () => {
     connections.resetMachineConnectionsForTests();
     const answer = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args?: never) => {
-      if (command === "experimental_settings") return { nativeCodex: false, machines: on };
-      if (command === "machines_list") return [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
-      if (command === "machines_connections") return [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
+      if (command === "machines_list") return !paired ? [] : [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
+      if (command === "machines_connections") return !paired ? [] : [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
       return answer(command, args);
     });
     await connections.refreshPairedMachines();
@@ -1105,11 +1235,11 @@ describe("the Machines section (PRO-345)", () => {
     expect(store.getSessionStore().selectedCloudWorkspace).toBe("machine:m1");
   });
 
-  it("shows nothing with Experimental → Machines off, even with machines paired", async () => {
+  it("shows nothing with no machine paired (PRO-360)", async () => {
     await machines(false);
     await boot([session("one", "/repos/web", new Date().toISOString())]);
     mount();
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_list"));
     expect(screen.queryByTestId("machines-section")).toBeNull();
   });
 });

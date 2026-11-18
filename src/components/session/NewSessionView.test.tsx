@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project, SessionEntry } from "@/types/session";
 
@@ -33,10 +33,12 @@ vi.mock("@/lib/models", async (original) => ({
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 // Settings → Autocorrect is read through the store's subscription, so this one is live.
 const autocorrect = vi.hoisted(() => ({ on: false, listeners: new Set<() => void>() }));
+// The last agent chosen is saved like the app saves it: a pick is the agent once it is the saved one.
+const savedAgent = vi.hoisted(() => ({ lastAgent: "claude" }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: savedAgent.lastAgent, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
   getPrefs: () => ({ autocorrect: autocorrect.on }),
-  setPrefs: vi.fn(),
+  setPrefs: vi.fn((patch: { lastAgent?: string }) => { if (patch.lastAgent) savedAgent.lastAgent = patch.lastAgent; }),
   subscribePrefs: (listener: () => void) => {
     autocorrect.listeners.add(listener);
     return () => autocorrect.listeners.delete(listener);
@@ -76,6 +78,7 @@ const { forgetAgentAccounts } = await import("@/lib/useSessionAgent");
 const created = { id: "session-1", tabs: [{ id: "tab-1" }] } as SessionEntry;
 
 beforeEach(() => {
+  savedAgent.lastAgent = "claude";
   forgetAgentAccounts();
   dragDropListener.mockReset();
   dragDropListener.mockResolvedValue(vi.fn());
@@ -150,6 +153,9 @@ describe("new session attachments", () => {
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "create_session")).toHaveLength(0);
     expect(onCreated).not.toHaveBeenCalled();
     signedIn = true;
+    // One line for the agent; its full setup, with Check again, opens from it.
+    expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
+    fireEvent.click(within(screen.getByTestId("agent-setup-notice")).getByRole("button", { name: "Details" }));
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
     fireEvent.click(start);
@@ -164,7 +170,7 @@ describe("new session attachments", () => {
     render(<NewSessionView quick />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this question" } });
     const ask = screen.getByRole("button", { name: "Ask" });
-    await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+    await screen.findByText("Sign in to Claude to start a chat. Your draft is kept.");
     expect(ask.hasAttribute("disabled")).toBe(true);
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", metaKey: true });
     expect(createQuickChat).not.toHaveBeenCalled();
@@ -268,7 +274,11 @@ describe("folder projects", () => {
       if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
     });
     render(<NewSessionView />);
-    expect(screen.getByRole("button", { name: "Start from" }).textContent).toContain("New branch");
+    // The header says each choice on a chip of its own: the base branch, the worktree, and what to start from.
+    expect((await screen.findByRole("button", { name: "Base branch: main" })).textContent).toBe("from main");
+    expect(screen.getByRole("button", { name: "Session options" }).textContent).toBe("New worktree");
+    expect(screen.getByTestId("issue-chip").textContent).toBe("Issue");
+    expect(screen.getByRole("button", { name: "Start from" }).textContent).toBe("Start from");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
     expect(screen.queryByText("No Git")).toBeNull();
   });
@@ -455,11 +465,11 @@ describe("one new-chat composer (PRO-173)", () => {
       : original(command, args));
     renderView();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
-    await screen.findByText("Not installed");
+    await screen.findByText("Install Codex to start a chat. Your draft is kept.");
 
     readiness = "signed_out";
     act(() => window.dispatchEvent(new Event("focus")));
-    await screen.findByText("Installed · sign in required");
+    await screen.findByText("Sign in to Codex to start a chat. Your draft is kept.");
     expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
 
     readiness = "ready";
@@ -505,6 +515,7 @@ describe("one new-chat composer (PRO-173)", () => {
       : command === "list_branches" ? Promise.resolve([]) : original(command, args));
     const { rerender, onCreated } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Branches" }), { button: 0 });
     fireEvent.click(await screen.findByRole("option", { name: /New branch.*from feature\/login/ }));
     rerender(<NewSessionView onCreated={onCreated} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Fix login" } });
@@ -521,6 +532,7 @@ describe("one new-chat composer (PRO-173)", () => {
       : command === "list_branches" ? Promise.resolve([{ name: "feature/other", remote: false }]) : original(command, args));
     const { rerender, onCreated } = renderView();
     fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Branches" }), { button: 0 });
     fireEvent.click(await screen.findByRole("option", { name: "feature/other New worktree" }));
     rerender(<NewSessionView onCreated={onCreated} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue other work" } });
@@ -551,7 +563,9 @@ describe("one new-chat composer (PRO-173)", () => {
       await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe(`${chosen} · Bypass`));
       expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(false);
     } else {
-      await screen.findByText("Sign in to an agent to start a chat. Your draft is kept.");
+      // One notice, for the agent the chat would start with, never a card per agent.
+      await screen.findByText("Sign in to Claude to start a chat. Your draft is kept.");
+      expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
       expect(screen.getByRole("button", { name: projectless ? "Ask" : "Create" }).hasAttribute("disabled")).toBe(true);
     }
     expect(createQuickChat).not.toHaveBeenCalled();
@@ -616,6 +630,130 @@ it("allows Tab and starts with the literal issue number on Enter when PR search 
   await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
   expect(onCreated.mock.calls[0][2]).toBe("fix #45");
   expect(invoke.mock.calls.some(([command]) => command === "pr_attach")).toBe(false);
+});
+
+describe("the new-session box as designed (PRO-396)", () => {
+  const withStartFrom = () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => {
+      if (command === "preview_workspace_name") return Promise.resolve("quiet-fox");
+      if (command === "pr_search") return Promise.resolve([{ number: 781, title: "Per-project setup and run scripts", author: "alex-kim", state: "OPEN", head: "raccoon/project-scripts", checks: [{ name: "ci", state: "failure" }] }]);
+      if (command === "list_branches") return Promise.resolve([{ name: "main", remote: false, current: true }, { name: "release/0.9", remote: false, current: false }]);
+      if (command === "search_files") return Promise.resolve([{ path: "src/components/chat/AskCards.tsx", name: "AskCards.tsx", score: 1 }]);
+      if (command === "issues_list") return Promise.resolve([]);
+      return original(command, args);
+    });
+  };
+
+  it("lists pull requests under the caret, outside the box, so typing # never moves the prompt", async () => {
+    withStartFrom();
+    render(<NewSessionView />);
+    const field = screen.getByRole("textbox");
+    const box = field.closest("[data-composer-box]")!;
+    const before = [...field.parentElement!.children].indexOf(field);
+    fireEvent.change(field, { target: { value: "Fix the failing archive test on #78" } });
+    const row = await screen.findByRole("option", { name: "#781 Per-project setup and run scripts checks failing" });
+    const list = screen.getByTestId("pr-mention-popover");
+    expect(box.contains(list)).toBe(false);
+    expect([...field.parentElement!.children].indexOf(field)).toBe(before);
+    expect(screen.getByTestId("pr-mention-query").textContent).toBe("#78");
+    expect(row.querySelector("[data-pr-state]")?.getAttribute("data-pr-state")).toBe("failing");
+    expect(list.textContent).toContain("Adds the PR’s title, description and diff as a context file.");
+  });
+
+  it("shows a picked pull request as a chip in the header, and Escape in the prompt or its × takes it back", async () => {
+    withStartFrom();
+    render(<NewSessionView />);
+    const pick = async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start from" }));
+      // It opens on Pull requests.
+      expect(screen.getByRole("tab", { name: "Pull requests" }).getAttribute("aria-selected")).toBe("true");
+      fireEvent.click(await screen.findByRole("option", { name: /#781 Per-project setup/ }));
+      return screen.findByTestId("picked-pr");
+    };
+    const chip = await pick();
+    expect(chip.textContent).toBe("#781 Per-project setup and run scripts");
+    expect(chip.closest("[data-testid=new-session-header]")).toBeTruthy();
+    // The pull request names its own branch: no base branch to choose, and no second row above the prompt.
+    expect(screen.queryByTestId("base-branch-chip")).toBeNull();
+    expect(screen.getByRole("textbox").parentElement!.querySelector("[data-testid=picked-pr]")).toBeNull();
+    expect(fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" })).toBe(false);
+    expect(screen.queryByTestId("picked-pr")).toBeNull();
+    expect(screen.getByTestId("base-branch-chip")).toBeTruthy();
+    // With nothing picked, Escape is left to whatever closes the form.
+    expect(fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" })).toBe(true);
+
+    await pick();
+    fireEvent.click(screen.getByRole("button", { name: "Remove pull request" }));
+    expect(screen.queryByTestId("picked-pr")).toBeNull();
+  });
+
+  it("opens Start from on Issues from the Issue chip", async () => {
+    withStartFrom();
+    render(<NewSessionView />);
+    fireEvent.click(screen.getByTestId("issue-chip"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Issues" }).getAttribute("aria-selected")).toBe("true"));
+  });
+
+  it("chooses the branch a new worktree starts from on the from chip", async () => {
+    withStartFrom();
+    const { startSessionIn } = await import("@/lib/sessions");
+    const view = render(<NewSessionView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Base branch: main" }));
+    const main = await screen.findByRole("option", { name: "main default branch" });
+    expect(within(main).getByLabelText("Chosen")).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: "release/0.9" }));
+    expect(startSessionIn).toHaveBeenLastCalledWith(project.path, null, "release/0.9");
+    view.rerender(<NewSessionView />);
+    expect(screen.getByRole("button", { name: "Base branch: release/0.9" }).textContent).toBe("from release/0.9");
+  });
+
+  it("turns the worktree off and on from its chip", async () => {
+    withStartFrom();
+    const view = render(<NewSessionView />);
+    fireEvent.click(screen.getByRole("button", { name: "Session options" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Start on a new branch in a worktree" }));
+    view.rerender(<NewSessionView />);
+    expect(screen.getByRole("button", { name: "Session options" }).textContent).toBe("Current checkout");
+    expect(screen.queryByTestId("base-branch-chip")).toBeNull();
+  });
+
+  it("starts a file mention from the @ button and writes the picked path", async () => {
+    withStartFrom();
+    render(<NewSessionView />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Show the diff in" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
+    expect(field.value).toBe("Show the diff in @");
+    const hit = await screen.findByRole("option", { name: "src/components/chat/AskCards.tsx" });
+    expect(invoke).toHaveBeenCalledWith("search_files", { cwd: project.path, query: "", limit: 30 });
+    expect(field.closest("[data-composer-box]")!.contains(hit)).toBe(false);
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(field.value).toBe("Show the diff in @src/components/chat/AskCards.tsx ");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
+  it("splits the model and the permission mode into two chips, and joins Create to its other ways only when there are any", async () => {
+    render(<NewSessionView />);
+    expect(screen.getByTestId("agent-menu").textContent).not.toContain("Bypass");
+    expect(screen.getByTestId("agent-mode").tagName).toBe("BUTTON");
+    expect(screen.getByTestId("agent-mode").textContent).toBe("Bypass");
+    expect(within(screen.getByTestId("create-button")).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Create"]);
+  });
+
+  it("says what stands in the way inside the box, not under it", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_agent_readiness") return { state: "signed_out", checkedAt: null, version: null };
+    });
+    render(<NewSessionView />);
+    const note = await screen.findByText("Sign in to Claude to start a chat. Your draft is kept.");
+    expect(note.closest("[data-composer-box]")).toBeTruthy();
+    const box = screen.getByRole("textbox").closest("[data-composer-box]")!;
+    // Nothing follows the box: the footer is its last band.
+    expect(box.nextElementSibling).toBeNull();
+    expect(box.lastElementChild).toBe(screen.getByTestId("new-session-footer"));
+  });
 });
 
 it.each([false, true])("waits for PR context before creating a session, unless Escape cancels it (cancel=%s)", async (cancel) => {
@@ -683,6 +821,103 @@ describe("what the new-session view says about the project and the agents (PRO-2
     expect(screen.queryByTestId("setup-script-line")).toBeNull();
   });
 
+  it.each(["unknown", "checking"] as const)("shows nothing above the prompt box for Claude and Codex while their logins are %s (#1064)", async (answer) => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex" }];
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? answer === "checking" ? new Promise(() => {}) : Promise.resolve({ state: "unknown", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    if (answer === "unknown") await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    else await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "check_agent_readiness").length).toBeGreaterThan(0));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+    expect(screen.queryByRole("region", { name: /setup$/ })).toBeNull();
+    expect(screen.queryByText(/Checking agents|Checking installation|could not be verified|TerminalX account is optional|Sign in to an agent/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Sign in|Copy command|Setup guide|Check again/ })).toBeNull();
+  });
+
+  it("picks a signed-out Codex from the menu for setup: one compact notice for Codex only, then Codex once it is signed in (#1064)", async () => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex", installable: true, installUrl: "https://example.com/codex" }];
+    let codex = "signed_out";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: args.harness === "codex" ? codex : "ready", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("agent-menu"));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Codex/ }));
+    const notice = await screen.findByTestId("agent-setup-notice");
+    expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
+    expect(notice.textContent).toContain("Codex is signed out.");
+    expect(within(notice).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Setup guide" })).toBeTruthy();
+    // The full setup opens on demand, without the TerminalX account sentence.
+    fireEvent.click(within(notice).getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("region", { name: "Codex setup" }).textContent).toContain("codex login");
+    expect(screen.queryByText(/TerminalX account is optional/)).toBeNull();
+
+    codex = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Codex · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Codex setup" })).toBeNull();
+  });
+
+  it("keeps the notice and its open details through a re-check when no agent can start (#1064 review)", async () => {
+    let release: (() => void) | null = null;
+    let held = false;
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? held ? new Promise((resolve) => { release = () => resolve({ state: "signed_out", checkedAt: null, version: null }); })
+        : Promise.resolve({ state: "signed_out", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    fireEvent.click(within(await screen.findByTestId("agent-setup-notice")).getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+    held = true;
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(release).not.toBeNull());
+    // The re-check is under way: the last answer still stands, and the open card stays open.
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+    await act(async () => { release!(); });
+    expect(screen.getByRole("region", { name: "Claude setup" })).toBeTruthy();
+  });
+
+  it("drops an agent picked for setup when dismissed, or when another agent is picked, so a later sign-in never switches the chat (#1064 review)", async () => {
+    store.harnesses = [harness, { ...harness, id: "codex", name: "Codex", installable: true, installUrl: "https://example.com/codex" }, { ...harness, id: "gemini", name: "Gemini" }];
+    let codex = "signed_out";
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) => command === "check_agent_readiness"
+      ? Promise.resolve({ state: args.harness === "codex" ? codex : "ready", checkedAt: null, version: null })
+      : original(command, args));
+    renderView();
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
+    const pick = async (name: string) => {
+      fireEvent.click(screen.getByTestId("agent-menu"));
+      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+      for (const menu of screen.queryAllByRole("menu", { hidden: true }).reverse()) fireEvent.keyDown(menu, { key: "Escape" });
+    };
+
+    await pick("Codex");
+    fireEvent.click(within(await screen.findByTestId("agent-setup-notice")).getByRole("button", { name: "Dismiss Codex setup" }));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    await pick("Codex");
+    await screen.findByTestId("agent-setup-notice");
+    await pick("Gemini");
+    await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Gemini · Bypass"));
+    expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
+
+    codex = "ready";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command, args]) => command === "check_agent_readiness" && args.harness === "codex").length).toBeGreaterThan(1));
+    await act(async () => {});
+    expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Gemini · Bypass");
+  });
+
   it("lists only the agents that are installed and signed in, beside the Create note", async () => {
     const codex = { id: "codex", name: "Codex", available: true, installHint: "" } as HarnessInfo;
     const gemini = { id: "gemini", name: "Gemini", available: true, installHint: "" } as HarnessInfo;
@@ -695,7 +930,10 @@ describe("what the new-session view says about the project and the agents (PRO-2
     });
     renderView();
     await waitFor(() => expect(screen.getAllByTestId("agent-signed-in").map((node) => node.textContent)).toEqual(["Claude signed in"]));
-    expect(screen.getByText("Nothing starts until you press Create.")).toBeTruthy();
+    // The footer is a band of the box itself, not text under it on whatever is behind.
+    const footer = screen.getByTestId("new-session-footer");
+    expect(footer.textContent).toBe("Claude signed inNothing starts until you press Create");
+    expect(footer.closest("[data-composer-box]")).toBeTruthy();
   });
 });
 
@@ -713,15 +951,22 @@ describe("Orchestrate (PRO-337)", () => {
   });
   afterEach(() => resetExperimentalSettingsForTests());
 
-  it("is offered beside Create for a local git project only while Orchestration runs is on", async () => {
+  // Orchestrate is the other way to start, behind the chevron joined to Create.
+  const offered = () => screen.queryByRole("button", { name: "More ways to create" });
+  const orchestrate = async () => {
+    fireEvent.click(screen.getByRole("button", { name: "More ways to create" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Orchestrate/ }));
+  };
+
+  it("is offered with Create for a local git project only while Orchestration runs is on", async () => {
     runsOn(true);
     const first = render(<NewSessionView />);
-    expect(screen.getByRole("button", { name: "Orchestrate" })).toBeTruthy();
+    expect(offered()).toBeTruthy();
     first.unmount();
 
     runsOn(false);
     const off = render(<NewSessionView />);
-    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    expect(offered()).toBeNull();
     expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
     off.unmount();
 
@@ -729,14 +974,14 @@ describe("Orchestrate (PRO-337)", () => {
     runsOn(true);
     project.kind = "folder";
     const folder = render(<NewSessionView />);
-    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    expect(offered()).toBeNull();
     folder.unmount();
     project.kind = "git";
     const quick = render(<NewSessionView quick />);
-    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    expect(offered()).toBeNull();
     quick.unmount();
     render(<NewSessionView compact />);
-    expect(screen.queryByRole("button", { name: "Orchestrate" })).toBeNull();
+    expect(offered()).toBeNull();
   });
 
   it("starts the session Create would, marked to ask first, with the plan-a-run request last, on its Run tab", async () => {
@@ -747,8 +992,9 @@ describe("Orchestrate (PRO-337)", () => {
       const onCreated = vi.fn();
       const view = render(<><NewSessionView onCreated={onCreated} useWorktree={false} onUseWorktreeChange={vi.fn()} /><RunShown /></>);
       fireEvent.change(screen.getByRole("textbox"), { target: { value: "Improve the parser" } });
-      await waitFor(() => expect(screen.getByRole("button", { name: button }).hasAttribute("disabled")).toBe(false));
-      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+      if (button === "Orchestrate") await orchestrate();
+      else fireEvent.click(screen.getByRole("button", { name: "Create" }));
       await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
       const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
       starts.push({ req: args.req, prompt: onCreated.mock.calls[0][2] });
@@ -787,8 +1033,8 @@ describe("Orchestrate (PRO-337)", () => {
     fireEvent.mouseDown(screen.getByRole("tab", { name: "Issues" }), { button: 0 });
     fireEvent.click(await screen.findByRole("option", { name: /Split the settings reads/ }));
     await screen.findByTestId("picked-issue");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Orchestrate" }).hasAttribute("disabled")).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Orchestrate" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More ways to create" }).hasAttribute("disabled")).toBe(false));
+    await orchestrate();
     await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
     expect(invoke).toHaveBeenCalledWith("create_session", { req: expect.objectContaining({ orchestrate: true, useWorktree: true, worktreeName: "700-split-the-settings-reads" }) });
     const prompt: string = onCreated.mock.calls[0][2];

@@ -68,19 +68,24 @@ try {
     await tab(page, "gemini tab").click();
 
     // Apply's check is held; the scope moves to Uncommitted meanwhile; then the check passes.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
-    await page.getByText(/Against main/).waitFor();
-    await page.getByLabel("Comparison target").fill("release");
-    await page.getByRole("button", { name: "Apply", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
+    const target = page.getByRole("button", { name: "Comparison target", exact: true });
+    const scope = page.getByRole("button", { name: "Changes scope", exact: true });
+    await target.filter({ hasText: "vs main" }).waitFor();
+    await target.click();
+    await page.getByLabel("Branch to compare against").fill("release");
+    await page.getByLabel("Branch to compare against").press("Enter");
     await page.waitForFunction(() => window.__checks.length === 1);
-    await page.getByLabel("Changes scope").selectOption("uncommitted");
-    await page.getByRole("button", { name: "Back to all changes" }).waitFor();
+    await scope.click();
+    await page.getByRole("button", { name: /^Uncommitted changes/ }).click();
+    await scope.filter({ hasText: "Uncommitted changes" }).waitFor();
     // Uncommitted has no Apply button; once the check is let through, give its continuation a moment to run.
     await page.evaluate(() => window.__checks.shift()());
     await page.waitForTimeout(500);
-    const scopeAfter = await page.getByLabel("Changes scope").inputValue();
-    await page.getByLabel("Changes scope").selectOption("all");
-    const appliedRelease = await page.getByText(/Against release/).waitFor().then(() => true, () => false);
+    const scopeAfter = (await scope.textContent()) === "Uncommitted changes" ? "uncommitted" : await scope.textContent();
+    await scope.click();
+    await page.getByRole("button", { name: /^All changes/ }).click();
+    const appliedRelease = await target.filter({ hasText: "vs release" }).waitFor().then(() => true, () => false);
 
     if (shots) {
       await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));

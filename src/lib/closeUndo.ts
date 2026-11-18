@@ -97,7 +97,7 @@ export function dismissCloseUndo(id: string) {
   if (offers.some((offer) => offer.id === id)) set(offers.filter((offer) => offer.id !== id));
 }
 
-/** Withdraw what is offered for a session's tab once it is back by another way (its page, ⌘⌥T). */
+/** Withdraw what is offered for a session's tab once it is back by another way (its page, ⌥⌘T). */
 export function forgetCloseUndoFor(sessionId: string, tabId: string) {
   for (const offer of offers) {
     if (offer.sessionId !== sessionId || !offer.tabs.some((tab) => tab.id === tabId)) continue;

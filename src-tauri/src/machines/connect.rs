@@ -137,8 +137,22 @@ impl MachineConnections {
         }
     }
 
+    /// The paired machines (`machines_list`), for the CLI (`machine_control`).
+    pub(crate) fn paired(&self) -> Result<Vec<super::store::PairedMachine>> {
+        self.machines.list()
+    }
+
+    pub(crate) fn machines(&self) -> &Arc<Machines> {
+        &self.machines
+    }
+
+    /// `terminalx machines remove`: as Settings → Machines → Remove.
+    pub(crate) fn forget(&self, machine_id: &str) -> Result<bool> {
+        self.remove(machine_id)
+    }
+
     /// One view per paired machine, `idle` when not attached.
-    fn views(&self) -> Result<Vec<MachineConnectionView>> {
+    pub(crate) fn views(&self) -> Result<Vec<MachineConnectionView>> {
         Ok(self
             .machines
             .list()?
@@ -218,6 +232,10 @@ impl MachineEnv for StoreEnv {
         Ok(())
     }
 
+    fn save_token(&self, token: &str) -> Result<()> {
+        self.machines.secrets.save_token(&self.machine_id, token)
+    }
+
     fn drop_relay(&self) {
         if let Err(error) = self.forget_relay() {
             log::warn!("machines: forget the relay credential of machine {}: {error:#}", self.machine_id);
@@ -235,7 +253,8 @@ impl MachineEnv for StoreEnv {
 /// list keeps the last one, so a machine whose listener is off for a
 /// moment is still found once it is back.
 pub(crate) fn apply_described(machine: &mut super::store::PairedMachine, described: &Value, route: &RouteUsed, now: i64) {
-    if let Some(name) = described["name"].as_str().filter(|name| !name.is_empty()) {
+    // A name given on this computer stays (PRO-350).
+    if let Some(name) = described["name"].as_str().filter(|name| !name.is_empty() && !machine.named_here) {
         machine.name = name.chars().take(80).collect();
     }
     if let Some(family) = described["os"]["family"].as_str() {
@@ -310,6 +329,41 @@ impl MachineConnections {
     }
 }
 
+/// The longest name a person may give a machine here, as `machine.describe` keeps one.
+const MAX_NAME_CHARS: usize = 80;
+
+/// What `name` becomes: trimmed, and an error when nothing or too much is left.
+fn given_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("A machine needs a name."));
+    }
+    if name.chars().count() > MAX_NAME_CHARS || name.chars().any(char::is_control) {
+        return Err(anyhow!("A machine's name is at most {MAX_NAME_CHARS} characters, on one line."));
+    }
+    Ok(name.to_string())
+}
+
+impl MachineConnections {
+    /// Rename a paired machine on this computer only; the machine is not told.
+    fn rename(&self, machine_id: &str, name: &str) -> Result<super::store::PairedMachine> {
+        let name = given_name(name)?;
+        let renamed = self.machines.store()?.update(machine_id, |machine| {
+            machine.name = name;
+            machine.named_here = true;
+        })?;
+        renamed.ok_or_else(|| anyhow!("This machine is no longer paired with this computer."))
+    }
+}
+
+/// A machine's page → Rename (PRO-350): the name this computer shows for it,
+/// which the name the machine gives itself on connecting no longer replaces.
+#[tauri::command]
+pub async fn machines_rename(machine_id: String, name: String, connections: tauri::State<'_, Arc<MachineConnections>>) -> Result<super::store::PairedMachine, String> {
+    let connections = connections.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || connections.rename(&machine_id, &name)).await.map_err(super::err)?.map_err(super::err)
+}
+
 /// Settings → Machines → Remove. Answers whether the machine was paired.
 #[tauri::command]
 pub async fn machines_remove(machine_id: String, connections: tauri::State<'_, Arc<MachineConnections>>) -> Result<bool, String> {
@@ -322,6 +376,23 @@ mod tests {
     use super::*;
     use crate::remote::machine_client::RouteKind;
     use serde_json::json;
+
+    #[test]
+    fn a_name_given_here_survives_the_machines_own_and_is_checked() {
+        let mut machine = crate::machines::store::tests_support::machine("m1");
+        machine.name = "Build box".into();
+        machine.named_here = true;
+        let route = RouteUsed { kind: RouteKind::Lan, endpoint: Some("ws://192.168.1.20:6768/machine/1".into()) };
+        apply_described(&mut machine, &json!({ "name": "dev-server" }), &route, 5);
+        assert_eq!(machine.name, "Build box");
+        machine.named_here = false;
+        apply_described(&mut machine, &json!({ "name": "dev-server" }), &route, 6);
+        assert_eq!(machine.name, "dev-server");
+        assert_eq!(given_name("  Build box ").unwrap(), "Build box");
+        assert!(given_name("   ").is_err());
+        assert!(given_name(&"x".repeat(81)).is_err());
+        assert!(given_name("two\nlines").is_err());
+    }
 
     #[test]
     fn a_describe_brings_the_record_up_to_date_and_an_empty_address_list_keeps_the_last() {

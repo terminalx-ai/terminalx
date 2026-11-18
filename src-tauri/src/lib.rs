@@ -60,6 +60,8 @@ mod codex_device_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
+mod desktop_inbox;
+#[cfg(feature = "desktop")]
 mod organization_github_app;
 #[cfg(feature = "desktop")]
 mod organization_members;
@@ -73,6 +75,7 @@ mod organization_workspace_config;
 pub mod computer;
 mod control;
 mod cloud_control;
+mod machine_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
@@ -98,6 +101,7 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+mod fork_allocation;
 #[cfg(feature = "desktop")]
 mod repo_mirror;
 mod checkpoints;
@@ -158,8 +162,17 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+/// The phone protocol, which the window and the runtime both serve (PRO-359).
+#[cfg(unix)]
+mod phone;
 #[cfg(feature = "desktop")]
 mod machines;
+/// The operating computer's side of pairing by code (`machines/pair.rs`),
+/// outside the desktop feature: it needs only `machine_wire` and
+/// `relay_e2ee`, and the two-machine tests (PRO-358) pair with it against
+/// real runtimes. The desktop reaches it as `machines::pair`.
+#[path = "machines/pair.rs"]
+pub mod machine_pair;
 pub mod power;
 mod project_start;
 mod project_templates;
@@ -305,6 +318,34 @@ fn offer_settings_link(app: &tauri::AppHandle, link: desktop_links::SettingsLink
     }
 }
 
+/// Tells the webview a tab link (PRO-381) is waiting, as for a setting link.
+#[cfg(feature = "desktop")]
+const TAB_LINK_REQUESTED: &str = "tab_link_requested";
+
+#[cfg(feature = "desktop")]
+fn offer_tab_link(app: &tauri::AppHandle, link: desktop_links::TabLink) {
+    app.state::<desktop_links::PendingTabLink>().set(link);
+    if let Err(error) = app.emit(TAB_LINK_REQUESTED, ()) {
+        log::warn!("tell the webview about a tab link: {error}");
+    }
+}
+
+/// The tab link waiting for the webview, once: `{ sessionId, tabId }`, or null.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_take(pending: tauri::State<'_, desktop_links::PendingTabLink>) -> Option<desktop_links::TabLink> {
+    pending.take()
+}
+
+/// The link that opens a chat tab, in this build's scheme: the tab menu's "Copy link to this tab".
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn tab_link_for(app: tauri::AppHandle, session_id: String, tab_id: String) -> Result<String, String> {
+    desktop_links::DesktopLinks::for_identifier(&app.config().identifier)
+        .tab_link_url(&session_id, &tab_id)
+        .ok_or_else(|| "this tab has no link".to_owned())
+}
+
 /// The setting link waiting for the webview, once: `{ id, enable }` and
 /// nothing else of the URL, or null when none is.
 #[cfg(feature = "desktop")]
@@ -317,6 +358,12 @@ fn settings_link_take(pending: tauri::State<'_, desktop_links::PendingSettingsLi
 /// from setup on: the app's stderr goes nowhere once it is opened normally.
 #[cfg(all(feature = "desktop", unix))]
 static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
+
+#[cfg(all(unix, feature = "desktop"))]
+fn install_window_pairing_consent(pairing: &std::sync::Arc<pairing::PairingManager>) {
+    let keys = std::sync::Arc::downgrade(pairing);
+    serve_cli::consent::speak_as_window(Box::new(move || keys.upgrade()?.consent_key()));
+}
 
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -407,6 +454,7 @@ pub fn run() {
         .manage(floating::Floating::default())
         .manage(state)
         .manage(desktop_links::PendingSettingsLink::default())
+        .manage(desktop_links::PendingTabLink::default())
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .manage(machines.clone())
@@ -441,6 +489,10 @@ pub fn run() {
             account.configure(&app.config().identifier)?;
             account.attach_app(app.handle());
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
+            // Pairing codes and approvals from this window prove it is the
+            // window, which has no terminal (PRO-369).
+            #[cfg(unix)]
+            install_window_pairing_consent(&pairing);
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
@@ -454,6 +506,7 @@ pub fn run() {
                     for url in urls {
                         if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
                         else if let Some(link) = links.settings_link(&url) { offer_settings_link(&app_handle, link); }
+                        else if let Some(link) = links.tab_link(&url) { offer_tab_link(&app_handle, link); }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
@@ -465,6 +518,9 @@ pub fn run() {
                             } else if let Some(link) = links.settings_link(&url) {
                                 log::info!("received TerminalX settings link");
                                 offer_settings_link(&app_handle, link);
+                            } else if let Some(link) = links.tab_link(&url) {
+                                log::info!("received TerminalX tab link");
+                                offer_tab_link(&app_handle, link);
                             } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
@@ -672,6 +728,20 @@ pub fn run() {
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
+            commands::phase2_desktop_contracts_available,
+            commands::cloud_workspace_follow_put,
+            commands::cloud_workspace_follow_delete,
+            commands::cloud_workspace_reassign,
+            commands::desktop_presence_put,
+            commands::desktop_presence_read,
+            commands::desktop_inbox,
+            commands::desktop_inbox_stream,
+            commands::desktop_inbox_receipts,
+            commands::cloud_workspace_read_marker,
+            commands::cloud_workspace_restart,
+            commands::cloud_workspace_details,
+            commands::cloud_workspace_idle_suspend,
+            commands::cloud_workspace_set_idle_suspend,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
             cloud_remote::cloud_remote_attach,
@@ -679,12 +749,15 @@ pub fn run() {
             machines::connect::machines_connections,
             machines::connect::machines_reconnect,
             machines::connect::machines_remove,
+            machines::connect::machines_rename,
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
             cloud_remote::cloud_port_forward,
             cloud_remote::cloud_port_unforward,
             cloud_remote::cloud_port_forwards,
+            cloud_remote::cloud_port_settings,
+            cloud_remote::cloud_port_set_settings,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
@@ -712,6 +785,9 @@ pub fn run() {
             machines::machines_approve,
             machines::machines_decline,
             machines::machines_revoke,
+            machines::machines_disconnect,
+            machines::machines_let_back,
+            machines::machines_activity,
             machines::machines_inspect_code,
             machines::machines_pair,
             machines::machines_cancel_pairing,
@@ -728,6 +804,8 @@ pub fn run() {
             commands::session_share_change,
             commands::session_join_pending,
             settings_link_take,
+            tab_link_take,
+            tab_link_for,
             commands::session_guest_join,
             commands::session_guest_send,
             commands::session_guest_leave,
@@ -804,6 +882,7 @@ pub fn run() {
             commands::delete_session,
             commands::list_harnesses,
             commands::check_agent_readiness,
+            commands::agent_latest_version,
             commands::agent_setup_start,
             commands::agent_setup_running,
             commands::list_skills,
@@ -830,6 +909,7 @@ pub fn run() {
             commands::prepare_continuation,
             commands::send_message,
             commands::store_attachments,
+            commands::read_attachment_part,
             commands::inspect_attachments,
             commands::save_attachment_copy,
             commands::report_send_shown,
@@ -930,6 +1010,7 @@ pub fn run() {
             commands::pr_landed,
             commands::pr_create,
             commands::pr_merge,
+            commands::pr_delete_branch,
             commands::pr_ready,
             commands::pr_check_authority,
             commands::pr_check_log,
@@ -977,12 +1058,14 @@ pub fn run() {
             commands::read_whole_text_file,
             commands::export_file,
             commands::write_text_file,
+            commands::create_text_file,
             commands::file_mtime,
             commands::inspect_local_path,
             commands::open_local_path,
             commands::search_text,
             commands::replace_text,
             commands::fork_session,
+            commands::fork_turn,
             commands::dictation_available,
             commands::notification_permission,
             commands::dictation_start,
@@ -1054,6 +1137,7 @@ pub fn run() {
             commands::orchestration_resolve_in_lead,
             commands::orchestration_take_over,
             commands::orchestration_finish,
+            commands::orchestration_finish_widens,
             commands::orchestration_widen,
             commands::orchestration_note,
             commands::orchestration_skip,

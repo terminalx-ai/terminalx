@@ -68,15 +68,15 @@ describe("settings in the command palette", () => {
     const rows = within(group).getAllByRole("option");
     // The rows are the registry's own, best first, each saying the page it is on.
     expect(rows.map((row) => row.id)).toEqual(searchSettings("text size").slice(0, rows.length).map((match) => `palette:setting:${match.id}`));
-    expect(rows[0].id).toBe("palette:setting:appearance.textSize");
+    expect(rows[0].id).toBe("palette:setting:general.textSize");
     expect(rows[0].textContent).toContain("Text size");
-    expect(rows[0].textContent).toContain("Appearance · Scales the transcript and composer.");
+    expect(rows[0].textContent).toContain("General · Scales the transcript and composer.");
     expect(rows[0].querySelector("mark")?.textContent).toBe("Text");
     // No section entry stands in for the row.
-    expect(within(group).queryByRole("option", { name: /^Appearance/ })).toBeNull();
+    expect(within(group).queryByRole("option", { name: /^General/ })).toBeNull();
     // The best match is the first row in the list, so Enter opens it.
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("appearance.textSize"));
+    await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("general.textSize"));
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
@@ -94,7 +94,7 @@ describe("settings in the command palette", () => {
     await screen.findByRole("group", { name: "Settings" });
     expect(screen.getByRole("option", { name: /Toggle status bar/ })).toBeTruthy();
     expect(groupIds().indexOf("palette-group-settings")).toBeLessThan(groupIds().indexOf("palette-group-commands"));
-    expect(screen.getAllByRole("option")[0].id).toBe("palette:setting:appearance.statusBar");
+    expect(screen.getAllByRole("option")[0].id).toBe("palette:setting:general.statusBar");
     fireEvent.change(input, { target: { value: "home" } });
     await waitFor(() => expect(screen.getAllByRole("option")[0].id).toBe("command:shortcut:app.home"));
     expect(groupIds().indexOf("palette-group-commands")).toBeLessThan(groupIds().indexOf("palette-group-settings"));
@@ -152,7 +152,8 @@ describe("settings in the command palette", () => {
     const results = screen.getAllByRole("option");
     const pages = within(screen.getByRole("group", { name: "Settings pages" })).getAllByRole("option");
     // Orchestrator and Local VMs are behind their Experimental switches, which are off.
-    expect(pages).toHaveLength(15);
+    expect(pages).toHaveLength(16);
+    expect(pages.map((row) => row.id)).toContain("palette:settings-page:machines");
     expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:localVms");
@@ -172,7 +173,7 @@ describe("settings in the command palette", () => {
     expect(input.getAttribute("aria-activedescendant")).toBe(results[0].id);
     fireEvent.keyDown(input, { key: "Enter" });
     // PRO-401: the pages are in design 07.05's order, General first.
-    expect(pages.slice(0, 8).map((row) => row.id.replace("palette:settings-page:", ""))).toEqual(["general", "account", "appearance", "shortcuts", "integrations", "devices", "agents", "environment"]);
+    expect(pages.slice(0, 9).map((row) => row.id.replace("palette:settings-page:", ""))).toEqual(["general", "account", "appearance", "shortcuts", "integrations", "devices", "machines", "agents", "environment"]);
     await waitFor(() => expect(onOpenSettings).toHaveBeenCalledWith("general"));
   });
 
@@ -185,7 +186,7 @@ describe("settings in the command palette", () => {
       const projects = within(screen.getByRole("group", { name: "Projects" })).getAllByRole("option");
       expect(projects.map((row) => row.textContent)).toEqual(["AlphaScripts, files to copy and workspace cleanup"]);
       fireEvent.click(projects[0]);
-      await waitFor(() => expect(requested).toHaveBeenCalledWith("/alpha"));
+      await waitFor(() => expect(requested).toHaveBeenCalledWith("/alpha", "scripts"));
       expect(onOpenChange).toHaveBeenCalledWith(false);
       expect(onOpenSettings).not.toHaveBeenCalled();
     } finally { stop(); }

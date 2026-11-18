@@ -12,7 +12,7 @@ const plan: WorkspaceRestorePreview = {
   projectPath: "/repo", path: "/repo/.raccoon/worktrees/topic", branch: "topic", commit: "a".repeat(40),
   needsBranch: null, suggestedBranch: "topic-restored", legacy: false, sessionIds: ["session", "sibling"],
 };
-const button = () => screen.getByRole("button", { name: "Restore workspace" }) as HTMLButtonElement;
+const button = () => screen.getByRole("button", { name: /^Restore session/ }) as HTMLButtonElement;
 const open = () => { render(<WorkspaceRestoreDialog />); act(() => openWorkspaceRestore("session")); };
 beforeEach(() => {
   mocks.preview.mockReset().mockResolvedValue(plan);
@@ -20,16 +20,20 @@ beforeEach(() => {
 });
 afterEach(() => { act(closeWorkspaceRestore); cleanup(); });
 
-it("waits for the check, explains archive-script files, and restores the existing branch only on confirmation", async () => {
+it("waits for the check, shows the commit and path on one line each, and restores the existing branch only on confirmation", async () => {
   let finish!: (preview: WorkspaceRestorePreview) => void;
   mocks.preview.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
   open();
   expect(button().disabled).toBe(true);
-  expect(screen.getByText(/Git checkout can recreate tracked files deliberately removed by an archive script/)).toBeTruthy();
   await act(async () => finish(plan));
-  expect(screen.getByText(plan.path)).toBeTruthy();
-  expect(screen.getByText(plan.commit)).toBeTruthy();
-  expect(screen.getByText("2 retained conversations will reopen here.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Restore session?" })).toBeTruthy();
+  const path = screen.getByText(plan.path);
+  expect(path.className).toContain("truncate");
+  expect(path.className).not.toContain("break-all");
+  expect(screen.getByText(plan.commit.slice(0, 7)).getAttribute("title")).toBe(plan.commit);
+  expect(screen.getByText(/reopens its 2 conversations there/)).toBeTruthy();
+  expect(screen.getByText(/Only committed files come back/)).toBeTruthy();
+  expect(screen.getByText("Chats and terminals come back as they were.")).toBeTruthy();
   expect(mocks.restore).not.toHaveBeenCalled();
   fireEvent.click(button());
   await waitFor(() => expect(mocks.restore).toHaveBeenCalledWith("session", plan, null));
@@ -42,7 +46,9 @@ it.each(["deleted", "moved", "checked out elsewhere", "detached HEAD"])("offers 
   open();
   const input = await screen.findByRole("textbox", { name: "New branch name" });
   expect((input as HTMLInputElement).value).toBe("topic-restored");
-  expect(screen.getByText(preview.needsBranch)).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Restore on a new branch?" })).toBeTruthy();
+  expect(screen.getByText(new RegExp(preview.needsBranch))).toBeTruthy();
+  expect(screen.getByRole("radio", { name: "New branch" }).getAttribute("aria-checked")).toBe("true");
   fireEvent.change(input, { target: { value: " " } });
   expect(button().disabled).toBe(true);
   fireEvent.change(input, { target: { value: "review-fix" } });
@@ -104,4 +110,23 @@ it("ignores a late preview after the dialog has changed sessions", async () => {
   expect(screen.queryByText("/stale-path")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(mocks.restore).not.toHaveBeenCalled();
+});
+
+it("restores the recorded commit detached when that card is chosen (02.16)", async () => {
+  const preview = { ...plan, needsBranch: "The branch was deleted." };
+  mocks.preview.mockResolvedValue(preview);
+  open();
+  fireEvent.click(await screen.findByRole("radio", { name: "Detached at aaaaaaa" }));
+  expect(screen.queryByRole("textbox", { name: "New branch name" })).toBeNull();
+  expect(button().disabled).toBe(false);
+  fireEvent.click(button());
+  await waitFor(() => expect(mocks.restore).toHaveBeenCalledWith("session", preview, null, true));
+});
+
+it("writes a path under the home folder with ~", async () => {
+  vi.doMock("@tauri-apps/api/path", () => ({ homeDir: async () => "/Users/someone" }));
+  mocks.preview.mockResolvedValue({ ...plan, path: "/Users/someone/code/lab/.raccoon/worktrees/topic" });
+  open();
+  expect(await screen.findByText("~/code/lab/.raccoon/worktrees/topic")).toBeTruthy();
+  vi.doUnmock("@tauri-apps/api/path");
 });

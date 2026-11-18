@@ -84,7 +84,7 @@ export function AttachmentToolbar({ path, name, sentAt, markdown = false, viewMo
       <div className="@container/editor-toolbar h-8 border-b border-hairline" data-testid="editor-toolbar">
         <div className="flex h-full items-center gap-2 overflow-x-auto px-3 text-xs">
           <Paperclip aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="flex min-w-0 flex-1 font-mono text-[11px] text-faint" title={path} data-testid="attachment-path">
+          <span className="flex min-w-0 flex-1 overflow-hidden font-mono text-[12px] text-faint" title={path} data-testid="attachment-path">
             <span className="truncate">{shown.slice(0, slash)}</span>
             <span className="min-w-0 max-w-full shrink-0 truncate">{shown.slice(slash)}</span>
           </span>

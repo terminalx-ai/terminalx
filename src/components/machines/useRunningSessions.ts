@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { RuntimeSession } from "@terminalx/portable/workspace";
+import type { RuntimeSession, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { runtimeResources } from "@terminalx/portable/workspaceGit";
 import type { CloudWorkspaceConnection } from "@/lib/api";
 
 /** A session whose agent is working or waiting on someone: running on the machine. */
@@ -36,4 +37,21 @@ export function useRunningSessions(connection: CloudWorkspaceConnection | null, 
 export function runningText(count: number): string {
   if (count === 0) return "no sessions running";
   return `${count} session${count === 1 ? "" : "s"} running`;
+}
+
+/** Free memory on a connected machine, read once per client (`lifecycle.resources`); null where it does not report it. */
+export function useFreeMemory(client: WorkspaceRpcClient | null): number | null {
+  const [free, setFree] = useState<number | null>(null);
+  useEffect(() => {
+    setFree(null);
+    if (!client) return;
+    let live = true;
+    runtimeResources(client)
+      .then((resources) => live && setFree(resources?.memory?.availableBytes ?? null))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client]);
+  return free;
 }

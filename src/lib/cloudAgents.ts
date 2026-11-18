@@ -1,9 +1,10 @@
+import { cloudActivityRead, subscribeCloudReadMarkers, writeCloudReadMarker } from "@/lib/cloudReadMarkers";
 import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
-import type { ImageInput } from "@/lib/api";
-import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages, uploadMachineFiles, type MachineFileRef } from "@/lib/cloudComposer";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
 import {
   cloudAgentApi,
@@ -103,6 +104,7 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+const deniedWorkspaces = new Set<string>();
 /** Issued mutations outlive disposable stores. Do not clear this queue on
  * account changes: A -> B -> A must still wait for A's older native operation. */
 const cacheMutations = new Map<string, Promise<void>>();
@@ -111,7 +113,9 @@ let account = "";
 
 /** Told by `@/lib/account` whenever the status changes. Stores made from now on are this account's. */
 export function setCloudAgentAccount(next: string | null) {
+  if (account === (next ?? "")) return;
   account = next ?? "";
+  loadDeniedWorkspaces();
 }
 
 /** The account a store's cache belongs to; one made before anyone was known takes the first account it is used under. */
@@ -129,15 +133,26 @@ export function subscribeAllCloudAgents(listener: () => void): () => void {
 }
 
 /**
- * A runtime attached by pairing code for development: no organization, so no
- * API mailbox, keys, checkpoints or cache. Prompts go over live RPC; steering,
- * stopping and decisions need a cloud workspace.
+ * A runtime with no organization: a paired machine (PRO-345). It has no API
+ * mailbox, keys, checkpoints or cache. Every command goes over the live
+ * connection: with `agent-commands/1` (PRO-343) send, steer, stop and
+ * decisions alike, each answered once per id from the machine's receipts;
+ * on an older machine only prompts.
  */
 export function isDevScope(scope: CloudAgentScope): boolean {
   return !scope.organizationId;
 }
 
-export const DEV_SCOPE_NOTICE = "Steering, stopping and permission decisions need a cloud workspace; this development runtime only takes prompts.";
+/** An older machine, without `agent-commands/1`. */
+export const DEV_SCOPE_NOTICE = "Steering, stopping and answering approvals need a newer TerminalX on that machine; it only takes prompts.";
+
+/** Nothing is queued on this Mac for a machine it cannot reach (docs/MACHINES.md decision 3). */
+export const LIVE_NOT_CONNECTED = "Not connected: nothing is sent until the machine is back.";
+
+/** Whether `scope`'s commands go live, all of them: a machine that serves `agent-commands/1`. */
+export function takesLiveCommands(scope: CloudAgentScope, client: WorkspaceRpcClient | null): boolean {
+  return isDevScope(scope) && !!client && client.connection.state === "connected" && client.hasCapability("agent-commands/1");
+}
 
 export function cloudAgentsKey(scope: CloudAgentScope): string {
   return `${scope.organizationId}:${scope.workspaceId}`;
@@ -172,7 +187,15 @@ function store(scope: CloudAgentScope): Store {
   return s;
 }
 
+subscribeCloudReadMarkers(() => {
+  for (const s of stores.values()) publish(s);
+});
+
 function publish(s: Store) {
+  if (stores.get(cloudAgentsKey(s.scope)) !== s) return;
+  for (const tab of s.tabs.values()) {
+    if (cloudActivityRead(s.scope.organizationId, s.scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt)) tab.unread = false;
+  }
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
   s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
@@ -233,6 +256,57 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   clearDrafts((tabId) => ids.has(tabId));
   for (const id of ids) draftTabs.delete(id);
   return count;
+}
+
+function loadDeniedWorkspaces() {
+  deniedWorkspaces.clear();
+  if (!account) return;
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(`terminalx.denied-cloud.v1:${encodeURIComponent(account)}`) ?? "[]");
+    if (Array.isArray(saved)) for (const key of saved) if (typeof key === "string") deniedWorkspaces.add(key);
+  } catch { /* Native authorization remains authoritative if local storage is unavailable. */ }
+}
+function saveDeniedWorkspaces() {
+  if (!account) return;
+  localStorage.setItem(`terminalx.denied-cloud.v1:${encodeURIComponent(account)}`, JSON.stringify([...deniedWorkspaces]));
+}
+
+/** A revoke hint blocks cache/checkpoint/live reloads until a fresh authorized catalog answers. */
+export function setCloudAgentsAccess(scope: CloudAgentScope, allowed: boolean) {
+  const key = cloudAgentsKey(scope);
+  if (allowed) {
+    const wildcard = deniedWorkspaces.delete(`*:${scope.workspaceId}`);
+    if (deniedWorkspaces.delete(key) || wildcard) {
+      try { saveDeniedWorkspaces(); } catch { /* A stale durable denial can only hide data on relaunch. */ }
+    }
+    return;
+  }
+  deniedWorkspaces.add(key);
+  const previous = stores.get(key);
+  dropCloudAgents(scope);
+  if (previous) {
+    previous.snapshot = { ...EMPTY, version: previous.snapshot.version + 1 };
+    for (const listener of [...previous.listeners]) listener();
+  }
+  for (const listener of [...anyListeners]) listener();
+  // A failed durable write prevents the inbox checkpoint from committing and retries the invalidation.
+  saveDeniedWorkspaces();
+}
+
+/** A minimal removal may arrive before the catalog knows the workspace's organization. */
+export function denyCloudAgentsWorkspace(workspaceId: string) {
+  deniedWorkspaces.add(`*:${workspaceId}`);
+  for (const s of [...stores.values()]) {
+    if (s.scope.workspaceId !== workspaceId) continue;
+    dropCloudAgents(s.scope);
+    s.snapshot = { ...EMPTY, version: s.snapshot.version + 1 };
+    for (const listener of [...s.listeners]) listener();
+  }
+  for (const listener of [...anyListeners]) listener();
+  saveDeniedWorkspaces();
+}
+export function cloudAgentsAccessDenied(scope: CloudAgentScope) {
+  return deniedWorkspaces.has(cloudAgentsKey(scope)) || deniedWorkspaces.has(`*:${scope.workspaceId}`);
 }
 
 /** Forget one organization's tabs and polling: the user left it (CS-18). */
@@ -436,6 +510,7 @@ export async function flushCloudAgentCache(scope: CloudAgentScope) {
  * have a checkpoint. Idempotent; never connects and never wakes anything.
  */
 export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
+  if (cloudAgentsAccessDenied(scope)) return Promise.resolve();
   const s = store(scope);
   if (s.loaded) return Promise.resolve();
   if (s.loading) return s.loading;
@@ -447,6 +522,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
   s.loading = (async () => {
     try {
       const cached = await cloudAgentApi.cacheLoad(cacheAccount(s), scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
         if (!entry?.tab) continue;
         const info = withMessagePresence(entry.tab, entry.events ?? []);
@@ -478,13 +554,19 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
     } catch (error) {
       s.error = errorText(error);
     }
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     try {
-      s.outbox = await cloudAgentApi.outbox(scope);
+      const outbox = await cloudAgentApi.outbox(scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
+      s.outbox = outbox;
     } catch (error) {
       s.error = errorText(error);
     }
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     try {
-      for (const meta of await cloudAgentApi.checkpoints(scope)) {
+      const metas = await cloudAgentApi.checkpoints(scope);
+      if (stores.get(cloudAgentsKey(scope)) !== s) return;
+      for (const meta of metas) {
         if (!s.tabs.has(meta.tabId)) s.tabs.set(meta.tabId, newTab(placeholderInfo(meta.tabId), "checkpoint", true));
       }
     } catch (error) {
@@ -506,8 +588,9 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
  * is read. A read of the API; never connects and never wakes anything.
  */
 export async function relistCloudCheckpoints(scope: CloudAgentScope): Promise<void> {
-  if (isDevScope(scope)) return;
+  if (isDevScope(scope) || cloudAgentsAccessDenied(scope)) return;
   await loadCloudAgents(scope);
+  if (cloudAgentsAccessDenied(scope)) return;
   const s = store(scope);
   const listed = await cloudAgentApi.checkpoints(scope);
   // Dropped meanwhile (another account, a deleted workspace): nothing is added to a store nobody holds.
@@ -527,10 +610,12 @@ export async function relistCloudCheckpoints(scope: CloudAgentScope): Promise<vo
  * stronger than a checkpoint.
  */
 export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: string): Promise<boolean> {
+  if (cloudAgentsAccessDenied(scope)) return false;
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   if (!tab || tab.live) return false;
   const checkpoint = await cloudAgentApi.checkpoint(scope, tabId, tab.checkpoint);
+  if (stores.get(cloudAgentsKey(scope)) !== s) return false;
   const current = s.tabs.get(tabId);
   if (!current) return false;
   if (!checkpoint && !current.historyRead) {
@@ -603,6 +688,7 @@ export function settledStatus(info: Pick<AgentTabInfo, "signIn">, status: AgentT
 
 /** The runtime's own tab list is authoritative: tabs it no longer has are gone. */
 export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
+  if (cloudAgentsAccessDenied(scope)) return;
   const s = store(scope);
   const seen = new Set<string>();
   for (const reported of tabs) {
@@ -643,7 +729,10 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {
-  applyLiveTabs(scope, await client.listAgentTabs());
+  const s = store(scope);
+  const tabs = await client.listAgentTabs();
+  if (stores.get(cloudAgentsKey(scope)) !== s) return;
+  applyLiveTabs(scope, tabs);
 }
 
 /** Tabs brought up to date from their checkpoints at one connect, at most. */
@@ -658,10 +747,11 @@ const RECONCILE_CHECKPOINTS = 20;
  * The tab being looked at streams live and replays from its cursor instead.
  */
 export async function reconcileCloudAgents(scope: CloudAgentScope, client: WorkspaceRpcClient) {
+  const s = store(scope);
   const tabs = await client.listAgentTabs();
+  if (stores.get(cloudAgentsKey(scope)) !== s || cloudAgentsAccessDenied(scope)) return;
   applyLiveTabs(scope, tabs);
   if (isDevScope(scope)) return;
-  const s = store(scope);
   const behind = tabs.filter((info) => {
     const tab = s.tabs.get(info.tabId);
     return !!tab && !tab.live && !!info.sessionId && knownSeq(tab) > lastSeq(info.sessionId, info.tabId);
@@ -714,6 +804,7 @@ function noteCaughtUp(sessionId: string, tabId: string, feed: object, on: boolea
  * merged by seq.
  */
 export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient): Promise<() => void> {
+  if (cloudAgentsAccessDenied(scope)) return () => {};
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   // Not known here yet (the runtime's tab list or a checkpoint has not named its session):
@@ -738,6 +829,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     caught(false);
   };
   const onEvent = (raw: unknown) => {
+    if (stores.get(cloudAgentsKey(scope)) !== s) return;
     const ev = raw as AgentEvent;
     if (!ev || typeof ev !== "object" || !ev.payload) return;
     const current = s.tabs.get(tabId);
@@ -761,10 +853,12 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     stop = await client.subscribeSession(sessionId, tabId, onEvent, {
       sinceCursor: tab.cursor ?? undefined,
       onCursor: (cursor) => {
+        if (stores.get(cloudAgentsKey(scope)) !== s) return;
         const current = s.tabs.get(tabId);
         if (current) current.cursor = cursor ?? null;
       },
       onStatus: (change) => {
+        if (stores.get(cloudAgentsKey(scope)) !== s) return;
         const current = s.tabs.get(tabId);
         if (!current) return;
         const status = settledStatus(current.info, change.status);
@@ -775,7 +869,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
         publish(s);
         scheduleSave(s, tabId);
       },
-      onReplayed: () => caught(client.connection.state === "connected"),
+      onReplayed: () => { if (stores.get(cloudAgentsKey(scope)) === s) caught(client.connection.state === "connected"); },
     });
   } catch (error) {
     end();
@@ -784,6 +878,7 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     publish(s);
     throw error;
   }
+  if (stores.get(cloudAgentsKey(scope)) !== s) { stop?.(); end(); return () => {}; }
   // The replay has been merged: the conversation is what is shown now.
   const replayed = s.tabs.get(tabId);
   if (replayed && !replayed.historyRead) {
@@ -837,6 +932,8 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
   const tab = s.tabs.get(tabId);
   if (!tab || (!tab.unread && tab.info.status !== "completed")) return;
   tab.unread = false;
+  // Use the runtime session row ID and the message actually rendered, never the desktop tab ID or wall clock.
+  if (!isDevScope(scope)) void writeCloudReadMarker(scope.organizationId, scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt);
   if (tab.info.status === "completed") tab.info = { ...tab.info, status: "idle" };
   publish(s);
   scheduleSave(s, tabId);
@@ -856,7 +953,7 @@ type NewCloudAgentTab = Parameters<WorkspaceRpcClient["createAgentTab"]>[0];
  * when the tab was started from an issue (`pipeline/1`): the pipeline, or why
  * there is none.
  */
-export async function newCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<{ tabId: string; pipeline: RuntimeIssuePipeline | null; pipelineNote: string | null }> {
+export async function newCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<{ tabId: string; sessionId: string; pipeline: RuntimeIssuePipeline | null; pipelineNote: string | null; startError: string | null }> {
   const created = await client.createAgentTab(params);
   const s = store(scope);
   const now = new Date().toISOString();
@@ -874,7 +971,7 @@ export async function newCloudAgentTab(scope: CloudAgentScope, client: Workspace
   if (!s.tabs.has(created.tabId)) s.tabs.set(created.tabId, newTab(info, "live"));
   publish(s);
   scheduleSave(s, created.tabId);
-  return { tabId: created.tabId, pipeline: created.pipeline ?? null, pipelineNote: created.pipelineNote ?? null };
+  return { tabId: created.tabId, sessionId: created.sessionId, pipeline: created.pipeline ?? null, pipelineNote: created.pipelineNote ?? null, startError: created.startError ?? null };
 }
 
 /** Stop the tab's process and drop it and its checkpoints from the workspace. */
@@ -1028,9 +1125,17 @@ async function enqueue(
  * A prompt: now if the agent is idle, else queued as a follow-up by the runtime.
  * With `wake: false` it starts nothing: a workspace that is not running refuses it (`WORKSPACE_STOPPED`) and nothing is kept.
  */
-export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean } = {}) {
+export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean; files?: FileInput[] } = {}) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
+  const files = options.files ?? [];
+  // Files other than images go to a machine only (PRO-407), uploaded before the images so a refused file costs no image upload.
+  if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
+  let attachedFiles: MachineFileRef[] = [];
+  if (files.length) {
+    const target = liveTarget(scope, tabId, client);
+    attachedFiles = await uploadMachineFiles(target.client, { sessionId: target.sessionId, tabId }, files, images.length);
+  }
   // Images go to the runtime first (PRO-22); the message then names them. A
   // mailbox command is far too small to carry one.
   let attached: CloudImageRef[] = [];
@@ -1041,11 +1146,11 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
     attached = await uploadCloudImages(client!, { sessionId: tab.info.sessionId, tabId }, images);
   }
   const withImages = attached.length ? { images: attached } : {};
-  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached);
+  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached, attachedFiles);
   const sent = tab?.pendingConfig ?? null;
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
-  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, options);
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, { wake: options.wake });
   if (images.length) sentImages.set(entry.clientCommandId, images);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
@@ -1061,30 +1166,87 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
 /** `data.reason` of a live `session.send` the runtime refused with a sentence meant for the person. */
 const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden", "attachment-missing"]);
 
-/** A development runtime has no mailbox: the legacy live `session.send`. */
-async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = []): Promise<OutboxEntry> {
+/**
+ * What a refused live command says to the person (docs/MACHINES.md decision
+ * 3, "Refusals"): the runtime's own sentence where it wrote one for them,
+ * else what the refusal means.
+ */
+export function liveCommandError(error: unknown): Error {
+  if (!(error instanceof WorkspaceRpcError)) return error instanceof Error ? error : new Error(String(error));
+  const reason = (error.data as { reason?: unknown } | undefined)?.reason;
+  if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) return new Error(error.message);
+  if (error.code === "conflict" && reason === "request-not-pending") return new Error("That request was already answered, or the agent no longer waits for it.");
+  if (error.code === "outcome_unknown") return new Error("The machine restarted while applying this, so it cannot say whether it reached the agent. Look at the conversation before trying again.");
+  return error;
+}
+
+/** The connection a live command goes over, and the tab's session there; refused while the machine is away. */
+function liveTarget(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null): { client: WorkspaceRpcClient; sessionId: string } {
   const tab = store(scope).tabs.get(tabId);
-  if (!client || client.connection.state !== "connected" || !tab?.info.sessionId) throw new Error("The development runtime is not connected");
-  try {
-    await client.mutate("session.send", { sessionId: tab.info.sessionId, tabId, text, ...(images.length ? { images } : {}) });
-  } catch (error) {
-    // The runtime's own sentence for what it refused to type or to queue (PRO-88), rather than the bare code.
-    const reason = error instanceof WorkspaceRpcError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined;
-    if (typeof reason === "string" && LIVE_SEND_REFUSALS.has(reason)) throw new Error((error as Error).message);
-    throw error;
-  }
+  if (!client || client.connection.state !== "connected") throw new Error(LIVE_NOT_CONNECTED);
+  if (!tab?.info.sessionId) throw new Error("This tab is not known to the machine yet.");
+  return { client, sessionId: tab.info.sessionId };
+}
+
+/** A command applied live: what the outbox would have said once it settled. */
+function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, requestId?: string): OutboxEntry {
   const now = Date.now();
-  return { clientCommandId: `live-${now}`, tabId, kind: "send", text, state: "applied", createdAt: now, updatedAt: now };
+  return { clientCommandId: `live-${now}`, tabId, kind, ...(text !== undefined ? { text } : {}), ...(requestId ? { requestId } : {}), state: "applied", createdAt: now, updatedAt: now };
+}
+
+/**
+ * A prompt to a machine, live. With `agent-commands/1` its id is kept across
+ * a dropped connection (the client resends it with the same id) and the
+ * machine answers a resend from its durable receipt, so it is typed once; a
+ * prompt during a turn waits in the tab's follow-up queue there. Settings
+ * chosen while away ride with it, as they ride with a mailbox send.
+ */
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = [], files: MachineFileRef[] = []): Promise<OutboxEntry> {
+  const s = store(scope);
+  const target = liveTarget(scope, tabId, client);
+  const durable = takesLiveCommands(scope, target.client);
+  const settings = durable ? (s.tabs.get(tabId)?.pendingConfig ?? null) : null;
+  let receipt: { settingsIgnored?: boolean } | undefined;
+  try {
+    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(settings ?? {}) });
+  } catch (error) {
+    throw liveCommandError(error);
+  }
+  const current = s.tabs.get(tabId);
+  if (current && settings) {
+    // Only what went out is settled; a change made meanwhile waits for the next.
+    if (current.pendingConfig === settings) current.pendingConfig = null;
+    current.settingsIgnored = receipt?.settingsIgnored === true;
+    publish(s);
+  }
+  return appliedEntry(tabId, "send", text);
+}
+
+/** Steer, stop or decide on a machine (`agent-commands/1`); an older machine takes prompts only. */
+async function commandLive(scope: CloudAgentScope, tabId: string, method: "session.steer" | "session.stop" | "session.decide", params: Record<string, unknown>, client: WorkspaceRpcClient | null): Promise<void> {
+  const target = liveTarget(scope, tabId, client);
+  if (!takesLiveCommands(scope, target.client)) throw new Error(DEV_SCOPE_NOTICE);
+  try {
+    await target.client.mutate(method, { sessionId: target.sessionId, tabId, ...params });
+  } catch (error) {
+    throw liveCommandError(error);
+  }
 }
 
 /** Into the running turn now. */
-export function steerCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
-  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
+export async function steerCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) {
+    await commandLive(scope, tabId, "session.steer", { text }, client);
+    return appliedEntry(tabId, "steer", text);
+  }
   return enqueue(scope, tabId, "steer", { text }, client);
 }
 
-export function stopCloudAgent(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
-  if (isDevScope(scope)) return Promise.reject(new Error(DEV_SCOPE_NOTICE));
+export async function stopCloudAgent(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient | null) {
+  if (isDevScope(scope)) {
+    await commandLive(scope, tabId, "session.stop", {}, client);
+    return appliedEntry(tabId, "stop");
+  }
   return enqueue(scope, tabId, "stop", {}, client);
 }
 
@@ -1098,7 +1260,7 @@ export async function decideCloudAgent(
   decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> },
   client: WorkspaceRpcClient | null,
 ): Promise<OutboxEntry | null> {
-  if (isDevScope(scope)) throw new Error(DEV_SCOPE_NOTICE);
+  if (isDevScope(scope)) return decideLive(scope, tabId, decision, client);
   const s = store(scope);
   const existing = decisionFor(s.outbox, decision.requestId);
   if (existing) return existing;
@@ -1107,6 +1269,44 @@ export async function decideCloudAgent(
   publish(s);
   try {
     return await enqueue(scope, tabId, "permission-decision", decision, client);
+  } finally {
+    s.deciding.delete(decision.requestId);
+    publish(s);
+  }
+}
+
+/**
+ * One id per permission request a machine is asked to decide: a second
+ * click, or a retry after the reply was lost, is the same command, which the
+ * machine answers from its receipt instead of deciding twice. A different
+ * answer under the same id is refused there (`id-reused`).
+ */
+const liveDecisionIds = new Map<string, string>();
+
+async function decideLive(
+  scope: CloudAgentScope,
+  tabId: string,
+  decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> },
+  client: WorkspaceRpcClient | null,
+): Promise<OutboxEntry | null> {
+  const s = store(scope);
+  if (s.deciding.has(decision.requestId)) return null;
+  const target = liveTarget(scope, tabId, client);
+  if (!takesLiveCommands(scope, target.client)) throw new Error(DEV_SCOPE_NOTICE);
+  const key = `${cloudAgentsKey(scope)}|${tabId}|${decision.requestId}`;
+  let id = liveDecisionIds.get(key);
+  if (!id) {
+    id = `decide-${crypto.randomUUID().replace(/-/g, "")}`;
+    if (liveDecisionIds.size > 512) liveDecisionIds.clear();
+    liveDecisionIds.set(key, id);
+  }
+  s.deciding.add(decision.requestId);
+  publish(s);
+  try {
+    await target.client.mutate("session.decide", { sessionId: target.sessionId, tabId, ...decision }, id);
+    return appliedEntry(tabId, "permission-decision", undefined, decision.requestId);
+  } catch (error) {
+    throw liveCommandError(error);
   } finally {
     s.deciding.delete(decision.requestId);
     publish(s);

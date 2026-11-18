@@ -94,12 +94,14 @@ function WorkspaceRow({ item, title, first, last, onPress }: { item: CloudWorksp
   const { workspace } = item;
   const status = listStatus(workspace);
   const role = roleLabel(workspace.you?.role);
+  const providerLabel = workspace.providerDescriptor?.label;
+  const provider = typeof providerLabel === "string" && providerLabel.trim() ? providerLabel : workspace.provider;
   const repository = workspace.repositories?.find((entry) => entry.primary)?.fullName ?? workspace.repositories?.[0]?.fullName ?? null;
   const branch = workspace.launch?.workBranch ?? null;
-  const where = [repository, branch].filter(Boolean).join(" · ");
+  const where = [provider, repository, branch].filter(Boolean).join(" · ");
   const when = workspace.lastActivityAt ? agoTime(workspace.lastActivityAt) : "";
   // What is said aloud also names the role (a manager's is assumed) and who else it is shared with.
-  const facts = [status.words, role === "Manager" ? null : role, workspace.sharedWith ? `Shared with ${workspace.sharedWith}` : null].filter(Boolean);
+  const facts = [status.words, role === "Manager" ? null : role, workspace.sharedWith ? `Shared with ${workspace.sharedWith}` : null, provider].filter(Boolean);
   // As the Sessions list colours its words (22.06): blue work, amber waits, red trouble, green running, grey rest.
   const tone = status.mark === "working" || status.mark === "changing" ? palette.info : status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : status.mark === "running" ? palette.success : palette.muted;
   return <Pressable accessibilityRole="button" accessibilityLabel={`${title}, ${facts.join(", ")}`} onPress={onPress} style={({ pressed }) => [styles.row, styles.cardRow, { backgroundColor: pressed ? palette.raised : palette.card, borderColor: palette.border }, first ? styles.cardTop : { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }, last && styles.cardBottom]}>

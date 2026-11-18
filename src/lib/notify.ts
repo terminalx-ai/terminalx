@@ -49,6 +49,8 @@ export interface Notice {
   at: number;
   /** Opened, it also opens this on the session: Share, for someone waiting to be admitted. */
   opens?: "share";
+  /** Drawn with an Open button under its text (21.09's "Mac mini needs you"), not as one clickable card. */
+  action?: "open";
 }
 
 let notices: Notice[] = [];
@@ -497,7 +499,7 @@ function onCloudSessions() {
   for (const event of observeCloud(getCloudDashboard())) raiseCloudAttention(event);
 }
 
-// ---- sessions on paired machines (PRO-346), only while Experimental → Machines is on
+// ---- sessions on paired machines (PRO-346)
 
 let observeMachines: ReturnType<typeof createMachineAttentionTracker> | null = null;
 
@@ -517,9 +519,19 @@ export function raiseMachineAttention({ kind, session, tab }: MachineAttention) 
   playSound(kind);
   if (getSessions().selectedSessionId === session.key) return;
   const id = `${session.key}:${tab.tabId}:${Date.now()}`;
-  notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() }];
+  // In the app, a wait names the machine (21.09): "Mac mini needs you", with Open.
+  const notice: Notice =
+    kind === "waiting"
+      ? { id, sessionId: session.key, tabId: tab.tabId, kind, title: `${session.machineName} needs you`, body: machineWaitText(session.title, tab.pendingApprovals), at: Date.now(), action: "open" }
+      : { id, sessionId: session.key, tabId: tab.tabId, kind, harness: tab.harness, title, body, at: Date.now() };
+  notices = [...notices.filter((n) => !(n.sessionId === session.key && n.tabId === tab.tabId)), notice];
   emit();
   expireNotice(id);
+}
+
+/** "Bisect the flaky relay e2e is waiting for an approval." (21.09). */
+export function machineWaitText(sessionTitle: string, pendingApprovals: number): string {
+  return `${sessionTitle} is waiting for ${pendingApprovals > 0 ? "an approval" : "you"}.`;
 }
 
 function onMachineSessions() {
@@ -541,7 +553,7 @@ function refreshBadge() {
   const local = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
   // Cloud sessions that want the reader back: waiting, or finished and unread.
   const cloud = getCloudDashboard().filter(wantsReader).length;
-  // Sessions on paired machines count the same way; none while Experimental → Machines is off.
+  // Sessions on paired machines count the same way; none while no machine is paired.
   const machines = getMachineDashboard().filter(wantsReader).length;
   const n = local + cloud + machines;
   if (n === lastBadge) return;

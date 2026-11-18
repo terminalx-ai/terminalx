@@ -60,13 +60,24 @@ fn desktop_service(desktop: Option<&str>, application: Option<&str>) -> Option<S
     valid.then(|| format!("{application}.machine-host"))
 }
 
+/// [`desktop_service`] for this runtime.
+fn runtime_service() -> Option<String> {
+    desktop_service(
+        std::env::var("TERMINALX_LOCAL_DESKTOP").ok().as_deref(),
+        std::env::var("TERMINALX_LOCAL_APPLICATION").ok().as_deref(),
+    )
+}
+
+/// Whether this runtime's host key is the window's, handed over from the
+/// app's Keychain item, rather than one it keeps itself.
+pub(crate) fn window_owned() -> bool {
+    runtime_service().is_some()
+}
+
 impl KeyStore {
     /// The store this runtime uses, under `data_dir`.
     pub(crate) fn for_runtime(data_dir: &Path) -> Self {
-        let service = desktop_service(
-            std::env::var("TERMINALX_LOCAL_DESKTOP").ok().as_deref(),
-            std::env::var("TERMINALX_LOCAL_APPLICATION").ok().as_deref(),
-        );
+        let service = runtime_service();
         let location = match service {
             Some(service) => Location::Keychain { service },
             None => Location::File { path: data_dir.join(super::DIR).join(FILE) },
@@ -77,6 +88,12 @@ impl KeyStore {
     #[cfg(test)]
     pub(crate) fn at(location: Location, secrets: Arc<dyn SecretStore>) -> Self {
         Self { location, secrets }
+    }
+
+    #[cfg(all(test, feature = "desktop", target_os = "macos"))]
+    pub(super) fn with_secrets_for_test(mut self, secrets: Arc<dyn SecretStore>) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     /// Whether the window owns the key and must hand it over.

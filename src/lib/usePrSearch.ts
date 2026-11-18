@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { errorMessage, gh, type PullRequest } from "./api";
 
-export function usePrSearch(cwd: string | null, query: string | null) {
-  const key = cwd && query !== null ? JSON.stringify([cwd, query]) : null;
+/** `attempt`: a number the caller bumps to read the same search once more. */
+export function usePrSearch(cwd: string | null, query: string | null, attempt = 0) {
+  const key = cwd && query !== null ? JSON.stringify([cwd, query, attempt]) : null;
   const [result, setResult] = useState<{ key: string; items: PullRequest[]; error: string | null } | null>(null);
   useEffect(() => {
     if (!cwd || query === null || !key) return;

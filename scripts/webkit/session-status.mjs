@@ -23,7 +23,7 @@ try {
   page.setDefaultTimeout(30_000);
   const rail = await sidebar(page);
   await rail.getByTestId("sidebar-filter").click();
-  await page.getByRole("menuitemradio", { name: "Group by status", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Status", exact: true }).click();
   await rail.getByRole("button", { name: "Backlog 2", exact: true }).waitFor();
   assert.equal(await rail.locator("[data-status-group]").count(), 5);
   await rail.getByRole("button", { name: "Chat 0", exact: true }).hover();
@@ -36,10 +36,9 @@ try {
   await rail.getByRole("button", { name: "Backlog 1", exact: true }).waitFor();
 
   await rail.getByTestId("sidebar-filter").click();
-  await page.getByRole("menuitem", { name: "Sort by: Updated", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "Created", exact: true }).click();
   await rail.getByTestId("sidebar-filter").click();
-  await page.getByRole("menuitem", { name: "Filter by project", exact: true }).focus();
+  await page.getByRole("menuitem", { name: /^Filter by project/ }).focus();
   await page.keyboard.press("ArrowRight");
   const search = page.getByRole("textbox", { name: "Search projects" });
   await search.waitFor();

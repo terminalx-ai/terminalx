@@ -1,7 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
-import type { Extension } from "@codemirror/state";
+import { EditorState, type Extension } from "@codemirror/state";
 import { javascript } from "@codemirror/lang-javascript";
 import { rust } from "@codemirror/lang-rust";
 import { python } from "@codemirror/lang-python";
@@ -10,6 +10,9 @@ import { markdown } from "@codemirror/lang-markdown";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
 import { extOf } from "@/lib/paths";
+
+/** The diff's collapsed runs say what they hide in the app's words. */
+export const diffPhrases: Extension = EditorState.phrases.of({ "$ unchanged lines": "$ unmodified lines" });
 
 /** Editor chrome drawn from the app's tokens so it follows the theme. */
 export const raccoonTheme: Extension = EditorView.theme({
@@ -27,8 +30,20 @@ export const raccoonTheme: Extension = EditorView.theme({
   ".cm-insertedLine, .cm-changedLine": { backgroundColor: "color-mix(in oklab, var(--accent-add) 12%, transparent)" },
   ".cm-changedText": { background: "color-mix(in oklab, var(--accent-add) 28%, transparent)" },
   ".cm-deletedText": { background: "color-mix(in oklab, var(--destructive) 28%, transparent)" },
-  ".cm-mergeSpacer": { backgroundColor: "var(--veil-raised)" },
-  ".cm-collapsedLines": { color: "var(--ink-faint)", backgroundColor: "var(--veil-raised)", padding: "2px 12px" },
+  // A line only the other side has: a faint diagonal hatch, so it never reads as a blank line of the file.
+  ".cm-mergeSpacer": { backgroundColor: "transparent", backgroundImage: "repeating-linear-gradient(-45deg, color-mix(in oklab, var(--foreground) 9%, transparent) 0 1px, transparent 1px 6px)" },
+  // The merge package draws these near-white (#f3f3f3 behind a zigzag) whatever the theme: a band in the toolbar's tone instead.
+  ".cm-collapsedLines": {
+    display: "flex", alignItems: "center", height: "32px", boxSizing: "border-box", padding: "0 12px 0 0", cursor: "pointer",
+    color: "var(--muted-foreground) !important", background: "var(--veil-raised) !important",
+    borderTop: "1px solid var(--hairline)", borderBottom: "1px solid var(--hairline)", fontFamily: "var(--font-sans)", fontSize: "12px",
+  },
+  ".cm-collapsedLines:hover": { color: "var(--foreground) !important" },
+  ".cm-collapsedLines:before": {
+    content: '""', flexShrink: "0", width: "13px", height: "13px", margin: "0 10px 0 14px", backgroundColor: "var(--ink-faint)",
+    mask: `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg>')}") center / contain no-repeat`,
+  },
+  ".cm-collapsedLines:after": { content: "none" },
   ".cm-searchMatch": { backgroundColor: "color-mix(in oklab, var(--warning) 35%, transparent)" },
   ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in oklab, var(--warning) 60%, transparent)" },
   ".cm-panels": { backgroundColor: "var(--popover)", color: "var(--foreground)" },

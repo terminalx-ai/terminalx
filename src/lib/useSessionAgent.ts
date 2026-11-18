@@ -8,7 +8,7 @@ import { tabAccount, type ModelInfo } from "@/lib/api";
 import { agentAccounts, resolveAccount, showsAccounts, switchesIn, takesAccounts, type AgentAccount, type AgentAccounts, type LaunchAccountChoice } from "@/lib/agentAccounts";
 import { useStatus } from "@/lib/status";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-import type { AgentReadinessMap } from "@/lib/agentReadiness";
+import { startingAgent, type AgentReadinessMap } from "@/lib/agentReadiness";
 
 /** One launch: the agent, its model and effort, and the permission mode it starts in. */
 export interface LaunchSettings {
@@ -200,14 +200,11 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   // without replacing the saved provider/model preferences during discovery.
   const localDefaults = !chosen && here && readiness !== undefined;
   const eligible = (state: "ready" | "unknown") => harnesses.filter((h) => h.available && readiness?.[h.id]?.state === state);
-  // Known logins win over an unknown probe, including a saved unknown agent.
-  // Unknown can be a working custom route; a failed probe is not a signed-out login.
   const ready = localDefaults ? eligible("ready") : [];
   const unknown = localDefaults ? eligible("unknown") : [];
-  const candidates = ready.length ? ready : unknown;
-  const explicit = [...ready, ...unknown].find((h) => h.id === pickedAgent && h.id === prefs.lastAgent);
+  // Known logins win over an unknown probe, including a saved unknown agent: `startingAgent` is the rule.
   const harness = localDefaults
-    ? explicit ?? candidates.find((h) => h.id === prefs.lastAgent) ?? candidates[0] ?? null
+    ? startingAgent(harnesses, readiness, prefs.lastAgent, pickedAgent)
     : (!chosen && here && !preferred?.available ? harnesses.find((h) => h.available) : preferred) ?? preferred ?? harnesses[0] ?? null;
   const catalog = useModels(controlled?.preserveUnavailableModel ? undefined : harness?.id);
   const listed = controlled?.preserveUnavailableModel ? catalog.filter((m) => m.harness === harness?.id) : catalog;

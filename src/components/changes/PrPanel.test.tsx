@@ -88,15 +88,24 @@ afterEach(() => {
   mocks.invoke.mockReset();
 });
 
-it.each([false, true])("renders one description and does not reload a terminal conversation on discovery ticks (inline=%s)", async (inline) => {
+it.each([false, true])("once merged shows the merged card and summaries, not the conversation, and does not reload it on discovery ticks (inline=%s)", async (inline) => {
   vi.useFakeTimers();
   mockBackend(cleanMerged);
   const backend = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation(async (command: string, ...args: unknown[]) => command === "pr_conversation" ? {
-    ...mergedPr, body: "The only PR description.", viewer: "reviewer", canEdit: true, reviewers: [], unresolvedThreads: 0, activity: [],
+    ...mergedPr, body: "The only PR description.", viewer: "reviewer", canEdit: true, unresolvedThreads: 0, activity: [], base: "main",
+    reviewers: [{ login: "aisha-khan", name: "Aisha Khan", kind: "user", state: "APPROVED", requested: false }],
+    merged: { at: null, by: "alexkim", commit: "a91c3e0123", mergeCommit: false, branchDeleted: true },
   } : backend(command, ...args));
   await act(async () => { render(<PrPanel cwd={cwd} branch={mergedPr.head} active busy={false} inline={inline} />); });
-  expect(screen.getAllByText("The only PR description.")).toHaveLength(1);
+  const card = screen.getByTestId("pr-merged-card");
+  expect(card.textContent).toContain(`Merged into main#${mergedPr.number}`);
+  expect(card.textContent).toContain("Merged by alexkim · a91c3e0");
+  expect(card.textContent).toContain("Remote branch deleted on GitHub");
+  expect(screen.getByText("Approved by Aisha Khan")).toBeTruthy();
+  // After the merge, no description, activity or reviewer controls (design 05.12).
+  expect(screen.queryByText("The only PR description.")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Activity" })).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_conversation")).toHaveLength(1);
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
@@ -118,7 +127,7 @@ describe("merged workspace action", () => {
       />,
     );
 
-    const button = await screen.findByRole("button", { name: "Delete workspace" });
+    const button = await screen.findByRole("button", { name: "Archive the session" });
     fireEvent.click(button);
 
     expect(openDelete).toHaveBeenCalledOnce();
@@ -142,7 +151,7 @@ describe("merged workspace action", () => {
     render(<PrPanel cwd={cwd} sessionId="author" branch={mergedPr.head} active busy={false} onSettle={() => {}} onFixErrors={onFixErrors} workspace={{ projectPath, onDelete: vi.fn() }} />);
     await screen.findByText("Someone else's work");
     expect(await screen.findByText("This branch has been merged.")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Delete workspace" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Archive the session" })).toBeTruthy();
     // Its failing checks are shown, but not sent to this session's agent to fix.
     expect(screen.queryByRole("button", { name: /Fix errors/ })).toBeNull();
   });
@@ -173,7 +182,7 @@ describe("merged workspace action", () => {
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd, fetch: false });
     });
-    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Archive the session" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
   });
 
@@ -184,7 +193,7 @@ describe("merged workspace action", () => {
     const view = render(
       <PrPanel cwd={cwd} branch={mergedPr.head} active busy={false} onSettle={() => {}} workspace={workspace} />,
     );
-    await screen.findByRole("button", { name: "Delete workspace" });
+    await screen.findByRole("button", { name: "Archive the session" });
 
     failDisposition = true;
     view.rerender(<PrPanel cwd={cwd} branch={mergedPr.head} active busy onSettle={() => {}} workspace={workspace} />);
@@ -192,7 +201,7 @@ describe("merged workspace action", () => {
     await screen.findByText("Could not complete Git operation");
     fireEvent.click(screen.getByText("Show details"));
     await screen.findByText("Unable to verify workspace");
-    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Archive the session" })).toBeNull();
   });
 });
 
@@ -547,13 +556,27 @@ it.each(["panel", "inline", "centre"])("loads review threads for the selected PR
     throw Error(command);
   });
   render(<PrPanel cwd={cwd} sessionId="author" branch={pr.head} selectedPr={surface === "centre" ? association(pr) : undefined} active busy={false} inline={surface === "inline"} />);
-  // Read as soon as the PR is shown: its counts lead the Checks section (PRO-234).
-  await screen.findByText("No review threads.");
-  expect(screen.getByTestId("review-thread-counts").textContent).toBe("0 open · 0 resolved");
-  expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url });
+  // Read as soon as the PR is shown (PRO-234). With none, no empty row: REVIEW's summary says "0 unresolved" (PRO-395).
+  await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pr_review_threads", { url: pr.url }));
+  await act(async () => {});
+  expect(screen.queryByTestId("review-threads")).toBeNull();
+  expect(screen.queryByText("No review threads.")).toBeNull();
 });
 
-const { mergeReadiness } = await import("./PrPanel");
+const { mergeReadiness, afterMerge } = await import("./PrPanel");
+
+it("acts on 'Archive this session after merge' only for the session's own pull request", () => {
+  const off = { archive: false, deleteBranch: false };
+  const on = { archive: true, deleteBranch: false };
+  // A linked PR: the menu did not offer the choice, so this session's workspace is left alone.
+  expect(afterMerge(false, off, true)).toBeNull();
+  expect(afterMerge(false, on, false)).toBeNull();
+  expect(afterMerge(true, off, true)).toBe("hold");
+  expect(afterMerge(true, on, false)).toBe("archive");
+  expect(afterMerge(true, on, true)).toBeNull();
+  expect(afterMerge(true, off, false)).toBeNull();
+  expect(afterMerge(true, undefined, true)).toBeNull();
+});
 const { checkCounts, checkSummary } = await import("@/lib/checks");
 const openPr: PullRequest = { ...followup, mergeState: "CLEAN", checks: [], requiredChecks: [] };
 
@@ -579,13 +602,19 @@ describe("merge state labels", () => {
     [{ isDraft: true, mergeState: "BLOCKED" }, "Draft", false],
     [{ reviewDecision: "REVIEW_REQUIRED" }, "Blocked", false],
     [{ checks: [{ name: "ci", state: "failure" }], requiredChecks: ["ci"] }, "Checks failing", false],
-    [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Checks running", false],
+    [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Waiting for 1 check", false],
+    // PRO-394: GitHub says BLOCKED while required checks run; that is a wait, not a block.
+    [{ mergeState: "BLOCKED", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }, { name: "b", state: "queued" }, { name: "c", state: "success" }], requiredChecks: ["a", "b", "c"] }, "Waiting for 2 checks", false],
+    // The wait is said only when checks are all that holds the PR: a review still needed or a stale base comes first.
+    [{ mergeState: "BLOCKED", reviewDecision: "REVIEW_REQUIRED", checks: [{ name: "a", state: "pending" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BLOCKED", reviewDecision: "CHANGES_REQUESTED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BEHIND", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Behind base", false],
     [{ checks: [{ name: "ci", state: "new_state" }], requiredChecks: ["ci"] }, "Checking mergeability", false],
     [{ detailsError: "offline" }, "Merge details unavailable", false],
     [{ mergeQueueEnabled: true, autoMergeEnabled: true }, "Waiting to enter merge queue", false],
     [{}, "Ready to merge", true],
   ] as [Partial<PullRequest>, string, boolean][])("chooses %s → %s", (changes, label, ok) => {
-    expect(mergeReadiness({ ...openPr, ...changes })).toEqual({ label, ok });
+    expect(mergeReadiness({ ...openPr, ...changes })).toMatchObject({ label, ok });
   });
 
   it.each([
@@ -621,10 +650,13 @@ describe("check summaries and deployments", () => {
   it.each([false, true])("renders matching counts, required/optional labels and deployment links (inline=%s)", async (inline) => {
     panelBackend(() => ({ ...openPr, checks, requiredChecks: ["build", "test"], deployments: [{ name: "Vercel preview", state: "success", url: "https://preview.example.test/" }] }));
     render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} inline={inline} />);
-    await screen.findByText("2 of 5 failed · 1 running · 1 skipped");
+    // PRO-394: a red band says how many failed; only required checks carry a chip, and every check is listed.
+    await screen.findByText("2 of 5 checks failed");
+    expect(screen.getByText("· 1 running · 1 skipped")).toBeTruthy();
     for (const check of checks) expect(screen.getByLabelText(`${check.name}: ${check.state}`)).toBeTruthy();
-    expect(screen.getAllByText("Required")).toHaveLength(2);
-    expect(screen.getAllByText("Optional")).toHaveLength(3);
+    expect(screen.getAllByText("required")).toHaveLength(2);
+    expect(screen.queryByText(/^optional$/i)).toBeNull();
+    expect(screen.getByText("Skipped")).toBeTruthy();
     expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "https://preview.example.test/" }));
     const { openUrl } = await import("@tauri-apps/plugin-opener");
@@ -634,7 +666,9 @@ describe("check summaries and deployments", () => {
   it("keeps unread requirements unknown and refuses non-web provider links", async () => {
     panelBackend(() => ({ ...openPr, requiredChecks: null, checks: [{ name: "ci", state: "success", url: "file:///tmp/run" }], deployments: [{ name: "unsafe", state: "success", url: "javascript:alert(1)" }] }));
     render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} />);
-    await screen.findByText("Requirement unknown");
+    await screen.findByLabelText("ci: success");
+    // Requirements GitHub has not said are not guessed at: no chip.
+    expect(screen.queryByText("required")).toBeNull();
     expect(screen.queryByRole("button", { name: "ci" })).toBeNull();
     expect(screen.queryByRole("button", { name: /javascript/ })).toBeNull();
     expect(screen.queryByText("Optional")).toBeNull();

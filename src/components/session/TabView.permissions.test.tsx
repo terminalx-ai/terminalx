@@ -72,13 +72,13 @@ it.each(["HTTP 500", "transport failure"])("lets the same desktop retry after an
   expect(screen.getByRole("button", { name: /^Allow/ })).toBeTruthy();
   expect(getTabLog(session.id, session.tabs[0].id).permissionResponses?.has("approval")).toBeFalsy();
   await act(async () => delivery(failure));
-  expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+  expect(screen.getByRole("button", { name: /^Deny/ })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /^Deny/ }));
   expect(answers).toHaveLength(2);
   expect(answers[1]).toEqual(expect.objectContaining({ requestId: "approval", optionId: "reject" }));
   await act(async () => acknowledge());
-  expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Deny/ })).toBeTruthy();
   await act(async () => delivery("delivered"));
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Deny" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("button", { name: /^Deny/ })).toBeNull());
   expect(getTabLog(session.id, session.tabs[0].id).events.filter(e => e.payload.type === "permission_decided")).toHaveLength(1);
 });

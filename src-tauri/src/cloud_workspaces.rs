@@ -17,10 +17,16 @@ const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
-/// The providers this client can show and drive; the server leaves every
-/// other one out of its answers. The local Docker provider (terminalx-saas
-/// `cloud:e2e:local --serve`) is offered only by debug builds.
-const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,hetzner,local-docker" } else { "machine0,box,hetzner" };
+/// Which providers this client can show and drive: every one the server
+/// describes (PRO-415). A provider comes with a descriptor that says what it
+/// is called, how it is drawn and ordered, and what its credential is, so the
+/// client needs no list of its own. The ids after `described` are only for a
+/// server older than described providers (or one rolled back): it skips the
+/// word it does not know and answers for the providers it always offered,
+/// without descriptors, where the client falls back to their display names.
+/// A server that knows `described` answers with its whole registry and
+/// ignores the rest.
+const SUPPORTED_PROVIDERS: &str = "described,machine0,box,hetzner";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -31,35 +37,116 @@ const MAX_ARCHIVE_RETENTION_DAYS: u32 = 365;
 /// Diagnostics carry up to a few hundred operations with their history.
 const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CloudWorkspaceProviderId {
-    Machine0,
-    Box,
-    Hetzner,
-    #[serde(rename = "local-docker")]
-    LocalDocker,
-}
+/// A cloud provider's id, as the server's registry names it (PRO-415): a
+/// validated string, not a list this client knows. The shape is the
+/// server's own (`^[a-z0-9][a-z0-9-]{0,62}$`), so an id can go into a URL
+/// path segment and a header as it is.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct CloudWorkspaceProviderId(String);
 
 impl CloudWorkspaceProviderId {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Machine0 => "machine0",
-            Self::Box => "box",
-            Self::Hetzner => "hetzner",
-            Self::LocalDocker => "local-docker",
-        }
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 
-    /// What the provider is called when the service does not say.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Machine0 => "Machine0",
-            Self::Box => "Boat",
-            Self::Hetzner => "Hetzner",
-            Self::LocalDocker => "Local Docker",
+    fn valid(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        (1..=63).contains(&bytes.len())
+            && matches!(bytes[0], b'a'..=b'z' | b'0'..=b'9')
+            && bytes.iter().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+    }
+}
+
+impl TryFrom<String> for CloudWorkspaceProviderId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if Self::valid(&value) {
+            Ok(Self(value))
+        } else {
+            Err("a provider id is 1 to 63 lowercase letters, digits or hyphens, starting with a letter or digit".into())
         }
     }
+}
+
+impl From<CloudWorkspaceProviderId> for String {
+    fn from(value: CloudWorkspaceProviderId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for CloudWorkspaceProviderId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One input of a provider's credential, asked for in a native dialog.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderCredentialField {
+    pub name: String,
+    /// `secret` is typed into a secure field; `text` into a plain one. An
+    /// unknown kind is treated as secret.
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub help_url: Option<String>,
+}
+
+impl CloudProviderCredentialField {
+    pub(crate) fn secret(&self) -> bool {
+        self.kind != "text"
+    }
+}
+
+/// Whose credential a provider's machines run on (PRO-452). `Organization`:
+/// a key the organization connects. `Platform`: TerminalX's own, so there is
+/// nothing for anybody to connect, replace, check or disconnect.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CloudProviderCredentialSource {
+    #[default]
+    Organization,
+    Platform,
+}
+
+impl<'de> Deserialize<'de> for CloudProviderCredentialSource {
+    /// Only `platform` is a platform provider. A value this client does not
+    /// know, of any type, is an organization's: the only kind there was, and
+    /// the one that asks before it uses anything.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(if value.as_str() == Some("platform") { Self::Platform } else { Self::Organization })
+    }
+}
+
+/// How a provider is presented, as the server's registry describes it
+/// (PRO-415). The fields this client acts on are typed; the rest
+/// (capabilities, offering, allowed values, copy) pass to the webview as the
+/// server sent them, so a field the server adds needs no client release.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderDescriptor {
+    pub id: CloudWorkspaceProviderId,
+    pub label: String,
+    pub icon: String,
+    pub order: i64,
+    /// False: hidden, listed only while the organization is still connected to it.
+    #[serde(default = "listed_by_default")]
+    pub listed: bool,
+    /// Absent from a server older than platform providers: an organization's.
+    #[serde(default)]
+    pub credential_source: CloudProviderCredentialSource,
+    /// Empty for a platform provider: nobody is asked for a credential.
+    pub credential_fields: Vec<CloudProviderCredentialField>,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+fn listed_by_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -253,6 +340,7 @@ pub(crate) struct ProviderConnectAuthorization {
 
 impl ProviderConnectAuthorization {
     pub(crate) fn organization_id(&self) -> &str { &self.context.organization_id }
+    pub(crate) fn provider(&self) -> &CloudWorkspaceProviderId { &self.provider }
 }
 
 pub(crate) fn validate_disclosure(input: &CloudProviderConnectInput) -> Result<(), CloudWorkspaceClientError> {
@@ -296,6 +384,40 @@ pub struct CloudProviderSummary {
     pub can_manage: bool,
     pub connection: Option<CloudProviderConnection>,
     pub capabilities: CloudProviderCapabilities,
+    /// Absent from a server older than described providers.
+    #[serde(default)]
+    pub descriptor: Option<CloudProviderDescriptor>,
+}
+
+impl CloudProviderSummary {
+    /// What the provider is called: its descriptor's label, else the list's
+    /// display name, else its id.
+    pub(crate) fn label(&self) -> String {
+        [self.descriptor.as_ref().map(|descriptor| descriptor.label.as_str()), Some(self.display_name.as_str())]
+            .into_iter()
+            .flatten()
+            .find(|name| !name.trim().is_empty())
+            .unwrap_or(self.id.as_str())
+            .to_owned()
+    }
+
+    /// True for a provider that runs on TerminalX's own credential
+    /// (PRO-452): it has no key, so no dialog ever asks for one and nothing
+    /// is sent to connect it.
+    pub(crate) fn platform_credential(&self) -> bool {
+        self.descriptor.as_ref().is_some_and(|descriptor| descriptor.credential_source == CloudProviderCredentialSource::Platform)
+    }
+
+    /// What the connect dialog asks for: the descriptor's credential fields,
+    /// else (a server older than described providers) one secret key.
+    /// Nothing for a platform provider, whatever its descriptor lists.
+    pub(crate) fn credential_fields(&self) -> Vec<CloudProviderCredentialField> {
+        match &self.descriptor {
+            Some(_) if self.platform_credential() => Vec::new(),
+            Some(descriptor) if !descriptor.credential_fields.is_empty() => descriptor.credential_fields.clone(),
+            _ => vec![CloudProviderCredentialField { name: "credential".into(), kind: "secret".into(), label: "provider key".into(), help_url: None }],
+        }
+    }
 }
 
 /// An agent whose login an organization can store for its cloud workspaces.
@@ -589,6 +711,22 @@ pub struct CloudWorkspaceSetup {
     pub defaults: ProviderSelection,
     pub allowed_idle_suspend_minutes: Vec<i64>,
     pub allowed_retention_days: Vec<i64>,
+    /// The organization's idle cap (PRO-410): the server has already left
+    /// never and every longer window out of `allowed_idle_suspend_minutes`.
+    /// None from a server that does not say, or with no cap.
+    #[serde(default, deserialize_with = "lenient")]
+    pub max_idle_suspend_minutes: Option<i64>,
+}
+
+/// A workspace's idle window and what it may be changed to (PRO-410).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceIdleSuspend {
+    pub workspace_id: String,
+    /// Minutes without activity before it is stopped, 0 for never.
+    pub idle_suspend_minutes: Option<i64>,
+    pub allowed_idle_suspend_minutes: Vec<i64>,
+    pub max_idle_suspend_minutes: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -703,8 +841,15 @@ pub struct CloudWorkspace {
     pub repositories: Option<Vec<WorkspaceRepository>>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<PresencePerson>,
+
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
+    /// Minutes without activity before TerminalX stops it, 0 for never
+    /// (PRO-410); absent from older servers.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub idle_suspend_minutes: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -723,12 +868,31 @@ pub struct CloudWorkspace {
     /// stops it, after which it cannot be started again.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub preparation: Option<WorkspacePreparation>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<WorkspaceCheckout>,
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<DetailsRuntime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspacePreparation {
     pub stop_after: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckout {
+    pub state: String,
+    pub repositories: Vec<WorkspaceCheckoutRepository>,
+    pub reported_at: i64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WorkspaceCheckoutRepository {
+    pub repository: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// `you` on a workspace list item (§21.2).
@@ -882,6 +1046,7 @@ pub enum OperationStage {
 pub enum OperationAction {
     Suspend,
     Resume,
+    Restart,
     Archive,
     Delete,
 }
@@ -945,6 +1110,20 @@ pub struct CloudWorkspaceOperation {
     /// A delete's cleanup report until the provider confirms (§10.4).
     #[serde(default)]
     pub cleanup: Option<CleanupReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<Vec<OperationLog>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, deserialize_with = "safe_provider_error_code", skip_serializing_if = "Option::is_none")]
+    pub reason_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationLog {
+    pub source: String,
+    pub content: String,
+    pub occurred_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1011,6 +1190,63 @@ pub enum RetryReason {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceDetailsResponse {
+    pub workspace: CloudWorkspace,
+    pub details: CloudWorkspaceDetails,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceDetails {
+    pub organization_id: String,
+    pub workspace_id: String,
+    pub created_by: String,
+    pub provider: String,
+    pub repositories: Vec<DetailsRepository>,
+    pub machine_id: Option<String>,
+    pub environment_version_id: Option<String>,
+    pub environment_version: Option<DetailsEnvironmentVersion>,
+    pub runtime: Option<DetailsRuntime>,
+    pub provisioning_log: Option<DetailsProvisioningLog>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsRepository {
+    pub identity: Option<String>,
+    pub full_name: Option<String>,
+    pub clone_url: String,
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+    pub target_directory: Option<String>,
+    pub primary: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsEnvironmentVersion {
+    pub id: String,
+    pub version_number: i64,
+    pub toolchain_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsRuntime {
+    pub sha256: String,
+    pub protocol: Option<i64>,
+    pub installed_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsProvisioningLog {
+    pub url: String,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CloudWorkspaceSnapshot {
     pub workspace: CloudWorkspace,
     pub operation: CloudWorkspaceOperation,
@@ -1019,8 +1255,14 @@ pub struct CloudWorkspaceSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudWorkspaceListItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<bool>,
     pub workspace: CloudWorkspace,
     pub latest_operation: Option<CloudWorkspaceOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_markers: Option<Vec<crate::desktop_inbox::ReadMarker>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<CatalogPresence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1040,6 +1282,8 @@ pub struct CloudWorkspaceList {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudCatalogOrganization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<CatalogPresence>,
     pub org_id: String,
     #[serde(default)]
     pub workspaces: Vec<CloudWorkspaceListItem>,
@@ -1068,6 +1312,7 @@ struct CloudCatalogBody {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudCatalogFeed {
+    pub viewer_user_id: String,
     pub changed: bool,
     pub cursor: Option<String>,
     /// The answer is the whole catalog and replaces what the desktop holds.
@@ -1350,12 +1595,13 @@ pub struct SelectedRepositories {
 }
 
 /// The collaboration role a share grants (contract §21.2): `viewer` reads,
-/// `driver` also sends to agents and types into terminals.
+/// `driver` also sends to agents and types into terminals; `manager` manages shares.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareRole {
     Viewer,
     Driver,
+    Manager,
 }
 
 /// Someone's effective role on a workspace (§21.1).
@@ -1420,6 +1666,25 @@ pub struct CloudScheduleTiming {
     pub timezone: String,
 }
 
+/// Selected organization repository row ID, never a GitHub numeric ID or URL.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleGithubTrigger {
+    pub repository_id: String,
+    pub event: String,
+    pub filters: Vec<CloudScheduleGithubFilter>,
+    #[serde(default)]
+    pub allow_fork_pull_requests: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleGithubFilter {
+    pub field: String,
+    pub operator: String,
+    pub value: String,
+}
+
 /// Upper bounds on what a schedule costs and occupies, from the workspace's
 /// own rate.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1432,6 +1697,8 @@ pub struct CloudScheduleEstimate {
     /// state it priced the limit alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_run_max_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_per_run_minutes: Option<u32>,
     pub per_run_max_micros: u64,
     pub monthly_runs: u32,
     pub monthly_max_micros: u64,
@@ -1451,7 +1718,17 @@ pub struct CloudScheduleRun {
     pub scheduled_for: i64,
     #[serde(default)]
     pub trigger: String,
-    /// queued | provisioning | working | completed | failed | skipped |
+    /// Own allocated workspace; absent before fresh allocation. Never use the template ID.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub work_branch: Option<String>,
+    #[serde(default)]
+    pub archive_at: Option<i64>,
+    /// Observed archival, not an archive request.
+    #[serde(default)]
+    pub archived_at: Option<i64>,
+    /// queued | creating-workspace | provisioning | working | completed | failed | skipped |
     /// canceled | expired.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1485,7 +1762,16 @@ pub struct CloudSchedule {
     pub mode: Option<String>,
     #[serde(default)]
     pub prompt_bytes: u64,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default)]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default)]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default = "existing_workspace_mode", deserialize_with = "response_workspace_mode")]
+    pub workspace_mode: String,
+    #[serde(default)]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, deserialize_with = "response_archive_on_pr_merge")]
+    pub archive_on_pr_merge: bool,
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
@@ -1544,7 +1830,12 @@ pub struct CloudSchedulesPaused {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CloudScheduleEstimateInput {
     pub workspace_id: String,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub workspace_mode: Option<String>,
     pub completion_policy: String,
     pub max_run_minutes: u32,
 }
@@ -1563,7 +1854,16 @@ pub struct CloudScheduleCreateInput {
     pub effort: Option<String>,
     pub mode: String,
     pub prompt: String,
-    pub schedule: CloudScheduleTiming,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub schedule: Option<CloudScheduleTiming>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub github_trigger: Option<CloudScheduleGithubTrigger>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub workspace_mode: Option<String>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub archive_after_days: Option<u32>,
+    #[serde(default, deserialize_with = "present_automation_field")]
+    pub archive_on_pr_merge: Option<bool>,
     pub missed_run_policy: String,
     pub completion_policy: String,
     pub max_run_minutes: u32,
@@ -1605,6 +1905,72 @@ fn schedule_timing_body(timing: &CloudScheduleTiming) -> Option<Value> {
     Some(body)
 }
 
+/// Optional request fields may be omitted, but explicit null is not accepted
+/// by the SaaS parser. Response DTOs remain nullable for compatibility.
+fn present_automation_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn existing_workspace_mode() -> String { "existing".into() }
+
+// Compatible responses may omit these fields or send null. Keep request
+// parsing strict: only response DTOs use these defaults.
+fn response_workspace_mode<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(existing_workspace_mode))
+}
+
+fn response_archive_on_pr_merge<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
+}
+
+/// The server may retain the template as an internal pre-allocation placeholder.
+/// Expose no link until a fresh run has its own allocated workspace.
+fn automation_run_identity(schedule: &mut CloudSchedule, runs: &mut [CloudScheduleRun]) {
+    if schedule.workspace_mode != "fresh" { return; }
+    for run in runs.iter_mut().chain(schedule.last_run.iter_mut()) {
+        if run.workspace_id.as_deref() == Some(schedule.workspace_id.as_str()) {
+            run.workspace_id = None;
+        }
+    }
+}
+
+/// Validate before consulting account/provider state or making HTTP requests.
+fn automation_body(
+    timing: Option<&CloudScheduleTiming>, github: Option<&CloudScheduleGithubTrigger>,
+    mode: Option<&str>, archive_days: Option<u32>, archive_merge: Option<bool>,
+) -> Option<Value> {
+    let fresh = mode == Some("fresh");
+    if mode.is_some_and(|m| !matches!(m, "existing" | "fresh"))
+        || archive_days.is_some_and(|days| !fresh || !(1..=365).contains(&days))
+        || (archive_merge == Some(true) && !fresh)
+    { return None; }
+    let mut body = json!({});
+    match (timing, github) {
+        (Some(timing), None) => body["schedule"] = schedule_timing_body(timing)?,
+        (None, Some(trigger)) => {
+            if trigger.repository_id.is_empty() || trigger.repository_id.encode_utf16().count() > 255
+                || !matches!(trigger.event.as_str(), "opened" | "pushed" | "merged")
+                || trigger.filters.len() > 5
+                || trigger.filters.iter().any(|f| !matches!(f.field.as_str(), "label" | "author" | "baseBranch")
+                    || !matches!(f.operator.as_str(), "is" | "is-not") || f.value.trim().is_empty()
+                    || f.value.encode_utf16().count() > 255 || f.value.chars().any(|c| c < ' ' || c == '\u{7f}'))
+            { return None; }
+            let mut trigger = trigger.clone();
+            for filter in &mut trigger.filters { filter.value = filter.value.trim().to_owned(); }
+            body["githubTrigger"] = serde_json::to_value(trigger).ok()?;
+        }
+        _ => return None,
+    }
+    if let Some(mode) = mode { body["workspaceMode"] = json!(mode); }
+    if let Some(days) = archive_days { body["archiveAfterDays"] = json!(days); }
+    if let Some(merge) = archive_merge { body["archiveOnPrMerge"] = json!(merge); }
+    Some(body)
+}
+
 fn valid_schedule_id(value: &str) -> bool {
     value.len() == "schedule_".len() + 36
         && value.strip_prefix("schedule_").is_some_and(|rest| rest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-')))
@@ -1612,6 +1978,165 @@ fn valid_schedule_id(value: &str) -> bool {
 
 fn valid_schedule_policies(missed: Option<&str>, completion: &str, minutes: u32) -> bool {
     missed.is_none_or(|missed| matches!(missed, "skip" | "run-once")) && matches!(completion, "suspend" | "keep") && SCHEDULE_RUN_MINUTES.contains(&minutes)
+}
+
+// PRO-137 uses the existing account IDs, independently of PRO-133's stricter IDs.
+fn valid_following_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-'))
+}
+
+fn valid_following_path_id(value: &str) -> bool {
+    // URL parsers normalize standalone dot segments; never address a different route.
+    valid_following_id(value) && !matches!(value, "." | "..")
+}
+
+fn valid_reassign_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36 && bytes.iter().enumerate().all(|(i, byte)| match i {
+        8 | 13 | 18 | 23 => *byte == b'-',
+        14 => matches!(*byte, b'1'..=b'8'),
+        19 => matches!(*byte, b'8' | b'9' | b'a' | b'b' | b'A' | b'B'),
+        _ => byte.is_ascii_hexdigit(),
+    })
+}
+
+// Missing is allowed via default; explicit null must pass T's nonnullable decoder.
+fn optional_nonnull<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where D: serde::Deserializer<'de>, T: Deserialize<'de> {
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceReassignInput {
+    pub target_user_id: String,
+    pub expected_owner_id: String,
+    pub request_id: String,
+    #[serde(default, deserialize_with = "optional_nonnull", skip_serializing_if = "Option::is_none")]
+    pub confirm_private: Option<bool>,
+    #[serde(default, deserialize_with = "optional_nonnull", skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+fn reassign_input(body: Value) -> Result<WorkspaceReassignInput, CloudWorkspaceClientError> {
+    if !body.is_object() { return Err(inbox_invalid()); }
+    let input: WorkspaceReassignInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+    if !valid_following_id(&input.target_user_id) || !valid_following_id(&input.expected_owner_id)
+        || !valid_reassign_uuid(&input.request_id) || input.note.as_deref().is_some_and(|note| {
+            note.encode_utf16().count() > 500 || note.chars().any(|ch|
+                (ch <= '\u{1f}' && ch != '\n' && ch != '\t') || matches!(ch, '\u{7f}' | '<' | '>'))
+        }) { return Err(inbox_invalid()); }
+    Ok(input)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceFollowingResponse {
+    pub workspace_id: String,
+    pub following: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceReassignResponse {
+    pub workspace_id: String,
+    pub owner_id: String,
+    pub previous_owner_id: String,
+    /// False is an exact committed retry receipt, never a current-owner projection.
+    pub reassigned: bool,
+}
+
+/// Current visible presence only; no timestamps or durable history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogPresence { pub active_members: Vec<PresencePerson> }
+
+// PRO-133 transport only. No device lifecycle or cached presence state lives here.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePutInput {
+    pub device_id: String,
+    #[serde(deserialize_with = "presence_sequence")]
+    pub sequence: u64,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub workspace_id: Option<String>,
+}
+
+fn required_nullable_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+fn presence_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    // JSON 1.0 is also a JS safe integer; strings and fractional values are not.
+    let number = serde_json::Number::deserialize(deserializer)?;
+    let value = number.as_f64().ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid sequence"))?;
+    if !(1.0..=9_007_199_254_740_991.0).contains(&value) || value.fract() != 0.0 {
+        return Err(serde::de::Error::custom("invalid sequence"));
+    }
+    Ok(value as u64)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceReadInput {
+    pub workspace_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePerson {
+    pub user_id: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub display_name: Option<String>,
+    #[serde(deserialize_with = "required_nullable_string")]
+    pub photo_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceWorkspace {
+    pub workspace_id: String,
+    /// Current server created_by projection; never inferred from active members.
+    pub owner: PresencePerson,
+    pub active_members: Vec<PresencePerson>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresencePutResponse {
+    pub applied: bool,
+    pub ttl_seconds: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresenceReadResponse {
+    pub ttl_seconds: u32,
+    pub active_members: Vec<PresencePerson>,
+    pub workspaces: Vec<PresenceWorkspace>,
+}
+
+fn valid_presence_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_presence_device(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36 && bytes.iter().enumerate().all(|(i, byte)| {
+        match i {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            14 => *byte == b'4',
+            19 => matches!(*byte, b'8' | b'9' | b'a' | b'b'),
+            _ => matches!(*byte, b'0'..=b'9' | b'a'..=b'f'),
+        }
+    })
+}
+
+fn valid_presence_people(people: &[PresencePerson]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    people.len() <= 500 && people.iter().all(|person| valid_presence_id(&person.user_id) && seen.insert(&person.user_id))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1766,18 +2291,12 @@ impl Client {
         if let Some((key, value)) = query {
             url.query_pairs_mut().append_pair(key, value);
         }
-        let agent = crate::data_privacy::http_agent()
-            .timeout(self.timeout)
-            .redirects(0)
-            .build();
-        let mut request = agent
-            .request(method, url.as_str())
-            .set("authorization", &format!("Bearer {}", context.access_token))
-            .set("content-type", "application/json")
-            .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
-            .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
-            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
-            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE);
+        self.send_url(method, context, url, body, idempotency_key, risk, limit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_url<T: DeserializeOwned>(&self, method: &str, context: &AccountContext, url: Url, body: Option<RequestBody>, idempotency_key: Option<&str>, risk: RequestRisk, limit: u64) -> Result<T, CloudWorkspaceClientError> {
+        let mut request = self.authorized_request(method, context, &url);
         if let Some(key) = idempotency_key {
             request = request.set("Idempotency-Key", key);
         }
@@ -1793,6 +2312,23 @@ impl Client {
             Err(ureq::Error::Transport(_)) => Err(transport_error(risk)),
         }
     }
+    fn inbox_url(&self, tail: &[&str]) -> Result<Url, CloudWorkspaceClientError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut().map_err(|_| inbox_invalid())?.extend(["v1", "desktop", "organization-inbox"]).extend(tail.iter().copied());
+        Ok(url)
+    }
+
+    fn authorized_request(&self, method: &str, context: &AccountContext, url: &Url) -> ureq::Request {
+        crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build()
+            .request(method, url.as_str())
+            .set("authorization", &format!("Bearer {}", context.access_token))
+            .set("content-type", "application/json")
+            .set("X-TerminalX-Cloud-Workspace-Contract", CONTRACT)
+            .set("X-TerminalX-Cloud-Workspace-Providers", SUPPORTED_PROVIDERS)
+            .set("X-TerminalX-Cloud-Workspace-Idle-Options", "never-v1")
+            .set("X-TerminalX-Cloud-Workspace-Lifecycle", LIFECYCLE)
+    }
+
 }
 
 enum RequestBody {
@@ -1803,12 +2339,13 @@ enum RequestBody {
 impl Client {
     /// `GET /v1/desktop/cloud-catalog` (saas contract §23). `None` is the
     /// server's 304: nothing changed since `cursor`.
-    fn catalog_feed(&self, context: &AccountContext, cursor: Option<&str>) -> Result<Option<CloudCatalogBody>, CloudWorkspaceClientError> {
+    fn catalog_feed(&self, context: &AccountContext, cursor: Option<&str>, presence: bool) -> Result<Option<CloudCatalogBody>, CloudWorkspaceClientError> {
         let risk = RequestRisk::Read;
         let mut url = self.base.clone();
         url.path_segments_mut()
             .map_err(|_| CloudWorkspaceClientError::local("cloud_workspace_client_invalid", false))?
             .extend(["v1", "desktop", "cloud-catalog"]);
+        if presence { url.query_pairs_mut().append_pair("presence", "1"); }
         let agent = crate::data_privacy::http_agent().timeout(self.timeout).redirects(0).build();
         let mut request = agent
             .request("GET", url.as_str())
@@ -1839,6 +2376,8 @@ fn valid_cursor(value: &str) -> bool {
 pub struct CloudWorkspaceService {
     account: Arc<AccountManager>,
     client: Client,
+    // No authoritative SaaS readiness flag exists yet. Never infer readiness from providers-v1.
+    phase2_enabled: bool,
 }
 
 impl CloudWorkspaceService {
@@ -1846,6 +2385,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::production(),
+            phase2_enabled: false,
         }
     }
 
@@ -1854,6 +2394,7 @@ impl CloudWorkspaceService {
         Self {
             account,
             client: Client::for_test(base, timeout),
+            phase2_enabled: false,
         }
     }
 
@@ -1918,6 +2459,230 @@ impl CloudWorkspaceService {
         result
     }
 
+    /// Account-wide inbox; never accepts a user or organization selector.
+    pub fn inbox(&self, after: &str, wait_ms: u32) -> Result<crate::desktop_inbox::InboxPage, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !crate::desktop_inbox::valid_cursor(after) || wait_ms > 25_000 { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Read, |client, context| {
+            let mut url = client.inbox_url(&[])?;
+            url.query_pairs_mut().append_pair("after", after).append_pair("waitMs", &wait_ms.to_string()).append_pair("presence", "1");
+            let page: crate::desktop_inbox::InboxPage = client.send_url("GET", context, url, None, None, RequestRisk::Read, CATALOG_RESPONSE_LIMIT_BYTES)?;
+            if page.v != 1 || page.events.len() > 100 || page.cursor.parse::<i64>().unwrap() < after.parse::<i64>().unwrap()
+                || page.events.iter().any(|event| event.id().parse::<i64>().unwrap() > page.cursor.parse::<i64>().unwrap()) { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(page)
+        })
+    }
+
+    pub fn inbox_stream(&self, after: &str, last_event_id: Option<&str>) -> Result<crate::desktop_inbox::InboxStreamPage, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !crate::desktop_inbox::valid_cursor(after) || last_event_id.is_some_and(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Read, |client, context| {
+            let mut url = client.inbox_url(&["stream"])?;
+            url.query_pairs_mut().append_pair("after", after).append_pair("presence", "1");
+            let mut request = client.authorized_request("GET", context, &url).set("accept", "text/event-stream");
+            if let Some(id) = last_event_id { request = request.set("Last-Event-ID", id); }
+            let response = match request.call() {
+                Ok(response) => response,
+                Err(ureq::Error::Status(status, response)) => return Err(http_error(status, response, RequestRisk::Read)),
+                Err(_) => return Err(transport_error(RequestRisk::Read)),
+            };
+            if !response.header("content-type").is_some_and(|value| value.starts_with("text/event-stream")) { return Err(post_send_error(RequestRisk::Read)); }
+            let page = crate::desktop_inbox::read_stream(response.into_reader()).map_err(|_| transport_error(RequestRisk::Read))?;
+            if page.cursor.parse::<i64>().unwrap() < last_event_id.unwrap_or(after).parse::<i64>().unwrap() { return Err(post_send_error(RequestRisk::Read)); }
+            Ok(page)
+        })
+    }
+
+    pub fn inbox_receipts(&self, event_ids: Vec<String>) -> Result<crate::desktop_inbox::InboxReceipt, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if event_ids.is_empty() || event_ids.len() > 100 || event_ids.iter().any(|id| !crate::desktop_inbox::valid_cursor(id)) { return Err(inbox_invalid()); }
+        self.inbox_account(RequestRisk::Mutation, |client, context| client.send_url("POST", context, client.inbox_url(&["receipts"])? , Some(RequestBody::Json(json!({"eventIds": event_ids}))), None, RequestRisk::Mutation, RESPONSE_LIMIT_BYTES))
+    }
+
+    fn inbox_account<T>(&self, risk: RequestRisk, operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        let context = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        let before = self.account.scope_if_same_account(&context).ok_or_else(|| context_changed_error(risk))?;
+        let result = operation(&self.client, &context);
+        if !self.account.scope_if_same_account(&context).is_some_and(|scope| scope.members == before.members) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    pub fn read_marker(&self, org: &str, workspace: &str, session_id: Option<String>, read_at: String) -> Result<crate::desktop_inbox::ReadMarker, CloudWorkspaceClientError> {
+        self.phase2_gate(true)?;
+        if !valid_resource_id(org) || !valid_resource_id(workspace)
+            || session_id.as_ref().is_some_and(|id| id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:@-".contains(&b)))
+            || chrono::DateTime::parse_from_rfc3339(&read_at).is_err() { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        let mut body = json!({"readAt": read_at});
+        if let Some(session) = &session_id { body["sessionId"] = json!(session); }
+        let result: Result<crate::desktop_inbox::ReadMarker, _> = self.client.request_as("PUT", &context, &["cloud-workspaces", workspace, "read-marker"], None, Some(body), None, RequestRisk::Mutation);
+        if !self.account.inbox_member_is_current(&context, org) { return Err(context_changed_error(RequestRisk::Mutation)); }
+        let marker = result?;
+        if marker.session_id != session_id.unwrap_or_default() || chrono::DateTime::parse_from_rfc3339(&marker.read_at).is_err() { return Err(post_send_error(RequestRisk::Mutation)); }
+        Ok(marker)
+    }
+
+    /// Held source-only transport; retain the original context across the entire request.
+    fn following_in<T>(&self, org: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if !self.phase2_enabled { return Err(CloudWorkspaceClientError::local("workspace_following_unavailable", true)); }
+        if !valid_following_path_id(org) { return Err(inbox_invalid()); }
+        let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        if !self.account.is_current(&original) || original.generation != context.generation
+            || original.access_token != context.access_token {
+            return Err(context_changed_error(risk));
+        }
+        let result = operation(&self.client, &context);
+        // Generation fences A-B-A; active org, profile, session and membership are
+        // checked again even for errors. There is no successful cached fallback.
+        let current = self.account.context();
+        if !self.account.is_current(&original)
+            || !self.account.inbox_member_is_current(&context, org)
+            || !current.is_some_and(|now| now.access_token == original.access_token) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    pub fn workspace_follow(&self, org: &str, workspace: &str, following: bool, body: Value) -> Result<WorkspaceFollowingResponse, CloudWorkspaceClientError> {
+        if !body.as_object().is_some_and(|object| object.is_empty()) || !valid_following_path_id(workspace) { return Err(inbox_invalid()); }
+        self.following_in(org, RequestRisk::Mutation, |client, context| {
+            let body: Value = client.request_as(if following { "PUT" } else { "DELETE" }, context,
+                &["cloud-workspaces", workspace, "follow"], None, Some(json!({})), None, RequestRisk::Mutation)?;
+            if !body.is_object() { return Err(post_send_error(RequestRisk::Mutation)); }
+            let value: WorkspaceFollowingResponse = serde_json::from_value(body).map_err(|_| post_send_error(RequestRisk::Mutation))?;
+            if value.workspace_id != workspace || value.following != following { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(value)
+        })
+    }
+
+    pub fn workspace_reassign(&self, org: &str, workspace: &str, body: Value) -> Result<WorkspaceReassignResponse, CloudWorkspaceClientError> {
+        let input = reassign_input(body)?;
+        if !valid_following_path_id(workspace) { return Err(inbox_invalid()); }
+        self.following_in(org, RequestRisk::Mutation, |client, context| {
+            let body: Value = client.request_as("POST", context, &["cloud-workspaces", workspace, "reassign"],
+                None, Some(json!(input)), None, RequestRisk::Mutation)?;
+            if !body.is_object() { return Err(post_send_error(RequestRisk::Mutation)); }
+            let value: WorkspaceReassignResponse = serde_json::from_value(body).map_err(|_| post_send_error(RequestRisk::Mutation))?;
+            if value.workspace_id != workspace || value.owner_id != input.target_user_id || value.previous_owner_id != input.expected_owner_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            // Both booleans are accepted. No retry, owner cache, UUID lifecycle or
+            // tab/session/credential migration is implied by this receipt.
+            Ok(value)
+        })
+    }
+
+    /// Both presence routes are held locally in production, before context or HTTP.
+    fn presence_in<T>(&self, org: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if !self.phase2_enabled { return Err(CloudWorkspaceClientError::local("presence_unavailable", true)); }
+        if !valid_presence_id(org) { return Err(inbox_invalid()); }
+        let original = self.account.context().ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        let context = self.account.inbox_member_context(org).map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        if !self.account.is_current(&original) || original.generation != context.generation
+            || original.access_token != context.access_token {
+            return Err(context_changed_error(risk));
+        }
+        let result = operation(&self.client, &context);
+        // Generation fences A-B-A; active org, profile, session and membership are
+        // checked again even for errors. There is no successful cached fallback.
+        let current = self.account.context();
+        if !self.account.is_current(&original)
+            || !self.account.inbox_member_is_current(&context, org)
+            || !current.is_some_and(|now| now.access_token == original.access_token) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    pub fn presence_put(&self, org: &str, body: Value) -> Result<PresencePutResponse, CloudWorkspaceClientError> {
+        if !body.is_object() { return Err(inbox_invalid()); }
+        let input: PresencePutInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+        if !valid_presence_device(&input.device_id) || !(1..=9_007_199_254_740_991).contains(&input.sequence)
+            || input.workspace_id.as_deref().is_some_and(|id| !valid_presence_id(id)) { return Err(inbox_invalid()); }
+        self.presence_in(org, RequestRisk::Mutation, |client, context| {
+            let body: Value = client.request_as("PUT", context, &["presence"], None, Some(json!(input)), None, RequestRisk::Mutation)?;
+            if !body.is_object() { return Err(post_send_error(RequestRisk::Mutation)); }
+            let value: PresencePutResponse = serde_json::from_value(body).map_err(|_| post_send_error(RequestRisk::Mutation))?;
+            if value.ttl_seconds != 45 { return Err(post_send_error(RequestRisk::Mutation)); }
+            Ok(value)
+        })
+    }
+
+    pub fn presence_read(&self, org: &str, body: Value) -> Result<PresenceReadResponse, CloudWorkspaceClientError> {
+        if !body.is_object() { return Err(inbox_invalid()); }
+        let input: PresenceReadInput = serde_json::from_value(body).map_err(|_| inbox_invalid())?;
+        let mut requested = std::collections::HashSet::new();
+        if input.workspace_ids.len() > 100 || !input.workspace_ids.iter().all(|id| valid_presence_id(id) && requested.insert(id.as_str())) { return Err(inbox_invalid()); }
+        self.presence_in(org, RequestRisk::Read, |client, context| {
+            let body: Value = client.request_as("POST", context, &["presence", "read"], None, Some(json!(input)), None, RequestRisk::Read)?;
+            // Serde's struct visitor also accepts positional arrays. Require JSON
+            // objects at every DTO boundary before decoding their exact fields.
+            let people_are_objects = |value: &Value| value.as_array().is_some_and(|people| people.iter().all(Value::is_object));
+            if !body.is_object() || !people_are_objects(&body["activeMembers"])
+                || !body["workspaces"].as_array().is_some_and(|workspaces| workspaces.iter().all(|workspace| {
+                    workspace.is_object() && workspace["owner"].is_object() && people_are_objects(&workspace["activeMembers"])
+                })) { return Err(invalid_response()); }
+            let value: PresenceReadResponse = serde_json::from_value(body).map_err(|_| invalid_response())?;
+            let mut seen = std::collections::HashSet::new();
+            if value.ttl_seconds != 45 || !valid_presence_people(&value.active_members)
+                || !value.workspaces.iter().all(|workspace| {
+                    requested.contains(workspace.workspace_id.as_str()) && seen.insert(workspace.workspace_id.as_str())
+                        && valid_presence_id(&workspace.owner.user_id) && valid_presence_people(&workspace.active_members)
+                        && workspace.active_members.iter().all(|person| value.active_members.iter().any(|aggregate| aggregate.user_id == person.user_id))
+                }) { return Err(invalid_response()); }
+            // Authorized omissions are intentional. The org aggregate also includes
+            // visible workspaces outside this batch; never restrict it to the batch.
+            Ok(value)
+        })
+    }
+
+    pub fn phase2_contracts_available(&self) -> bool { self.phase2_enabled }
+
+    fn phase2_gate(&self, inbox: bool) -> Result<(), CloudWorkspaceClientError> {
+        if self.phase2_enabled { Ok(()) } else {
+            Err(CloudWorkspaceClientError::local(if inbox { "inbox_unavailable" } else { "cloud_workspace_runtime_not_ready" }, true))
+        }
+    }
+
+    /// PRO-212 integrated routes authorize by target membership, independent of CS-18.
+    pub fn restart(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceSnapshot, CloudWorkspaceClientError> {
+        self.phase2_gate(false)?;
+        self.member_phase2_workspace(org, workspace_id, RequestRisk::Mutation, |client, context| {
+            let snapshot = client.request(context, &["cloud-workspaces", workspace_id, "restart"], None, Some(json!({})), None, RequestRisk::Mutation)?;
+            ensure_snapshot(snapshot, &context.organization_id, Some(workspace_id), RequestRisk::Mutation)
+        })
+    }
+
+    pub fn details(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceDetailsResponse, CloudWorkspaceClientError> {
+        self.phase2_gate(false)?;
+        self.member_phase2_workspace(org, workspace_id, RequestRisk::Read, |client, context| {
+            let value: CloudWorkspaceDetailsResponse = client.request(context, &["cloud-workspaces", workspace_id, "details"], None, None, None, RequestRisk::Read)?;
+            if value.workspace.id != workspace_id || value.workspace.org_id != context.organization_id
+                || value.details.workspace_id != workspace_id || value.details.organization_id != context.organization_id
+                || value.details.provider != value.workspace.provider.as_str() {
+                return Err(post_send_error(RequestRisk::Read));
+            }
+            Ok(value)
+        })
+    }
+
+    fn member_phase2_workspace<T>(&self, org: Option<&str>, workspace: &str, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace) { return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)); }
+        let target = match org { Some(org) => org.to_owned(), None => self.context()?.organization_id };
+        if !valid_resource_id(&target) { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(&target)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        let result = operation(&self.client, &context);
+        if !self.account.inbox_member_is_current(&context, &target) { return Err(context_changed_error(risk)); }
+        result
+    }
+
     pub fn providers(&self) -> Result<CloudProviderSummaryResponse, CloudWorkspaceClientError> {
         self.run(RequestRisk::Read, |client, context| {
             client.request(
@@ -1944,7 +2709,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Read,
             )?;
-            ensure_connection(result, provider)
+            ensure_connection(result, &provider)
         })
     }
 
@@ -1961,7 +2726,7 @@ impl CloudWorkspaceService {
             None,
             RequestRisk::Read,
         )?;
-        let connection = ensure_connection(connection, provider)?;
+        let connection = ensure_connection(connection, &provider)?;
         if !self.account.is_current(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
@@ -1971,14 +2736,27 @@ impl CloudWorkspaceService {
         Ok(ProviderConnectAuthorization { context, provider })
     }
 
-    /// The provider's name in the organization's provider list, as Settings
-    /// shows it; `None` when the list cannot be read or does not name it.
-    pub(crate) fn provider_display_name(&self, authorization: &ProviderConnectAuthorization) -> Option<String> {
+    /// The provider as the organization's provider list describes it: its
+    /// name as Settings shows it and the credential its connect dialog asks
+    /// for (PRO-415). `None` when the list cannot be read or does not name it.
+    pub(crate) fn provider_summary(&self, authorization: &ProviderConnectAuthorization) -> Option<CloudProviderSummary> {
         let list = self
             .client
             .request::<CloudProviderSummaryResponse>(&authorization.context, &["cloud-providers"], None, None, None, RequestRisk::Read)
             .ok()?;
-        list.providers.into_iter().find(|summary| summary.id == authorization.provider).map(|summary| summary.display_name)
+        list.providers.into_iter().find(|summary| summary.id == authorization.provider)
+    }
+
+    /// `provider_summary` for a provider an organization connects. A
+    /// platform provider (PRO-452) is refused here, before any dialog: it
+    /// has no key to ask for, and the server answers its connect route the
+    /// same way.
+    pub(crate) fn connectable_provider_summary(&self, authorization: &ProviderConnectAuthorization) -> Result<Option<CloudProviderSummary>, CloudWorkspaceClientError> {
+        let summary = self.provider_summary(authorization);
+        if summary.as_ref().is_some_and(CloudProviderSummary::platform_credential) {
+            return Err(CloudWorkspaceClientError::local("cloud_provider_disabled", false));
+        }
+        Ok(summary)
     }
 
     pub(crate) fn connect_authorized(
@@ -2012,7 +2790,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, authorization.provider)
+        ensure_connection(result, &authorization.provider)
     }
 
     pub fn disconnect_provider(
@@ -2021,7 +2799,7 @@ impl CloudWorkspaceService {
         context_revision: String,
         disposition: DisconnectDisposition,
     ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2034,7 +2812,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, provider)
+        ensure_connection(result, &provider)
     }
 
     /// The organization's cloud teardown, if one was ever asked for (§10.7).
@@ -2121,7 +2899,7 @@ impl CloudWorkspaceService {
         context_revision: String,
         enabled: bool,
     ) -> Result<CloudProviderSummary, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2152,7 +2930,7 @@ impl CloudWorkspaceService {
         provider: CloudWorkspaceProviderId,
         context_revision: String,
     ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-        let authorization = self.authorize_connect(provider)?;
+        let authorization = self.authorize_connect(provider.clone())?;
         if context_revision != AccountManager::context_revision(&authorization.context)
             || !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
@@ -2165,7 +2943,7 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&authorization.context) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
-        ensure_connection(result, provider)
+        ensure_connection(result, &provider)
     }
 
     /// An organization's agent logins for cloud workspaces (PRO-79): which
@@ -2392,7 +3170,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Read,
             )?;
-            ensure_provider(result, provider, RequestRisk::Read)
+            ensure_provider(result, &provider, RequestRisk::Read)
         })
     }
 
@@ -2402,7 +3180,7 @@ impl CloudWorkspaceService {
         input: CloudWorkspaceQuoteInput,
     ) -> Result<CloudWorkspaceQuote, CloudWorkspaceClientError> {
         self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let provider = input.provider;
+            let provider = input.provider.clone();
             let result = client.request(
                 context,
                 &["cloud-workspaces", "quote"],
@@ -2411,7 +3189,7 @@ impl CloudWorkspaceService {
                 None,
                 RequestRisk::Mutation,
             )?;
-            ensure_provider(result, provider, RequestRisk::Mutation)
+            ensure_provider(result, &provider, RequestRisk::Mutation)
         })
     }
 
@@ -2490,10 +3268,11 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_catalog_feed_unavailable", false));
         }
         let cursor = cursor.filter(|cursor| valid_cursor(cursor));
-        let answer = self.client.catalog_feed(&context, cursor);
+        let answer = self.client.catalog_feed(&context, cursor, self.phase2_enabled);
+        if self.phase2_enabled && !self.account.is_current(&context) { return Err(context_changed_error(risk)); }
         let scope = self.account.scope_if_same_account(&context).filter(|scope| scope.multi_org).ok_or_else(|| context_changed_error(risk))?;
         let Some(body) = answer? else {
-            return Ok(CloudCatalogFeed { changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
+            return Ok(CloudCatalogFeed { viewer_user_id: context.user_id.clone(), changed: false, cursor: cursor.map(str::to_string), reset: false, organizations: Vec::new(), deleted_workspace_ids: Vec::new() });
         };
         if !valid_cursor(&body.cursor) {
             return Err(invalid_response());
@@ -2505,12 +3284,13 @@ impl CloudWorkspaceService {
                 continue;
             }
             let org_id = organization.org_id;
-            let failed = |code: String| CloudCatalogOrganization { org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
+            let failed = |code: String| CloudCatalogOrganization { presence: None, org_id: org_id.clone(), workspaces: Vec::new(), tombstones: Vec::new(), quota: None, error: Some(code) };
             organizations.push(match organization.error {
                 // Only a code this desktop knows crosses to the webview.
+                _ if organization.presence.as_ref().is_some_and(|presence| !valid_presence_people(&presence.active_members)) => failed("cloud_workspace_invalid_response".into()),
                 Some(code) => failed(if known_error_code(&code) { code } else { "cloud_workspace_unknown_error".into() }),
                 None => match ensure_list(CloudWorkspaceList { workspaces: organization.workspaces, tombstones: organization.tombstones, quota: organization.quota }, &org_id, risk) {
-                    Ok(list) => CloudCatalogOrganization { org_id: org_id.clone(), workspaces: list.workspaces, tombstones: list.tombstones, quota: list.quota, error: None },
+                    Ok(list) => CloudCatalogOrganization { presence: organization.presence, org_id: org_id.clone(), workspaces: list.workspaces, tombstones: list.tombstones, quota: list.quota, error: None },
                     Err(error) => failed(error.code),
                 },
             });
@@ -2518,7 +3298,7 @@ impl CloudWorkspaceService {
         let listed: std::collections::BTreeSet<&str> = organizations.iter().flat_map(|organization| organization.tombstones.iter().map(|tombstone| tombstone.id.as_str())).collect();
         // Only ids this desktop was also shown a tombstone for, or (in a delta) ids that are well formed.
         let deleted_workspace_ids = body.deleted_workspace_ids.into_iter().filter(|id| valid_resource_id(id) && (!body.reset || listed.contains(id.as_str()))).collect();
-        Ok(CloudCatalogFeed { changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
+        Ok(CloudCatalogFeed { viewer_user_id: context.user_id.clone(), changed: true, cursor: Some(body.cursor), reset: body.reset, organizations, deleted_workspace_ids })
     }
 
     /// Check the repositories and refs before quoting (contract §16), and
@@ -2626,9 +3406,13 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
+        if matches!(action, OperationAction::Restart) {
+            return self.restart(org, workspace_id);
+        }
         let action_path = match action {
             OperationAction::Suspend => "suspend",
             OperationAction::Resume => "resume",
+            OperationAction::Restart => unreachable!(),
             OperationAction::Archive => "archive",
             OperationAction::Delete => "delete",
         };
@@ -2786,12 +3570,91 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// Only explicit shares use the accepted target-membership contract here.
+    /// Keep the initiating active context as well as target membership: neither
+    /// a late success nor an HTTP error may escape into a replacement session.
+    fn run_share_in<T>(&self, org: Option<&str>, risk: RequestRisk,
+        operation: impl FnOnce(&Client, &AccountContext) -> Result<T, CloudWorkspaceClientError>) -> Result<T, CloudWorkspaceClientError> {
+        if org.is_some_and(|org| !valid_resource_id(org)) { return Err(inbox_invalid()); }
+        // An explicit member target does not require an active organization.
+        let active = self.account.context()
+            .ok_or_else(|| CloudWorkspaceClientError::local("account_signed_out", false))?;
+        if org.is_none() && active.organization_id.is_empty() {
+            return Err(CloudWorkspaceClientError::local("account_organization_unavailable", false));
+        }
+        let target = org.unwrap_or(&active.organization_id);
+        if !valid_resource_id(target) { return Err(inbox_invalid()); }
+        let context = self.account.inbox_member_context(target)
+            .map_err(|code| CloudWorkspaceClientError::local(code, false))?;
+        // is_current includes generation/user/profile/active org, but not token
+        // rotation. Fence the captured token too, even without a generation bump.
+        let session_is_current = || self.account.context().is_some_and(|now|
+            now.access_token == active.access_token && self.account.is_current(&active));
+        if context.generation != active.generation || context.user_id != active.user_id
+            || context.profile_id != active.profile_id || context.access_token != active.access_token
+            || !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+            return Err(context_changed_error(risk));
+        }
+        let result = operation(&self.client, &context);
+        if !session_is_current() || !self.account.inbox_member_is_current(&context, target) {
+            return Err(context_changed_error(risk));
+        }
+        result
+    }
+
+    /// The workspace's idle window and what it may be changed to (PRO-410),
+    /// for whoever may manage it.
+    pub fn idle_suspend(&self, org: Option<&str>, workspace_id: &str) -> Result<WorkspaceIdleSuspend, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: WorkspaceIdleSuspend = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                None,
+                None,
+                RequestRisk::Read,
+            )?;
+            if result.workspace_id != workspace_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    /// How long the workspace may sit idle before it is stopped, 0 for never
+    /// (PRO-410). The server holds it to the provider's windows and the
+    /// organization's cap.
+    pub fn set_idle_suspend(&self, org: Option<&str>, workspace_id: &str, idle_suspend_minutes: i64) -> Result<CloudWorkspace, CloudWorkspaceClientError> {
+        if !valid_resource_id(workspace_id) || idle_suspend_minutes < 0 {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudWorkspace = client.request(
+                context,
+                &["cloud-workspaces", workspace_id, "idle-suspend"],
+                None,
+                Some(json!({ "idleSuspendMinutes": idle_suspend_minutes })),
+                None,
+                RequestRisk::Mutation,
+            )?;
+            // An answer about another workspace, or one that does not name
+            // the window it now has, says nothing about whether this changed.
+            if result.id != workspace_id || result.org_id != context.organization_id || result.idle_suspend_minutes != Some(idle_suspend_minutes) {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result)
+        })
+    }
+
     /// Who the workspace is shared with, and what the caller may do (§21.2).
     pub fn shares(&self, org: Option<&str>, workspace_id: &str) -> Result<CloudWorkspaceShares, CloudWorkspaceClientError> {
         if !valid_resource_id(workspace_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Read, |client, context| {
+        self.run_share_in(org, RequestRisk::Read, |client, context| {
             let result: CloudWorkspaceShares = client.request(
                 context,
                 &["cloud-workspaces", workspace_id, "shares"],
@@ -2820,7 +3683,15 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
+        // Native v1 cannot enforce a manager without approval. Never upgrade the
+        // requested boolean, downgrade the role or retry with a different body.
+        if role == ShareRole::Manager {
+            if !can_approve {
+                return Err(CloudWorkspaceClientError::local("cloud_workspace_runtime_unsupported", false));
+            }
+            self.phase2_gate(false)?;
+        }
+        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "PUT",
                 context,
@@ -2848,7 +3719,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(workspace_id) || !valid_resource_id(user_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
+        self.run_share_in(org, RequestRisk::Mutation, |client, context| {
             let result: CloudWorkspaceShareChange = client.request_as(
                 "DELETE",
                 context,
@@ -2873,11 +3744,12 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Read, |client, context| {
-            let result: CloudSchedules = client.request(context, &["cloud-schedules"], workspace_id.map(|id| ("workspaceId", id)), None, None, RequestRisk::Read)?;
+            let mut result: CloudSchedules = client.request(context, &["cloud-schedules"], workspace_id.map(|id| ("workspaceId", id)), None, None, RequestRisk::Read)?;
             // An answer about another workspace is not this workspace's list.
             if result.schedules.iter().any(|schedule| !valid_schedule_id(&schedule.id) || workspace_id.is_some_and(|id| schedule.workspace_id != id)) {
                 return Err(invalid_response());
             }
+            for schedule in &mut result.schedules { automation_run_identity(schedule, &mut []); }
             Ok(result)
         })
     }
@@ -2888,10 +3760,11 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
         self.run_in(org, RequestRisk::Read, |client, context| {
-            let result: CloudScheduleDetail = client.request(context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read)?;
+            let mut result: CloudScheduleDetail = client.request(context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read)?;
             if result.schedule.id != schedule_id {
                 return Err(invalid_response());
             }
+            automation_run_identity(&mut result.schedule, &mut result.runs);
             Ok(result)
         })
     }
@@ -2899,11 +3772,17 @@ impl CloudWorkspaceService {
     /// What a schedule would cost and when it would first run. It writes
     /// nothing on the server, so it is asked like a read.
     pub fn schedule_estimate(&self, org: Option<&str>, input: &CloudScheduleEstimateInput) -> Result<CloudScheduleQuote, CloudWorkspaceClientError> {
-        let timing = schedule_timing_body(&input.schedule);
+        let timing = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), None, None);
         let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
-        let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
+            return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
+        }
+        let mut body = timing;
+        body["workspaceId"] = json!(input.workspace_id);
+        body["completionPolicy"] = json!(input.completion_policy);
+        body["maxRunMinutes"] = json!(input.max_run_minutes);
         self.run_in(org, RequestRisk::Read, |client, context| {
             client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
                 // A 404 that names no refusal is a server without the route
@@ -2923,7 +3802,7 @@ impl CloudWorkspaceService {
     pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
         let name = input.name.trim();
-        let Some(timing) = schedule_timing_body(&input.schedule) else { return invalid("cloud_workspace_request_invalid") };
+        let Some(trigger_body) = automation_body(input.schedule.as_ref(), input.github_trigger.as_ref(), input.workspace_mode.as_deref(), input.archive_after_days, input.archive_on_pr_merge) else { return invalid("cloud_workspace_request_invalid") };
         // As the server reads it: printable ASCII, no space.
         let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x21..=0x7e).contains(&byte)));
         let effort_ok = input.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
@@ -2942,18 +3821,21 @@ impl CloudWorkspaceService {
         if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
             return invalid("cloud_workspace_prompt_too_long");
         }
+        if !self.phase2_enabled && (input.workspace_mode.as_deref() == Some("fresh") || input.github_trigger.is_some()) {
+            return invalid("cloud_schedule_runtime_unsupported");
+        }
         let mut body = json!({
             "workspaceId": input.workspace_id,
             "name": name,
             "agent": input.agent,
             "mode": input.mode,
             "prompt": input.prompt,
-            "schedule": timing,
             "missedRunPolicy": input.missed_run_policy,
             "completionPolicy": input.completion_policy,
             "maxRunMinutes": input.max_run_minutes,
             "confirmProviderSpend": true,
         });
+        body.as_object_mut().unwrap().extend(trigger_body.as_object().unwrap().clone());
         if let Some(model) = input.model.as_deref() {
             body["model"] = json!(model);
         }
@@ -2961,10 +3843,11 @@ impl CloudWorkspaceService {
             body["effort"] = json!(effort);
         }
         self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
+            let mut result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
             if result.schedule.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.id) {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
+            automation_run_identity(&mut result.schedule, &mut []);
             Ok(result.schedule)
         })
     }
@@ -2975,14 +3858,39 @@ impl CloudWorkspaceService {
         if !valid_schedule_id(schedule_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
+        let (context, access) = self.context_in(org)?;
+        // Resume can start billed compute. While activation is held, inspect
+        // the saved trigger/mode through the existing authorized detail route
+        // before sending any spend mutation, regardless of the UI adapter.
+        if active && !self.phase2_enabled {
+            let detail: Result<CloudScheduleDetail, _> = self.client.request(&context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read);
+            if !self.account.is_current_in(&context, access) {
+                return Err(context_changed_error(RequestRisk::Read));
+            }
+            let saved = detail?.schedule;
+            if saved.id != schedule_id { return Err(invalid_response()); }
+            if saved.workspace_mode != "existing" || saved.github_trigger.is_some() || saved.schedule.is_none() {
+                return Err(CloudWorkspaceClientError::local("cloud_schedule_runtime_unsupported", false));
+            }
+        }
         let (action, body) = if active { ("resume", json!({ "confirmProviderSpend": true })) } else { ("pause", json!({})) };
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules", schedule_id, action], None, Some(body), None, RequestRisk::Mutation)?;
+        // Use the same captured authority for both requests; never recapture
+        // a different account/profile after the preflight authorized a timer.
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        let result = (|| {
+            let mut result: CloudScheduleAnswer = self.client.request(&context, &["cloud-schedules", schedule_id, action], None, Some(body), None, RequestRisk::Mutation)?;
             if result.schedule.id != schedule_id {
                 return Err(post_send_error(RequestRisk::Mutation));
             }
+            automation_run_identity(&mut result.schedule, &mut []);
             Ok(result.schedule)
-        })
+        })();
+        if !self.account.is_current_in(&context, access) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        result
     }
 
     /// Delete a scheduled task, its prompt and its runs.
@@ -3030,7 +3938,7 @@ impl CloudWorkspaceService {
                 false,
             ));
         }
-        self.run_in(org, risk, |client, context| {
+        let request = |client: &Client, context: &AccountContext| {
             let tail = [
                 "cloud-workspace-operations",
                 operation_id,
@@ -3055,7 +3963,14 @@ impl CloudWorkspaceService {
                 return Err(post_send_error(risk));
             }
             ensure_snapshot(result, &context.organization_id, None, risk)
-        })
+        };
+        // Once the accepted Phase 2 routes are activated, their existing poll
+        // endpoint also accepts a member target without requiring it active.
+        if self.phase2_enabled && matches!(risk, RequestRisk::Read) {
+            self.member_phase2_workspace(org, operation_id, risk, request)
+        } else {
+            self.run_in(org, risk, request)
+        }
     }
 }
 
@@ -3135,10 +4050,30 @@ fn parse_retry_after(value: Option<&str>) -> Option<u64> {
         .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECONDS))
 }
 
+fn inbox_invalid() -> CloudWorkspaceClientError {
+    CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false)
+}
+
 fn known_error_code(code: &str) -> bool {
     matches!(
         code,
         "invalid_access_token"
+            | "workspace_owner_changed"
+            | "workspace_reassign_same_owner"
+            | "workspace_reassign_private_confirmation_required"
+            | "workspace_reassign_target_not_visible"
+            | "workspace_reassign_busy"
+            | "workspace_reassign_personal_route_held"
+            | "workspace_reassign_credential_restricted"
+            | "workspace_reassign_runtime_unsupported"
+            | "workspace_reassign_idempotency_conflict"
+            | "cloud_workspace_last_admin"
+            | "workspace_following_unavailable"
+            | "presence_rate_limited"
+            | "presence_device_limit"
+            | "presence_capacity_exceeded"
+            | "presence_unavailable"
+            | "inbox_unavailable"
             | "organization_admin_required"
             | "active_organization_required"
             | "cloud_workspace_not_found"
@@ -3188,6 +4123,12 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_schedule_prompt_file_mention"
             | "cloud_schedule_needs_approval"
             | "cloud_workspace_concurrency_exceeded"
+            // Existing SaaS lifecycle errors reused by restart; no new domain errors.
+            | "cloud_workspace_manager_required"
+            | "cloud_workspace_runtime_unsupported"
+            | "cloud_workspace_runtime_not_ready"
+            | "cloud_workspace_member_concurrency_exceeded"
+            | "cloud_preparation_workspace_expired"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
             | "cloud_workspace_request_invalid"
@@ -3211,6 +4152,7 @@ fn known_error_code(code: &str) -> bool {
             | "github_installation_suspended"
             | "github_installation_revoked"
             | "organization_member_not_found"
+            | "cloud_workspace_share_unavailable"
             | "cloud_workspace_share_not_found"
             | "cloud_workspace_share_redundant"
             | "cloud_workspace_share_requires_organization_access"
@@ -3391,7 +4333,7 @@ fn known_operation_error_code(code: &str) -> bool {
 
 fn ensure_provider<T>(
     value: T,
-    expected: CloudWorkspaceProviderId,
+    expected: &CloudWorkspaceProviderId,
     risk: RequestRisk,
 ) -> Result<T, CloudWorkspaceClientError>
 where
@@ -3405,31 +4347,31 @@ where
 
 fn ensure_connection(
     value: CloudProviderConnectionResponse,
-    expected: CloudWorkspaceProviderId,
+    expected: &CloudWorkspaceProviderId,
 ) -> Result<CloudProviderConnectionResponse, CloudWorkspaceClientError> {
-    if value.provider != expected {
+    if &value.provider != expected {
         return Err(invalid_response());
     }
     Ok(value)
 }
 
 trait ProviderBound {
-    fn provider_id(&self) -> CloudWorkspaceProviderId;
+    fn provider_id(&self) -> &CloudWorkspaceProviderId;
 }
 
 impl ProviderBound for CloudProviderSummary {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.id
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.id
     }
 }
 impl ProviderBound for CloudWorkspaceSetup {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.provider
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.provider
     }
 }
 impl ProviderBound for CloudWorkspaceQuote {
-    fn provider_id(&self) -> CloudWorkspaceProviderId {
-        self.provider
+    fn provider_id(&self) -> &CloudWorkspaceProviderId {
+        &self.provider
     }
 }
 
@@ -3466,7 +4408,9 @@ fn ensure_list(
     risk: RequestRisk,
 ) -> Result<CloudWorkspaceList, CloudWorkspaceClientError> {
     if value.workspaces.iter().any(|item| {
-        item.workspace.org_id != org_id
+        item.workspace.creator.as_ref().is_some_and(|person| !valid_presence_id(&person.user_id) || item.workspace.created_by.as_deref() != Some(person.user_id.as_str()))
+            || item.presence.as_ref().is_some_and(|presence| !valid_presence_people(&presence.active_members))
+            || item.workspace.org_id != org_id
             || !valid_resource_id(&item.workspace.id)
             || item
                 .latest_operation
@@ -3652,6 +4596,619 @@ mod tests {
         (account, service)
     }
 
+    fn reassign_body() -> Value {
+        json!({"targetUserId":"target.member:@-1", "expectedOwnerId":"previous-owner",
+            "requestId":"01234567-89ab-8cde-Bfab-0123456789ab"})
+    }
+
+    fn reassign_reply(reassigned: bool) -> Value {
+        json!({"workspaceId":"workspace-1", "ownerId":"target.member:@-1",
+            "previousOwnerId":"previous-owner", "reassigned":reassigned})
+    }
+
+    fn following_call(service: &CloudWorkspaceService, action: &str, org: &str) -> Result<(), CloudWorkspaceClientError> {
+        match action {
+            "reassign" => service.workspace_reassign(org, "workspace-1", reassign_body()).map(|_| ()),
+            "put" => service.workspace_follow(org, "workspace-1", true, json!({})).map(|_| ()),
+            "delete" => service.workspace_follow(org, "workspace-1", false, json!({})).map(|_| ()),
+            _ => unreachable!(),
+        }
+    }
+
+    fn following_reply(action: &str) -> Value {
+        if action == "reassign" { reassign_reply(true) }
+        else { json!({"workspaceId":"workspace-1", "following":action == "put"}) }
+    }
+
+    #[test]
+    fn phase2_following_contract_exact_paths_empty_delete_auth_inactive_org_and_receipt() {
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"workspaceId":"workspace-1","following":true}"#, ""),
+            response("200 OK", r#"{"workspaceId":"workspace-1","following":false}"#, ""),
+            response("200 OK", &reassign_reply(true).to_string(), ""),
+            response("200 OK", &reassign_reply(false).to_string(), ""),
+            response("200 OK", &reassign_reply(true).to_string(), ""),
+        ]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert!(service.workspace_follow("org-2", "workspace-1", true, json!({})).unwrap().following);
+        assert!(!service.workspace_follow("org-2", "workspace-1", false, json!({})).unwrap().following);
+        let mut body = reassign_body();
+        body["confirmPrivate"] = json!(false);
+        body["note"] = json!("Away\nplease\tland 🦝");
+        assert!(service.workspace_reassign("org-2", "workspace-1", body.clone()).unwrap().reassigned);
+        // A caller explicitly repeats the same payload. False is a receipt even
+        // if another transfer happened later; no fresh-owner lookup is attempted.
+        let receipt = service.workspace_reassign("org-2", "workspace-1", body.clone()).unwrap();
+        assert!(!receipt.reassigned);
+        assert_eq!(receipt.owner_id, "target.member:@-1");
+        service.workspace_reassign("org-2", "workspace-1", reassign_body()).unwrap();
+        let requests = requests.join().unwrap();
+        assert_eq!(requests.len(), 5);
+        for (i, (method, suffix, expected)) in [
+            ("PUT", "follow", json!({})), ("DELETE", "follow", json!({})),
+            ("POST", "reassign", body.clone()), ("POST", "reassign", body),
+            ("POST", "reassign", reassign_body()),
+        ].into_iter().enumerate() {
+            let request = &requests[i];
+            assert!(request.starts_with(&format!("{method} /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/{suffix} HTTP/1.1")));
+            phase2_headers(request);
+            assert!(request.to_ascii_lowercase().contains("content-type: application/json"));
+            assert!(!request.to_ascii_lowercase().contains("idempotency-key:"));
+            assert!(!request.contains("presence=1"));
+            assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn phase2_following_contract_uuid_versions_variants_and_utf16_boundaries() {
+        for version in '1'..='8' {
+            for variant in ['8','9','a','b','A','B'] {
+                let mut body = reassign_body();
+                body["requestId"] = json!(format!("01234567-89AB-{version}CDE-{variant}FAB-0123456789AB"));
+                assert!(reassign_input(body).is_ok());
+            }
+        }
+        for note in ["".to_owned(), "a".repeat(500), "🦝".repeat(250), "line\nwith\ttab".to_owned()] {
+            let mut body = reassign_body(); body["note"] = json!(note);
+            assert!(reassign_input(body).is_ok());
+        }
+        for id in ["a".repeat(128), "a.b_c:d@e-f".to_owned()] {
+            let mut body = reassign_body(); body["targetUserId"] = json!(id);
+            assert!(reassign_input(body).is_ok());
+        }
+        assert!(!valid_presence_id("a.b:c@d"));
+        assert!(valid_following_id("a.b:c@d"));
+    }
+
+    #[test]
+    fn phase2_following_contract_strict_input_path_nulls_and_production_hold_no_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (account, service) = phase2_service(&base);
+        let mut production = CloudWorkspaceService::new(account.clone());
+        production.client = Client::for_test(&base, Duration::from_millis(30));
+        assert!(!production.phase2_contracts_available());
+        for action in ["put", "delete", "reassign"] {
+            assert_eq!(following_call(&production, action, "org-1").unwrap_err().code, "workspace_following_unavailable");
+        }
+        for following in [true, false] {
+            for body in [Value::Null, json!([]), json!([{}]), json!(true), json!("{}"), json!({"extra":1})] {
+                assert_eq!(service.workspace_follow("org-1", "workspace-1", following, body).unwrap_err().code, "cloud_workspace_request_invalid");
+            }
+        }
+        let mut invalid = vec![Value::Null, json!([]), json!({}), json!("input")];
+        for key in ["targetUserId", "expectedOwnerId", "requestId"] {
+            let mut body = reassign_body(); body.as_object_mut().unwrap().remove(key); invalid.push(body);
+            for value in [Value::Null, json!(1), json!(false), json!([]), json!({}), json!("")] {
+                let mut body = reassign_body(); body[key] = value; invalid.push(body);
+            }
+        }
+        for (key, values) in [
+            ("note", vec![Value::Null, json!(false), json!(42), json!([]), json!({}), json!("a".repeat(501)), json!("🦝".repeat(251))]),
+            ("confirmPrivate", vec![Value::Null, json!("false"), json!(0), json!([]), json!({})]),
+            ("requestId", vec![json!("01234567-89ab-0cde-8fab-0123456789ab"), json!("01234567-89ab-9cde-8fab-0123456789ab"),
+                json!("01234567-89ab-4cde-7fab-0123456789ab"), json!("01234567-89ab-4cde-cfab-0123456789ab"),
+                json!("0123456789ab4cde8fab0123456789ab"), json!("{01234567-89ab-4cde-8fab-0123456789ab}"),
+                json!("01234567-89ab-4cde-8fab-0123456789ab\n"), json!(" 01234567-89ab-4cde-8fab-0123456789ab")]),
+        ] {
+            for value in values { let mut body = reassign_body(); body[key] = value; invalid.push(body); }
+        }
+        for code in (0u8..=31).filter(|code| !matches!(*code, 9 | 10)).chain([127, b'<', b'>']) {
+            let mut body = reassign_body(); body["note"] = json!(format!("before{}after", char::from(code))); invalid.push(body);
+        }
+        let mut extra = reassign_body(); extra["actorId"] = json!("invented"); invalid.push(extra);
+        for id in ["", "x/y", "a\\b", "id\n", "id\r", "id?x", "id#x", "%2f", " a", "é", &"a".repeat(129)] {
+            for key in ["targetUserId", "expectedOwnerId"] { let mut body = reassign_body(); body[key] = json!(id); invalid.push(body); }
+            assert!(service.workspace_reassign(id, "workspace-1", reassign_body()).is_err());
+            assert!(service.workspace_reassign("org-1", id, reassign_body()).is_err());
+            for following in [true, false] {
+                assert!(service.workspace_follow(id, "workspace-1", following, json!({})).is_err());
+                assert!(service.workspace_follow("org-1", id, following, json!({})).is_err());
+            }
+        }
+        for id in [".", ".."] {
+            assert!(service.workspace_reassign("org-1", id, reassign_body()).is_err());
+            assert!(service.workspace_follow(id, "workspace-1", true, json!({})).is_err());
+        }
+        for body in invalid {
+            assert_eq!(service.workspace_reassign("org-1", "workspace-1", body).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        account.set_memberships_for_test(&["org-1"], false);
+        for action in ["put", "delete", "reassign"] { assert!(following_call(&service, action, "org-2").is_err()); }
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn phase2_following_contract_bounded_ids_note_wire_and_server_safety_refusals() {
+        let workspace = "w".repeat(128);
+        let note = "🦝".repeat(250);
+        let mut input = reassign_body(); input["note"] = json!(note); input["confirmPrivate"] = json!(true);
+        let mut success = reassign_reply(true); success["workspaceId"] = json!(workspace);
+        let (base, _, request) = serve_once(response("200 OK", &success.to_string(), ""), Duration::ZERO);
+        let (_, service) = phase2_service(&base);
+        service.workspace_reassign("org-1", &workspace, input.clone()).unwrap();
+        let captured = request.join().unwrap();
+        assert!(!captured.extra_request);
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split_once("\r\n\r\n").unwrap().1).unwrap(), input);
+        let workspace = "workspace.name:@-1";
+        let (base, _, request) = serve_once(response("200 OK", &json!({"workspaceId":workspace,"following":true}).to_string(), ""), Duration::ZERO);
+        let (_, service) = phase2_service(&base);
+        service.workspace_follow("org-1", workspace, true, json!({})).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("PUT /v1/desktop/orgs/org-1/cloud-workspaces/{workspace}/follow HTTP/1.1")));
+        assert!(!captured.extra_request);
+        for (code, confirm) in [
+            ("workspace_reassign_private_confirmation_required", false),
+            ("workspace_reassign_target_not_visible", true),
+            ("workspace_reassign_runtime_unsupported", true),
+            ("workspace_reassign_busy", true),
+            ("workspace_reassign_personal_route_held", true),
+            ("workspace_reassign_credential_restricted", true),
+            ("workspace_reassign_idempotency_conflict", true),
+        ] {
+            let (base, _, request) = serve_once(response("409 Conflict", &json!({"error":code}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let mut input = reassign_body(); input["confirmPrivate"] = json!(confirm);
+            assert_eq!(service.workspace_reassign("org-1", "workspace-1", input).unwrap_err().code, code);
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_following_contract_response_ids_booleans_and_exact_receipt() {
+        let mut bodies = vec![Value::Null, json!([]), json!({}), json!(["workspace-1","target.member:@-1","previous-owner",true])];
+        for (key, value) in [("workspaceId", json!("foreign")), ("ownerId", json!("fresh-owner")), ("previousOwnerId", json!("wrong-owner")),
+            ("ownerId", json!("bad\n")), ("reassigned", json!("false")), ("reassigned", Value::Null), ("extra", json!(true))] {
+            let mut body = reassign_reply(false); body[key] = value; bodies.push(body);
+        }
+        let mut missing = reassign_reply(false); missing.as_object_mut().unwrap().remove("reassigned"); bodies.push(missing);
+        let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
+        let (_, service) = phase2_service(&base);
+        for _ in &bodies {
+            let error = service.workspace_reassign("org-1", "workspace-1", reassign_body()).unwrap_err();
+            assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
+            assert!(error.requires_original_account_context);
+        }
+        assert_eq!(requests.join().unwrap().len(), bodies.len());
+        for following in [true, false] {
+            for body in [Value::Null, json!(["workspace-1",following]), json!({"workspaceId":"wrong","following":following}),
+                json!({"workspaceId":"workspace-1","following":!following}), json!({"workspaceId":"workspace-1","following":"true"}),
+                json!({"workspaceId":"workspace-1","following":null}), json!({"workspaceId":"workspace-1"}),
+                json!({"workspaceId":"workspace-1","following":following,"extra":1})] {
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                assert_eq!(service.workspace_follow("org-1", "workspace-1", following, json!({})).unwrap_err().code, "cloud_workspace_request_outcome_unknown");
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_following_contract_all_server_errors_and_no_automatic_retry() {
+        for (status, code) in [
+            ("401 Unauthorized", "invalid_access_token"), ("403 Forbidden", "active_organization_required"),
+            ("403 Forbidden", "cloud_workspace_manager_required"), ("404 Not Found", "cloud_workspace_not_found"),
+            ("422 Unprocessable Entity", "cloud_workspace_request_invalid"),
+            ("409 Conflict", "workspace_owner_changed"), ("409 Conflict", "workspace_reassign_same_owner"),
+            ("409 Conflict", "workspace_reassign_private_confirmation_required"), ("409 Conflict", "workspace_reassign_target_not_visible"),
+            ("409 Conflict", "workspace_reassign_busy"), ("409 Conflict", "workspace_reassign_personal_route_held"),
+            ("409 Conflict", "workspace_reassign_credential_restricted"), ("409 Conflict", "workspace_reassign_runtime_unsupported"),
+            ("409 Conflict", "cloud_workspace_member_concurrency_exceeded"), ("409 Conflict", "cloud_teardown_in_progress"),
+            ("409 Conflict", "workspace_reassign_idempotency_conflict"), ("409 Conflict", "cloud_workspace_last_admin"),
+            ("503 Service Unavailable", "workspace_following_unavailable"),
+        ] {
+            assert!(known_error_code(code));
+            for action in ["put", "delete", "reassign"] {
+                let (base, _, request) = serve_once(response(status, &json!({"error":code}).to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let error = following_call(&service, action, "org-1").unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, Some(status[..3].parse::<u16>().unwrap()));
+                assert!(!error.retryable);
+                assert!(!error.retry_with_same_idempotency_key);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+        let (base, _, request) = serve_once(response("413 Payload Too Large", "framework body limit", ""), Duration::ZERO);
+        let (_, service) = phase2_service(&base);
+        assert_eq!(following_call(&service, "reassign", "org-1").unwrap_err().status, Some(413));
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_following_contract_bounded_timeout_and_body_capture_no_retry() {
+        for action in ["put", "delete", "reassign"] {
+            let (base, _, request) = serve_once(response("200 OK", &following_reply(action).to_string(), ""), Duration::from_millis(150));
+            let (account, _) = test_service(&base);
+            let mut service = CloudWorkspaceService::for_test(account, &base, Duration::from_millis(30));
+            service.phase2_enabled = true;
+            let error = following_call(&service, action, "org-1").unwrap_err();
+            assert_eq!(error.code, "cloud_workspace_request_outcome_unknown");
+            assert_eq!(error.status, None);
+            assert!(error.requires_original_account_context);
+            assert!(!request.join().unwrap().extra_request);
+            let mut body = following_reply(action).to_string(); body.push_str(&" ".repeat(RESPONSE_LIMIT_BYTES as usize + 1));
+            let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            assert_eq!(following_call(&service, action, "org-1").unwrap_err().code, "cloud_workspace_request_outcome_unknown");
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_following_contract_late_account_profile_org_session_and_aba_fenced() {
+        for change in ["signout", "account", "profile", "org", "session", "aba", "membership"] {
+            for (action, rejected) in [("put", false), ("delete", false), ("reassign", false), ("put", true), ("delete", true), ("reassign", true)] {
+                let body = following_reply(action);
+                let reply = if rejected { response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "") }
+                    else { response("200 OK", &body.to_string(), "") };
+                let (base, accepted, request) = serve_once(reply, Duration::from_millis(100));
+                let (account, mut service) = test_service(&base); service.phase2_enabled = true;
+                account.set_memberships_for_test(&["org-1", "org-2"], false);
+                let handle = thread::spawn(move || following_call(&service, action, "org-2"));
+                accepted.recv_timeout(Duration::from_secs(1)).unwrap();
+                let mut replacement = context();
+                match change {
+                    "signout" => account.set_context_for_test(None),
+                    "membership" => { account.set_memberships_for_test(&["org-1"], false); },
+                    "aba" => {
+                        let mut other = context();
+                        other.user_id = "user-2".into();
+                        other.generation += 1;
+                        account.set_context_for_test(Some(other));
+                        replacement.generation += 2;
+                        account.set_context_for_test(Some(replacement));
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                    _ => {
+                        match change {
+                            "account" => replacement.user_id = "user-2".into(),
+                            "profile" => replacement.profile_id = "profile-2".into(),
+                            "org" => replacement.organization_id = "org-2".into(),
+                            "session" => replacement.access_token = "new-session-token".into(),
+                            _ => unreachable!(),
+                        }
+                        account.set_context_for_test(Some(replacement));
+                        // Keep target membership valid: each test must fail for
+                        // the changed context field, not fixture membership loss.
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                }
+                let error = handle.join().unwrap().unwrap_err();
+                assert_eq!(error.code, "account_context_changed", "{change}, action={action}, rejected={rejected}");
+                assert!(error.requires_original_account_context);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+    }
+
+    fn presence_put_body() -> Value {
+        json!({"deviceId":"01234567-89ab-4cde-8fab-0123456789ab", "sequence":1, "workspaceId":"workspace-1"})
+    }
+
+    fn presence_read_body() -> Value {
+        json!({"ttlSeconds":45, "activeMembers":[{"userId":"member-1","displayName":null,"photoUrl":"https://example.com/current.png"}],
+            "workspaces":[{"workspaceId":"workspace-1", "owner":{"userId":"current-owner","displayName":null,"photoUrl":null},
+                "activeMembers":[{"userId":"member-1","displayName":null,"photoUrl":"https://example.com/current.png"}]}]})
+    }
+
+    #[test]
+    fn phase2_presence_contract_exact_paths_auth_bodies_and_nonactive_target() {
+        let (base, requests) = serve_each(vec![
+            response("200 OK", r#"{"applied":false,"ttlSeconds":45}"#, ""),
+            response("200 OK", r#"{"applied":true,"ttlSeconds":45}"#, ""),
+            response("200 OK", &presence_read_body().to_string(), ""),
+            response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""),
+        ]);
+        let (account, mut service) = test_service(&base);
+        service.phase2_enabled = true;
+        // Membership alone authorizes the inactive org, without CS-18 opt-in.
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        let mut body = presence_put_body();
+        body["sequence"] = json!(9_007_199_254_740_991_u64);
+        assert!(!service.presence_put("org-2", body.clone()).unwrap().applied);
+        let mut leave = body.clone();
+        leave["workspaceId"] = Value::Null;
+        // Number.isSafeInteger(1.0) is true; its normalized wire value is 1.
+        leave["sequence"] = json!(1.0);
+        assert!(service.presence_put("org-2", leave.clone()).unwrap().applied);
+        leave["sequence"] = json!(1);
+        let read = service.presence_read("org-2", json!({"workspaceIds":["workspace-1","omitted"]})).unwrap();
+        assert_eq!(read.workspaces.len(), 1);
+        assert_eq!(read.workspaces[0].owner.user_id, "current-owner");
+        assert!(read.workspaces[0].owner.display_name.is_none());
+        assert!(read.workspaces[0].owner.photo_url.is_none());
+        assert!(read.active_members[0].display_name.is_none());
+        service.presence_read("org-2", json!({"workspaceIds":[]})).unwrap();
+        let requests = requests.join().unwrap();
+        for (request, path, body) in [
+            (&requests[0], "PUT /v1/desktop/orgs/org-2/presence HTTP/1.1", body),
+            (&requests[1], "PUT /v1/desktop/orgs/org-2/presence HTTP/1.1", leave),
+            (&requests[2], "POST /v1/desktop/orgs/org-2/presence/read HTTP/1.1", json!({"workspaceIds":["workspace-1","omitted"]})),
+            (&requests[3], "POST /v1/desktop/orgs/org-2/presence/read HTTP/1.1", json!({"workspaceIds":[]})),
+        ] {
+            assert!(request.starts_with(path));
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer native-secret-token"));
+            assert!(!request.to_ascii_lowercase().contains("presence=1"));
+            assert!(!request.to_ascii_lowercase().contains("x-terminalx-presence"));
+            assert_eq!(serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_invalid_inputs_and_production_hold_never_http() {
+        // A bound listener proves no connection was attempted (unlike a dead port).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (account, mut service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
+        let mut production = CloudWorkspaceService::new(account.clone());
+        assert!(!production.phase2_contracts_available());
+        // Route the actual production constructor to the listener, preserving
+        // its activation state, so a hold regression would be observable.
+        production.client = Client::for_test(&format!("http://{}", listener.local_addr().unwrap()), Duration::from_millis(30));
+        assert_eq!(production.presence_put("org-1", presence_put_body()).unwrap_err().code, "presence_unavailable");
+        assert_eq!(production.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().code, "presence_unavailable");
+        assert!(!service.phase2_contracts_available());
+        assert_eq!(service.presence_put("org-1", presence_put_body()).unwrap_err().code, "presence_unavailable");
+        assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().code, "presence_unavailable");
+        service.phase2_enabled = true;
+        let valid = presence_put_body();
+        let mut invalid = vec![Value::Null, json!([]), json!([valid["deviceId"], 1, null]), json!({}), json!({"deviceId":"x","sequence":1}), json!({"deviceId":1,"sequence":1,"workspaceId":null})];
+        for (key, value) in [
+            ("deviceId", json!("01234567-89ab-3cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567-89ab-4cde-7fab-0123456789ab")),
+            ("deviceId", json!("01234567-89AB-4cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567_89ab-4cde-8fab-0123456789ab")),
+            ("deviceId", json!("01234567-89ab-4cde-cfab-0123456789ab")),
+            ("sequence", json!(0)), ("sequence", json!(-1)), ("sequence", json!(1.5)),
+            ("sequence", json!(9_007_199_254_740_992_u64)), ("sequence", json!("1")),
+            ("sequence", Value::Null), ("sequence", json!(true)),
+            ("workspaceId", json!("../private")), ("workspaceId", json!("a.b")), ("workspaceId", json!("a:b")),
+            ("workspaceId", json!("")), ("workspaceId", json!("x".repeat(129))), ("workspaceId", json!(false)),
+            ("userId", json!("actor")), ("profileId", json!("actor")), ("sessionId", json!("actor")),
+        ] { let mut body = valid.clone(); body[key] = value; invalid.push(body); }
+        for key in ["deviceId", "sequence", "workspaceId"] {
+            let mut body = valid.clone(); body.as_object_mut().unwrap().remove(key); invalid.push(body);
+        }
+        for body in invalid { assert_eq!(service.presence_put("org-1", body).unwrap_err().code, "cloud_workspace_request_invalid"); }
+        let too_many: Vec<String> = (0..101).map(|i| format!("workspace-{i}")).collect();
+        for body in [Value::Null, json!([]), json!([["workspace-1"]]), json!({}), json!({"workspaceIds":null}), json!({"workspaceIds":[1]}),
+            json!({"workspaceIds":["a","a"]}), json!({"workspaceIds":["a/b"]}), json!({"workspaceIds":["x".repeat(129)]}),
+            json!({"workspaceIds":too_many}), json!({"workspaceIds":[""]}), json!({"workspaceIds":"a"}),
+            json!({"workspaceIds":[],"profileId":"actor"}), json!({"workspaceIds":[],"extra":null})] {
+            assert_eq!(service.presence_read("org-1", body).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        for org in ["", "../org", "a.b", "a:b", &"x".repeat(129)] {
+            assert_eq!(service.presence_put(org, presence_put_body()).unwrap_err().code, "cloud_workspace_request_invalid");
+            assert_eq!(service.presence_read(org, json!({"workspaceIds":[]})).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        account.set_memberships_for_test(&["org-1"], false);
+        assert!(service.presence_read("org-2", json!({"workspaceIds":[]})).is_err());
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        for variant in ['8', '9', 'a', 'b'] {
+            assert!(valid_presence_device(&format!("01234567-89ab-4cde-{variant}fab-0123456789ab")));
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_subset_omissions_and_invalid_outputs() {
+        let mut bodies = vec![presence_read_body()];
+        bodies[0]["workspaces"] = json!([]); // Aggregate need not be in requested batch.
+        let mut foreign = presence_read_body(); foreign["workspaces"][0]["workspaceId"] = json!("foreign");
+        let mut duplicate = presence_read_body(); let repeated = duplicate["workspaces"][0].clone(); duplicate["workspaces"].as_array_mut().unwrap().push(repeated);
+        let mut bad_person = presence_read_body(); bad_person["activeMembers"][0]["userId"] = json!("bad/id");
+        let mut missing_name = presence_read_body(); missing_name["workspaces"][0]["owner"].as_object_mut().unwrap().remove("displayName");
+        let mut email = presence_read_body(); email["workspaces"][0]["owner"]["email"] = json!("hidden@example.com");
+        let mut bad_ttl = presence_read_body(); bad_ttl["ttlSeconds"] = json!(44);
+        let mut missing_aggregate = presence_read_body(); missing_aggregate["activeMembers"] = json!([]);
+        let mut duplicate_people = presence_read_body(); duplicate_people["activeMembers"].as_array_mut().unwrap().push(json!({"userId":"member-1","displayName":null,"photoUrl":null}));
+        let mut duplicate_attached = presence_read_body(); let person = duplicate_attached["workspaces"][0]["activeMembers"][0].clone(); duplicate_attached["workspaces"][0]["activeMembers"].as_array_mut().unwrap().push(person);
+        let mut array_owner = presence_read_body(); array_owner["workspaces"][0]["owner"] = json!(["owner",null,null]);
+        let mut array_person = presence_read_body(); array_person["activeMembers"][0] = json!(["member-1",null,null]);
+        let mut array_attached = presence_read_body(); array_attached["workspaces"][0]["activeMembers"][0] = json!(["member-1",null,null]);
+        let mut array_workspace = presence_read_body(); let workspace = array_workspace["workspaces"][0].clone();
+        array_workspace["workspaces"][0] = json!([workspace["workspaceId"],workspace["owner"],workspace["activeMembers"]]);
+        let mut missing_photo = presence_read_body(); missing_photo["activeMembers"][0].as_object_mut().unwrap().remove("photoUrl");
+        let mut mistyped_name = presence_read_body(); mistyped_name["activeMembers"][0]["displayName"] = json!(false);
+        let mut mistyped_photo = presence_read_body(); mistyped_photo["workspaces"][0]["owner"]["photoUrl"] = json!(42);
+        let mut bad_owner = presence_read_body(); bad_owner["workspaces"][0]["owner"]["userId"] = json!("owner/private");
+        let mut extra_workspace = presence_read_body(); extra_workspace["workspaces"][0]["creator"] = json!({"userId":"stale-owner"});
+        let mut extra_top = presence_read_body(); extra_top["privateCount"] = json!(1);
+        let mut too_many_people = presence_read_body(); too_many_people["activeMembers"] = json!((0..501).map(|i| json!({"userId":format!("member-{i}"),"displayName":null,"photoUrl":null})).collect::<Vec<_>>());
+        bodies.extend([foreign, duplicate, bad_person, missing_name, email, bad_ttl, missing_aggregate,
+            duplicate_people, duplicate_attached, array_owner, array_person, array_attached, array_workspace,
+            missing_photo, mistyped_name, mistyped_photo, bad_owner, extra_workspace, extra_top, too_many_people,
+            json!([45, [], []]), Value::Null, json!({"ttlSeconds":45,"activeMembers":[]})]);
+        let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap().workspaces.is_empty());
+        for _ in 1..bodies.len() {
+            assert!(service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).is_err());
+        }
+        assert_eq!(requests.join().unwrap().len(), bodies.len());
+    }
+
+    #[test]
+    fn phase2_presence_contract_current_owner_and_no_cached_authorization() {
+        let mut first = presence_read_body();
+        first["workspaces"][0]["owner"] = json!({"userId":"previous-owner","displayName":"Previous name","photoUrl":"https://example.com/old.png"});
+        let mut current = presence_read_body();
+        current["workspaces"][0]["owner"] = json!({"userId":"reassigned-owner","displayName":"Current name","photoUrl":null});
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &first.to_string(), ""),
+            response("200 OK", &current.to_string(), ""),
+            response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""),
+            response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, ""),
+            response("403 Forbidden", r#"{"error":"active_organization_required"}"#, ""),
+            response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""),
+            response("503 Service Unavailable", r#"{"error":"presence_unavailable"}"#, ""),
+        ]);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        let read = || service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]}));
+        assert_eq!(read().unwrap().workspaces[0].owner.user_id, "previous-owner");
+        let latest = read().unwrap();
+        let owner = &latest.workspaces[0].owner;
+        assert_eq!(owner.user_id, "reassigned-owner");
+        assert_eq!(owner.display_name.as_deref(), Some("Current name"));
+        assert!(owner.photo_url.is_none());
+        let hidden = read().unwrap();
+        assert!(hidden.workspaces.is_empty() && hidden.active_members.is_empty());
+        for code in ["invalid_access_token", "active_organization_required", "cloud_workspace_not_found", "presence_unavailable"] {
+            assert_eq!(read().unwrap_err().code, code);
+        }
+        assert_eq!(requests.join().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn phase2_presence_contract_error_codes_retry_after_and_no_retry() {
+        for (status, code, retry) in [
+            ("429 Too Many Requests", "presence_rate_limited", Some(7)),
+            ("429 Too Many Requests", "presence_device_limit", Some(7)),
+            ("503 Service Unavailable", "presence_capacity_exceeded", None),
+            ("503 Service Unavailable", "presence_unavailable", None),
+            ("401 Unauthorized", "invalid_access_token", None),
+            ("403 Forbidden", "active_organization_required", None),
+            ("404 Not Found", "cloud_workspace_not_found", None),
+            ("422 Unprocessable Entity", "cloud_workspace_request_invalid", None),
+        ] {
+            for put in [true, false] {
+                let (base, _, request) = serve_once(response(status, &json!({"error":code}).to_string(), if retry.is_some() { "Retry-After: 7\r\n" } else { "" }), Duration::ZERO);
+                let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+                let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
+                    else { service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err() };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, Some(status[..3].parse::<u16>().unwrap()));
+                assert_eq!(error.retry_after_seconds, retry);
+                assert_eq!(serde_json::to_value(&error).unwrap()["retryAfterSeconds"], json!(retry));
+                let uncertain = status.starts_with("429") || status.starts_with("503");
+                assert_eq!(error.retryable, !put && uncertain);
+                assert_eq!(error.requires_original_account_context, put && uncertain);
+                assert!(!error.retry_with_same_idempotency_key);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+        assert_eq!(parse_retry_after(Some("Wed, 21 Oct 2015 07:28:00 GMT")), None);
+        assert_eq!(parse_retry_after(Some("1.5")), None);
+        let (base, _, request) = serve_once(response("413 Payload Too Large", "framework body limit", ""), Duration::ZERO);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        assert_eq!(service.presence_read("org-1", json!({"workspaceIds":[]})).unwrap_err().status, Some(413));
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_presence_contract_bounds_malformed_put_and_bounded_timeout() {
+        let ids: Vec<String> = (0..100).map(|i| format!("workspace_{i}-A")).collect();
+        let (base, _, request) = serve_once(response("200 OK", r#"{"ttlSeconds":45,"activeMembers":[],"workspaces":[]}"#, ""), Duration::ZERO);
+        let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+        service.presence_read("org-1", json!({"workspaceIds":ids})).unwrap();
+        assert!(!request.join().unwrap().extra_request);
+        for body in [json!([true,45]), Value::Null, json!({"applied":true,"ttlSeconds":46}), json!({"applied":"true","ttlSeconds":45}),
+            json!({"ttlSeconds":45}), json!({"applied":true,"ttlSeconds":45,"extra":1})] {
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            assert!(service.presence_put("org-1", presence_put_body()).is_err());
+            assert!(!request.join().unwrap().extra_request);
+        }
+        let (base, _, request) = serve_once(response("200 OK", &presence_read_body().to_string(), ""), Duration::from_millis(150));
+        let (account, _) = test_service(&base);
+        let mut service = CloudWorkspaceService::for_test(account, &base, Duration::from_millis(30));
+        service.phase2_enabled = true;
+        // The delayed reply is valid for this request: only the transport
+        // deadline, not an unrequested workspace, may make this call fail.
+        let error = service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err();
+        assert_eq!(error.code, "cloud_workspace_unavailable");
+        assert!(error.retryable);
+        assert_eq!(error.status, None);
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_presence_contract_response_body_capture_is_bounded() {
+        for put in [true, false] {
+            // Valid JSON with trailing whitespace must still obey the byte cap.
+            let mut body = if put { json!({"applied":true,"ttlSeconds":45}).to_string() }
+                else { presence_read_body().to_string() };
+            body.push_str(&" ".repeat(RESPONSE_LIMIT_BYTES as usize + 1));
+            let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+            let (_, mut service) = test_service(&base); service.phase2_enabled = true;
+            let error = if put { service.presence_put("org-1", presence_put_body()).unwrap_err() }
+                else { service.presence_read("org-1", json!({"workspaceIds":["workspace-1"]})).unwrap_err() };
+            assert_eq!(error.code, if put { "cloud_workspace_request_outcome_unknown" } else { "cloud_workspace_invalid_response" });
+            assert_eq!(error.requires_original_account_context, put);
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_presence_contract_late_account_profile_org_session_and_aba_fenced() {
+        for change in ["signout", "account", "profile", "org", "session", "aba", "membership"] {
+            for (put, rejected) in [(true, false), (false, false), (true, true), (false, true)] {
+                let body = if put { json!({"applied":true,"ttlSeconds":45}) } else { presence_read_body() };
+                let reply = if rejected { response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "") }
+                    else { response("200 OK", &body.to_string(), "") };
+                let (base, accepted, request) = serve_once(reply, Duration::from_millis(100));
+                let (account, mut service) = test_service(&base); service.phase2_enabled = true;
+                account.set_memberships_for_test(&["org-1", "org-2"], false);
+                let handle = thread::spawn(move || if put { service.presence_put("org-2", presence_put_body()).map(|_| ()) }
+                    else { service.presence_read("org-2", json!({"workspaceIds":["workspace-1"]})).map(|_| ()) });
+                accepted.recv_timeout(Duration::from_secs(1)).unwrap();
+                let mut replacement = context();
+                match change {
+                    "signout" => account.set_context_for_test(None),
+                    "membership" => { account.set_memberships_for_test(&["org-1"], false); },
+                    "aba" => {
+                        let mut other = context();
+                        other.user_id = "user-2".into();
+                        other.generation += 1;
+                        account.set_context_for_test(Some(other));
+                        replacement.generation += 2;
+                        account.set_context_for_test(Some(replacement));
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                    _ => {
+                        match change {
+                            "account" => replacement.user_id = "user-2".into(),
+                            "profile" => replacement.profile_id = "profile-2".into(),
+                            "org" => replacement.organization_id = "org-2".into(),
+                            "session" => replacement.access_token = "new-session-token".into(),
+                            _ => unreachable!(),
+                        }
+                        account.set_context_for_test(Some(replacement));
+                        // Keep target membership valid: each test must fail for
+                        // the changed context field, not fixture membership loss.
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    },
+                }
+                let error = handle.join().unwrap().unwrap_err();
+                assert_eq!(error.code, "account_context_changed", "{change}, put={put}, rejected={rejected}");
+                assert_eq!(error.requires_original_account_context, put);
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+    }
+
     fn snapshot_body(error_code: Option<&str>) -> String {
         let mut value = json!({
             "workspace": {
@@ -3670,6 +5227,291 @@ mod tests {
             value["operation"]["errorCode"] = Value::String(error_code.into());
         }
         value.to_string()
+    }
+
+    fn phase2_service(base: &str) -> (Arc<AccountManager>, CloudWorkspaceService) {
+        let (account, mut service) = test_service(base);
+        service.phase2_enabled = true;
+        (account, service)
+    }
+
+    fn phase2_headers(request: &str) {
+        let request = request.to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer native-secret-token"));
+        assert!(request.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
+        assert!(request.contains(&format!("x-terminalx-cloud-workspace-providers: {}", SUPPORTED_PROVIDERS)));
+        assert!(request.contains("x-terminalx-cloud-workspace-lifecycle: archive-v1"));
+    }
+
+    fn phase2_details_body() -> Value {
+        let snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        json!({"workspace": snapshot["workspace"], "details": {
+            "organizationId": "org-1", "workspaceId": "workspace-1", "createdBy": "user-1", "provider": "machine0",
+            "repositories": [{"identity": null, "fullName": null, "cloneUrl": "https://example.test/a.git", "ref": null, "targetDirectory": null, "primary": true}],
+            "machineId": "machine-1", "environmentVersionId": "env-1",
+            "environmentVersion": {"id": "env-1", "versionNumber": 7, "toolchainVersion": 12},
+            "runtime": {"sha256": "artifact-sha", "protocol": 1, "installedAt": 1794657600123_i64},
+            "provisioningLog": null
+        }})
+    }
+
+    #[test]
+    fn phase2_desktop_contract_production_activation_stays_held() {
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert!(!service.phase2_contracts_available());
+        assert_eq!(service.inbox("0", 0).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.inbox_stream("0", None).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.inbox_receipts(vec!["1".into()]).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.read_marker("org-1", "workspace-1", None, "2026-11-14T12:00:00Z".into()).unwrap_err().code, "inbox_unavailable");
+        assert_eq!(service.restart(None, "workspace-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+        assert_eq!(service.details(None, "workspace-1").unwrap_err().code, "cloud_workspace_runtime_not_ready");
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_exact_empty_body_queued_snapshot_and_existing_poll() {
+        let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        body["operation"]["action"] = json!("restart");
+        body["operation"]["cancelable"] = json!(false);
+        body["operation"]["progress"] = json!({"phase": "starting", "retryAt": 1794657600123_i64});
+        body["operation"]["checkpoint"] = json!("committed");
+        body["operation"]["reason"] = json!("attention-stopped");
+        body["operation"]["reasonDetail"] = json!("provider.runtime:unavailable");
+        body["operation"]["logs"] = json!([{"source": "runtime", "content": "checkpoint saved", "occurredAt": 1794657600123_i64}]);
+        body["workspace"]["runtime"] = json!({"sha256": "artifact", "protocol": 1, "installedAt": 1794657600123_i64});
+        body["workspace"]["checkout"] = json!({"state": "ready", "repositories": [{"repository": "owner/repo", "state": "ready"}], "reportedAt": 1794657600123_i64});
+        body["workspace"]["preparation"] = json!({"stopAfter": 1794657609999_i64});
+        let queued = body.to_string();
+        body["operation"]["state"] = json!("succeeded");
+        let (base, requests) = serve_each(vec![response("202 Accepted", &queued, ""), response("200 OK", &body.to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        let snapshot = service.restart(Some("org-1"), "workspace-1").unwrap();
+        let serialized = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(serialized["operation"]["state"], "queued");
+        assert_eq!(serialized["operation"]["action"], "restart");
+        assert_eq!(serialized["operation"]["type"], "create");
+        assert_eq!(serialized["operation"]["cancelable"], false);
+        assert_eq!(serialized["operation"]["checkpoint"], "committed");
+        assert_eq!(serialized["operation"]["reason"], "attention-stopped");
+        assert_eq!(serialized["operation"]["reasonDetail"], "provider.runtime:unavailable");
+        assert_eq!(serialized["operation"]["logs"][0]["occurredAt"], 1794657600123_i64);
+        assert_eq!(serialized["workspace"]["runtime"]["installedAt"], 1794657600123_i64);
+        assert_eq!(serialized["workspace"]["checkout"]["state"], "ready");
+        assert_eq!(serialized["workspace"]["preparation"]["stopAfter"], 1794657609999_i64);
+        assert!(matches!(service.operation(None, "operation-1").unwrap().operation.state, OperationState::Succeeded));
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/restart HTTP/1.1"));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, "{}");
+        assert!(requests[1].starts_with("GET /v1/desktop/orgs/org-1/cloud-workspace-operations/operation-1 HTTP/1.1"));
+        for request in requests { phase2_headers(&request); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_details_integer_versions_epoch_ms_and_no_body() {
+        let body = phase2_details_body();
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "Cache-Control: no-store\r\n")]);
+        let (_, service) = phase2_service(&base);
+        let details = service.details(None, "workspace-1").unwrap();
+        let environment = details.details.environment_version.unwrap();
+        assert_eq!((environment.version_number, environment.toolchain_version), (7, 12));
+        assert_eq!(details.details.runtime.unwrap().installed_at, 1794657600123);
+        assert!(details.details.provisioning_log.is_none());
+        let request = &requests.join().unwrap()[0];
+        assert!(request.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/details HTTP/1.1"));
+        assert_eq!(request.split_once("\r\n\r\n").unwrap().1, "");
+        phase2_headers(request);
+        for field in ["toolchainVersion", "versionNumber"] {
+            for wrong in [json!("12"), json!(1.5)] {
+                let mut bad = body.clone();
+                bad["details"]["environmentVersion"][field] = wrong;
+                assert!(serde_json::from_value::<CloudWorkspaceDetailsResponse>(bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_details_keep_membership_and_existing_errors() {
+        for code in ["cloud_workspace_manager_required", "cloud_workspace_runtime_unsupported", "cloud_workspace_runtime_not_ready", "cloud_workspace_member_concurrency_exceeded", "cloud_preparation_workspace_expired"] {
+            assert!(known_error_code(code));
+        }
+
+        let (account, service) = phase2_service("http://127.0.0.1:9");
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.restart(Some("org-3"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.details(Some("org-3"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        for (status, code) in [("401 Unauthorized", "invalid_access_token"), ("403 Forbidden", "cloud_workspace_manager_required"), ("404 Not Found", "cloud_workspace_not_found"), ("409 Conflict", "cloud_workspace_operation_in_progress"), ("422 Unprocessable Entity", "cloud_workspace_request_invalid"), ("503 Service Unavailable", "cloud_provider_unavailable")] {
+            let (base, requests) = serve_each(vec![response(status, &json!({"error": code}).to_string(), "")]);
+            let (_, service) = phase2_service(&base);
+            assert_eq!(service.restart(None, "workspace-1").unwrap_err().code, code);
+            requests.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_restart_details_allow_inactive_member_org() {
+        let mut details = phase2_details_body();
+        details["workspace"]["orgId"] = json!("org-2");
+        details["details"]["organizationId"] = json!("org-2");
+        let mut snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        snapshot["workspace"]["orgId"] = json!("org-2");
+        snapshot["operation"]["action"] = json!("restart");
+        snapshot["operation"]["cancelable"] = json!(false);
+        let (base, requests) = serve_each(vec![response("200 OK", &details.to_string(), ""), response("202 Accepted", &snapshot.to_string(), ""), response("200 OK", &snapshot.to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.details(Some("org-2"), "workspace-1").unwrap().workspace.org_id, "org-2");
+        assert_eq!(service.restart(Some("org-2"), "workspace-1").unwrap().workspace.org_id, "org-2");
+        assert_eq!(service.operation(Some("org-2"), "operation-1").unwrap().workspace.org_id, "org-2");
+        for request in requests.join().unwrap() {
+            assert!(request.contains("/v1/desktop/orgs/org-2/"));
+            phase2_headers(&request);
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_inbox_account_route_bigint_filtered_page_receipts_and_revoke() {
+        let id = "9223372036854775807";
+        let body = json!({"v":1,"cursor":id,"hasMore":true,"events":[{"id":id,"type":"workspace.share-removed","workspaceId":"workspace-1","createdAt":"2026-11-14T12:00:00Z","organizationId":"must-drop","payload":{"private":"must-drop"}}]});
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), ""), response("200 OK", r#"{"acknowledged":true}"#, ""), response("200 OK", &json!({"v":1,"cursor":id,"hasMore":true,"events":[]}).to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_active_org_for_test("");
+        let page = service.inbox("0", 25000).unwrap();
+        assert_eq!(page.cursor, id);
+        assert!(page.has_more);
+        let event = serde_json::to_value(&page.events[0]).unwrap();
+        assert!(event.get("organizationId").is_none() && event.get("payload").is_none());
+        assert!(service.inbox_receipts(vec![id.into()]).unwrap().acknowledged);
+        let filtered = service.inbox(id, 0).unwrap();
+        assert!(filtered.has_more && filtered.events.is_empty());
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox?after=0&waitMs=25000&presence=1 HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /v1/desktop/organization-inbox/receipts HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"eventIds":[id]}));
+        for request in requests { phase2_headers(&request); assert!(!request.contains("userId")); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_read_marker_inactive_member_iso_and_real_session_id() {
+        let timestamp = "2026-11-14T12:00:00.000Z";
+        let (base, requests) = serve_each(vec![response("200 OK", &json!({"sessionId":"runtime.session:1@host","readAt":timestamp}).to_string(), ""), response("200 OK", &json!({"sessionId":"","readAt":timestamp}).to_string(), "")]);
+        let (account, service) = phase2_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], false);
+        assert_eq!(service.read_marker("org-2", "workspace-1", Some("runtime.session:1@host".into()), timestamp.into()).unwrap().read_at, timestamp);
+        service.read_marker("org-2", "workspace-1", None, timestamp.into()).unwrap();
+        assert_eq!(service.read_marker("org-3", "workspace-1", None, timestamp.into()).unwrap_err().code, "cloud_organization_unavailable");
+        let requests = requests.join().unwrap();
+        for request in &requests {
+            assert!(request.starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/read-marker HTTP/1.1")); phase2_headers(request);
+        }
+        let workspace_body: Value = serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(workspace_body, json!({"readAt":timestamp}));
+    }
+
+    #[test]
+    fn phase2_desktop_contract_sse_checkpoint_last_event_id_and_poll_fallback() {
+        let sse = "event: inbox\nid: 9007199254740993\ndata: {\"id\":\"9007199254740993\",\"type\":\"workspace.share-removed\",\"workspaceId\":\"workspace-1\",\"createdAt\":\"2026-11-14T12:00:00Z\"}\n\nevent: checkpoint\nid: 9007199254740994\ndata: {\"cursor\":\"9007199254740994\"}\n\n";
+        let (base, requests) = serve_each(vec![response("200 OK", sse, "Content-Type: text/event-stream\r\n"), response("200 OK", "event: inbox\nid: 2\n", "Content-Type: text/event-stream\r\n"), response("200 OK", r#"{"v":1,"cursor":"9007199254740994","hasMore":false,"events":[]}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let page = service.inbox_stream("0", Some("9007199254740992")).unwrap();
+        assert_eq!(page.cursor, "9007199254740994"); assert_eq!(page.events.len(), 1);
+        assert!(service.inbox_stream(&page.cursor, None).is_err());
+        assert_eq!(service.inbox(&page.cursor, 0).unwrap().cursor, page.cursor);
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/organization-inbox/stream?after=0&presence=1 HTTP/1.1"));
+        assert!(requests[0].to_ascii_lowercase().contains("last-event-id: 9007199254740992"));
+        assert!(requests[2].contains("after=9007199254740994"));
+        for request in requests { phase2_headers(&request); }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_non_machine0_details_and_response_scope_validation() {
+        for provider in ["box", "hetzner"] {
+            let mut body = phase2_details_body();
+            body["workspace"]["provider"] = json!(provider);
+            body["details"]["provider"] = json!(provider);
+            let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "")]);
+            let (_, service) = phase2_service(&base);
+            assert_eq!(service.details(None, "workspace-1").unwrap().details.provider, provider);
+            phase2_headers(&requests.join().unwrap()[0]);
+        }
+        let mut body = phase2_details_body();
+        body["details"]["organizationId"] = json!("other-org");
+        let (base, requests) = serve_each(vec![response("200 OK", &body.to_string(), "")]);
+        let (_, service) = phase2_service(&base);
+        assert_eq!(service.details(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        requests.join().unwrap();
+    }
+
+    #[test]
+    fn phase2_desktop_contract_inbox_auth_and_late_account_membership_fences() {
+        let (base, requests) = serve_each(vec![response("401 Unauthorized", r#"{"error":"invalid_access_token"}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let error = service.inbox("0", 0).unwrap_err();
+        assert_eq!(error.code, "invalid_access_token"); assert!(!error.retryable);
+        requests.join().unwrap();
+        for replace_account in [false, true] {
+            let (base, accepted, request) = serve_once(response("200 OK", r#"{"v":1,"cursor":"0","hasMore":false,"events":[]}"#, ""), Duration::from_millis(150));
+            let (account, service) = phase2_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], false);
+            let pending = thread::spawn(move || service.inbox("0", 0));
+            accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+            if replace_account { account.set_context_for_test(None); }
+            else { account.set_memberships_for_test(&["org-1"], false); }
+            assert!(pending.join().unwrap().is_err());
+            request.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_desktop_contract_validation_unavailable_and_catalog_marker_types() {
+        let (_, service) = phase2_service("http://127.0.0.1:9");
+        for invalid in ["", "01", "-1", "1.0", "9223372036854775808"] {
+            assert_eq!(service.inbox(invalid, 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        }
+        assert!(service.inbox("0", 25001).is_err());
+        assert!(service.inbox_receipts(vec![]).is_err());
+        assert!(service.inbox_receipts(vec!["1".into(); 101]).is_err());
+        assert!(serde_json::from_value::<crate::desktop_inbox::InboxPage>(json!({"v":1,"cursor":1,"hasMore":false,"events":[]})).is_err());
+        let (base, requests) = serve_each(vec![response("503 Service Unavailable", r#"{"error":"inbox_unavailable"}"#, "")]);
+        let (_, service) = phase2_service(&base);
+        let error = service.inbox("0", 0).unwrap_err();
+        assert_eq!(error.code, "inbox_unavailable"); assert!(error.retryable);
+        requests.join().unwrap();
+        let snapshot: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        let item: CloudWorkspaceListItem = serde_json::from_value(json!({"workspace":snapshot["workspace"],"readMarkers":[{"sessionId":"","readAt":"2026-11-14T12:00:00.000Z"}]})).unwrap();
+        assert_eq!(serde_json::to_value(item).unwrap()["readMarkers"][0]["readAt"], "2026-11-14T12:00:00.000Z");
+    }
+
+    #[test]
+    fn phase2_desktop_contract_marker_and_details_restart_discard_late_scope_changes() {
+        for route in ["read-marker", "details", "restart"] {
+            let body = match route {
+                "read-marker" => json!({"sessionId":"", "readAt":"2026-11-14T12:00:00Z"}).to_string(),
+                "details" => phase2_details_body().to_string(),
+                _ => {
+                    let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+                    body["operation"]["action"] = json!("restart");
+                    body["operation"]["cancelable"] = json!(false);
+                    body.to_string()
+                }
+            };
+            let (base, accepted, request) = serve_once(response("200 OK", &body, ""), Duration::from_millis(150));
+            let (account, service) = phase2_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], true);
+            let pending = thread::spawn(move || match route {
+                "read-marker" => service.read_marker("org-2", "workspace-1", None, "2026-11-14T12:00:00Z".into()).map(|_| ()),
+                "details" => service.details(None, "workspace-1").map(|_| ()),
+                _ => service.restart(None, "workspace-1").map(|_| ()),
+            });
+            accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+            if route == "read-marker" {
+                account.set_memberships_for_test(&["org-1"], true);
+            } else {
+                account.set_active_org_for_test("org-2");
+                account.set_memberships_for_test(&["org-2"], true);
+            }
+            assert!(pending.join().unwrap().is_err(), "discard late {route} response");
+            phase2_headers(&request.join().unwrap().text);
+        }
     }
 
     fn org_2_list_body() -> String {
@@ -3739,6 +5581,39 @@ mod tests {
 
     fn feed_body(organizations: Value) -> String {
         json!({ "v": 1, "cursor": "cursor-2", "reset": true, "organizations": organizations, "deletedWorkspaceIds": ["gone-1", "never-listed"] }).to_string()
+    }
+
+    #[test]
+    fn phase2_presence_catalog_exact_projection_optin_and_independent_following() {
+        for enabled in [false, true] {
+            let mut item = feed_item("org-1", "workspace-1");
+            item["following"] = json!(true);
+            if enabled {
+                item["workspace"]["createdBy"] = json!("user-1");
+                item["workspace"]["creator"] = json!({"userId":"user-1","displayName":"Current owner","photoUrl":null});
+                item["presence"] = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]});
+            }
+            let mut organization = json!({"orgId":"org-1","workspaces":[item]});
+            if enabled { organization["presence"] = json!({"activeMembers":[{"userId":"user-2","displayName":null,"photoUrl":null}]}); }
+            let (base, _, request) = serve_once(response("200 OK", &feed_body(json!([organization])), ""), Duration::ZERO);
+            let (account, mut service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1"], true);
+            account.set_catalog_feed_for_test(true);
+            service.phase2_enabled = enabled;
+            let feed = service.catalog_feed(Some("cursor-1")).unwrap();
+            assert_eq!(feed.viewer_user_id, "user-1");
+            let item = &feed.organizations[0].workspaces[0];
+            assert_eq!(item.following, Some(true));
+            assert_eq!(item.presence.is_some(), enabled);
+            assert_eq!(feed.organizations[0].presence.is_some(), enabled);
+            let projection = serde_json::to_value(item).unwrap();
+            assert!(projection["workspace"].get("creatorPerson").is_none());
+            if enabled { assert_eq!(projection["workspace"]["creator"]["displayName"], "Current owner"); }
+            let request = request.join().unwrap().text;
+            assert_eq!(request.contains("presence=1"), enabled);
+            assert!(request.to_ascii_lowercase().contains("if-none-match: \"cursor-1\""));
+            phase2_headers(&request);
+        }
     }
 
     #[test]
@@ -3906,18 +5781,118 @@ mod tests {
         assert_eq!(old.operation.detail_code, None);
     }
 
+    fn provider_id(id: &str) -> CloudWorkspaceProviderId {
+        CloudWorkspaceProviderId::try_from(id.to_owned()).unwrap()
+    }
+
+    // PRO-415: which providers exist is the server's to say. The client reads
+    // any id of the registry's shape, one it has never heard of included, and
+    // refuses anything that could not go into a path segment as it is.
     #[test]
-    fn hetzner_is_a_provider_this_client_names_and_reads() {
-        assert!(SUPPORTED_PROVIDERS.split(',').any(|provider| provider == "hetzner"));
-        let provider: CloudWorkspaceProviderId = serde_json::from_str(r#""hetzner""#).unwrap();
-        assert_eq!(provider, CloudWorkspaceProviderId::Hetzner);
-        assert_eq!(provider.as_str(), "hetzner");
-        assert_eq!(serde_json::to_string(&provider).unwrap(), r#""hetzner""#);
-        // Every provider the client declares is one it can also read back.
-        for name in SUPPORTED_PROVIDERS.split(',') {
+    fn a_provider_id_is_any_registry_shaped_string() {
+        // Described providers first; the fixed ids only for a server without them.
+        assert_eq!(SUPPORTED_PROVIDERS.split(',').next(), Some("described"));
+        for name in SUPPORTED_PROVIDERS.split(',').skip(1) {
+            assert!(serde_json::from_value::<CloudWorkspaceProviderId>(json!(name)).is_ok(), "{name}");
+        }
+        for name in ["hetzner", "acme-cloud", "0x", &"a".repeat(63)] {
             let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(parsed.as_str(), name);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(name));
         }
+        for name in ["", "Box", "-leading", "a/b", "a b", "a_b", "é", &"a".repeat(64)] {
+            assert!(serde_json::from_value::<CloudWorkspaceProviderId>(json!(name)).is_err(), "{name:?}");
+        }
+    }
+
+    // PRO-415: a described provider's descriptor reaches the webview whole,
+    // fields this client does not type included; an older server's summary,
+    // without one, still reads.
+    #[test]
+    fn provider_summaries_carry_their_descriptor() {
+        let described: CloudProviderSummary = serde_json::from_value(json!({
+            "id": "acme-cloud", "displayName": "Acme", "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" },
+            "descriptor": {
+                "id": "acme-cloud", "label": "Acme Cloud", "icon": "server", "order": 40, "listed": true,
+                "credentialFields": [{ "name": "token", "kind": "secret", "label": "Acme token", "helpUrl": "https://acme.example/tokens" }],
+                "capabilities": { "pauseResumeWithMemory": false, "stopStart": true, "snapshots": false, "exec": false, "computeRunsUntilStopped": false },
+                "allowedRetentionDays": [7, 30], "somethingNew": { "kept": true }
+            }
+        }))
+        .unwrap();
+        assert_eq!(described.label(), "Acme Cloud");
+        assert_eq!(described.credential_fields(), vec![CloudProviderCredentialField { name: "token".into(), kind: "secret".into(), label: "Acme token".into(), help_url: Some("https://acme.example/tokens".into()) }]);
+        let projected = serde_json::to_value(&described).unwrap();
+        assert_eq!(projected["descriptor"]["somethingNew"], json!({ "kept": true }));
+        assert_eq!(projected["descriptor"]["allowedRetentionDays"], json!([7, 30]));
+        assert_eq!(projected["descriptor"]["credentialFields"][0]["helpUrl"], json!("https://acme.example/tokens"));
+        // A descriptor that does not say whose credential it is (a server older than platform providers) is an organization's.
+        assert!(!described.platform_credential());
+        assert_eq!(projected["descriptor"]["credentialSource"], json!("organization"));
+
+        let older: CloudProviderSummary = serde_json::from_value(json!({
+            "id": "box", "displayName": "Boat", "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }
+        }))
+        .unwrap();
+        assert!(older.descriptor.is_none());
+        assert_eq!(older.label(), "Boat");
+        assert_eq!(older.credential_fields().len(), 1);
+        assert!(older.credential_fields()[0].secret());
+        assert!(!older.platform_credential());
+        assert_eq!(serde_json::to_value(&older).unwrap()["descriptor"], Value::Null);
+    }
+
+    // PRO-452: a provider that runs on TerminalX's own credential says so in
+    // its descriptor and lists no credential fields. It reads beside the
+    // organization ones, reaches the webview as `platform`, and asks for
+    // nothing; anything but `platform` is an organization's.
+    #[test]
+    fn a_platform_provider_reads_with_no_credential_fields_and_asks_for_none() {
+        let summary = |id: &str, descriptor: Value| json!({
+            "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null,
+            "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "required", "sourceSelection": "optional", "pricing": "provider-rate" },
+            "descriptor": descriptor
+        });
+        let descriptor = |id: &str, label: &str, source: Value, fields: Value| {
+            let mut described = json!({ "id": id, "label": label, "icon": "cloud", "order": 5, "listed": true, "billing": "Billed by TerminalX", "billedByProvider": false, "credentialFields": fields });
+            if !source.is_null() {
+                described["credentialSource"] = source;
+            }
+            described
+        };
+        let key = json!([{ "name": "credential", "kind": "secret", "label": "Acme token", "helpUrl": null }]);
+        let list: CloudProviderSummaryResponse = serde_json::from_value(json!({ "providers": [
+            summary("terminalx-cloud", descriptor("terminalx-cloud", "TerminalX Cloud", json!("platform"), json!([]))),
+            summary("acme-cloud", descriptor("acme-cloud", "Acme Cloud", json!("organization"), key.clone())),
+            summary("older-cloud", descriptor("older-cloud", "Older Cloud", Value::Null, key.clone())),
+            summary("newer-cloud", descriptor("newer-cloud", "Newer Cloud", json!("something-new"), key.clone())),
+            summary("odd-cloud", descriptor("odd-cloud", "Odd Cloud", json!(7), key.clone())),
+        ] }))
+        .unwrap();
+        let [platform, organization, older, newer, odd] = list.providers.as_slice() else { panic!("five providers") };
+
+        assert!(platform.platform_credential());
+        assert_eq!(platform.label(), "TerminalX Cloud");
+        // Not the one-key fallback of a descriptor without fields: there is nothing to ask for.
+        assert!(platform.credential_fields().is_empty());
+        let projected = serde_json::to_value(platform).unwrap();
+        assert_eq!(projected["descriptor"]["credentialSource"], json!("platform"));
+        assert_eq!(projected["descriptor"]["credentialFields"], json!([]));
+        assert_eq!(projected["descriptor"]["billing"], json!("Billed by TerminalX"));
+        assert_eq!(projected["availability"], json!("available"));
+        assert_eq!(projected["connection"], Value::Null);
+
+        for provider in [organization, older, newer, odd] {
+            assert!(!provider.platform_credential(), "{}", provider.id);
+            assert_eq!(provider.credential_fields().len(), 1, "{}", provider.id);
+            assert_eq!(serde_json::to_value(provider).unwrap()["descriptor"]["credentialSource"], json!("organization"), "{}", provider.id);
+        }
+
+        // Even a platform descriptor that listed fields asks for none.
+        let listed: CloudProviderSummary = serde_json::from_value(summary("terminalx-cloud", descriptor("terminalx-cloud", "TerminalX Cloud", json!("platform"), key))).unwrap();
+        assert!(listed.credential_fields().is_empty());
     }
 
     #[test]
@@ -3942,7 +5917,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box,hetzner"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: described,machine0,box,hetzner\r\n"));
     }
 
     #[test]
@@ -3951,9 +5926,9 @@ mod tests {
             r#"{"provider":"box","state":"not-connected","canManage":false,"ignored":"drop"}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let detail = service.provider(CloudWorkspaceProviderId::Box).unwrap();
+        let detail = service.provider(provider_id("box")).unwrap();
         let captured = request.join().unwrap();
-        assert_eq!(detail.provider, CloudWorkspaceProviderId::Box);
+        assert_eq!(detail.provider, provider_id("box"));
         assert!(matches!(
             detail.state,
             CloudProviderConnectionState::NotConnected
@@ -3964,29 +5939,66 @@ mod tests {
             .starts_with("GET /v1/desktop/orgs/org-1/cloud-providers/box HTTP/1.1"));
     }
 
-    // PRO-111: the key dialog names the provider as the organization's list does.
+    // PRO-111, PRO-415: the key dialog names the provider and asks for its
+    // credential as the organization's list describes it.
     #[test]
-    fn provider_display_name_comes_from_the_organization_list() {
-        let summary = |id: &str, name: &str| json!({ "id": id, "displayName": name, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" } });
-        let body = json!({ "providers": [summary("box", "Boat"), summary("local-docker", "Local Docker (development)")] }).to_string();
+    fn provider_summary_for_the_dialog_comes_from_the_organization_list() {
+        let summary = |id: &str, name: &str, descriptor: Value| json!({ "id": id, "displayName": name, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": descriptor });
+        let fields = json!([{ "name": "account", "kind": "text", "label": "Account id" }, { "name": "secret", "kind": "secret", "label": "Secret key" }]);
+        let body = json!({ "providers": [
+            summary("box", "Boat", Value::Null),
+            summary("acme-cloud", "Acme", json!({ "id": "acme-cloud", "label": "Acme Cloud (test)", "icon": "cloud", "order": 90, "credentialFields": fields })),
+        ] })
+        .to_string();
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let authorization = ProviderConnectAuthorization { context: context(), provider: CloudWorkspaceProviderId::LocalDocker };
-        assert_eq!(service.provider_display_name(&authorization).as_deref(), Some("Local Docker (development)"));
+        let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id("acme-cloud") };
+        let found = service.provider_summary(&authorization).unwrap();
+        assert_eq!(found.label(), "Acme Cloud (test)");
+        let asked: Vec<(String, bool)> = found.credential_fields().into_iter().map(|field| (field.name.clone(), field.secret())).collect();
+        assert_eq!(asked, vec![("account".into(), false), ("secret".into(), true)]);
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-providers HTTP/1.1"));
         assert!(!captured.extra_request);
 
-        // Not listed, or no list: no name, and the dialog falls back to the provider's own label.
+        // Not listed, or no list: nothing, and the dialog falls back to the provider's id and one key.
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let authorization = ProviderConnectAuthorization { context: context(), provider: CloudWorkspaceProviderId::Hetzner };
-        assert_eq!(service.provider_display_name(&authorization), None);
+        let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id("hetzner") };
+        assert!(service.provider_summary(&authorization).is_none());
         request.join().unwrap();
         let (base, _, request) = serve_once(response("503 Service Unavailable", "{}", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.provider_display_name(&authorization), None);
+        assert!(service.provider_summary(&authorization).is_none());
         request.join().unwrap();
+    }
+
+    // PRO-452: connecting a provider TerminalX itself provides is refused
+    // from the organization's list, before a dialog could ask for a key; an
+    // organization's provider, and one the list does not name, go on.
+    #[test]
+    fn a_platform_provider_is_never_connected() {
+        let summary = |id: &str, source: &str, fields: Value| json!({ "id": id, "displayName": id, "availability": "available", "canManage": true, "connection": null, "capabilities": { "suspend": true, "resume": true, "releaseDisposition": "destroyed", "locationSelection": "automatic", "sourceSelection": "optional", "pricing": "provider-rate" }, "descriptor": { "id": id, "label": id, "icon": "cloud", "order": 5, "credentialSource": source, "credentialFields": fields } });
+        let body = json!({ "providers": [
+            summary("terminalx-cloud", "platform", json!([])),
+            summary("acme-cloud", "organization", json!([{ "name": "credential", "kind": "secret", "label": "Acme token" }])),
+        ] })
+        .to_string();
+        let connectable = |provider: &str| {
+            let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let authorization = ProviderConnectAuthorization { context: context(), provider: provider_id(provider) };
+            let result = service.connectable_provider_summary(&authorization);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-providers HTTP/1.1"));
+            // Reading the list is all that happened: nothing was sent to connect.
+            assert!(!captured.extra_request);
+            result
+        };
+        let refused = connectable("terminalx-cloud").unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.status, refused.retryable), ("cloud_provider_disabled", None, false));
+        assert_eq!(connectable("acme-cloud").unwrap().unwrap().credential_fields().len(), 1);
+        assert!(connectable("hetzner").unwrap().is_none());
     }
 
     #[test]
@@ -4038,8 +6050,8 @@ mod tests {
     fn provider_creation_switch_and_recheck_deny_members_and_stale_organizations_before_any_mutation() {
         type Call = fn(&CloudWorkspaceService, String) -> Option<CloudWorkspaceClientError>;
         let calls: [Call; 2] = [
-            |service, revision| service.set_provider_creation_enabled(CloudWorkspaceProviderId::Box, revision, false).err(),
-            |service, revision| service.revalidate_provider(CloudWorkspaceProviderId::Box, revision).err(),
+            |service, revision| service.set_provider_creation_enabled(provider_id("box"), revision, false).err(),
+            |service, revision| service.revalidate_provider(provider_id("box"), revision).err(),
         ];
         for call in calls {
             // A member: the read says so, and nothing is posted.
@@ -4586,7 +6598,7 @@ mod tests {
     fn provider_disconnect_denies_members_before_any_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":false}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, AccountManager::context_revision(&context()), DisconnectDisposition::Retain).unwrap_err();
+        let error = service.disconnect_provider(provider_id("box"), AccountManager::context_revision(&context()), DisconnectDisposition::Retain).unwrap_err();
         assert_eq!(error.code, "organization_admin_required");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET "));
@@ -4597,7 +6609,7 @@ mod tests {
     fn provider_disconnect_fences_stale_organization_before_mutation() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"provider":"box","state":"connected","canManage":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.disconnect_provider(CloudWorkspaceProviderId::Box, "old-context".into(), DisconnectDisposition::Destroy).unwrap_err();
+        let error = service.disconnect_provider(provider_id("box"), "old-context".into(), DisconnectDisposition::Destroy).unwrap_err();
         assert_eq!(error.code, "account_context_changed");
         assert!(!request.join().unwrap().extra_request);
     }
@@ -4615,7 +6627,7 @@ mod tests {
         }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let setup = service.setup(None, CloudWorkspaceProviderId::Box).unwrap();
+        let setup = service.setup(None, provider_id("box")).unwrap();
         let captured = request.join().unwrap();
         assert!(matches!(
             setup.locations[0].placement,
@@ -4688,7 +6700,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let quote = service
             .quote(None, CloudWorkspaceQuoteInput {
-                provider: CloudWorkspaceProviderId::Machine0,
+                provider: provider_id("machine0"),
                 source_id: "ubuntu".into(),
                 location_id: "us".into(),
                 machine_class_id: "small".into(),
@@ -4996,7 +7008,7 @@ mod tests {
                     id: "workspace-1".into(),
                     org_id: "another-org".into(),
                     name: "one".into(),
-                    provider: CloudWorkspaceProviderId::Box,
+                    provider: provider_id("box"),
                     state: WorkspaceState::Ready,
                     access_mode: WorkspaceAccessMode::Private,
                     created_at: 1,
@@ -5008,15 +7020,22 @@ mod tests {
                     deleted_at: None,
                     repositories: None,
                     created_by: None,
+                    creator: None,
                     last_activity_at: None,
+                    idle_suspend_minutes: None,
                     revision: None,
                     runtime_activity: None,
                     authority: None,
                     you: None,
                     shared_with: None,
                     preparation: None,
+                    checkout: None,
+                    runtime: None,
                 },
                 latest_operation: None,
+                following: None,
+                read_markers: None,
+                presence: None,
             }],
             tombstones: Vec::new(),
             quota: None,
@@ -5807,6 +7826,326 @@ mod tests {
     }
 
     #[test]
+    fn phase2_admin_share_contract_get_mixed_nullable_rows_and_effective_you() {
+        for effective in ["manager", "driver", "viewer", "none"] {
+            let mut manager = share_json("user-2", "manager");
+            manager["name"] = Value::Null;
+            manager["canApprove"] = json!(true);
+            manager["createdAt"] = json!(1_731_000_000_123_i64);
+            manager["updatedAt"] = json!(1_731_000_000_456_i64);
+            let body = json!({"shares": [manager, share_json("user-3", "viewer"), share_json("user-4", "driver")],
+                "you": {"role": effective, "canApprove": true, "canManageShares": effective == "manager"}});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let listed = service.shares(None, "workspace-1").unwrap();
+            assert_eq!(serde_json::to_value(&listed).unwrap(), body);
+            assert_eq!(listed.shares[0].role, ShareRole::Manager);
+            assert_eq!(listed.shares[0].name, None);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares HTTP/1.1"));
+            phase2_headers(&captured.text);
+            assert_eq!(captured.text.split_once("\r\n\r\n").unwrap().1, "");
+            assert!(!captured.extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_enabled_manager_put_and_delete_receipts() {
+        for method in ["PUT", "DELETE"] {
+            for created in [true, false] {
+                let mut share = share_json("user-2", "manager");
+                share["name"] = Value::Null;
+                share["canApprove"] = json!(true);
+                let body = if method == "PUT" { json!({"share": share, "created": created}) }
+                    else { json!({"share": share}) };
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let receipt = if method == "PUT" {
+                    service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap()
+                } else { service.share_revoke(None, "workspace-1", "user-2").unwrap() };
+                assert_eq!(serde_json::to_value(receipt).unwrap(), body);
+                let captured = request.join().unwrap();
+                assert!(captured.text.starts_with(&format!("{method} /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1")));
+                phase2_headers(&captured.text);
+                let sent = captured.text.split_once("\r\n\r\n").unwrap().1;
+                if method == "PUT" {
+                    assert_eq!(serde_json::from_str::<Value>(sent).unwrap(), json!({"v": 1, "role": "manager", "canApprove": true}));
+                } else { assert_eq!(sent, ""); }
+                assert!(!captured.text.to_ascii_lowercase().contains("idempotency-key:"));
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_manager_holds_and_invalid_inputs_never_send() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (account, mut service) = test_service(&base);
+        // The production constructor and its HTTP fixture both start held.
+        assert!(!CloudWorkspaceService::new(account).phase2_contracts_available());
+        for enabled in [false, true] {
+            service.phase2_enabled = enabled;
+            let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, false).unwrap_err();
+            assert_eq!(error.code, "cloud_workspace_runtime_unsupported");
+            assert_eq!(serde_json::to_value(error).unwrap(), json!({"code": "cloud_workspace_runtime_unsupported",
+                "status": null, "retryable": false, "retryAfterSeconds": null,
+                "retryWithSameIdempotencyKey": false, "requiresOriginalAccountContext": false}));
+            if !enabled {
+                let error = service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err();
+                assert_eq!(error.code, "cloud_workspace_runtime_not_ready");
+                assert!(error.status.is_none());
+            }
+            for invalid in ["", "../user", "user/2", "user?x", ".", ".."] {
+                assert_eq!(service.share_put(None, "workspace-1", invalid, ShareRole::Manager, true).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_revoke(None, "workspace-1", invalid).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.shares(None, invalid).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_put(None, invalid, "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
+                assert_eq!(service.share_revoke(Some(invalid), "workspace-1", "user-2").unwrap_err().code, "cloud_workspace_request_invalid");
+            }
+        }
+        // Tauri deserializes this same type before invoking the service. Invalid
+        // wire roles must never coerce into a fallback grant or reach HTTP.
+        for role in ["admin", "owner", "Manager", "none", "", "writer"] {
+            assert!(serde_json::from_value::<ShareRole>(json!(role)).is_err());
+        }
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_legacy_production_put_approval_is_independent() {
+        for (role, wire) in [(ShareRole::Viewer, "viewer"), (ShareRole::Driver, "driver")] {
+            for can_approve in [false, true] {
+                let mut share = share_json("user-2", wire);
+                share["canApprove"] = json!(can_approve);
+                let body = json!({"share": share, "created": false});
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = test_service(&base);
+                assert!(!service.phase2_contracts_available());
+                let receipt = service.share_put(None, "workspace-1", "user-2", role, can_approve).unwrap();
+                assert_eq!(receipt.share.can_approve, can_approve);
+                assert_eq!(receipt.share.role, role);
+                assert_eq!(receipt.created, Some(false));
+                let captured = request.join().unwrap();
+                phase2_headers(&captured.text);
+                assert!(captured.text.starts_with("PUT /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/shares/user-2 HTTP/1.1"));
+                assert_eq!(serde_json::from_str::<Value>(captured.text.split_once("\r\n\r\n").unwrap().1).unwrap(),
+                    json!({"v": 1, "role": wire, "canApprove": can_approve}));
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_target_member_without_capability_or_active_org() {
+        for active_org in ["org-1", ""] {
+            let bodies = [
+                json!({"shares": [], "you": {"role": "none", "canApprove": false, "canManageShares": false}}),
+                json!({"share": share_json("user-2", "viewer"), "created": false}),
+                json!({"share": share_json("user-2", "manager")}),
+            ];
+            let (base, requests) = serve_each(bodies.iter().map(|body| response("200 OK", &body.to_string(), "")).collect());
+            let (account, service) = test_service(&base);
+            let mut current = context();
+            current.organization_id = active_org.into();
+            account.set_context_for_test(Some(current));
+            account.set_memberships_for_test(&["org-2"], false);
+            if active_org.is_empty() {
+                let error = service.shares(None, "workspace-1").unwrap_err();
+                assert_eq!(error.code, "account_organization_unavailable");
+                assert!(error.status.is_none());
+                assert_eq!(service.share_put(None, "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "account_organization_unavailable");
+                assert_eq!(service.share_revoke(None, "workspace-1", "user-2").unwrap_err().code, "account_organization_unavailable");
+            }
+            service.shares(Some("org-2"), "workspace-1").unwrap();
+            service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap();
+            service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap();
+            for (request, method) in requests.join().unwrap().iter().zip(["GET", "PUT", "DELETE"]) {
+                assert!(request.starts_with(&format!("{method} /v1/desktop/orgs/org-2/cloud-workspaces/workspace-1/shares")));
+                phase2_headers(request);
+            }
+            // The same target remains unavailable to legacy provider transport.
+            assert_eq!(service.teardown_status(Some("org-2")).unwrap_err().code, "cloud_organization_unavailable");
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_nonmembership_and_private_errors_fail_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (_, service) = test_service(&format!("http://{}", listener.local_addr().unwrap()));
+        assert_eq!(service.shares(Some("org-2"), "workspace-1").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Viewer, false).unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.share_revoke(Some("org-2"), "workspace-1", "user-2").unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        for method in ["GET", "PUT", "DELETE"] {
+            let (base, _, request) = serve_once(response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""), Duration::ZERO);
+            let (account, service) = test_service(&base);
+            account.set_memberships_for_test(&["org-1", "org-2"], false);
+            let error = match method {
+                "GET" => service.shares(Some("org-2"), "private-workspace").unwrap_err(),
+                "PUT" => service.share_put(Some("org-2"), "private-workspace", "user-2", ShareRole::Viewer, false).unwrap_err(),
+                _ => service.share_revoke(Some("org-2"), "private-workspace", "user-2").unwrap_err(),
+            };
+            assert_eq!(error.code, "cloud_workspace_not_found");
+            assert_eq!(error.status, Some(404));
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_late_context_fences_success_and_error_for_all_routes() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for success in [false, true] {
+                for change in ["sign-out", "account", "profile", "organization", "session", "token-only", "A-B-A", "membership"] {
+                    let body = if !success { json!({"error": "cloud_workspace_last_admin"}) }
+                        else if method == "GET" { json!({"shares": [], "you": {"role": "manager", "canApprove": true, "canManageShares": true}}) }
+                        else { json!({"share": share_json("user-2", "manager"), "created": false}) };
+                    let (base, accepted, request) = serve_once(response(if success { "200 OK" } else { "409 Conflict" }, &body.to_string(), ""), Duration::from_millis(150));
+                    let (account, service) = phase2_service(&base);
+                    account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    let pending = thread::spawn(move || match method {
+                        "GET" => service.shares(Some("org-2"), "workspace-1").map(|_| ()),
+                        "PUT" => service.share_put(Some("org-2"), "workspace-1", "user-2", ShareRole::Manager, true).map(|_| ()),
+                        _ => service.share_revoke(Some("org-2"), "workspace-1", "user-2").map(|_| ()),
+                    });
+                    accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+                    if change == "sign-out" { account.set_context_for_test(None); }
+                    else if change == "membership" { account.set_memberships_for_test(&["org-1"], false); }
+                    else {
+                        let mut replacement = context();
+                        match change {
+                            "account" => replacement.user_id = "user-other".into(),
+                            "profile" => replacement.profile_id = "profile-other".into(),
+                            "organization" => replacement.organization_id = "org-other".into(),
+                            "session" => replacement.generation += 1,
+                            "token-only" => replacement.access_token = "rotated-token".into(),
+                            "A-B-A" => {
+                                let mut other = context();
+                                other.user_id = "user-other".into(); other.generation += 1;
+                                account.set_context_for_test(Some(other));
+                                replacement.generation += 2;
+                            }
+                            _ => unreachable!(),
+                        }
+                        account.set_context_for_test(Some(replacement));
+                        account.set_memberships_for_test(&["org-1", "org-2"], false);
+                    }
+                    let error = pending.join().unwrap().unwrap_err();
+                    assert_eq!(error.code, "account_context_changed", "{method}/{success}/{change}");
+                    assert!(error.status.is_none());
+                    assert_eq!(error.requires_original_account_context, method != "GET");
+                    assert!(!request.join().unwrap().extra_request);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_foreign_user_and_unknown_response_roles_refuse() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for invalid in ["foreign-user", "unknown-role", "invalid-user-id"] {
+                // A different valid user is allowed in GET's roster, but never
+                // in the receipt for a specific PUT/DELETE target.
+                if method == "GET" && invalid == "foreign-user" { continue; }
+                let mut share = share_json(if invalid == "foreign-user" { "user-other" } else { "user-2" }, "manager");
+                if invalid == "unknown-role" { share["role"] = json!("admin"); }
+                if invalid == "invalid-user-id" { share["userId"] = json!("../user"); }
+                let body = if method == "GET" { json!({"shares": [share], "you": {"role": "manager", "canApprove": true, "canManageShares": true}}) }
+                    else { json!({"share": share, "created": false}) };
+                let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert_eq!(error.code, if method == "GET" { "cloud_workspace_invalid_response" } else { "cloud_workspace_request_outcome_unknown" });
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+        let (base, _, request) = serve_once(response("200 OK", &json!({"shares": [], "you": {"role": "owner", "canApprove": true, "canManageShares": true}}).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.shares(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        assert!(!request.join().unwrap().extra_request);
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_safe_errors_status_retry_after_and_no_retry() {
+        for (status, number, code) in [
+            ("409 Conflict", 409, "cloud_workspace_last_admin"),
+            ("409 Conflict", 409, "cloud_workspace_runtime_unsupported"),
+            ("503 Service Unavailable", 503, "cloud_workspace_share_unavailable"),
+            ("403 Forbidden", 403, "cloud_workspace_share_forbidden"),
+            ("403 Forbidden", 403, "cloud_workspace_manager_required"),
+            ("401 Unauthorized", 401, "invalid_access_token"),
+            ("404 Not Found", 404, "cloud_workspace_not_found"),
+            ("404 Not Found", 404, "organization_member_not_found"),
+            ("404 Not Found", 404, "cloud_workspace_share_not_found"),
+            ("422 Unprocessable Entity", 422, "cloud_workspace_request_invalid"),
+            ("429 Too Many Requests", 429, "cloud_workspace_share_limit"),
+            ("409 Conflict", 409, "cloud_workspace_share_redundant"),
+            ("409 Conflict", 409, "cloud_workspace_share_requires_organization_access"),
+            ("409 Conflict", 409, "cloud_workspace_share_credential_restricted"),
+            ("409 Conflict", 409, "cloud_workspace_share_personal_route"),
+            ("503 Service Unavailable", 503, "machine0_unavailable"),
+        ] {
+            for method in ["GET", "PUT", "DELETE"] {
+                let (base, _, request) = serve_once(response(status, &json!({"error": code, "message": "private diagnostic must not cross"}).to_string(), "Retry-After: 17\r\n"), Duration::ZERO);
+                let (_, service) = phase2_service(&base);
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, Some(number));
+                assert_eq!(error.retry_after_seconds, Some(17));
+                assert_eq!(error.retryable, method == "GET" && (number == 429 || number >= 500));
+                assert_eq!(error.requires_original_account_context, method != "GET" && (number == 429 || number >= 500));
+                assert!(!error.retry_with_same_idempotency_key);
+                assert!(!serde_json::to_string(&error).unwrap().contains("private diagnostic"));
+                let captured = request.join().unwrap();
+                phase2_headers(&captured.text);
+                assert!(!captured.extra_request);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_admin_share_contract_bounded_timeout_body_and_unknown_error_capture() {
+        for method in ["GET", "PUT", "DELETE"] {
+            for failure in ["timeout", "body-limit", "error-body-limit", "unknown-error"] {
+                let body = match failure {
+                    "body-limit" | "error-body-limit" => " ".repeat(RESPONSE_LIMIT_BYTES as usize + 1),
+                    "unknown-error" => r#"{"error":"raw_database_secret","message":"private"}"#.into(),
+                    _ => json!({"share": share_json("user-2", "manager")}).to_string(),
+                };
+                let status = if matches!(failure, "error-body-limit" | "unknown-error") { "503 Service Unavailable" } else { "200 OK" };
+                let (base, _, request) = serve_once(response(status, &body, ""), if failure == "timeout" { Duration::from_millis(200) } else { Duration::ZERO });
+                let (account, _) = test_service(&base);
+                let mut service = CloudWorkspaceService::for_test(account, &base, if failure == "timeout" { Duration::from_millis(50) } else { Duration::from_secs(2) });
+                service.phase2_enabled = true;
+                let started = Instant::now();
+                let error = match method {
+                    "GET" => service.shares(None, "workspace-1").unwrap_err(),
+                    "PUT" => service.share_put(None, "workspace-1", "user-2", ShareRole::Manager, true).unwrap_err(),
+                    _ => service.share_revoke(None, "workspace-1", "user-2").unwrap_err(),
+                };
+                assert!(started.elapsed() < Duration::from_secs(2));
+                let http_error = matches!(failure, "error-body-limit" | "unknown-error");
+                assert_eq!(error.status, if http_error { Some(503) } else { None });
+                assert_eq!(error.code, if http_error || (failure == "timeout" && method == "GET") { "cloud_workspace_unavailable" }
+                    else if method == "GET" { "cloud_workspace_invalid_response" } else { "cloud_workspace_request_outcome_unknown" });
+                let serialized = serde_json::to_string(&error).unwrap();
+                assert!(!serialized.contains("raw_database_secret") && !serialized.contains("private"));
+                assert!(!request.join().unwrap().extra_request);
+            }
+        }
+    }
+
+    #[test]
     fn shares_list_reads_the_caller_standing() {
         let body = json!({
             "shares": [share_json("user-2", "viewer")],
@@ -5951,6 +8290,63 @@ mod tests {
     }
 
     #[test]
+    fn set_idle_suspend_posts_the_window_and_checks_the_answer_names_it() {
+        let mut workspace: Value = serde_json::from_str::<Value>(&snapshot_body(None)).unwrap()["workspace"].clone();
+        workspace["idleSuspendMinutes"] = json!(0);
+        let (base, _, request) = serve_once(response("200 OK", &workspace.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let changed = service.set_idle_suspend(None, "workspace-1", 0).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert!(captured.text.to_ascii_lowercase().contains("x-terminalx-cloud-workspace-idle-options: never-v1"));
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent, json!({ "idleSuspendMinutes": 0 }));
+        assert_eq!(changed.idle_suspend_minutes, Some(0));
+
+        // An answer that does not name the window asked for (an older
+        // server, another workspace's) is an unknown outcome, not a success.
+        for (key, value) in [("idleSuspendMinutes", json!(15)), ("id", json!("workspace-9"))] {
+            let mut other = workspace.clone();
+            other[key] = value;
+            let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.set_idle_suspend(None, "workspace-1", 0).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, "cloud_workspace_request_outcome_unknown", "{key}");
+        }
+
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.set_idle_suspend(None, "../x", 0).unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.set_idle_suspend(None, "workspace-1", -1).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn idle_suspend_reads_the_window_and_its_choices_for_that_workspace() {
+        let body = json!({
+            "workspaceId": "workspace-1", "idleSuspendMinutes": 15,
+            "allowedIdleSuspendMinutes": [5, 10, 15, 30], "maxIdleSuspendMinutes": 30
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let read = service.idle_suspend(None, "workspace-1").unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspaces/workspace-1/idle-suspend HTTP/1.1"));
+        assert_eq!(read, WorkspaceIdleSuspend {
+            workspace_id: "workspace-1".into(),
+            idle_suspend_minutes: Some(15),
+            allowed_idle_suspend_minutes: vec![5, 10, 15, 30],
+            max_idle_suspend_minutes: Some(30),
+        });
+
+        let mut other = body.clone();
+        other["workspaceId"] = json!("workspace-9");
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.idle_suspend(None, "workspace-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+    }
+
+    #[test]
     fn share_identifiers_are_checked_before_sending() {
         let (_, service) = test_service("http://127.0.0.1:9");
         assert_eq!(service.share_put(None, "workspace-1", "../x", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
@@ -5963,7 +8359,7 @@ mod tests {
         let body = r#"{"error":"cloud_provider_disabled"}"#;
         let (base, _, request) = serve_once(response("403 Forbidden", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let error = service.setup(None, CloudWorkspaceProviderId::Machine0).unwrap_err();
+        let error = service.setup(None, provider_id("machine0")).unwrap_err();
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("cloud_provider_disabled", Some(403)));
         assert!(!error.retryable);
@@ -5993,6 +8389,429 @@ mod tests {
         assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
         assert!(!error.requires_original_account_context);
     }
+    fn automation_github() -> Value {
+        json!({"repositoryId": "org-repository-row-1", "event": "pushed",
+            "filters": [{"field": "baseBranch", "operator": "is-not", "value": " main "}]})
+    }
+
+    fn automation_input(fork: Option<bool>) -> CloudScheduleCreateInput {
+        let mut input = schedule_input();
+        input.schedule = None;
+        input.workspace_mode = Some("fresh".into());
+        input.archive_after_days = Some(365);
+        input.archive_on_pr_merge = Some(true);
+        let mut github = automation_github();
+        if let Some(fork) = fork { github["allowForkPullRequests"] = json!(fork); }
+        input.github_trigger = Some(serde_json::from_value(github).unwrap());
+        input
+    }
+
+    fn automation_json() -> Value {
+        let mut view = schedule_json(SCHEDULE, "workspace-1");
+        view["schedule"] = Value::Null;
+        view.as_object_mut().unwrap().remove("nextRunAt");
+        view["workspaceMode"] = json!("fresh");
+        view["archiveAfterDays"] = json!(365);
+        view["archiveOnPrMerge"] = json!(true);
+        let mut github = automation_github();
+        github["filters"][0]["value"] = json!("main");
+        view["githubTrigger"] = github;
+        view
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_paths_never_reach_an_old_server() {
+        let (_, service) = test_service("http://127.0.0.1:1");
+        assert!(!service.phase2_contracts_available());
+        for fresh in [false, true] {
+            for github in [false, true] {
+                if !fresh && !github { continue; }
+                let mut input = schedule_input();
+                input.workspace_mode = fresh.then(|| "fresh".into());
+                if github {
+                    input.schedule = None;
+                    input.github_trigger = Some(serde_json::from_value(automation_github()).unwrap());
+                }
+                let error = service.schedule_create(None, &input).unwrap_err();
+                assert_eq!(error.code, "cloud_schedule_runtime_unsupported");
+                assert!(error.status.is_none() && !error.retryable);
+                let estimate = CloudScheduleEstimateInput {
+                    workspace_id: input.workspace_id, schedule: input.schedule, github_trigger: input.github_trigger,
+                    workspace_mode: input.workspace_mode, completion_policy: input.completion_policy, max_run_minutes: input.max_run_minutes,
+                };
+                assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_schedule_runtime_unsupported");
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_fresh_timer_cleanup_boundaries_and_no_github() {
+        for days in [1, 365] {
+            let mut input = schedule_input();
+            input.workspace_mode = Some("fresh".into());
+            input.archive_after_days = Some(days);
+            input.archive_on_pr_merge = Some(true);
+            let mut view = schedule_json(SCHEDULE, "workspace-1");
+            view["workspaceMode"] = json!("fresh");
+            view["archiveAfterDays"] = json!(days);
+            view["archiveOnPrMerge"] = json!(true);
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let created = service.schedule_create(None, &input).unwrap();
+            assert_eq!(created.workspace_mode, "fresh");
+            assert_eq!(created.archive_after_days, Some(days));
+            assert!(created.archive_on_pr_merge);
+            let sent = sent_body(&request.join().unwrap());
+            assert_eq!(sent["archiveAfterDays"], days);
+            assert_eq!(sent["archiveOnPrMerge"], true);
+            assert!(sent.get("githubTrigger").is_none());
+            assert_eq!(sent["schedule"]["preset"], "weekly");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_body_defaultforkoptin_and_persisted_optin() {
+        for fork in [None, Some(false), Some(true)] {
+            let mut view = automation_json();
+            view["githubTrigger"]["allowForkPullRequests"] = json!(fork.unwrap_or(false));
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let created = service.schedule_create(None, &automation_input(fork)).unwrap();
+            assert!(created.schedule.is_none() && created.next_run_at.is_none());
+            assert_eq!(created.github_trigger.unwrap().allow_fork_pull_requests, fork.unwrap_or(false));
+            let captured = request.join().unwrap();
+            assert!(!captured.extra_request);
+            let mut github = automation_github();
+            github["filters"][0]["value"] = json!("main");
+            github["allowForkPullRequests"] = json!(fork.unwrap_or(false));
+            assert_eq!(sent_body(&captured), json!({
+                "workspaceId": "workspace-1", "name": "Nightly triage", "agent": "claude", "model": "sonnet",
+                "mode": "acceptEdits", "prompt": "Triage the new issues.", "githubTrigger": github,
+                "workspaceMode": "fresh", "archiveAfterDays": 365, "archiveOnPrMerge": true,
+                "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 45, "confirmProviderSpend": true
+            }));
+            phase2_headers(&captured.text);
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_null_response_defaults_retain_current_timer_apis() {
+        let mut view = schedule_json(SCHEDULE, "workspace-1");
+        for field in ["workspaceMode", "archiveOnPrMerge", "archiveAfterDays", "githubTrigger"] {
+            view[field] = Value::Null;
+        }
+        let answer = json!({"schedule": view, "runs": []}).to_string();
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &json!({"schedules": [view]}).to_string(), ""),
+            response("200 OK", &answer, ""),
+            response("200 OK", &answer, ""),
+            response("200 OK", &answer, ""),
+            response("200 OK", &answer, ""),
+            response("200 OK", &answer, ""),
+        ]);
+        let (_, service) = test_service(&base);
+        let listed = service.schedules(None, Some("workspace-1")).unwrap();
+        let detail = service.schedule(None, SCHEDULE).unwrap();
+        let created = service.schedule_create(None, &schedule_input()).unwrap();
+        let paused = service.schedule_set_active(None, SCHEDULE, false).unwrap();
+        // The held resume preflight must also accept compatible null defaults.
+        let resumed = service.schedule_set_active(None, SCHEDULE, true).unwrap();
+        for schedule in [&listed.schedules[0], &detail.schedule, &created, &paused, &resumed] {
+            assert_eq!(schedule.workspace_mode, "existing");
+            assert!(!schedule.archive_on_pr_merge);
+            assert!(schedule.archive_after_days.is_none() && schedule.github_trigger.is_none());
+            assert!(schedule.schedule.is_some());
+            let wire = serde_json::to_value(schedule).unwrap();
+            assert_eq!(wire["workspaceMode"], "existing");
+            assert_eq!(wire["archiveOnPrMerge"], false);
+        }
+        let requests = requests.join().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests[4].starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+        assert!(requests[5].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(serde_json::from_str::<Value>(requests[5].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
+        for request in &requests { phase2_headers(request); }
+    }
+
+    #[test]
+    fn phase2_automation_contract_null_cleanup_preserves_fresh_response_and_strict_types() {
+        let mut view = automation_json();
+        view["archiveOnPrMerge"] = Value::Null;
+        view["archiveAfterDays"] = Value::Null;
+        view["githubTrigger"]["allowForkPullRequests"] = json!(true);
+        let pending = json!({"id": "run-pending", "scheduledFor": 1, "state": "creating-workspace", "workspaceId": "workspace-1"});
+        view["lastRun"] = pending.clone();
+        let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view, "runs": [pending]}).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let detail = service.schedule(None, SCHEDULE).unwrap();
+        assert_eq!(detail.schedule.workspace_mode, "fresh");
+        assert!(!detail.schedule.archive_on_pr_merge);
+        assert!(detail.schedule.archive_after_days.is_none() && detail.schedule.schedule.is_none());
+        assert!(detail.schedule.github_trigger.unwrap().allow_fork_pull_requests);
+        assert!(detail.schedule.last_run.unwrap().workspace_id.is_none());
+        assert!(detail.runs[0].workspace_id.is_none());
+        assert!(!request.join().unwrap().extra_request);
+
+        // Null compatibility must not coerce wrong response types.
+        for (field, value) in [("workspaceMode", json!(false)), ("archiveOnPrMerge", json!("false"))] {
+            let mut invalid = schedule_json(SCHEDULE, "workspace-1");
+            invalid[field] = value;
+            assert!(serde_json::from_value::<CloudSchedule>(invalid).is_err());
+        }
+        // Create inputs still follow the SaaS parser's omission-only defaults.
+        for field in ["workspaceMode", "archiveOnPrMerge", "archiveAfterDays", "schedule", "githubTrigger"] {
+            let mut input = json!({
+                "workspaceId": "workspace-1", "name": "Triage", "agent": "claude", "mode": "acceptEdits",
+                "prompt": "Triage issues.", "schedule": schedule_json(SCHEDULE, "workspace-1")["schedule"],
+                "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 45
+            });
+            input[field] = Value::Null;
+            assert!(serde_json::from_value::<CloudScheduleCreateInput>(input).is_err());
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_invalid_inputs_are_local_even_while_inactive() {
+        let (account, service) = test_service("http://127.0.0.1:1");
+        account.set_context_for_test(None);
+        assert!(!service.phase2_contracts_available());
+        let invalid = |edit: fn(&mut CloudScheduleCreateInput)| {
+            let mut input = automation_input(None);
+            edit(&mut input);
+            assert_eq!(service.schedule_create(None, &input).unwrap_err().code, "cloud_workspace_request_invalid");
+        };
+        invalid(|i| i.schedule = schedule_input().schedule);
+        invalid(|i| i.github_trigger = None);
+        invalid(|i| i.workspace_mode = Some("clone".into()));
+        invalid(|i| i.workspace_mode = None);
+        invalid(|i| i.workspace_mode = Some("existing".into()));
+        invalid(|i| i.archive_after_days = Some(0));
+        invalid(|i| i.archive_after_days = Some(366));
+        invalid(|i| i.github_trigger.as_mut().unwrap().event = "push".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().repository_id.clear());
+        invalid(|i| i.github_trigger.as_mut().unwrap().repository_id = "x".repeat(256));
+        invalid(|i| { let g = i.github_trigger.as_mut().unwrap(); g.filters = vec![g.filters[0].clone(); 6]; });
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].field = "headBranch".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].operator = "contains".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = " ".into());
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = "x".repeat(256));
+        invalid(|i| i.github_trigger.as_mut().unwrap().filters[0].value = "a\nb".into());
+        invalid(|i| i.mode = "bypassPermissions".into());
+        // Serde rejects unknown nested keys and non-boolean fork opt-in.
+        for extra in [json!({"allowForkPullRequests": "true"}), json!({"webhook": true})] {
+            let mut g = automation_github();
+            g.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(serde_json::from_value::<CloudScheduleGithubTrigger>(g).is_err());
+        }
+        let mut g = automation_github();
+        g["filters"][0]["unknown"] = json!(true);
+        assert!(serde_json::from_value::<CloudScheduleGithubTrigger>(g).is_err());
+        for field in ["schedule", "githubTrigger", "workspaceMode"] {
+            let mut body = json!({"workspaceId": "workspace-1", "githubTrigger": automation_github(), "completionPolicy": "suspend", "maxRunMinutes": 60});
+            body[field] = Value::Null;
+            assert!(serde_json::from_value::<CloudScheduleEstimateInput>(body).is_err());
+        }
+        let estimate: CloudScheduleEstimateInput = serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "completionPolicy": "suspend", "maxRunMinutes": 60
+        })).unwrap();
+        assert_eq!(service.schedule_estimate(None, &estimate).unwrap_err().code, "cloud_workspace_request_invalid");
+        let mut estimate_body = json!({"workspaceId": "workspace-1", "githubTrigger": automation_github(), "completionPolicy": "suspend", "maxRunMinutes": 60});
+        estimate_body["archiveAfterDays"] = json!(1);
+        assert!(serde_json::from_value::<CloudScheduleEstimateInput>(estimate_body).is_err());
+    }
+
+    #[test]
+    fn phase2_automation_contract_freshrunidentity_is_own_workspace_or_unavailable() {
+        for timer in [false, true] {
+            let mut view = automation_json();
+            if timer {
+                view["schedule"] = schedule_json(SCHEDULE, "workspace-1")["schedule"].clone();
+                view.as_object_mut().unwrap().remove("githubTrigger");
+            } else {
+                view.as_object_mut().unwrap().remove("schedule");
+            }
+            let pending = json!({"id": "run-pending", "scheduledFor": 1, "trigger": "github", "state": "creating-workspace", "workspaceId": "workspace-1"});
+            let allocated = json!({"id": "run-own", "scheduledFor": 2, "trigger": "github", "state": "working", "workspaceId": "fresh-workspace-2", "workBranch": "terminalx/triage-123", "archiveAt": 1792713600000_i64, "archivedAt": null});
+            view["lastRun"] = pending.clone();
+            let body = json!({"schedule": view, "runs": [pending, allocated]});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let detail = service.schedule(None, SCHEDULE).unwrap();
+            assert!(detail.runs[0].workspace_id.is_none());
+            assert!(detail.schedule.last_run.unwrap().workspace_id.is_none());
+            assert_eq!(detail.runs[0].state, "creating-workspace");
+            let pending = serde_json::to_value(&detail.runs[0]).unwrap();
+            for field in ["workspaceId", "workBranch", "archiveAt", "archivedAt"] { assert!(pending[field].is_null()); }
+            assert_eq!(detail.runs[1].workspace_id.as_deref(), Some("fresh-workspace-2"));
+            assert_eq!(detail.runs[1].work_branch.as_deref(), Some("terminalx/triage-123"));
+            let run = serde_json::to_value(&detail.runs[1]).unwrap();
+            assert_eq!(run["archiveAt"], 1792713600000_i64);
+            assert!(run["archivedAt"].is_null());
+            request.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_github_list_pause_resume_have_no_timer() {
+        let view = automation_json();
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &json!({"schedules": [view.clone()]}).to_string(), ""),
+            response("200 OK", &json!({"schedule": view.clone()}).to_string(), ""),
+            response("200 OK", &json!({"schedule": view}).to_string(), ""),
+        ]);
+        let (_, service) = phase2_service(&base);
+        let listed = service.schedules(None, Some("workspace-1")).unwrap();
+        assert!(listed.schedules[0].schedule.is_none());
+        assert!(!listed.schedules[0].github_trigger.as_ref().unwrap().allow_fork_pull_requests);
+        for active in [false, true] {
+            let changed = service.schedule_set_active(None, SCHEDULE, active).unwrap();
+            assert!(changed.schedule.is_none() && changed.next_run_at.is_none());
+        }
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
+        assert!(requests[1].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
+        assert!(requests[2].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(requests[1].split_once("\r\n\r\n").unwrap().1, "{}");
+        assert_eq!(serde_json::from_str::<Value>(requests[2].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({"confirmProviderSpend": true}));
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_fresh_or_github_resume_never_posts() {
+        for (fresh, github) in [(true, false), (false, true), (true, true)] {
+            let mut view = automation_json();
+            if !fresh { view["workspaceMode"] = json!("existing"); }
+            if !github {
+                view["schedule"] = schedule_json(SCHEDULE, "workspace-1")["schedule"].clone();
+                view.as_object_mut().unwrap().remove("githubTrigger");
+            }
+            let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": view, "runs": []}).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert!(!service.phase2_contracts_available());
+            let error = service.schedule_set_active(None, SCHEDULE, true).unwrap_err();
+            assert_eq!(error.code, "cloud_schedule_runtime_unsupported");
+            assert!(error.status.is_none() && !error.retryable);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+            assert!(!captured.extra_request, "held resume must not POST");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_resume_preflight_refusals_never_post() {
+        for (status, code) in [("403 Forbidden", "organization_admin_required"), ("404 Not Found", "cloud_workspace_not_found")] {
+            let (base, _, request) = serve_once(response(status, &json!({"error": code}).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            assert_eq!(service.schedule_set_active(None, SCHEDULE, true).unwrap_err().code, code);
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with("GET "));
+            assert!(!captured.extra_request);
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_delayed_resume_preflight_context_changes_never_post() {
+        for change in ["sign-out", "account", "organization", "profile", "membership"] {
+            let answer = json!({"schedule": schedule_json(SCHEDULE, "workspace-1"), "runs": []});
+            let (base, accepted, request) = serve_once(response("200 OK", &answer.to_string(), ""), Duration::from_millis(150));
+            let (account, service) = test_service(&base);
+            let target = if change == "membership" {
+                account.set_memberships_for_test(&["org-1", "org-2"], true);
+                "org-2"
+            } else { "org-1" };
+            let resume = thread::spawn(move || service.schedule_set_active(Some(target), SCHEDULE, true));
+            accepted.recv_timeout(Duration::from_secs(1)).unwrap();
+            if change == "sign-out" {
+                account.set_context_for_test(None);
+            } else if change == "membership" {
+                account.set_memberships_for_test(&["org-1"], true);
+            } else {
+                let mut replacement = context();
+                replacement.generation += 1;
+                match change {
+                    "account" => replacement.user_id = "another-user".into(),
+                    "organization" => replacement.organization_id = "org-2".into(),
+                    "profile" => replacement.profile_id = "another-profile".into(),
+                    _ => unreachable!(),
+                }
+                account.set_context_for_test(Some(replacement));
+            }
+            assert_eq!(resume.join().unwrap().unwrap_err().code, "account_context_changed");
+            let captured = request.join().unwrap();
+            assert!(captured.text.starts_with(&format!("GET /v1/desktop/orgs/{target}/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+            assert!(!captured.extra_request, "context change during {change} preflight must prevent spend POST");
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_held_automation_safety_controls_need_no_preflight() {
+        let (base, _, request) = serve_once(response("200 OK", &json!({"schedule": automation_json()}).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.schedule_set_active(None, SCHEDULE, false).unwrap().schedule.is_none());
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
+        assert_eq!(sent_body(&captured), json!({}));
+        assert!(!captured.extra_request);
+
+        let (base, _, request) = serve_once(response("200 OK", "{\"ok\":true}", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.schedule_delete(None, SCHEDULE).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("DELETE "));
+        assert!(!captured.extra_request);
+
+        let (base, _, request) = serve_once(response("200 OK", "{\"paused\":1}", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.schedules_pause_all(None).unwrap().paused, 1);
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules/pause-all HTTP/1.1"));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn phase2_automation_contract_numericcosts_fresh_ceiling_and_estimate_body() {
+        for keep in [false, true] {
+            let monthly = if keep { 62_208_000_000u64 } else { 410_400_000u64 };
+            let body = json!({"estimate": {"currency": "USD", "hourlyMicros": 120000,
+                "createPerRunMinutes": 20, "perRunMaxMinutes": 285, "perRunMaxMicros": 570000,
+                "monthlyRuns": 720, "monthlyMaxMicros": monthly, "keepsMachineRunning": keep, "runningSlots": 1, "maxRunsPerDay": 24},
+                "supported": false, "refusal": "cloud_schedule_runtime_unsupported", "nextRunAt": null});
+            let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
+                "workspaceId": "workspace-1", "workspaceMode": "fresh", "githubTrigger": automation_github(),
+                "completionPolicy": if keep {"keep"} else {"suspend"}, "maxRunMinutes": 240
+            })).unwrap();
+            let quote = service.schedule_estimate(None, &input).unwrap();
+            assert_eq!(quote.estimate.monthly_max_micros, monthly);
+            assert!(monthly > 120000 * 720, "fresh totals must not be clamped to one machine-month");
+            assert_eq!(quote.estimate.create_per_run_minutes, Some(20));
+            assert_eq!(quote.estimate.per_run_max_minutes, Some(285));
+            assert_eq!(quote.refusal.as_deref(), Some("cloud_schedule_runtime_unsupported"));
+            assert!(!quote.supported && quote.next_run_at.is_none());
+            let captured = request.join().unwrap();
+            let mut github = automation_github();
+            github["filters"][0]["value"] = json!("main");
+            github["allowForkPullRequests"] = json!(false);
+            assert_eq!(sent_body(&captured), json!({"workspaceId": "workspace-1", "workspaceMode": "fresh", "githubTrigger": github,
+                "completionPolicy": if keep {"keep"} else {"suspend"}, "maxRunMinutes": 240}));
+        }
+    }
+
+    #[test]
+    fn phase2_automation_contract_inactive_org_and_server_refusals_are_retained() {
+        let (_, service) = phase2_service("http://127.0.0.1:1");
+        assert_eq!(service.schedule_create(Some("org-other"), &automation_input(None)).unwrap_err().code, "cloud_organization_unavailable");
+        for (status, code) in [("403 Forbidden", "organization_admin_required"), ("404 Not Found", "cloud_workspace_not_found"),
+            ("409 Conflict", "cloud_provider_connection_required"), ("409 Conflict", "cloud_schedule_runtime_unsupported"),
+            ("422 Unprocessable Entity", "cloud_workspace_request_invalid")] {
+            let (base, _, request) = serve_once(response(status, &json!({"error": code}).to_string(), ""), Duration::ZERO);
+            let (_, service) = phase2_service(&base);
+            let error = service.schedule_create(None, &automation_input(None)).unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(!request.join().unwrap().extra_request);
+        }
+    }
+
     fn schedule_json(id: &str, workspace_id: &str) -> Value {
         json!({
             "id": id, "workspaceId": workspace_id, "name": "Nightly triage", "createdBy": "user-1",
@@ -6022,13 +8841,15 @@ mod tests {
     }
 
     #[test]
-    fn schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
+    fn phase2_automation_contract_schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
         let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let listed = service.schedules(None, Some("workspace-1")).unwrap();
         assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
         let schedule = &listed.schedules[0];
+        assert_eq!(schedule.workspace_mode, "existing");
+        assert!(!schedule.archive_on_pr_merge && schedule.github_trigger.is_none());
         assert_eq!((schedule.estimate.per_run_max_micros, schedule.estimate.max_runs_per_day, schedule.estimate.keeps_machine_running), (120_000, 24, false));
         assert_eq!(schedule.last_run.as_ref().and_then(|run| run.category.as_deref()), Some("timed-out"));
         // Serialized for the webview in camelCase.
@@ -6044,7 +8865,7 @@ mod tests {
     }
 
     #[test]
-    fn a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
+    fn phase2_automation_contract_a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
         let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let error = service.schedules(None, None).unwrap_err();
@@ -6053,7 +8874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
+    fn phase2_automation_contract_a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
         let body = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") });
         let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6074,7 +8895,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_that_the_server_would_refuse_is_not_sent() {
+    fn phase2_automation_contract_a_schedule_that_the_server_would_refuse_is_not_sent() {
         let (_, service) = test_service("http://127.0.0.1:1");
         let change = |edit: fn(&mut CloudScheduleCreateInput)| {
             let mut input = schedule_input();
@@ -6091,10 +8912,10 @@ mod tests {
         assert_eq!(change(|input| input.max_run_minutes = 4), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.max_run_minutes = 241), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.completion_policy = "forever".into()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.preset = "cron".into()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.weekdays = Vec::new()), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.weekdays = vec!["mon".into(), "mon".into()]), "cloud_workspace_request_invalid");
-        assert_eq!(change(|input| input.schedule.hour = 24), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().preset = "cron".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().weekdays = Vec::new()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().weekdays = vec!["mon".into(), "mon".into()]), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.as_mut().unwrap().hour = 24), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.workspace_id = "../other".into()), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.prompt = " ".into()), "cloud_workspace_prompt_too_long");
         assert_eq!(change(|input| input.prompt = "x".repeat(MAX_PROMPT_BYTES + 1)), "cloud_workspace_prompt_too_long");
@@ -6103,7 +8924,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_times_are_sent_as_the_strict_parser_takes_them() {
+    fn phase2_automation_contract_schedule_times_are_sent_as_the_strict_parser_takes_them() {
         let timing = |preset: &str, weekdays: &[&str]| CloudScheduleTiming {
             preset: preset.into(),
             hour: 7,
@@ -6120,7 +8941,7 @@ mod tests {
     }
 
     #[test]
-    fn an_estimate_is_asked_without_a_prompt_and_read_back() {
+    fn phase2_automation_contract_an_estimate_is_asked_without_a_prompt_and_read_back() {
         let body = json!({
             "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMicros": 480_000, "monthlyRuns": 30, "monthlyMaxMicros": 86_400_000, "keepsMachineRunning": true, "runningSlots": 1, "maxRunsPerDay": 24 },
             "nextRunAt": 1_792_713_600_000i64, "supported": false
@@ -6155,7 +8976,7 @@ mod tests {
     }
 
     #[test]
-    fn an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
+    fn phase2_automation_contract_an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
         let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
             "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "suspend", "maxRunMinutes": 60
         }))
@@ -6174,7 +8995,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_delete_and_pause_all_send_what_the_server_expects() {
+    fn phase2_automation_contract_pause_resume_delete_and_pause_all_send_what_the_server_expects() {
         let answer = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") }).to_string();
         let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6183,13 +9004,19 @@ mod tests {
         assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
         assert_eq!(sent_body(&captured), json!({}));
 
-        // Resuming starts billed compute by itself again, and says so.
-        let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
+        // Held activation reads the saved task first; legacy timer resume
+        // retains authorization and its exact spend-confirmation body.
+        let (base, requests) = serve_each(vec![response("200 OK", &answer, ""), response("200 OK", &answer, "")]);
         let (_, service) = test_service(&base);
         service.schedule_set_active(None, SCHEDULE, true).unwrap();
-        let captured = request.join().unwrap();
-        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
-        assert_eq!(sent_body(&captured), json!({ "confirmProviderSpend": true }));
+        let captured = requests.join().unwrap();
+        assert!(captured[0].starts_with(&format!("GET /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+        assert!(captured[1].starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(serde_json::from_str::<Value>(captured[1].split_once("\r\n\r\n").unwrap().1).unwrap(), json!({ "confirmProviderSpend": true }));
+        for request in &captured {
+            assert!(request.to_ascii_lowercase().contains("authorization: bearer native-secret-token"));
+            assert!(request.to_ascii_lowercase().contains("x-terminalx-cloud-workspace-contract: providers-v1"));
+        }
 
         let (base, _, request) = serve_once(response("200 OK", r#"{"ok":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
@@ -6207,7 +9034,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_schedule_keeps_the_servers_reason() {
+    fn phase2_automation_contract_a_refused_schedule_keeps_the_servers_reason() {
         for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
             let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
@@ -6216,10 +9043,14 @@ mod tests {
             assert_eq!(error.code, code);
         }
         // A resume of a task paused for an approval nobody could give.
-        let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": "cloud_schedule_needs_approval" }).to_string(), ""), Duration::ZERO);
+        let (base, requests) = serve_each(vec![
+            response("200 OK", &json!({"schedule": schedule_json(SCHEDULE, "workspace-1")}).to_string(), ""),
+            response("409 Conflict", &json!({ "error": "cloud_schedule_needs_approval" }).to_string(), ""),
+        ]);
         let (_, service) = test_service(&base);
         let error = service.schedule_set_active(None, SCHEDULE, true).unwrap_err();
-        request.join().unwrap();
+        let captured = requests.join().unwrap();
+        assert!(captured[0].starts_with("GET ") && captured[1].contains("/resume HTTP/1.1"));
         assert_eq!(error.code, "cloud_schedule_needs_approval");
     }
 }

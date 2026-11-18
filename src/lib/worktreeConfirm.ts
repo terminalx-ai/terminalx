@@ -1,4 +1,5 @@
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 
 /** What became of a workspace's branch and HEAD when it was removed. */
 export interface BranchOutcome {
@@ -28,10 +29,10 @@ export async function reportBranchOutcome(outcome: BranchOutcome | null | undefi
  */
 export function confirmRiskyRemoval(path: string, losses: string[]): Promise<boolean> {
   const what = losses.length ? losses.map((line) => `• ${line}`).join("\n") : "• Its state could not be checked.";
-  return ask(`This workspace is not known to be clean and merged:\n\n${path}\n\n${what}\n\nRemoving it deletes the directory for good; it is not moved to the Trash. Uncommitted files in it are lost. Its branch is kept if it holds commits that no other branch, remote or tag has, whatever "Also delete the branch" is set to.`, {
+  return confirmInApp({
     title: "Remove anyway?",
-    kind: "warning",
-    okLabel: "Remove anyway",
-    cancelLabel: "Cancel",
-  }).catch(() => false);
+    body: `This workspace is not known to be clean and merged:\n\n${path}\n\n${what}\n\nRemoving it deletes the directory for good; it is not moved to the Trash. Uncommitted files in it are lost. Its branch is kept if it holds commits that no other branch, remote or tag has, whatever "Also delete the branch" is set to.`,
+    action: "Remove anyway",
+    destructive: true,
+  });
 }

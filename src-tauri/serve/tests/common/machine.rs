@@ -41,9 +41,12 @@ pub fn pair(data: &Path, id: &str, token: &str, relay_device_id: Option<&str>) {
             platform: Some("macos".into()),
             client_public_key_b64: None,
             fingerprint: None,
-            approved_at: 1,
+            // Now: a credential unused for 90 days would expire (PRO-357).
+            approved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
             last_seen_at: None,
             relay_device_id: relay_device_id.map(str::to_string),
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         })
         .unwrap();
@@ -120,6 +123,10 @@ pub async fn connect(port: u16, host_public_key_b64: &str, token: &str) -> Outco
 
 impl Computer {
     pub async fn call(&mut self, method: &str, params: Value) -> Value {
+        self.call_observing(method, params, |_| {}).await
+    }
+
+    pub async fn call_observing(&mut self, method: &str, params: Value, mut observe: impl FnMut(Value)) -> Value {
         let id = format!("r{}", self.next);
         self.next += 1;
         let request = json!({ "id": id, "method": method, "params": params });
@@ -132,18 +139,21 @@ impl Computer {
             if message["id"] == id.as_str() {
                 return message;
             }
+            if message["event"].is_string() {
+                observe(message);
+            }
         }
     }
 
-    /// The params of the next `event` notification within `within`; `None`
-    /// when none came or the connection closed first.
-    pub async fn notification(&mut self, event: &str, within: Duration) -> Option<Value> {
+    /// The params of the next matching `event` notification within `within`.
+    /// Returns `None` if the deadline expires or the connection closes first.
+    pub async fn notification(&mut self, event: &str, within: Duration, matches: impl Fn(&Value) -> bool) -> Option<Value> {
         let deadline = tokio::time::Instant::now() + within;
         loop {
             match tokio::time::timeout_at(deadline, self.socket.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
-                    if message["event"] == event {
+                    if message["event"] == event && matches(&message["params"]) {
                         return Some(message["params"].clone());
                     }
                 }

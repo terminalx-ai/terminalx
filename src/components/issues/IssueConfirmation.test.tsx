@@ -15,9 +15,9 @@ const request = (): IssueConfirmationRequest => ({
   id: "request-1", expiresAt: Date.now() + 40_000,
   question: {
     title: "Linear issue request", sessionId: "origin", sessionTitle: "Zeron comparison",
-    project: "TerminalX", target: "PRO", summary: "Create the issue ‘Show truthful agent readiness’ in PRO",
+    project: "TerminalX", target: "PRO-42", summary: "Permanently delete PRO-42 ‘Show truthful agent readiness’",
     description: "## Readiness\n\n- [ ] Check readiness\n\n[Reference](https://example.com/" + "long-path/".repeat(250) + ")\n\n" + "Review this complete description.\n".repeat(30) + "END OF DESCRIPTION",
-    agree: "Create issue",
+    agree: "Delete issue",
   },
 });
 beforeEach(() => {
@@ -59,10 +59,10 @@ describe("issue confirmation", () => {
     expect(within(details).getByRole("checkbox")).toBeTruthy();
     expect(details.textContent).toContain("END OF DESCRIPTION");
     expect(details.textContent).toContain("long-path/".repeat(250));
-    expect(within(details).getByText("PRO")).toBeTruthy();
+    expect(within(details).getByText("PRO-42")).toBeTruthy();
     expect(within(details).getByText("origin")).toBeTruthy();
     const cancel = within(dialog).getByRole("button", { name: "Cancel request" });
-    const approve = within(dialog).getByRole("button", { name: "Create issue" });
+    const approve = within(dialog).getByRole("button", { name: "Delete issue" });
     expect(details.contains(cancel)).toBe(false);
     expect(details.contains(approve)).toBe(false);
     await waitFor(() => expect(document.activeElement).toBe(cancel));
@@ -87,7 +87,7 @@ describe("issue confirmation", () => {
   it.each([true, false])("sends only the explicit decision (%s) with its request id", async (approved) => {
     render(<IssueConfirmation />);
     await review();
-    fireEvent.click(screen.getByRole("button", { name: approved ? "Create issue" : "Cancel request" }));
+    fireEvent.click(screen.getByRole("button", { name: approved ? "Delete issue" : "Cancel request" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_confirmation_reply", { id: "request-1", approved }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
@@ -115,7 +115,7 @@ describe("issue confirmation", () => {
     render(<IssueConfirmation />);
     await review();
     invoke.mockRejectedValueOnce(new Error("Disconnected"));
-    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete issue" }));
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(invoke.mock.calls.filter(([command]) => command === "issue_confirmation_reply")).toHaveLength(1);

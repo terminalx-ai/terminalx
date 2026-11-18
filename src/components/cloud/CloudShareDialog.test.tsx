@@ -241,10 +241,16 @@ describe("share dialog", () => {
     const manager = { role: "manager", canApprove: true, canManageShares: true } as const;
     expect(yourAccessText(manager, "owner")).toMatch(/^Owner \(/);
     expect(yourAccessText(manager, "admin")).toMatch(/^Admin \(/);
-    // Not known which: neither is claimed.
-    expect(yourAccessText(manager, null)).toBe("Owner or admin of the organization (manages this workspace and who it is shared with)");
+    expect(yourAccessText(manager, null)).toMatch(/^Admin \(/);
+    expect(yourAccessText(manager, "member")).toMatch(/^Workspace Admin \(/);
+    expect(yourAccessText(manager, "owner", true)).toMatch(/^Creator \(/);
+    expect(yourAccessText({ ...manager, canApprove: false }, null)).not.toContain("can approve");
     // A plain member who created the workspace drives it and manages its shares.
-    expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Creator \(you created this workspace/);
+    expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member", true)).toMatch(/^Creator \(you created this workspace/);
+    expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: true }, "member")).toMatch(/^Driver \(/);
+    expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: true }, "member", true)).not.toContain("approve permissions and manage");
+    expect(shareErrorMessage({ code: "cloud_workspace_last_admin" })).toBe("A workspace must have at least one admin.");
+    expect(shareErrorMessage({ code: "cloud_workspace_runtime_unsupported" })).toContain("not supported");
     expect(yourAccessText({ role: "driver", canApprove: false, canManageShares: false }, "member")).toBe("Driver (can send to agents; typing in terminals also needs the right to approve permissions)");
     expect(yourAccessText({ role: "driver", canApprove: true, canManageShares: false }, "member")).toBe("Driver (can send to agents and type in terminals), can approve permissions");
     expect(yourAccessText({ role: "viewer", canApprove: false, canManageShares: false }, "member")).toBe("Viewer (can read everything, not send)");
@@ -260,6 +266,43 @@ describe("share dialog", () => {
     expect(screen.queryByLabelText("Add person")).toBeNull();
     expect(screen.queryByRole("button", { name: /Revoke/ })).toBeNull();
     expect(within(row).queryByRole("combobox")).toBeNull();
+  });
+
+  it("shows an existing Admin without offering an Admin grant or disabling approval silently", async () => {
+    listed = { ...listed, shares: [share({ role: "manager", canApprove: true })] };
+    dialog();
+    const row = await screen.findByTestId("cloud-share-row");
+    const role = within(row).getByLabelText("Role for Alice") as HTMLSelectElement;
+    expect(role.value).toBe("manager");
+    expect(within(role).getByRole("option", { name: "Admin" }).hasAttribute("disabled")).toBe(true);
+    expect(within(screen.getByLabelText("New person's role")).queryByRole("option", { name: "Admin" })).toBeNull();
+    const approval = within(row).getByRole("switch", { name: "Can approve permissions: Alice" }) as HTMLButtonElement;
+    expect(approval.disabled).toBe(true);
+    expect(approval.getAttribute("aria-description")).toContain("not supported");
+    fireEvent.click(approval);
+    expect(mocks.put).not.toHaveBeenCalled();
+    fireEvent.change(role, { target: { value: "driver" } });
+    await waitFor(() => expect(mocks.put).toHaveBeenCalledWith("ws-1", "u-alice", "driver", true, "org-1"));
+  });
+
+  it("shows a read-only Admin and preserves the independent approval flag", async () => {
+    listed = { shares: [share({ role: "manager", canApprove: false })], you: { role: "viewer", canApprove: false, canManageShares: false } };
+    dialog();
+    const row = await screen.findByTestId("cloud-share-row");
+    expect(row.textContent).toContain("Admin");
+    expect(row.textContent).not.toContain("Viewer");
+    expect(row.textContent).not.toContain("can approve");
+  });
+
+  it("updates manager provenance when a delayed roster identifies the creator", async () => {
+    refreshRosterFlags([]);
+    account.status = { ...account.status, organizations: [] };
+    let resolveRoster!: (value: unknown) => void;
+    mocks.members.mockImplementationOnce(() => new Promise((resolve) => { resolveRoster = resolve; }));
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" createdBy="u-me" onClose={() => undefined} />);
+    expect((await screen.findByTestId("cloud-share-you")).textContent).toMatch(/^Your access: Admin \(/);
+    await act(async () => resolveRoster({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "member" }], pendingInvites: [], viewerRole: "member", canManageMembers: false, contextRevision: "r1" }));
+    await waitFor(() => expect(screen.getByTestId("cloud-share-you").textContent).toMatch(/^Your access: Creator \(/));
   });
 
   it("shares a workspace in another organization with that organization's own members", async () => {

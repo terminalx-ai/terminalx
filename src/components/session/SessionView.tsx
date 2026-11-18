@@ -29,7 +29,7 @@ import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
-import { WorkspacePanes } from "./WorkspacePanes";
+import { WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabAccountLabel, TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
@@ -38,8 +38,8 @@ import { TerminalChatProvider } from "@/components/terminal/TerminalChat";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
 import { bootBrowser, pagesFor, useBrowser } from "@/lib/browser";
-import { isReviewEditor, setLastFocused, useEditors } from "@/lib/editors";
-import { EditorSplit } from "@/components/editor/EditorSplit";
+import { isFileTab, isTabEditor, setLastFocused, useEditors } from "@/lib/editors";
+import { EditorSplit, useFileTabShortcuts } from "@/components/editor/EditorSplit";
 import { QuickOpen } from "@/components/editor/QuickOpen";
 import { ProjectSearch } from "@/components/editor/ProjectSearch";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -55,6 +55,7 @@ import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
+import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -63,6 +64,12 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { CloudPortsView } from "@/components/cloud/CloudPorts";
+import { PortForwardChip } from "@/components/cloud/PortForwardChip";
+import { PortToasts } from "@/components/cloud/PortToast";
+import { openForwardCount, usePortForwards } from "@/lib/portForwards";
+import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
+import { MachineRunMenu } from "@/components/machines/MachineRunPanes";
+import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
@@ -74,6 +81,7 @@ import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { copyText } from "@/lib/clipboard";
 import { RepoMirrorButton, useRepoMirror } from "./RepoMirrorControl";
 import { BranchGitButton } from "./BranchGitButton";
+import { MachineBranchButton, MachineDiffSize, useMachineBranch } from "./MachineBranchButton";
 import { SessionCost } from "./SessionCost";
 import { RunMenu, RunRestartOffer, offersRunMenu } from "./RunMenu";
 
@@ -151,12 +159,19 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
         <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
       )
     : null;
+  // The tab says how many ports are forwarded here now ("Ports 3", 14.11; "Ports 1", 21.08).
+  const { forwards } = usePortForwards(cloud.ports.connectionId, false);
+  const portsCount = cloud.ports.offered ? openForwardCount(forwards) : 0;
+  // A machine session's terminals are the machine's, under the panel (21.08).
+  const dock = cloud.machine ? <MachineTerminalDock cloud={cloud} /> : undefined;
   if (!cloud.fileSource) {
     return (
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
-          {cloud.locked === "deleted"
+          {cloud.machine
+            ? `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
+            : cloud.locked === "deleted"
             ? "This workspace was deleted. Its changes, files and Git went with it, and any previews that were open ended."
             : cloud.locked
               ? "Changes, Files and Git are only shown to people this workspace is shared with."
@@ -164,8 +179,14 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
                 ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
                 : "Changes, Files and Git appear once the workspace is connected."}
         </div>
+        {/* A machine's Ports stay while it reconnects: its forwards wait, and return with it (PRO-355). */}
+        {ports && cloud.machine && (
+          <section className="flex max-h-[60%] min-h-0 shrink-0 flex-col border-t border-hairline" aria-label="Ports" data-testid="cloud-panel-offline-ports">
+            {ports(true)}
+          </section>
+        )}
         {/* Where previews stand while there is no connection: restarting, stopped, or closed with it. */}
-        {ports && (
+        {ports && !cloud.machine && (
           <section className="shrink-0 border-t border-hairline" aria-label="Ports" data-testid="cloud-panel-offline-ports">
             <h2 className="flex items-center gap-1 px-3 pt-2 text-[11px] font-medium text-muted-foreground">
               <Globe className="size-3" /> Ports
@@ -173,6 +194,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
             {ports(false)}
           </section>
         )}
+        {dock}
       </aside>
     );
   }
@@ -195,6 +217,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
+      portsCount={portsCount}
+      dock={dock}
     />
   );
 }
@@ -328,8 +352,14 @@ function CloudLocation({
     </>
   );
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
+  const detailsRequest = request && ["restart", "details", "copy-machine", "copy-info"].includes(request.action);
+  const detailsVisible = !cloud.locked && !!item && request?.item.workspace.id === cloud.workspaceId && request.item.workspace.orgId === cloud.orgId;
+  useEffect(() => {
+    if (detailsRequest && !detailsVisible) setRequest(null);
+  }, [detailsRequest, detailsVisible]);
   return (
     <>
+      {item && !cloud.locked && <CloudWorkspaceDetails item={item} />}
       {item || diagnosticsOffered || onShowPorts ? (
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
@@ -345,7 +375,7 @@ function CloudLocation({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
-            {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {item && <WorkspaceActionItems item={item} detailsAllowed={!cloud.locked} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
             {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
             {item && !cloud.locked && (
               <>
@@ -380,7 +410,7 @@ function CloudLocation({
           {error}
         </span>
       )}
-      {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
+      {request && (!detailsRequest || detailsVisible) && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
       {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
       {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
@@ -429,6 +459,8 @@ export function SessionView({
   // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
   const backend = cloud?.backend ?? localSessionBackend(session.id);
+  // A session on a paired machine (PRO-347): the cloud views, with the machine's chip, strips and terminal dock.
+  const machine = cloud?.machine;
   const local = backend.caps.local;
   const isGit = useSessionIsGit(session, local);
   const quick = isQuickChat(session);
@@ -438,6 +470,8 @@ export function SessionView({
   const runOffered = useExperimentalSettings(canLead)?.orchestratorRuns === true && canLead && isGit;
   const run = useRun(session.id, runOffered);
   const runShown = useRunViewShown(session.id) && runOffered;
+  // The window's right column an open piece of the run is shown in, beside the title bar (PRO-383).
+  const [pieceColumn, setPieceColumn] = useState<HTMLDivElement | null>(null);
   const prefs = usePrefs();
   const store = useSessionStore();
   // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
@@ -472,7 +506,8 @@ export function SessionView({
   const savedPanes = [...(savedLayout.panes ?? [])].sort((a, b) => Number(b.id === savedLayout.focusedPane) - Number(a.id === savedLayout.focusedPane));
   const restored = !cloud && !compact ? savedPanes.flatMap((pane) => candidates.filter((tab) => tabKey(tab.kind, tab.id) === pane.active))[0] : undefined;
   const requested = followedSelection(session, terminals.selected[session.id] ?? restored);
-  const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
+  // A machine's terminals are in the side panel's dock, never a tab of the main area.
+  const terminalIds = local ? shellPanes.map((pane) => pane.id) : machine ? [] : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
   // the tab it shows until this person picks another (or that tab closes), so a tab someone else
@@ -488,7 +523,7 @@ export function SessionView({
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
-    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id) : [],
+    reviewIds: local ? ed.editors.filter((e) => e.sessionId === session.id && isTabEditor(e)).map((e) => e.id) : [],
   });
   // The asked-for tab is restored across reloads, before its shell or page has loaded. Until it is the
   // tab shown, the fallback on screen is no request: following it would rewrite the panes' saved tabs.
@@ -503,7 +538,25 @@ export function SessionView({
     return () => setVisibleSessionTab(session.id, null);
   }, [session.id, selectedKind, selectedId]);
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
-  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: activeTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!activeTab && !isTerminalTab(activeTab) });
+  // PRO-404: a machine session's branch, diff size and next Git step, read and run on the machine (21.08). Nothing is read for any other session.
+  const machineBranch = useMachineBranch({
+    session,
+    machineName: machine?.name ?? "",
+    backend,
+    gitSource: machine && !cloud?.locked ? cloud?.gitSource : undefined,
+    fileSource: machine ? cloud?.fileSource : undefined,
+    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === cloud.repository)?.remote) || null,
+    connected: !!machine && !!cloud?.connected,
+    tabId: activeTab?.id,
+  });
+  // The side panel follows the agent tab while a review, terminal or page is on screen (PRO-392): swapping it for a
+  // working-tree panel remounted it on Overview, and its "Latest turn" scope had no turn to read.
+  const panelTab = activeTab ?? (selected ? session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0] : undefined);
+  // With a check's log (or another review tab) on screen, Fix errors still goes to the session's
+  // agent: its last chat tab, so the log tab's hand-off bar has somewhere to send (PRO-394).
+  const fixTab = selected?.kind === "agent" ? activeTab
+    : session.tabs.find((tab) => tab.id === session.activeTab && !isTerminalTab(tab)) ?? session.tabs.find((tab) => !isTerminalTab(tab));
+  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!fixTab && !isTerminalTab(fixTab) });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -540,7 +593,14 @@ export function SessionView({
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, viewPlace);
   });
-  const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
+  // A local session's files are tabs in its panes, beside the chat (PRO-402). A cloud session's, and the
+  // floating window's (it has no panes), are the editor pane's.
+  const tabsInPanes = !cloud && !compact;
+  const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow);
+  const switchInPaneStrip = tabsInPanes && paneLayout.showStrip;
+  const hasEditors = !tabsInPanes && ed.editors.some((e) => e.sessionId === session.id);
+  const shownFile = tabsInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
+  useFileTabShortcuts(session.id, shownFile, tabsInPanes);
   // Agents change files when their status changes; the explorer re-reads git then.
   const statusKey = session.tabs.map((t) => t.status).join(",");
 
@@ -575,15 +635,21 @@ export function SessionView({
 
   useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
-    else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
+    else if (machine && cloud && cloudTerminals.some((terminal) => !terminal.run)) {
+      // The latest shell, not a script's run (PRO-403): those are under Setup and Run.
+      selectCloudTerminal(cloud.workspaceKey, cloudTerminals.filter((terminal) => !terminal.run).at(-1)!.id);
+      setPrefs({ panelOpen: true, panelTerminalOpen: true });
+    } else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
   // What the session's agents have used, at API list prices (PRO-273), beside
   // where it is; Settings → Experimental → Session cost.
   const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
-    <div className="flex h-full min-h-0 min-w-0 flex-1">
-      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+    <div className="relative flex h-full min-h-0 min-w-0 flex-1">
+      {/* "Port N forwarded to 127.0.0.1:N" for each forward that opened unasked (14.10). */}
+      {cloud?.ports.offered && <PortToasts connectionId={cloud.ports.connectionId} where={machine ? `on ${machine.name}` : `in ${cloud.workspaceName}`} />}
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col" data-conversation-column>
         <header
           data-tauri-drag-region="deep"
           className="@container/session-header flex h-(--titlebar-h) shrink-0 items-center gap-1 border-b border-hairline pl-2"
@@ -603,8 +669,10 @@ export function SessionView({
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden @max-[360px]/session-header:gap-0.5 @max-[360px]/session-header:px-0 @max-[360px]/session-header:[&>*]:ml-0")} data-testid="session-breadcrumb">
             {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
             {identityPath && githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(identityPath)} />}
+            {/* A machine session names its machine first, with how it is reached (21.08); the sidebar names its project. */}
+            {machine && cloud && <MachineSessionChip cloud={cloud} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
-            {!(cloud && cloud.projectName === session.title) && (
+            {!machine && !(cloud && cloud.projectName === session.title) && (
               <>
                 <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : quick ? "A quick chat: it has no project" : project?.name} data-testid="session-project">
                   {cloud ? cloud.projectName : quick ? sessionProjectName(session, project) : (project?.name ?? "project")}
@@ -749,6 +817,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
+            {machine && <MachineDiffSize branch={machineBranch} className={cn("ml-1.5 flex shrink-0 items-center", HEADER_TIGHT)} />}
             {/* The base commit is a detail (the branch's tooltip and the ··· menu have it); only a doubt about it stays on the bar. A cloud session has no menu, so it keeps the note. */}
             {session.worktreeBase && (session.worktreeBase.warning || !local) && (
               <span
@@ -761,7 +830,7 @@ export function SessionView({
                   : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
               </span>
             )}
-            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
+            {cloud && !machine && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -774,13 +843,28 @@ export function SessionView({
           {/* The header's actions fill the bar's height, square, so their hover is a full band. An icon on its own is
               20px in a 40px-wide button (32px when the header is tight); one beside a label (Share) stays at the label's scale. */}
           <div className={cn("ml-auto flex shrink-0 items-stretch self-stretch [&_button]:h-full [&_button]:rounded-none [&_button:has(>svg:only-child)>svg]:size-5 [&_button:has(>svg:only-child)]:w-10", HEADER_TIGHT_BUTTONS, !compact && "max-w-[70%]")}>
+            {/* PRO-355: ports forwarded to this Mac, and the "Forward ports to this Mac" popover (14.10, 21.08). */}
+            {cloud && cloud.ports.offered && !cloud.locked && !compact && (
+              <PortForwardChip
+                key={`ports:${cloud.workspaceKey}`}
+                workspaceKey={cloud.workspaceKey}
+                client={cloud.client}
+                state={cloud.ports.state}
+                connectionId={cloud.ports.connectionId}
+                mayOpen
+                follow={cloud.connected || !!machine}
+              />
+            )}
             {/* A lead's run in a word (18.01, 18.03): it needs you, or how many workers run. Opens the Run view. */}
             {runOffered && <RunPill run={run} onOpen={() => showRunView(session.id, true)} />}
             {/* The keys that open the Run view (Go → Run View), while this session leads a run (18.01). */}
             {runOffered && run && <RunViewHint className="@max-[560px]/session-header:hidden" />}
             {/* The project's saved actions and preview URLs (PRO-363); a cloud session's are its runtime's, so it has none here. */}
             {local && !cloud && !compact && offersRunMenu(session, project) && <RunMenu key={`run-menu:${session.id}`} session={session} project={project} />}
+            {/* A machine session's are the machine's, run there (PRO-403). */}
+            {machine && cloud && !compact && <MachineRunMenu key={`run-menu:${session.id}`} cloud={cloud} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
+            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
@@ -791,8 +875,9 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
-            {(!stripRow || compact) && !cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && (
+            {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
+            {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !switchInPaneStrip && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
@@ -807,7 +892,7 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            {activeTab && terminalOffer && !terminalOffer.available && (
+            {activeTab && terminalOffer && !terminalOffer.available && !(machine && !compact) && (
               // Not offered here (an older runtime, or an agent with no terminal): the switch stays in its place, off, and says why.
               <WithTooltip label={terminalOffer.reason ?? undefined}>
                 <Button
@@ -840,7 +925,20 @@ export function SessionView({
           </div>
         </header>
         {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
-        {runShown && <RunView session={session} onShowChat={() => showRunView(session.id, false)} />}
+        {runShown && <RunView session={session} pieceColumn={pieceColumn} onShowChat={() => showRunView(session.id, false)} />}
+        {machine && cloud && !compact && (
+          <MachineSessionStrips
+            session={session}
+            selected={selected}
+            cloud={cloud}
+            newTab={<TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
+            terminalView={
+              activeTab && terminalOffer?.available
+                ? { on: activeInTerminal, disabled: switching, toggle: () => void toggleTabView(session, activeTab, viewPlace) }
+                : null
+            }
+          />
+        )}
         {/* The row of tabs, ended by the "+" that opens one (keyed by session, as above). The floating window leaves out a row that would only repeat its one tab, and keeps its + in the title bar. */}
         {stripRow && compact && (
           <WorkspaceTabStrip
@@ -852,13 +950,14 @@ export function SessionView({
             trailing={compact ? undefined : <TabActions key={session.id} session={session} selected={selected} />}
           />
         )}
-        {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
+        {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
-        {local && !cloud && <RunRestartOffer session={session} />}
+        {((local && !cloud) || (machine && cloud)) && <RunRestartOffer session={session} />}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
-        {(checkFix.busy || checkFix.error || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role={checkFix.error ? "alert" : "status"}>
-          <span className={cn("min-w-0 flex-1", checkFix.error ? "text-destructive" : "text-muted-foreground")}>{checkFix.busy ? "Collecting failed check logs…" : checkFix.error ?? checkFix.notice}</span>
-          {!checkFix.busy && <Button size="xs" variant="ghost" onClick={checkFix.clear}>Dismiss</Button>}
+        {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
+        {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
+          <span className="min-w-0 flex-1 text-muted-foreground">{checkFix.busy ? "Collecting failed check logs…" : checkFix.notice}</span>
+          {!checkFix.busy && <Button size="sm" variant="ghost" className="h-6" onClick={checkFix.clear}>Dismiss</Button>}
         </div>}
         {/* Hidden, not unmounted, behind the Run view: the chat and its terminals stay as they are. */}
         <section className={cn("flex min-h-0 flex-1 flex-col", runShown && "hidden")}>
@@ -868,7 +967,7 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {!cloud && !compact ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
+              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} layout={paneLayout} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -899,7 +998,7 @@ export function SessionView({
                   aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
                 >
-                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} moveToDock={!compact} />
+                  <TerminalView id={pane.id} visible={pane.id === activeShell?.id} moveToDock={!compact} shell />
                   {pane.exited && (
                     <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">
                       Process exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
@@ -907,7 +1006,7 @@ export function SessionView({
                   )}
                 </div>
               ))}
-              {cloud && cloud.client && cloudTerminals.map((terminal) => (
+              {cloud && !machine && cloud.client && cloudTerminals.map((terminal) => (
                 <div
                   key={terminal.id}
                   id={tabPanelId({ kind: "terminal", id: terminal.id })}
@@ -953,7 +1052,16 @@ export function SessionView({
                     <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
                   ) : (
                     // One state at a time: stopped, loading, or empty (with what this person can do about it).
-                    cloud.asleep ? (
+                    machine ? (
+                      !cloud.connected ? (
+                        <span data-testid="machine-session-loading">{machine.state.state === "offline" ? `${machine.name} isn't reachable.` : `Connecting to ${machine.name}…`}</span>
+                      ) : (
+                        <>
+                          <span>No tabs in this session</span>
+                          <span className="text-xs text-faint">Add an agent tab, or open a terminal on {machine.name} from the side panel.</span>
+                        </>
+                      )
+                    ) : cloud.asleep ? (
                       <>
                         <span>Workspace stopped</span>
                         <span className="text-xs text-faint">
@@ -976,16 +1084,18 @@ export function SessionView({
               )}
               </>}
             </div>
-            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} reviewsInPanes={!cloud && !compact} />}
+            {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}
           </div>
         </section>
       </div>
+      {/* The Run view's open piece, full height beside the title bar (18.01–18.04); empty, it takes no room. */}
+      {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
       {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
       {!compact && prefs.panelOpen && !cloud &&
-        (activeTab ? (
-          <PanelHost session={session} tab={activeTab} checkFix={checkFix} />
+        (panelTab ? (
+          <PanelHost session={session} tab={panelTab} checkFix={checkFix} />
         ) : (
           <RightPanel
             cwd={session.cwd}

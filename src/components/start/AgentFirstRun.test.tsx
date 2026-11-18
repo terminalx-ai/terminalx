@@ -24,7 +24,10 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({ errorMessage: String, files: { droppedText: vi.fn(async () => null) }, agentSetup: setup, pty }));
 vi.mock("@/lib/account", () => ({ signIn: vi.fn(), useAccount: () => ({ ready: true, busy: false, status: { state: "signed-in" } }) }));
-vi.mock("@/lib/prefs", () => ({ setPrefs: vi.fn(), usePrefs: () => ({ projectsDir: null }) }));
+vi.mock("@/lib/prefs", () => {
+  const prefs = { projectsDir: null, lastMode: "manual", lastAgent: "claude", bypassConfirmed: false };
+  return { setPrefs: vi.fn(), getPrefs: () => prefs, usePrefs: () => prefs };
+});
 vi.mock("@/lib/sessions", () => ({ ...sessions, useSessionStore: () => store }));
 vi.mock("@/lib/terminal", () => ({ disposeInstance: vi.fn(), peekInstance: () => undefined }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="terminal-view" data-pane={id} /> }));
@@ -69,7 +72,7 @@ const row = (name: string) => screen.getByRole("region", { name: `${name} setup`
 describe("first run with no agent installed (PRO-152)", () => {
   it("installs, signs in and shows Ready on the welcome screen without Terminal or Check again", async () => {
     render(<StartScreen onOpenSettings={vi.fn()} />);
-    expect(screen.getByTestId("start-no-agent").textContent).toContain("No agent is installed");
+    expect(screen.getByTestId("start-no-agent").textContent).toContain("Set up an agent");
     await waitFor(() => expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Not installed"));
 
     fireEvent.click(screen.getByRole("button", { name: "Install Claude Code and sign in" }));
@@ -88,19 +91,22 @@ describe("first run with no agent installed (PRO-152)", () => {
     expect(setup.start.mock.calls[1].slice(0, 3)).toEqual([pane, "claude", "login"]);
     // The agent now counts as installed, and the setup stays in view for its sign-in.
     expect(store.harnesses[0].available).toBe(true);
-    expect(screen.getByTestId("start-no-agent").textContent).toContain("No agent is signed in");
+    expect(screen.getByTestId("start-screen").getAttribute("data-stage")).toBe("agent");
     expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Signing in");
     expect(within(row("Claude Code")).getByTestId("terminal-view").getAttribute("data-pane")).toBe(pane);
 
     // The browser step is done and the CLI's sign-in exits.
     installed.claude = "ready";
     await exit(pane, 0);
-    await waitFor(() => expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Ready · local login found"));
-    expect(within(row("Claude Code")).getByText(/Claude Code is ready\. Open a project above/)).toBeTruthy();
-    expect(screen.getByTestId("start-no-agent").textContent).toContain("Set up an agent");
+    // Step 1 is done and the project step opens: the agent is on its line under "Agents ready".
+    await waitFor(() => expect(screen.getByTestId("start-screen").getAttribute("data-stage")).toBe("project"));
+    expect(screen.getByRole("heading", { name: "Agents ready" })).toBeTruthy();
+    await waitFor(() => expect(within(row("Claude Code")).getByRole("status").textContent).toBe("Local login found"));
+    expect(within(row("Claude Code")).getByText("Ready")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Quick start" })).toBeTruthy();
     expect(within(row("Claude Code")).queryByTestId("terminal-view")).toBeNull();
     expect(pty.kill).toHaveBeenCalledWith(pane);
-    expect(within(row("Codex")).getByRole("status").textContent).toBe("Not installed");
+    await waitFor(() => expect(within(row("Codex")).getByRole("status").textContent).toBe("Not installed"));
   });
 
   it("offers a retry when the network is down, and finishes once it is back", async () => {
@@ -121,6 +127,7 @@ describe("first run with no agent installed (PRO-152)", () => {
     await waitFor(() => expect(setup.start).toHaveBeenCalledTimes(3));
     installed.codex = "ready";
     await exit(pane, 0);
-    await waitFor(() => expect(within(row("Codex")).getByRole("status").textContent).toBe("Ready · local login found"));
+    await waitFor(() => expect(within(row("Codex")).getByRole("status").textContent).toBe("Local login found"));
+    expect(within(row("Codex")).getByText("Ready")).toBeTruthy();
   });
 });

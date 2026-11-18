@@ -81,6 +81,12 @@ try {
       await painted(page);
       assert.match(await card.innerText(), /Notifications are off for TerminalX/);
       assert.match(await card.innerText(), /“Chat 0” needs your approval, but macOS blocks TerminalX banners and the dock badge\./);
+      // The bell-off icon is amber, as screen 17.12 draws it (PRO-400 kept the screen's colour over its table's).
+      const bell = await card.locator("[data-notifications-off-icon]").evaluate((icon) => {
+        const colour = (value) => { const probe = document.createElement("i"); probe.style.color = value; document.body.append(probe); const drawn = getComputedStyle(probe).color; probe.remove(); return drawn; };
+        return { drawn: getComputedStyle(icon).color, muted: colour("var(--muted-foreground)"), warning: colour("var(--warning)") };
+      });
+      assert.ok(bell.drawn === bell.warning && bell.drawn !== bell.muted, `bell-off icon is amber ${where}: ${JSON.stringify(bell)}`);
       const others = {
         composer: "[data-composer-box]",
         "send button": '[data-composer-box] button[aria-label="Send"]',
@@ -131,7 +137,7 @@ try {
       await painted(page);
       const text = await mic.innerText();
       assert.match(text, /Microphone access is off for TerminalX/);
-      assert.match(text, /Dictation needs it\. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ⌘⇧D again\./);
+      assert.match(text, /Dictation needs it\. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ⇧⌘D again\./);
       const row = await placed(page, "[data-dictation-error]", { composer: "[data-composer-box]" });
       assert.ok(row.contained && row.onTop && row.buttonsInside && row.textFits && row.overlaps.length === 0 && !row.overflow, `microphone row ${where}: ${JSON.stringify(row)}`);
       await mic.getByRole("button", { name: "Open System Settings" }).click();

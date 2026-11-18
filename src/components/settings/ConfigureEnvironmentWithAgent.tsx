@@ -3,15 +3,16 @@ import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId } from "@/lib/api";
 import { refreshCloudWorkspaces, useCloudCatalog } from "@/lib/cloudCatalog";
-import { observationsBody, preparationPrompt, type PreparationRepository } from "@/lib/environmentProposal";
+import { observationsBody, preparationPrompt, type BuildFailureContext, type PreparationRepository } from "@/lib/environmentProposal";
 import { PREPARATION_LIMIT_MINUTES, PreparationError, machineSentence, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
 import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, retryEnvironmentRun, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
 import { formatMicros, providerLabel } from "@/lib/organizationCompute";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { checkSummary, environmentErrorMessage, organizationEnvironment, type EnvironmentStatus } from "@/lib/organizationEnvironment";
 import { RecipeDetails } from "./EnvironmentRecipes";
 
 const inputClass = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
-const areaClass = "min-h-16 rounded-md border border-hairline bg-background px-2 py-1 font-mono text-[11px] disabled:opacity-60";
+const areaClass = "min-h-16 rounded-md border border-hairline bg-background px-2 py-1 font-mono text-xs disabled:opacity-60";
 const MAX_REPOSITORIES = 5;
 const AGENT_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor" };
 
@@ -54,7 +55,23 @@ type Stage = { kind: "idle" } | { kind: "offering" } | { kind: "confirm"; offer:
  * checks, and the machine is stopped. What comes out is a recipe to review.
  * Saving it changes nothing: applying and building stay their own presses.
  */
-export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved }: { status: EnvironmentStatus; organizationId: string | null; onSaved: () => void }) {
+export function ConfigureEnvironmentWithAgent({
+  status,
+  organizationId,
+  onSaved,
+  failure = null,
+  autoBegin = false,
+}: {
+  status: EnvironmentStatus;
+  organizationId: string | null;
+  onSaved: () => void;
+  /** "Fix with an agent" on a failed build (PRO-389): the agent is also given that build's script and log to fix. */
+  failure?: BuildFailureContext | null;
+  /** Go straight to the price and the confirm, as when a button elsewhere asked for this run. */
+  autoBegin?: boolean;
+}) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const provider = status.provider as CloudWorkspaceProviderId;
   const [local, setStage] = useState<Stage>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +136,15 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
     }
   };
 
+  // Asked for from elsewhere: offered once on arrival, never again on a re-render.
+  const begun = useRef(false);
+  useEffect(() => {
+    if (!autoBegin || begun.current || local.kind !== "idle" || run.kind === "running" || run.kind === "review") return;
+    begun.current = true;
+    void begin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on arrival
+  }, [autoBegin]);
+
   const repositories = parseRepositories(repositoryText);
   const repositoryProblem =
     repositories === null
@@ -133,7 +159,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
     if (!repositories || repositoryProblem || !agent || !startKey.current || !token) return;
     setError(null);
     const started = startEnvironmentRun(
-      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current, token },
+      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current, token, failure },
       { baseRevision: status.template?.revision ?? 0, onChange: refresh },
     );
     if (!started) {
@@ -194,7 +220,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
       )}
       {canRetry && local.kind === "idle" && (
         <div>
-          <Button size="xs" variant="outline" onClick={() => retryEnvironmentRun(refresh)}>
+          <Button size="sm" variant="outline" onClick={() => retryEnvironmentRun(refresh)}>
             Try again (the same machine, not a second one)
           </Button>
         </div>
@@ -202,14 +228,14 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
 
       {stage.kind === "idle" && (
         <>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             An agent reads your repositories on a temporary machine and proposes the machine script and each repository's setup. TerminalX then runs the proposed install, lint, test, build and start commands itself and records how each ended. You review the result as a recipe; nothing changes until you apply it.
           </p>
           <div>
             <Button size="sm" variant="outline" className="h-7" disabled={busyElsewhere} onClick={() => void begin()}>
               Configure with an agent…
             </Button>
-            {busyElsewhere && <span className="ml-2 text-[11px] text-muted-foreground">{run.kind === "running" ? "A preparation run for another provider is in progress." : "A proposal for another provider is waiting to be saved or discarded there."}</span>}
+            {busyElsewhere && <span className="ml-2 text-xs text-muted-foreground">{run.kind === "running" ? "A preparation run for another provider is in progress." : "A proposal for another provider is waiting to be saved or discarded there."}</span>}
           </div>
         </>
       )}
@@ -222,7 +248,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
 
       {stage.kind === "confirm" && (
         <div className="flex flex-col gap-2 rounded-md border border-hairline p-2" aria-label="Before the machine starts">
-          <ul className="flex list-disc flex-col gap-0.5 pl-4 text-[11px]">
+          <ul className="flex list-disc flex-col gap-0.5 pl-4 text-xs">
             <li>
               This starts a cloud machine on the organization's {name} account. {name} bills that account for it: about {formatMicros(stage.offer.quote.activeHourlyMicros, stage.offer.quote.currency)} an hour
               {stage.offer.quote.pricing === "estimate" ? " (an estimate)" : ""}, plus what the agent's own usage costs.
@@ -239,11 +265,11 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             <li>The organization's login for the agent you choose, and read access to the repositories you name, are placed on the machine for the agent to use.</li>
             <li>The agent runs with permissions bypassed and reads whatever the repositories contain. Name only repositories you trust.</li>
           </ul>
-          <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             Repositories (one per line: owner/name, or owner/name@branch)
             <textarea aria-label="Repositories to prepare" className={areaClass} value={repositoryText} onChange={(event) => setRepositoryText(event.target.value)} />
           </label>
-          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
             Agent
             <select aria-label="Agent" className={inputClass} value={agent} onChange={(event) => setAgent(event.target.value as AgentLoginProvider)}>
               {stage.offer.agents.map((option) => (
@@ -254,12 +280,12 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             </select>
           </label>
           <div>
-            <Button size="xs" variant="ghost" aria-expanded={showPrompt} onClick={() => setShowPrompt(!showPrompt)}>
+            <Button size="sm" variant="ghost" aria-expanded={showPrompt} onClick={() => setShowPrompt(!showPrompt)}>
               {showPrompt ? "Hide what the agent is asked" : "Show what the agent is asked"}
             </Button>
             {showPrompt && repositories && repositories.length > 0 && (
-              <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]" aria-label="What the agent is asked">
-                {preparationPrompt(repositories, token)}
+              <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-xs" aria-label="What the agent is asked">
+                {preparationPrompt(repositories, token, failure)}
               </pre>
             )}
           </div>
@@ -270,7 +296,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             <Button size="sm" variant="ghost" className="h-7" onClick={() => setStage({ kind: "idle" })}>
               Cancel
             </Button>
-            {repositoryProblem && <span className="text-[11px] text-destructive">{repositoryProblem}</span>}
+            {repositoryProblem && <span className="text-xs text-destructive">{repositoryProblem}</span>}
           </div>
         </div>
       )}
@@ -278,8 +304,8 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
       {stage.kind === "running" && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-hairline p-2" role="status">
           <Loader2 className="size-3.5 shrink-0 animate-spin" />
-          <p className="min-w-0 flex-1 text-[11px]">{phaseText(stage.phase)}</p>
-          <Button size="xs" variant="outline" disabled={stage.phase.step === "stopping"} onClick={cancelEnvironmentRun}>
+          <p className="min-w-0 flex-1 text-xs">{phaseText(stage.phase)}</p>
+          <Button size="sm" variant="outline" disabled={stage.phase.step === "stopping"} onClick={cancelEnvironmentRun}>
             Cancel and stop the machine
           </Button>
         </div>
@@ -287,13 +313,13 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
 
       {stage.kind === "review" && (
         <div className="flex flex-col gap-3 rounded-md border border-hairline p-2" aria-label="Proposed recipe">
-          <p className="text-[11px]">
+          <p className="text-xs">
             The agent's proposal, against the current template (revision {stage.baseRevision}). {machineSentence(stage.result.machine)} {checkSummary(stage.result.observations)}
           </p>
           {stage.result.sources
             .filter((source) => source.agentCheckout === "differs")
             .map((source) => (
-              <p key={`${source.owner}/${source.name}`} className="text-[11px] text-amber-600 dark:text-amber-400" role="note">
+              <p key={`${source.owner}/${source.name}`} className="text-xs text-amber-600 dark:text-amber-400" role="note">
                 The agent's own copy of {source.owner}/{source.name} had commits or changed files that are not on GitHub. They were not checked: the results below are for {source.branch} as GitHub has it
                 {source.commit ? ` (${source.commit.slice(0, 12)})` : ""}.
               </p>
@@ -306,17 +332,17 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             <Button size="sm" variant="ghost" className="h-7" disabled={saving} onClick={clearEnvironmentRun}>
               Discard
             </Button>
-            <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">Saving stores the proposal for review. It does not change the template and builds nothing.</span>
+            <span className="min-w-0 flex-1 text-xs text-muted-foreground">Saving stores the proposal for review. It does not change the template and builds nothing.</span>
           </div>
         </div>
       )}
 
       {stage.kind === "saved" && (
         <div className="flex flex-wrap items-center gap-2">
-          <p className="min-w-0 flex-1 text-[11px]" role="status">
+          <p className="min-w-0 flex-1 text-xs" role="status">
             Saved as a recipe below. Apply it to change the template, then build a version; each is its own step.
           </p>
-          <Button size="xs" variant="ghost" onClick={() => setStage({ kind: "idle" })}>
+          <Button size="sm" variant="ghost" onClick={() => setStage({ kind: "idle" })}>
             Done
           </Button>
         </div>
@@ -328,7 +354,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             const expired = (workspace.preparation?.stopAfter ?? 0) <= Date.now();
             const running = workspace.state === "ready" || workspace.state === "provisioning";
             return (
-              <li key={workspace.id} className="rounded-md border border-hairline p-2 text-[11px]">
+              <li key={workspace.id} className="rounded-md border border-hairline p-2 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="min-w-0">
                     <span className="font-medium">Preparation machine</span>
@@ -339,12 +365,12 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
                   </span>
                   <span className="flex gap-2">
                     {workspace.state === "ready" && (
-                      <Button size="xs" variant="outline" disabled={Boolean(machineBusy)} onClick={() => void machineAction(workspace, "stop")}>
+                      <Button size="sm" variant="outline" disabled={Boolean(machineBusy)} onClick={() => void machineAction(workspace, "stop")}>
                         {machineBusy === `stop:${workspace.id}` ? <Loader2 className="animate-spin" /> : "Stop"}
                       </Button>
                     )}
                     {confirmDelete !== workspace.id && (
-                      <Button size="xs" variant="ghost" disabled={Boolean(machineBusy)} onClick={() => setConfirmDelete(workspace.id)}>
+                      <Button size="sm" variant="ghost" disabled={Boolean(machineBusy)} onClick={() => setConfirmDelete(workspace.id)}>
                         Delete…
                       </Button>
                     )}
@@ -354,10 +380,10 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
                 {confirmDelete === workspace.id && (
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <p className="min-w-0 flex-1">Delete this preparation machine and everything on it? Saved recipes are kept.</p>
-                    <Button size="xs" disabled={Boolean(machineBusy)} onClick={() => void machineAction(workspace, "delete")}>
+                    <Button size="sm" disabled={Boolean(machineBusy)} onClick={() => void machineAction(workspace, "delete")}>
                       {machineBusy === `delete:${workspace.id}` ? <Loader2 className="animate-spin" /> : "Delete"}
                     </Button>
-                    <Button size="xs" variant="ghost" disabled={Boolean(machineBusy)} onClick={() => setConfirmDelete(null)}>
+                    <Button size="sm" variant="ghost" disabled={Boolean(machineBusy)} onClick={() => setConfirmDelete(null)}>
                       Cancel
                     </Button>
                   </div>

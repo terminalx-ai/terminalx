@@ -53,6 +53,7 @@ for (const result of ["success", "error", "readback-error", "legacy"] as const) 
     outcome = result;
     const rendered = render(view());
     await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Request" }));
     fireEvent.change(screen.getByLabelText("Search reviewers"), { target: { value: "ben" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(300); });
     expect(calls("pr_reviewer_search")).toBe(1);

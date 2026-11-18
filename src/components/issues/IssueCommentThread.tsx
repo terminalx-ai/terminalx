@@ -34,7 +34,7 @@ export function UserAvatar({ user, className }: { user?: IssueUser | null; class
 
 /**
  * One comment: who wrote it and when, its Markdown, and for the viewer's own
- * comments a "…" menu to edit it in place or delete it after a confirmation.
+ * comments a "…" menu to edit it in place or delete it directly.
  * `onEdit` and `onDelete` resolve once the provider took the change and
  * reject with what to show when it did not.
  */
@@ -48,7 +48,6 @@ export function IssueCommentItem({
   onDelete?: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const author = comment.author?.name || comment.author?.login || "Someone";
@@ -99,7 +98,6 @@ export function IssueCommentItem({
                 {canEdit && (
                   <DropdownMenuItem
                     onSelect={() => {
-                      setConfirming(false);
                       setError(null);
                       setDraft(comment.body);
                     }}
@@ -108,7 +106,7 @@ export function IssueCommentItem({
                   </DropdownMenuItem>
                 )}
                 {canDelete && (
-                  <DropdownMenuItem className="text-destructive" onSelect={() => setConfirming(true)}>
+                  <DropdownMenuItem className="text-destructive" disabled={busy} onSelect={() => onDelete && void run(onDelete, () => {})}>
                     <Trash2 /> Delete
                   </DropdownMenuItem>
                 )}
@@ -138,19 +136,6 @@ export function IssueCommentItem({
           <Markdown text={comment.body} className="mt-0.5 text-[13px]" />
         ) : (
           <div className="mt-0.5 text-[13px] text-faint">No text.</div>
-        )}
-        {confirming && (
-          <div className="mt-2 rounded-md border border-destructive/25 bg-destructive/5 p-2" role="group" aria-label="Confirm delete">
-            <p className="text-[11px] leading-relaxed text-muted-foreground">Delete this comment? It is removed from the issue for everyone.</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button variant="destructive" size="xs" disabled={busy} onClick={() => onDelete && void run(onDelete, () => setConfirming(false))}>
-                Delete comment
-              </Button>
-              <Button variant="ghost" size="xs" disabled={busy} onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </div>
-          </div>
         )}
         {error && <div role="alert" className="mt-1.5 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">{error}</div>}
       </div>

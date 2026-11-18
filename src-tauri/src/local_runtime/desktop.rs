@@ -297,6 +297,19 @@ impl Desktop {
         self.client.quick(command, params)
     }
 
+    /// A relay control request through the runtime's registration
+    /// (`machine_wire::RELAY_CONTROL`, PRO-368). The runtime waits up to 15 s
+    /// for the relay, so this allows a little more than a quick call.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn relay_control(&self, frame: serde_json::Value) -> Result<serde_json::Value> {
+        let attachment = self.attachment()?;
+        self.client.call_within(
+            crate::machine_wire::RELAY_CONTROL,
+            serde_json::json!({ "epoch": attachment.epoch, "lease": attachment.lease, "frame": frame }),
+            std::time::Duration::from_secs(20),
+        )
+    }
+
     /// A view connection for `window`. When it ends by itself it leaves the
     /// window, so the next attach opens another, and the loss is reported.
     fn view(&self, window: &str) -> Result<(u64, Bridge)> {

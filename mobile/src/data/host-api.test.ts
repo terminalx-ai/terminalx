@@ -181,6 +181,14 @@ describe("the computer's name and unpairing", () => {
     await expect(hostApi(vi.fn().mockResolvedValue({ ok: true, value: { name: { evil: true } } })).describe()).resolves.toBeNull();
   });
 
+  it("hears whether a TerminalX window runs there and the OS, and nothing of either from an older computer (PRO-359)", async () => {
+    const answer = (value: unknown) => hostApi(vi.fn().mockResolvedValue({ ok: true, value })).describeHost();
+    await expect(answer({ name: "build-01", hasWindow: false, platform: "linux" })).resolves.toEqual({ name: "build-01", hasWindow: false, platform: "linux" });
+    await expect(answer({ name: "Paresh’s Mac mini" })).resolves.toEqual({ name: "Paresh’s Mac mini", hasWindow: null, platform: null });
+    await expect(answer({ name: "x", hasWindow: "no", platform: "Linux\u0000; rm" })).resolves.toEqual({ name: "x", hasWindow: null, platform: null });
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).describeHost()).resolves.toBeNull();
+  });
+
   it("reports whether the computer dropped this phone", async () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { forgotten: true } });
     await expect(hostApi(request).forgetPairing()).resolves.toBe(true);

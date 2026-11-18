@@ -265,4 +265,33 @@ describe("the chat's Delete workspace action", () => {
     // Never a local command against a path that only exists on the VM.
     await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "workspace_disposition" || command === "remove_workspace")).toBe(false));
   });
+
+  // PRO-406: a machine session's merged worktree is offered the same way, and is read and removed on that machine.
+  it("works for a machine session: the machine reads and removes it, and nothing on this computer is touched", async () => {
+    const { machineWorkspaceHost } = await import("@/lib/machineWorkspaceHost");
+    const client = {
+      workspaceDisposition: vi.fn(async () => merged),
+      removeSessionWorkspace: vi.fn(async () => ({ deleted: ["s1"], keptBranch: null, rescuedBranch: null })),
+      listSessions: vi.fn(async () => []),
+    };
+    const key = "machine:m1:P1:s1";
+    const machinePath = "/Users/me/code/app/.raccoon/worktrees/quiet-amber-fox";
+    const host = machineWorkspaceHost({ machineId: "m1", name: "Mac mini", sessionId: "s1", sessionKey: key, client: client as never });
+    const workspace: RemovableWorkspace = { host, projectPath: "machine:m1:P1", path: machinePath, name: "quiet-amber-fox" };
+    const backend = {
+      kind: "cloud", key, generation: "g1", logSessionId: "s1", readOnlyReason: null,
+      caps: { local: false, write: true, steer: true, images: false, recovery: false, interrupt: false },
+      openTab: () => undefined, markRead: async () => undefined, patchTab: () => undefined, setTabStatus: () => undefined,
+    } as unknown as SessionBackend;
+    show({ ...sessionAt("machine://m1:P1"), id: key, projectPath: "machine:m1:P1", worktreeName: null }, workspace, { backend });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete workspace" }));
+    expect(client.workspaceDisposition).toHaveBeenCalledWith("s1", undefined);
+    expect(getDialogs().workspaceRemove).toMatchObject({ mode: "delete", name: "quiet-amber-fox", path: machinePath, host });
+
+    // The dialog's removal goes to the machine, named by the session.
+    await getDialogs().workspaceRemove!.host!.remove({ keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1"] });
+    expect(client.removeSessionWorkspace).toHaveBeenCalledWith("s1", { deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1"] });
+    await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "workspace_disposition" || command === "remove_workspace")).toBe(false));
+  });
 });

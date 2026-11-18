@@ -1,5 +1,5 @@
 import { reviewFileReader } from "./reviewThreads";
-import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey, parseMachineKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type CheckAuthority, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
@@ -36,11 +36,12 @@ export interface GitSource {
   generateCommitMessage?(agent: "claude" | "codex"): Promise<string>;
   reviewRange(target: string | null, uncommitted: boolean): Promise<{ target: string; base: string; head: string }>;
   changesBetween(base: string, head: string | null, hideWhitespace?: boolean): Promise<ChangedFile[]>;
-  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }>;
+  fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>;
   mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
   /** Resolves to a notice worth showing (e.g. what a reconciled push found), or null. */
@@ -82,7 +83,10 @@ export interface GitSource {
   conversation?(pr: PullRequest, association?: PrAssociation): PrConversationAccess;
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
+  /** `head`, where given, pins the merge to that commit (a machine's or workspace's `git.prMerge`). */
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<void>;
+  /** "Delete the branch after merge": only a local checkout can ask for it today. */
+  deleteMergedBranch?(number: number, url?: string): Promise<void>;
   errorMessage(error: unknown): string;
 }
 
@@ -154,6 +158,7 @@ export function localGitSource(cwd: string, authority?: CheckAuthority): GitSour
     createPr: ({ title, body, base, draft, sessionId }) => gh.create(cwd, title, body, base, draft, sessionId).then(() => null),
     readyPr: (number) => gh.ready(cwd, number),
     mergePr: (number, method) => gh.merge(cwd, number, method),
+    deleteMergedBranch: (number, url) => gh.deleteBranch(cwd, number, url),
     errorMessage,
   };
   if (locals.size > 64) locals.clear();
@@ -168,7 +173,20 @@ export class MissingIdentityError extends Error {
 }
 
 /**
- * One repository of a cloud workspace. `author` is read when committing
+ * The runtime's own id of a session, when `sessionKey` names one of
+ * `workspaceKey`'s: a cloud session of that workspace, or a machine session
+ * of that machine project (`machine:<m>:<p>`, PRO-347). Null otherwise.
+ */
+export function runtimeSessionIn(workspaceKey: string, sessionKey: string): string | null {
+  const machine = parseMachineKey(sessionKey);
+  if (machine) return machine.sessionId && machine.projectId && machineProjectKey(machine.machineId, machine.projectId) === workspaceKey ? machine.sessionId : null;
+  const parsed = parseCloudWorkspaceKey(sessionKey);
+  return parsed?.sessionId && cloudWorkspaceKey(parsed.orgId, parsed.workspaceId) === workspaceKey ? parsed.sessionId : null;
+}
+
+/**
+ * One repository of a cloud workspace, or of a machine project (its
+ * `workspaceKey` is then `machine:<m>:<p>`). `author` is read when committing
  * (the person's own Git identity from this computer); the workspace's GitHub
  * credentials never leave the runtime.
  */
@@ -228,10 +246,10 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     ghAvailable: () => Promise.resolve(true),
     prs: (branch) => remote.prs(branch).then((answer) => answer.prs),
     prAssociations: async (sessionId) => {
-      const parsed = parseCloudWorkspaceKey(sessionId);
-      if (!parsed?.sessionId || cloudWorkspaceKey(parsed.orgId, parsed.workspaceId) !== input.workspaceKey) throw new Error("This session belongs to a different cloud workspace.");
+      const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
+      if (!runtimeId) throw new Error("This session belongs to a different workspace.");
       let response;
-      try { response = await remote.prAssociations(parsed.sessionId); }
+      try { response = await remote.prAssociations(runtimeId); }
       catch (error) {
         if (!(error instanceof WorkspaceRpcError) || error.code !== "method_not_found") throw error;
         // Older git/1 runtimes can list branch PRs but cannot prove session
@@ -271,7 +289,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;
     },
     readyPr: (number) => remote.readyPr(number).then(() => undefined),
-    mergePr: (number, method) => remote.mergePr(number, method).then(() => undefined),
+    mergePr: (number, method, head) => remote.mergePr(number, method, head).then(() => undefined),
     errorMessage: (error) => (error instanceof MissingIdentityError ? error.message : gitErrorMessage(error)),
   };
 }

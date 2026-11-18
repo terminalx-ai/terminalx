@@ -51,6 +51,8 @@ export interface TabsBackend {
   layouts: Record<string, TabLayout>;
   closed: ClosedTab[];
   calls: Call[];
+  /** A tab's event log by `<session>/<tab>`, for a test that reads one; any other tab's reads answer nothing. */
+  events: Record<string, unknown[]>;
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   listen: (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>;
   emit: (event: string, payload: unknown) => void;
@@ -84,6 +86,7 @@ function create(): TabsBackend {
     layouts: {},
     closed: [],
     calls: [],
+    events: {},
     emit(event, payload) {
       for (const handler of [...(listeners.get(event) ?? [])]) handler({ payload });
     },
@@ -101,6 +104,7 @@ function create(): TabsBackend {
       backend.layouts = {};
       backend.closed = [];
       backend.calls = [];
+      backend.events = {};
     },
     async invoke(command, args = {}) {
       backend.calls.push({ command, args });
@@ -196,6 +200,10 @@ function create(): TabsBackend {
           backend.pages = backend.pages.filter((candidate) => candidate.id !== args.pageId);
           backend.emit("browser_pages_changed", { pages: structuredClone(backend.pages) });
           return null;
+        case "load_tab_events":
+          return backend.events[`${args.sessionId}/${args.tabId}`] ?? null;
+        case "tab_link_for":
+          return `terminalx://tab/${args.sessionId}/${args.tabId}`;
         default:
           // Everything else a tab test may touch answers nothing: starting an agent's CLI, activating a page, a detach.
           return null;

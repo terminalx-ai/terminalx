@@ -38,6 +38,14 @@ describe("pairing payload parsing", () => {
     expect(parsePairingCode(encode(direct), () => now)).toEqual(direct);
   });
 
+  it("accepts the link a headless server prints with `terminalx-serve pair --phone` (PRO-359)", () => {
+    // Field for field what the runtime serialises: direct only, no relay, the device id it made.
+    const server = { v: 2, endpoint: "ws://10.0.0.5:6768", directEndpoints: ["ws://10.0.0.5:6768", "ws://100.64.0.9:6768"], deviceToken: "B".repeat(43), publicKeyB64: offer.publicKeyB64, pairedDeviceId: "0f1e2d3c4b5a69788796a5b4c3d2e1f0", scope: "mobile", identityMode: "inherit" };
+    const link = `terminalx://pair?code=${encode(server)}&name=build-01`;
+    expect(parsePairingCode(link, () => now)).toEqual(server);
+    expect(extractPairingNameFromUrl(link)).toBe("build-01");
+  });
+
   it("preserves bounded LAN, VPN and Bonjour candidates", () => {
     const updated = { ...offer, directEndpoints: ["ws://192.168.1.2:6768", "ws://100.93.49.78:6768", "ws://mac.local:6768"] };
     expect(parsePairingCode(encode(updated), () => now)).toEqual(updated);

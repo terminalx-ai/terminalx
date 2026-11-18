@@ -129,10 +129,8 @@ try {
     const block = chat.locator('[data-streamdown="code-block"]').filter({hasText:expected});
     await block.scrollIntoViewIfNeeded();
     if (expected===code) assert.ok(await block.evaluate(el=>[...el.querySelectorAll('*')].some(child=>child.scrollWidth>child.clientWidth && getComputedStyle(child).overflowX==='auto')),`${label}: code scrolls horizontally`);
-    const pending = page.waitForEvent('download');
-    await block.getByRole('button',{name:/Download/}).click();
-    const file=await pending;
-    assert.equal(await readFile(await file.path(),'utf8'),expected+'\n');
+    // PRO-378: a code block offers a labelled Copy only, no download.
+    assert.equal(await block.getByRole('button',{name:/Download/}).count(),0,`${label}: no code download`);
     const copy = block.getByRole('button',{name:/Copy/});
     const icon = await copy.locator('svg').innerHTML();
     await copy.click();

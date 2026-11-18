@@ -24,7 +24,7 @@ use crate::store::projects::IssuePipelineSettings;
 use super::gate::{self, same_commit, Facts, Gate, StopReason, Wait};
 use super::carry::{BaseMerges, Carry};
 use super::verdict::{self, AuthorReport, Decision, LocalChecks, ReviewChecks, ReviewError, SecurityPass, Verdict};
-use super::{categories, prompts, store, MergeRecord, MergeRequest, MergedBy, Pipeline, PipelineChecks, PrLink, Role, SessionRef, Stage, State};
+use super::{categories, prompts, store, HeadWait, MergeRecord, MergeRequest, MergedBy, Pipeline, PipelineChecks, PrLink, Role, SessionRef, Stage, State};
 
 /// How long checks may stay unfinished before a person is asked to look.
 pub const CHECKS_WAIT_MINUTES: u32 = 60;
@@ -37,6 +37,19 @@ pub const REVIEW_CHECKS_MINUTES: u32 = 20;
 /// was still running (its checks, most often) is waited for before it is
 /// asked for its report (#753).
 pub const RESOLVE_CHECKS_MINUTES: u32 = 30;
+
+/// How many reviews in a row may be set aside because the branch moved while
+/// the reviewer read it, each asked again in the same round, before the next
+/// one is left to a person (#1018).
+pub const MOVED_REVIEW_TRIES: u32 = 3;
+
+/// How long a branch that moved during a review must hold still before the
+/// reviewer is asked to read it again.
+pub const HEAD_STILL_MINUTES: i64 = 2;
+
+/// How long a branch that moved during a review is waited on to hold still
+/// before a person is asked.
+pub const HEAD_WAIT_MINUTES: i64 = 30;
 
 /// How many times a pull request is read again while it still shows the head
 /// from before a push.
@@ -446,6 +459,12 @@ fn resolution_overdue(pipeline: &Pipeline, now: DateTime<Utc>) -> bool {
         && pipeline.resolution.as_ref().and_then(|resolution| resolution.waiting_since.as_deref()).and_then(|since| DateTime::parse_from_rfc3339(since).ok()).is_some_and(|since| (now - since.with_timezone(&Utc)).num_minutes() >= i64::from(RESOLVE_CHECKS_MINUTES))
 }
 
+/// Whether a review was set aside because the branch moved during it, and
+/// the new head is waited on to hold still (#1018).
+fn waits_on_moved_head(pipeline: &Pipeline) -> bool {
+    pipeline.stage == Stage::Review && pipeline.state == State::Waiting && pipeline.head_wait.is_some()
+}
+
 /// What a step that failed does about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnError {
@@ -477,6 +496,13 @@ struct Step<'a> {
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
 /// person's own action asks for one.
 fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
+    run_with(host, id, even_if_stopped, on_error, true, action)
+}
+
+/// [`run`], where `follow` says whether a gone author tab is replaced by the
+/// session's current one before the step's work (#1014). A takeover names
+/// the tab itself, so it does not.
+fn run_with(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, follow: bool, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
     let _request = crate::github_process::scope();
     // Track stage work separately from read-only requests and timer passes.
     let _running = (on_error == OnError::NeedsYou).then(Running::start);
@@ -499,6 +525,9 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         Err(error) => (IssuePipelineSettings::default(), Some(format!("{error:#}"))),
     };
     let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background, ended: None };
+    if follow {
+        step.follow_session();
+    }
     if let Err(error) = action(&mut step) {
         match on_error {
             OnError::Report | OnError::Background => return Err(error),
@@ -555,6 +584,10 @@ impl Step<'_> {
                 self.record(kind, note.clone());
             }
         }
+        // A person decides from here: a wait on a moving branch is over (#1018).
+        if matches!(state, State::NeedsYou | State::ReadyToMerge | State::Merged) {
+            self.p.head_wait = None;
+        }
         self.p.state = state;
         self.p.reason = reason;
         self.p.note = Some(note);
@@ -570,6 +603,8 @@ impl Step<'_> {
     fn enter(&mut self, stage: Stage, note: impl Into<String>) {
         self.p.stage = stage;
         self.p.checks = None;
+        // A stage at work is past any wait on a moving branch (#1018).
+        self.p.head_wait = None;
         self.p.reminded = false;
         // At work again: a conversation told the pipeline had ended is not stopped for it now.
         self.p.releasing.clear();
@@ -588,6 +623,29 @@ impl Step<'_> {
             self.settle(State::Stopped, None, "Stopped. Nothing further happens until it is resumed.");
         }
         stopped
+    }
+
+    /// The pipeline follows its session, not one tab (#1014): when the
+    /// author's tab is gone, as after a restart that left the lead working in
+    /// a new tab, the session's current agent tab is the author from here on,
+    /// for findings, conflict resolution and merge alike.
+    fn follow_session(&mut self) {
+        let Some((tab_id, why)) = self.author.as_ref().and_then(|session| self.p.successor(session)) else {
+            return;
+        };
+        let why = match why {
+            super::Succession::Active => "the tab the session is on",
+            super::Succession::Latest => "the session's most recent agent tab",
+        };
+        let message = format!("Tab {tab_id} became the author: the author's tab {} is no longer in this session, and {tab_id} is {why}.", self.p.author.tab_id);
+        self.move_author(tab_id, true, message);
+    }
+
+    fn move_author(&mut self, tab_id: String, followed: bool, message: String) {
+        self.p.author.tab_id = tab_id;
+        self.p.author_followed = followed;
+        let session_id = self.p.author.session_id.clone();
+        self.record("authorMoved", message).session_id = Some(session_id);
     }
 
     fn author_session(&mut self) -> Option<SessionEntry> {
@@ -974,8 +1032,7 @@ impl Step<'_> {
         self.doing = "Reading the workspace";
         let workspace = self.host.workspace(&self.cwd)?;
         if !same_commit(&workspace.head, &commit) {
-            self.needs_you(StopReason::ReviewerChangedWorkspace { detail: format!("the checkout is at {} and the commit it reviewed is {}.", short(&workspace.head), short(&commit)) });
-            return Ok(());
+            return self.moved_during_review(&commit, &workspace);
         }
         if !workspace.dirty.is_empty() {
             self.needs_you(StopReason::ReviewerChangedWorkspace { detail: format!("it left uncommitted changes in {}.", list(&workspace.dirty)) });
@@ -1003,6 +1060,7 @@ impl Step<'_> {
         event.session_id = reviewer;
         self.p.reminded = false;
         self.p.review_pending_since = None;
+        self.p.moved_reviews = 0;
         self.p.verdict = Some(verdict.clone());
         self.save()?;
 
@@ -1030,6 +1088,136 @@ impl Step<'_> {
                 Ok(())
             }
         }
+    }
+
+    // ---- the branch moved during a review (#1018) ---------------------------
+
+    /// The pull request as GitHub shows it once it has caught up with `head`,
+    /// or as it last showed it when it does not within a few reads.
+    fn pull_request_at(&mut self, head: &str) -> Result<PrSnapshot> {
+        let link = self.p.pr.clone().context("There is no pull request to review.")?;
+        self.doing = "Reading the pull request";
+        let mut pr = self.host.pull_request(&self.cwd, link.number)?;
+        let mut tries = 0;
+        while pr.state == "OPEN" && !same_commit(head, &pr.head_sha) && tries < HEAD_CATCH_UP_TRIES {
+            self.host.pause();
+            pr = self.host.pull_request(&self.cwd, link.number)?;
+            tries += 1;
+        }
+        Ok(pr)
+    }
+
+    /// The reviewer's verdict is for `reviewed`, and the checkout moved on
+    /// while it read it, so the verdict does not count. A head someone pushed
+    /// to the pull request is reviewed again in the same round: at once the
+    /// first time, and once the branch has held still after that. A commit
+    /// that is only in this checkout was made by a hand the pipeline cannot
+    /// name, the reviewer's own perhaps, and the next push would carry it out
+    /// under the author's name: that one is a person's, as are reviews that
+    /// keep being overtaken.
+    fn moved_during_review(&mut self, reviewed: &str, workspace: &Workspace) -> Result<()> {
+        let moved = format!("the checkout is at {} and the commit it reviewed is {}.", short(&workspace.head), short(reviewed));
+        if !workspace.dirty.is_empty() {
+            self.needs_you(StopReason::ReviewerChangedWorkspace { detail: format!("{} It also has uncommitted changes in {}.", moved.trim_end_matches('.'), list(&workspace.dirty)) });
+            return Ok(());
+        }
+        let pr = self.pull_request_at(&workspace.head)?;
+        if pr.state != "OPEN" {
+            return self.evaluate_snapshot(pr, Merger::Pipeline);
+        }
+        if !same_commit(&pr.head_sha, &workspace.head) {
+            self.needs_you(StopReason::ReviewerChangedWorkspace { detail: format!("{} That commit is not on the pull request (at {}), so it was made in this checkout.", moved.trim_end_matches('.'), short(&pr.head_sha)) });
+            return Ok(());
+        }
+        if !self.author_at_work_during_review() {
+            self.needs_you(StopReason::ReviewerChangedWorkspace { detail: self.unattributed(&workspace.head, reviewed) });
+            return Ok(());
+        }
+        if self.p.moved_reviews >= MOVED_REVIEW_TRIES {
+            let reviews = self.p.moved_reviews + 1;
+            self.needs_you(StopReason::ReviewerChangedWorkspace {
+                detail: format!("the branch moved during {reviews} reviews in a row, most recently from {} to {}. Review it again once it holds still.", short(reviewed), short(&workspace.head)),
+            });
+            return Ok(());
+        }
+        self.p.moved_reviews += 1;
+        self.p.review_pending_since = None;
+        self.p.reminded = false;
+        let now = self.stamp();
+        self.p.head_wait = Some(HeadWait { reviewed: reviewed.to_string(), head: workspace.head.clone(), still_since: now.clone(), since: now });
+        // The first time it is read again at once; a branch that moves again
+        // is waited on until it holds still.
+        self.look_at_moved_head(self.p.moved_reviews == 1)
+    }
+
+    /// Whether the author's conversation was at work since the overtaken
+    /// review was asked for: in a turn now, or with a turn that ended since.
+    /// The reviewer shares the checkout and its push rights, so a head on the
+    /// pull request is not proof the author moved it; a reviewer that pushed
+    /// its own change must not have it reviewed as the author's work.
+    fn author_at_work_during_review(&self) -> bool {
+        if self.host.agent_busy(&self.p.author) {
+            return true;
+        }
+        let Some(asked) = self.p.review_requested_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()) else { return false };
+        self.host.last_reply(&self.p.author).is_some_and(|(ended, _)| ended >= asked.with_timezone(&Utc))
+    }
+
+    fn unattributed(&self, head: &str, reviewed: &str) -> String {
+        format!(
+            "the branch moved to {} during the review of {}, and the author session was not at work meanwhile, so it cannot be told from a change the reviewer pushed itself.",
+            short(head),
+            short(reviewed),
+        )
+    }
+
+    /// From a set-aside review, and then from the poller: review the new head
+    /// once the branch has held still for [`HEAD_STILL_MINUTES`], or `at_once`.
+    fn look_at_moved_head(&mut self, at_once: bool) -> Result<()> {
+        let Some(mut wait) = self.p.head_wait.clone() else { return Ok(()) };
+        self.doing = "Reading the workspace";
+        let workspace = self.host.workspace(&self.cwd)?;
+        if workspace.branch.as_deref() != Some(self.p.branch.as_str()) {
+            self.needs_you(StopReason::WorkspaceMoved { expected: self.p.branch.clone(), found: workspace.branch.clone().unwrap_or_else(|| "no branch".into()) });
+            return Ok(());
+        }
+        if !same_commit(&workspace.head, &wait.head) {
+            wait.head = workspace.head.clone();
+            wait.still_since = self.stamp();
+        }
+        self.p.head_wait = Some(wait.clone());
+        let still = self.seconds_since(&wait.still_since).unwrap_or(0) >= HEAD_STILL_MINUTES * 60;
+        if workspace.dirty.is_empty() && (at_once || still) {
+            let pr = self.pull_request_at(&workspace.head)?;
+            if pr.state != "OPEN" {
+                return self.evaluate_snapshot(pr, Merger::Pipeline);
+            }
+            if same_commit(&pr.head_sha, &workspace.head) {
+                if !self.author_at_work_during_review() {
+                    self.needs_you(StopReason::ReviewerChangedWorkspace { detail: self.unattributed(&workspace.head, &wait.reviewed) });
+                    return Ok(());
+                }
+                return self.request_review_again();
+            }
+            if still {
+                self.needs_you(StopReason::ReviewerChangedWorkspace {
+                    detail: format!("the checkout is at {}, which is not on the pull request (at {}), and the commit it reviewed is {}.", short(&workspace.head), short(&pr.head_sha), short(&wait.reviewed)),
+                });
+                return Ok(());
+            }
+        }
+        if self.seconds_since(&wait.since).unwrap_or(0) >= HEAD_WAIT_MINUTES * 60 {
+            self.needs_you(StopReason::ReviewerChangedWorkspace {
+                detail: format!("the branch moved from {} during the review and did not hold still for {HEAD_STILL_MINUTES} minutes within {HEAD_WAIT_MINUTES}; it is at {}.", short(&wait.reviewed), short(&workspace.head)),
+            });
+            return Ok(());
+        }
+        self.settle(
+            State::Waiting,
+            None,
+            format!("The branch moved from {} to {} during the review, so its verdict does not count. {} is reviewed again once the branch has held still for {HEAD_STILL_MINUTES} minutes.", short(&wait.reviewed), short(&wait.head), short(&wait.head)),
+        );
+        Ok(())
     }
 
     /// Detect early, but reserve the checkout only at a quiet turn boundary.
@@ -1472,6 +1660,20 @@ impl Step<'_> {
     /// Have the reviewer read the pull request's head. `by_person` is a
     /// review someone asked for by hand, which the round limit does not refuse.
     fn request_review(&mut self, by_person: bool) -> Result<()> {
+        self.request_review_with(by_person, false)
+    }
+
+    /// A review set aside because the branch moved during it, asked again in
+    /// the same round (#1018).
+    fn request_review_again(&mut self) -> Result<()> {
+        self.request_review_with(false, true)
+    }
+
+    /// `again`: the last review was set aside because the branch moved while
+    /// it was read, so this one is in the same round. A review asked for while
+    /// the pipeline waits on such a branch is too.
+    fn request_review_with(&mut self, by_person: bool, again: bool) -> Result<()> {
+        let again = again || self.p.head_wait.is_some();
         if self.p.stage != Stage::Resolve && self.watch_conflicts()? { return Ok(()); }
         let link = self.p.pr.clone().context("There is no pull request to review yet.")?;
         self.doing = "Reading the pull request";
@@ -1526,8 +1728,9 @@ impl Step<'_> {
                 }
             }
         };
-        // The light check is not a round, so the limit does not refuse it.
-        if merge_check.is_none() && self.p.round >= self.p.max_rounds {
+        // The light check is not a round, so the limit does not refuse it,
+        // and neither does the round a moving branch took away.
+        if merge_check.is_none() && !again && self.p.round >= self.p.max_rounds {
             if !by_person {
                 let reason = match self.p.verdict.as_ref() {
                     // It passed: the review the head needs is what is missing, not a fix.
@@ -1572,17 +1775,26 @@ impl Step<'_> {
         let request = prompts::ReviewRequest { issue: self.p.issue.as_ref(), issue_body: issue_body.as_deref(), pr_number: pr.number, pr_url: &pr.url, commit: &pr.head_sha, base: &base, security_areas: &self.p.security_areas };
         // The commit whose verdict a light check would carry forward.
         let checked = merge_check.as_ref().and(self.p.verdict.as_ref()).map(|verdict| verdict.commit.clone());
+        // The commit whose review the branch overtook.
+        let overtaken = again.then(|| self.p.head_wait.as_ref().map(|wait| wait.reviewed.clone()).or_else(|| self.p.review_commit.clone())).flatten();
         let prompt = match (&merge_check, &checked) {
             (Some(merges), Some(reviewed)) => prompts::merge_check(&request, reviewed, merges),
             _ if first => prompts::review(&request),
-            _ => prompts::review_again(&request, previous.as_deref()),
+            _ => match overtaken.as_deref() {
+                Some(overtaken) => prompts::review_moved(&request, overtaken),
+                None => prompts::review_again(&request, previous.as_deref()),
+            },
         };
 
-        let before = (self.p.round, self.p.review_commit.clone(), self.p.review_requested_at.clone(), self.p.merge_check.clone());
+        let before = (self.p.round, self.p.review_commit.clone(), self.p.review_requested_at.clone(), self.p.merge_check.clone(), self.p.head_wait.clone(), self.p.moved_reviews);
         self.p.reviewer = Some(reviewer.clone());
-        if checked.is_none() {
+        if checked.is_none() && !again {
             self.p.round += 1;
         }
+        if !again {
+            self.p.moved_reviews = 0;
+        }
+        self.p.head_wait = None;
         self.p.merge_check = checked.clone();
         self.p.review_commit = Some(pr.head_sha.clone());
         self.p.review_requested_at = Some(self.stamp());
@@ -1600,6 +1812,7 @@ impl Step<'_> {
                 if merge_check.as_ref().is_some_and(|merges| merges.merges.len() > 1) { "merges" } else { "merge" },
                 short(&pr.head_sha),
             ),
+            None if again => format!("Review {} of {} again: the reviewer conversation is reading {}. This is the same round.", self.p.round, self.p.max_rounds, short(&pr.head_sha)),
             None => format!("Review {} of {}: the reviewer conversation is reading {}.", self.p.round, self.p.max_rounds, short(&pr.head_sha)),
         };
         self.enter(Stage::Review, note.clone());
@@ -1607,8 +1820,13 @@ impl Step<'_> {
         // find its pipeline waiting for it.
         self.save()?;
         if let Err(error) = self.host.send(&reviewer, &prompt) {
-            (self.p.round, self.p.review_commit, self.p.review_requested_at, self.p.merge_check) = before;
+            (self.p.round, self.p.review_commit, self.p.review_requested_at, self.p.merge_check, self.p.head_wait, self.p.moved_reviews) = before;
             return Err(error);
+        }
+        if let Some(overtaken) = overtaken.as_deref().filter(|overtaken| !same_commit(overtaken, &pr.head_sha)) {
+            let event = self.record("reviewAgain", format!("Reviewing again: the branch moved from {} to {} during the review.", short(overtaken), short(&pr.head_sha)));
+            event.commit = Some(pr.head_sha.clone());
+            event.session_id = Some(reviewer.session_id.clone());
         }
         let security = if self.p.security_areas.is_empty() { String::new() } else { format!(" A security pass is required: the change touches {}.", list(&self.p.security_areas)) };
         let event = self.record(if checked.is_some() { "mergeCheckRequested" } else { "reviewRequested" }, format!("{note}{security}"));
@@ -2312,6 +2530,7 @@ fn start_locked(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Opt
                 store::set_switches(&step.p.id, |pipeline| pipeline.resolve_conflicts = value)?;
             }
             step.p.author = next;
+            step.p.author_followed = false;
             step.enter(Stage::Work, "The new author conversation is continuing the work.");
             step.record("handoff", "Pipeline ownership moved to a new conversation in this session; the original history was left unchanged.");
             Ok(())
@@ -2366,6 +2585,7 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         resolution: None,
         interrupted_resolution: None,
             preserve_resolution_edits: false,
+        author_followed: false,
         cloud,
         issue_body,
         stopped: false,
@@ -2382,6 +2602,8 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
         merge_check: None,
         review_pending_since: None,
         findings_sent_round: 0,
+        moved_reviews: 0,
+        head_wait: None,
         verdict: None,
         failed_local_checks: Vec::new(),
         local_check: None,
@@ -2415,10 +2637,24 @@ fn new_pipeline(host: &dyn Host, session: &SessionEntry, tab_id: &str, auto_merg
 pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, resolve_conflicts: Option<bool>, adopt_pr: bool, actor: super::SwitchActor) -> Result<Pipeline> {
     let lock = step_lock(&format!("start:{session_id}"));
     let _start = lock.lock().unwrap_or_else(|error| error.into_inner());
-    let existing = store::for_session(session_id)?;
+    let mut existing = store::for_session(session_id)?;
+    if let Some(found) = existing.as_ref().filter(|found| found.author.session_id == session_id) {
+        // Its author tab is gone, or TerminalX chose the author when it went:
+        // this tab takes the pipeline over, with its pull request, record and
+        // switches (#1014). A chosen author asked to adopt the pull request
+        // takes again the step that stopped on the tab that was gone.
+        let other = found.author.tab_id != tab_id;
+        let gone = other && host.session(session_id)?.tab(&found.author.tab_id).is_none();
+        if gone || (found.author_followed && (other || adopt_pr)) {
+            existing = Some(take_over(host, found, tab_id, &actor)?);
+        }
+    }
     if let Some(existing) = &existing {
-        if existing.author.session_id != session_id || existing.author.tab_id != tab_id {
-            bail!("This session already participates in a pipeline. Use its original author tab.");
+        if existing.author.session_id != session_id {
+            bail!("This session already participates in a pipeline. Use its author tab.");
+        }
+        if existing.author.tab_id != tab_id {
+            bail!("This session already participates in a pipeline. Use its author tab, {}.", existing.author.tab_id);
         }
         if !adopt_pr || existing.pr.is_some() { return Ok(existing.clone()); }
         if existing.stopped || existing.stage != Stage::Work {
@@ -2472,6 +2708,48 @@ pub fn start_existing(host: &dyn Host, session_id: &str, tab_id: &str, auto_merg
     })
 }
 
+/// Make `tab_id` the author of a pipeline whose author tab is gone (#1014).
+/// A pipeline that stopped because that tab could not be reached, while
+/// opening the pull request or starting its review, takes that step again.
+fn take_over(host: &dyn Host, pipeline: &Pipeline, tab_id: &str, actor: &super::SwitchActor) -> Result<Pipeline> {
+    let session_id = pipeline.author.session_id.clone();
+    run_with(host, &pipeline.id, true, OnError::Report, false, |step| {
+        let session = step.author.clone().context("The author session is gone")?;
+        let tab = session.tab(tab_id).with_context(|| format!("tab {tab_id} not found in session {session_id}"))?;
+        // As it is now, not as the caller read it: a step may have moved it since.
+        let old = step.p.author.tab_id.clone();
+        let present = session.tab(&old).is_some();
+        if present && !step.p.author_followed && old != tab_id {
+            bail!("This session already participates in a pipeline. Use its author tab, {old}.");
+        }
+        if !step.p.may_author(&session, tab) {
+            bail!("Tab {tab_id} cannot be this pipeline's author: it is a terminal, a conversation the pipeline opened to review or resolve, or not a PTY conversation.");
+        }
+        let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
+        let message = if old == tab_id {
+            format!("Tab {tab_id}, which TerminalX had made the author, was confirmed as the author by {by}.")
+        } else if present {
+            format!("Tab {tab_id} took this pipeline over, asked by {by}, from tab {old}, which TerminalX had made the author when the author's own tab went.")
+        } else {
+            format!("Tab {tab_id} took this pipeline over, asked by {by}: the author's tab {old} is no longer in this session.")
+        };
+        step.move_author(tab_id.to_string(), false, message);
+        if step.p.state != State::NeedsYou || step.p.stopped || !matches!(step.p.reason, Some(StopReason::Failed { .. })) {
+            return Ok(());
+        }
+        let retried = match step.p.stage {
+            Stage::PullRequest => step.open_pull_request(),
+            Stage::Review => step.request_review(false),
+            _ => Ok(()),
+        };
+        if let Err(error) = retried {
+            let reason = StopReason::Failed { step: step.doing.to_string(), message: format!("{error:#}") };
+            step.needs_you(reason);
+        }
+        Ok(())
+    })
+}
+
 fn record_attachment(pipeline: &mut Pipeline, now: &str, actor: &super::SwitchActor) {
     let by = match actor { super::SwitchActor::Person => "the person", super::SwitchActor::SelfUi { .. } => "an agent through scoped self-UI", _ => "an agent through the CLI" };
     pipeline.record(now, "attached", format!("Autopilot attached to the existing author conversation by {by}.")).actor = Some(actor.clone());
@@ -2497,7 +2775,7 @@ fn initialize_adoption(pipeline: &mut Pipeline, now: &str, pr: &PrSnapshot, acto
 /// author, the reviewer or the conflict resolver of a pipeline. Once the
 /// pipeline has ended, what the turn says is not pipeline work.
 pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_message: Option<&str>) {
-    let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
+    let Some((pipeline, role)) = taking_part_now(host, session_id, tab_id) else {
         return;
     };
     let message = final_message.unwrap_or_default();
@@ -2588,7 +2866,7 @@ pub(crate) fn retry_interrupted_resolver<T>(host: &dyn Host, session_id: &str, t
 /// turn it started decides again (#725). Anyone else's answer, and an answer
 /// to any other stop (a required review, a closed pull request), changes nothing.
 pub fn answered(host: &dyn Host, session_id: &str, tab_id: &str) {
-    if let Some((pipeline, Role::Author)) = taking_part(session_id, tab_id) {
+    if let Some((pipeline, Role::Author)) = taking_part_now(host, session_id, tab_id) {
         answer_if_stopped(host, &pipeline);
     }
 }
@@ -2618,7 +2896,7 @@ pub fn turn_failure(interrupted: bool) -> &'static str {
 
 /// A turn ended without finishing: interrupted, or the agent's process went.
 pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str) {
-    let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
+    let Some((pipeline, role)) = taking_part_now(host, session_id, tab_id) else {
         return;
     };
     // A resolver a person interrupted leaves its merge to them; one whose
@@ -2662,6 +2940,25 @@ fn taking_part(session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
     let pipeline = store::for_session(session_id).ok().flatten()?;
     let role = pipeline.role_of(session_id, tab_id)?;
     Some((pipeline, role))
+}
+
+/// As [`taking_part`], for a tab that is the author's successor before any
+/// step has said so: the pipeline is moved to it first (#1014), so a report
+/// from the tab the lead carried on in after a restart is the author's.
+fn taking_part_now(host: &dyn Host, session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
+    if let Some(found) = taking_part(session_id, tab_id) {
+        return Some(found);
+    }
+    let pipeline = store::for_session(session_id).ok().flatten()?;
+    let session = host.session(session_id).ok()?;
+    if pipeline.successor(&session).is_none_or(|(successor, _)| successor != tab_id) {
+        return None;
+    }
+    if let Err(error) = run(host, &pipeline.id, true, OnError::Report, |_| Ok(())) {
+        log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+        return None;
+    }
+    taking_part(session_id, tab_id)
 }
 
 pub fn run_local_checks(host: &dyn Host, id: &str) {
@@ -2931,7 +3228,7 @@ pub fn poll(host: &dyn Host) {
         let due = match pipeline.state {
             // A resolver at work is watched for its pull request merging or
             // closing, even with the switch turned off since it started.
-            State::Waiting | State::Working => at_gate || pipeline.resolve_conflicts || pipeline.stage == Stage::Resolve || review_overdue(&pipeline, now),
+            State::Waiting | State::Working => at_gate || pipeline.resolve_conflicts || pipeline.stage == Stage::Resolve || review_overdue(&pipeline, now) || waits_on_moved_head(&pipeline),
             // Parked on a person, at any stage: they may have merged or
             // closed the pull request by hand.
             State::ReadyToMerge | State::NeedsYou => {
@@ -2951,6 +3248,7 @@ pub fn poll(host: &dyn Host) {
         // GitHub being unreachable for a pass changes nothing and is tried again.
         let look = |step: &mut Step<'_>| {
             if review_overdue(&step.p, step.host.now()) { return step.look_at_overdue_review(); }
+            if waits_on_moved_head(&step.p) { return step.look_at_moved_head(false); }
             // The author is at work on a person's answer: its turn's end
             // decides again. Until then only a merge or a close made
             // meanwhile is noticed, or the stop it was answered out of would

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ask } from "@tauri-apps/plugin-dialog";
-import { getTerminalState } from "@/lib/terminal";
-import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode } from "./editors";
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
+import { confirmInApp as ask } from "@/lib/confirm";
+import { getTerminalState, selectSessionTab } from "@/lib/terminal";
+import { conflictTabName, openConflict, setConflictCount, pruneReviewTabs, closeAllEditors, closeEditor, editorLinkContext, fileKind, getEditors, openDiff, openPr, openReviewStack, setDiffMode, serializeReviewTabs, restoreReviewTabs, openAttachment, openFile, setEditorDirty, setPaneCollapsed, setViewMode, toggleViewMode, isFileTab, isTabEditor } from "./editors";
+// Unsaved changes are asked about in the app's own dialog (PRO-400), not a system alert.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn() }));
 
 afterEach(async () => {
   vi.mocked(ask).mockResolvedValue(true);
@@ -105,7 +106,7 @@ describe("review tabs", () => {
   });
 
   it("restores review locators, selected tab and collapsed state without restoring stale dirty buffers", async () => {
-    openFile("s", "/repo", "plain.ts");
+    const plain = openFile("s", "/repo", "plain.ts");
     openPr("s", "/repo", { url: "https://github.com/org/repo/pull/12", number: 12, head: "branch", scope: { kind: "local", cwd: "/repo" } });
     const id = openDiff("s", "/repo", "new.ts", { scope: "turn", oldPath: "old.ts", range: { base: "before", head: "after" } });
     await setDiffMode(id, "edit");
@@ -114,20 +115,73 @@ describe("review tabs", () => {
     const saved = serializeReviewTabs(getEditors());
     expect(localStorage.getItem("terminalx:review-tabs:v1")).toBe(saved);
     const restored = restoreReviewTabs(saved);
-    expect(restored.editors.map((e) => e.kind)).toEqual(["pr", "diff"]);
-    expect(restored.editors[1]).toMatchObject({ dirty: false, diff: { mode: "diff", oldPath: "old.ts", range: { base: "before", head: "after" } } });
-    expect(restored.active.s).toBeNull();
+    // The session's file tab comes back too (PRO-402): where the file is, nothing typed in it.
+    expect(restored.editors.map((e) => e.kind)).toEqual(["text", "pr", "diff"]);
+    expect(restored.editors[0]).toMatchObject({ rel: "plain.ts", dirty: false, viewMode: "source" });
+    expect(restored.editors[2]).toMatchObject({ dirty: false, diff: { mode: "diff", oldPath: "old.ts", range: { base: "before", head: "after" } } });
+    // The session's active file is the file tab, which the file tree marks; the tab on screen is the tab strip's to restore.
+    expect(restored.active.s).toBe(plain);
     expect(restored.collapsed.s).toBe(true);
     expect(restoreReviewTabs("bad JSON").editors).toEqual([]);
-    expect(restoreReviewTabs(JSON.stringify({ editors: [null, { kind: "diff" }, { ...restored.editors[1], diff: { mode: "edit", scope: "turn", range: 12 } }] })).editors).toEqual([]);
+    expect(restoreReviewTabs(JSON.stringify({ editors: [null, { kind: "diff" }, { ...restored.editors[2], diff: { mode: "edit", scope: "turn", range: 12 } }] })).editors).toEqual([]);
   });
 });
 
 
 it("does not select a saved review when the active editor was a file", () => {
   openDiff("s", "/repo", "a.ts", { scope: "all", range: { base: "base", head: null } });
-  openFile("s", "/repo", "another.ts");
-  expect(restoreReviewTabs(serializeReviewTabs(getEditors())).active.s).toBeNull();
+  const file = openFile("s", "/repo", "another.ts");
+  expect(restoreReviewTabs(serializeReviewTabs(getEditors())).active.s).toBe(file);
+});
+
+describe("file tabs (PRO-402)", () => {
+  it("opens a local session's file as a tab of the session and selects it, leaving the chat tab's selection to the strip", () => {
+    const id = openFile("s", "/repo", "docs/scripts.md");
+    expect(getEditors().editors.find((e) => e.id === id)).toMatchObject({ kind: "text", rel: "docs/scripts.md", viewMode: "preview" });
+    expect(isFileTab(getEditors().editors[0])).toBe(true);
+    expect(isTabEditor(getEditors().editors[0])).toBe(true);
+    expect(getTerminalState().selected.s).toEqual({ kind: "review", id });
+    expect(getEditors().lastFocused).toBe("editor");
+    // Opening it again focuses the tab it has.
+    selectSessionTab("s", { kind: "agent", id: "chat" });
+    expect(openFile("s", "/repo", "docs/scripts.md")).toBe(id);
+    expect(getEditors().editors).toHaveLength(1);
+    expect(getTerminalState().selected.s).toEqual({ kind: "review", id });
+  });
+
+  it("keeps a cloud workspace's file and a checkout's in the editor pane", () => {
+    selectSessionTab("s", { kind: "agent", id: "chat" });
+    const cloud = openFile("s", "/repo", "a.ts", undefined, "/repo", "cloud:ws");
+    const checkout = openFile("checkout:/repo", "/repo", "a.ts");
+    // A cloud session has no panes of the workspace's tabs: a file a link in its chat opens stays in the pane too.
+    const cloudSession = openFile("cloud:org:ws:one", "/repo", "a.ts");
+    // Nor is a paired machine's session local: "not a cloud key" must never read as "this Mac" (PRO-346).
+    const machineSession = openFile("machine:cs1uhCLEB_ttCYaQ:1_xp39fWQj0RTKD0:5b4c4c1e", "/repo", "a.ts");
+    for (const id of [cloud, checkout, cloudSession, machineSession]) expect(isTabEditor(getEditors().editors.find((e) => e.id === id)!)).toBe(false);
+    expect(getTerminalState().selected.s).toEqual({ kind: "agent", id: "chat" });
+    expect(getTerminalState().selected["checkout:/repo"]).toBeUndefined();
+    expect(getTerminalState().selected["cloud:org:ws:one"]).toBeUndefined();
+    expect(restoreReviewTabs(serializeReviewTabs(getEditors())).editors).toEqual([]);
+  });
+
+  it("closes every file tab and leaves the session's reviews, and drops the selection of a closed file", async () => {
+    const diff = openDiff("s", "/repo", "a.ts", { scope: "all", range: { base: "base", head: null } });
+    openFile("s", "/repo", "one.ts");
+    const two = openFile("s", "/repo", "two.png");
+    expect(getTerminalState().selected.s).toEqual({ kind: "review", id: two });
+    await closeAllEditors("s", true);
+    expect(getEditors().editors.map((e) => e.id)).toEqual([diff]);
+    expect(getTerminalState().selected.s).toBeUndefined();
+  });
+
+  it("does not restore a file tab that points outside its root or at a sent attachment", () => {
+    const id = openFile("s", "/repo", "docs/scripts.md");
+    const saved = JSON.parse(serializeReviewTabs(getEditors()));
+    expect(restoreReviewTabs(JSON.stringify(saved)).editors.map((e) => e.id)).toEqual([id]);
+    for (const bad of [{ rel: "../secret" }, { rel: "/etc/passwd" }, { attachment: { path: "/repo/docs/scripts.md" } }, { sessionId: "checkout:/repo" }, { kind: "binary" }]) {
+      expect(restoreReviewTabs(JSON.stringify({ ...saved, editors: [{ ...saved.editors[0], ...bad }] })).editors).toEqual([]);
+    }
+  });
 });
 
 it("prunes restored review tabs for deleted sessions and removed worktrees after sessions load", () => {
@@ -229,5 +283,21 @@ describe("attachment tabs (PRO-290)", () => {
     expect(() => openAttachment("s1", { path: "notes.md", name: "notes.md" })).toThrow();
     expect(() => openAttachment("s1", { path: `${folder}/../x/notes.md`, name: "notes.md" })).toThrow();
     expect(getEditors().editors).toHaveLength(0);
+  });
+});
+
+describe("review stack (PRO-392)", () => {
+  it("opens one Review tab per scope for every file, focused on the file opened, and restores it", () => {
+    const first = openReviewStack("s", "/repo", "src/slug.js", { scope: "turn", range: { base: "base", head: "head" } });
+    const again = openReviewStack("s", "/repo", "test/slug.test.js", { scope: "turn", range: { base: "base", head: "head" } });
+    expect(again).toBe(first);
+    const tabs = getEditors().editors.filter((e) => e.sessionId === "s");
+    expect(tabs).toHaveLength(1);
+    const entry = tabs[0]!;
+    expect(entry).toMatchObject({ name: "Review · Latest turn", rel: "test/slug.test.js", kind: "diff", diff: { stack: true, focus: 1 } });
+    expect(openReviewStack("s", "/repo", "a.ts", { scope: "all", range: { base: "b", head: null }, target: null, uncommitted: false })).not.toBe(first);
+    expect(getEditors().editors.find((e) => e.id !== first && e.sessionId === "s")?.name).toBe("Review · All changes");
+    const restored = restoreReviewTabs(serializeReviewTabs(getEditors())).editors.find((e) => e.id === first);
+    expect(restored).toMatchObject({ kind: "diff", diff: { stack: true } });
   });
 });

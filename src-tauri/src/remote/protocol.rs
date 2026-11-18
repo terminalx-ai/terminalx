@@ -23,6 +23,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   running turn. Live only: it is never queued, receipted or resent.
 /// - `session-repository/1`: `session.create.repository` carries the selected
 ///   identity and advertised directory; mismatch/missing checkout fails closed.
+/// - `session-base/1` (PRO-348): `session.create.baseRef` names the branch a
+///   new worktree is cut from; without it the project's default branch is.
 /// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
@@ -36,6 +38,11 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `composer/3`: `session.attach`, an image uploaded in parts for a
 ///   message that then names it (`images: [{ id }]`, in a mailbox `send` or
 ///   the live `session.send`).
+/// - `composer/4` (PRO-407): files other than images. `session.attach` takes
+///   `kind: "file"` (any media type, up to 25 MB, a name the session's
+///   attachments folder can store), and a send names them (`files: [{ id }]`,
+///   with its images at most 10). The runtime stores them in the session's
+///   attachments folder on its own computer and hands the agent those paths.
 /// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
 ///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
 /// - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
@@ -65,6 +72,7 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `pipeline.noteTracker`. It also lets `session.create` take an issue, which
 ///   an older runtime would ignore: a client sends one only once this is granted.
 /// - `pipeline/2`: paginated persistent reviewer identities, independent of pipeline history.
+/// - `environment/1`: bounded installed-tool observations and cancellation.
 /// - `session-status/1`: `session.update.manualStatus`, separate from agent activity.
 /// - `agent-commands/1` (PRO-343): send, steer, stop and the permission
 ///   decision as live calls, for a runtime with no cloud mailbox (a machine,
@@ -77,9 +85,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 25] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
+pub const CAPABILITIES: [&str; 28] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1",
 ];
 
 /// The namespace of live agent commands (spelled out in [`CAPABILITIES`]).
@@ -98,7 +106,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -137,6 +145,8 @@ const fn method(name: &'static str, capability: &'static str, authority: Authori
 use Authority::{Manage, Participate};
 
 pub const METHODS: &[Method] = &[
+    method("environment.report", "environment/1", Manage, false),
+    method("environment.cancel", "environment/1", Manage, false),
     method("session.list", "session/1", Participate, false),
     method("session.get", "session/1", Participate, false),
     method("session.create", "session/1", Manage, true),
@@ -305,6 +315,35 @@ pub const METHODS: &[Method] = &[
     // (blockers, other computers, one already under way).
     method("machine.updateStatus", "machine/3", Participate, false),
     method("machine.update", "machine/3", Manage, false),
+    // PRO-350: an agent's install or sign-in on the machine runs a command
+    // there, so starting one is the manager's, as `pty.create` is. Not
+    // idempotent: a second start is refused while the first runs. Following
+    // one is the manager's too: a sign-in shows a device code, and whoever
+    // completes it chooses the account the machine's CLI signs in to.
+    method("machine.agentSetup", "machine/4", Manage, false),
+    method("machine.agentSetupRunning", "machine/4", Manage, false),
+    // PRO-357: a fresh device token for the paired computer that asks, kept
+    // beside the current one until it connects with it. Not idempotent: a
+    // repeat makes another token, and the computer keeps the last it saved.
+    method("machine.rotateCredential", "machine/5", Manage, false),
+    // PRO-351: a machine's projects from another computer. Each changes the
+    // machine's store or names its folders, so all are the manager's. Not
+    // idempotent: a browse reads the moment, add/remove answer as the store
+    // now stands, and each clone is a new one.
+    method("machine.browse", "machine/6", Manage, false),
+    method("machine.addProject", "machine/6", Manage, false),
+    method("machine.removeProject", "machine/6", Manage, false),
+    method("machine.cloneProject", "machine/6", Manage, false),
+    method("machine.cloneStatus", "machine/6", Manage, false),
+    method("machine.cloneCancel", "machine/6", Manage, false),
+    // PRO-403: a machine session's Setup and Run. What the session's project
+    // saved on the machine, read there; its runs are the machine runtime's
+    // own panes, listed by `pty.list` with the session and attached as any
+    // terminal. Starting, rerunning or stopping one is the machine's to do.
+    method("machine.sessionActions", "machine/7", Participate, false),
+    method("machine.runAction", "machine/7", Manage, false),
+    method("machine.setupRerun", "machine/7", Manage, false),
+    method("machine.setupStop", "machine/7", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -315,9 +354,10 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
         "git/1" => &["git."],
-        "session/1" | "session/2" | "session/3" | "session-repository/1" => &["session."],
+        "session/1" | "session/2" | "session/3" | "session-repository/1" | "session-base/1" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
+        "environment/1" => &["environment."],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
         "mirror/1" => &["mirror."],
@@ -328,10 +368,16 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
         "composer/3" => &["session.attach"],
+        // `composer/4` adds no method: `session.attach` takes `kind: "file"`
+        // and `session.send` names `files` (PRO-407).
         "ports/1" => &["ports."],
         "machine/1" => &["machine."],
         "machine/2" => &["machine.relayAccess"],
         "machine/3" => &["machine.updateStatus", "machine.update"],
+        "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
+        "machine/5" => &["machine.rotateCredential"],
+        "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
+        "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
@@ -486,6 +532,7 @@ pub(crate) fn leak_code(code: &str) -> &'static str {
         "update_confirm",
         "update_busy",
         "update_unavailable",
+        "invalid_project",
     ];
     CODES.iter().find(|known| **known == code).copied().unwrap_or("internal")
 }
@@ -591,6 +638,11 @@ mod tests {
         // An interrupt is for the turn running now: never replayed from a cache.
         let interrupt = find_method("session.interrupt").unwrap();
         assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));
+        for name in ["environment.report", "environment.cancel"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("environment/1", Manage, false));
+        }
+        assert!(find_method("environment.exec").is_none());
         // The mailbox's other commands, live for a runtime without one:
         // each carries a request id and is answered from its receipt.
         for name in ["session.steer", "session.stop", "session.decide"] {
@@ -694,6 +746,23 @@ mod tests {
         for code in ["update_confirm", "update_busy", "update_unavailable"] {
             assert_eq!(leak_code(code), code);
         }
+    }
+
+    /// PRO-351: `machine/6` is offered by a machine only, and every one of
+    /// its methods is the manager's.
+    #[test]
+    fn machine_6_adds_a_machines_projects_for_the_manager_only() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/6") && machine.contains(&"machine/4"));
+        assert!(!workspace.contains(&"machine/6"));
+        assert!(machine.contains(&"machine/5"), "machine/5 (PRO-357) is served beside it");
+        for name in ["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("machine/6", Manage, false), "{name}");
+        }
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/4"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/4"], "an older desktop is not handed machine/6");
+        assert_eq!(leak_code("invalid_project"), "invalid_project");
     }
 
     #[test]

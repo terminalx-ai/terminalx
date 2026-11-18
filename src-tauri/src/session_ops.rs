@@ -2283,7 +2283,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
         let error = create_quick_chat_entry(NewQuickChat { parent: None, section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
-        assert!(error.contains("resolve"), "{error}");
+        assert!(error.contains("No folder at"), "{error}");
         assert!(index::load().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);
     }

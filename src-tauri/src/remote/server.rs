@@ -141,6 +141,8 @@ impl Notifications {
 }
 
 impl Peer {
+    pub(crate) fn disconnected(&self) -> bool { self.gone.load(Ordering::SeqCst) }
+
     pub fn new(device_id: String, authority: Authority) -> (Arc<Self>, Notifications) {
         Self::for_user(device_id, authority, None)
     }
@@ -240,8 +242,33 @@ impl Peer {
 
 /// Authority belongs to the keystroke, not the later writer thread.
 struct PtyInput {
+    collaboration: Option<collab::v2::Permit>,
+    pid: Option<u32>,
     data: Vec<u8>,
     privacy: crate::data_privacy::Ticket,
+}
+
+impl PtyInput {
+    fn write(&self, terminals: &crate::pty::Terminals, manager: Option<&SessionManager>, pane: &str) -> anyhow::Result<bool> {
+        let write = || terminals.write_remote(pane, &self.data, &self.privacy, self.collaboration.as_ref(), self.pid);
+        match manager {
+            Some(manager) => manager.with_raw_terminal_input(pane, write),
+            None => write(),
+        }
+    }
+}
+
+
+#[derive(Clone, Copy)]
+enum RunDiscovery {
+    Active,
+    Backfill,
+    Exit,
+}
+
+enum EvictedRun {
+    Backfilled,
+    Observed,
 }
 
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
@@ -272,6 +299,7 @@ struct PtyState {
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
     exit: Option<Option<i32>>,
+    /// When this server heard the exit. Historical backfill has no timestamp.
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
@@ -291,6 +319,79 @@ struct PtyState {
     /// never listed, killed or evicted as a shell is, and it stays through
     /// every CLI the tab starts in it.
     agent: Option<AgentPty>,
+    /// Set for an agent's install or sign-in on a machine (`machine/4`,
+    /// PRO-350): never listed as a shell, and its exit makes the agents'
+    /// logins be read again.
+    setup: Option<SetupPty>,
+    /// Set for a session's own script run on a machine (`machine/7`,
+    /// PRO-403): the runtime's pane of one of its project's saved actions or
+    /// of its workspace setup. The runtime owns the process, so this entry
+    /// only records and relays it: it is listed with its session, never
+    /// counted against [`MAX_PTYS`] and never ended by an eviction.
+    run: Option<SessionRun>,
+}
+
+/// What a session's script run is (`machine/7`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SessionRun {
+    Action { action_id: String, name: String },
+    Setup,
+}
+
+impl SessionRun {
+    /// The session and run a runtime pane id names: `<session>:action-…`
+    /// ([`crate::action_runner`]) or `<session>:workspace-setup-…`
+    /// ([`crate::workspace_setup`]). A cheap test first: every pane's output
+    /// passes through here.
+    fn of_pane(pane: &str, title: Option<&str>) -> Option<(String, Self)> {
+        if !pane.contains(':') || pane.starts_with(AGENT_PTY_PREFIX) || pane.starts_with(PTY_PREFIX) {
+            return None;
+        }
+        if let Some(session) = crate::workspace_setup::pane_session(pane) {
+            return Some((session.to_string(), Self::Setup));
+        }
+        let (session, action_id) = crate::action_runner::parse_pane(pane)?;
+        Some((session.to_string(), Self::Action { name: title.unwrap_or(&action_id).to_string(), action_id }))
+    }
+
+    fn wire(&self) -> Value {
+        match self {
+            Self::Action { action_id, name } => json!({ "kind": "action", "actionId": action_id, "name": name }),
+            Self::Setup => json!({ "kind": "setup" }),
+        }
+    }
+}
+
+/// A workspace setup attempt on the wire (`machine/7`). Its pane, while the
+/// runtime keeps it, is the terminal `pty.list` lists as its `run`.
+fn setup_wire(setup: &crate::workspace_setup::Setup) -> Value {
+    json!({
+        "paneId": setup.pane_id,
+        "command": setup.command,
+        "status": setup.status,
+        "exitCode": setup.exit_code,
+        "error": setup.error,
+        "hasPane": setup.has_pane,
+    })
+}
+
+struct SetupPty {
+    harness: String,
+    step: crate::harness::setup::Step,
+}
+
+/// A shell-like terminal to start: where it runs and what it belongs to.
+struct NewPty<'a> {
+    /// Relative to its project, as `pty.list` shows it.
+    cwd: String,
+    /// Where the program starts.
+    start_in: &'a str,
+    command: Option<&'a str>,
+    session_id: Option<String>,
+    project_id: Option<String>,
+    cols: u16,
+    rows: u16,
+    setup: Option<SetupPty>,
 }
 
 struct AgentPty {
@@ -371,6 +472,9 @@ pub struct WorkspaceRpc {
     terminals: Arc<Terminals>,
     sessions: Option<SessionManager>,
     ptys: Mutex<HashMap<String, PtyState>>,
+    /// Runtime-owned run panes whose exited remote records were evicted.
+    /// Accessed under the ptys lock so discovery cannot race eviction.
+    evicted_runs: Mutex<HashMap<String, EvictedRun>>,
     /// Agent tabs that were removed. Tab ids are never reused, and the last
     /// output of a CLI that was just stopped must not bring its terminal back.
     /// The newest [`MAX_REMOVED_AGENT_TABS`] are remembered: by the time one
@@ -407,9 +511,23 @@ pub struct WorkspaceRpc {
     /// The machine's version and updates (`machine/3`, PRO-354); absent on
     /// a workspace runtime, or one whose data directory cannot be named.
     machine_updates: Mutex<Option<Arc<super::machine_update::MachineUpdates>>>,
+    /// The status as the served updates stood when they started being
+    /// served (which updates, and what): the watcher's first compare.
+    update_baseline: Mutex<Option<(usize, String)>>,
+    /// Clones started from another computer (`machine/6`, PRO-351).
+    machine_clones: Arc<super::machine_projects::Clones>,
+    /// Stands in for the runtime user's home directory in tests (`machine/6`).
+    #[cfg(test)]
+    home_for_tests: Mutex<Option<std::path::PathBuf>>,
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    /// Stands in for the agents' login probes in tests (PRO-350).
+    #[cfg(test)]
+    sign_ins_for_tests: Mutex<Option<HashMap<String, super::machine_agents::Probed>>>,
+    /// Stands in for a setup step's installer or sign-in in tests (PRO-350).
+    #[cfg(test)]
+    setup_command_for_tests: Mutex<Option<String>>,
     #[cfg(test)]
     commands_for_tests: Mutex<Option<Option<Vec<SlashCommand>>>>,
     /// Terminal input this runtime counted as use of the workspace (the
@@ -489,6 +607,7 @@ impl WorkspaceRpc {
             terminals,
             sessions,
             ptys: Mutex::new(HashMap::new()),
+            evicted_runs: Mutex::new(HashMap::new()),
             removed_agent_tabs: Mutex::new(VecDeque::new()),
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
@@ -504,8 +623,16 @@ impl WorkspaceRpc {
             machine_changed: Arc::new(tokio::sync::Notify::new()),
             machine_access: OnceLock::new(),
             machine_updates: Mutex::new(None),
+            update_baseline: Mutex::new(None),
+            machine_clones: Arc::new(super::machine_projects::Clones::default()),
+            #[cfg(test)]
+            home_for_tests: Mutex::new(None),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            sign_ins_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            setup_command_for_tests: Mutex::new(None),
             #[cfg(test)]
             commands_for_tests: Mutex::new(None),
             #[cfg(test)]
@@ -757,9 +884,15 @@ impl WorkspaceRpc {
     /// record (read every [`UPDATE_STATUS_POLL`]), a release check, the
     /// blockers and the connected computers.
     fn serve_updates(self: &Arc<Self>, updates: super::machine_update::MachineUpdates) {
+        let updates = Arc::new(updates);
+        let previous = self.machine_updates.lock().unwrap().replace(updates);
+        // What the status is as these updates start being served, taken
+        // now: a change made after this returns is sent, however late the
+        // watcher's first look at them comes on a busy machine.
+        *self.update_baseline.lock().unwrap() = self.update_fingerprint();
         // One watcher, whichever updates it serves (a test replaces them):
         // woken to take its first look at the new ones now.
-        if let Some(previous) = self.machine_updates.lock().unwrap().replace(Arc::new(updates)) {
+        if let Some(previous) = previous {
             previous.changed.notify_one();
             return;
         }
@@ -771,15 +904,22 @@ impl WorkspaceRpc {
             loop {
                 // Held only while it looks: the runtime may drop meanwhile.
                 let Some(rpc) = weak.upgrade() else { return };
-                let fingerprint = tokio::task::spawn_blocking(move || rpc.update_fingerprint()).await.ok().flatten();
-                if fingerprint.is_some() && fingerprint != last {
-                    // The first look at these updates only sets what later
-                    // ones compare with.
-                    if last.as_ref().zip(fingerprint.as_ref()).is_some_and(|(last, now)| last.0 == now.0) {
+                let looked = tokio::task::spawn_blocking(move || {
+                    let fingerprint = rpc.update_fingerprint();
+                    (fingerprint, rpc.update_baseline.lock().unwrap().clone())
+                })
+                .await
+                .ok();
+                if let Some((Some(now), baseline)) = looked {
+                    // New updates are compared with how they stood when served.
+                    if last.as_ref().is_none_or(|last| last.0 != now.0) {
+                        last = baseline.filter(|baseline| baseline.0 == now.0).or_else(|| Some(now.clone()));
+                    }
+                    if last.as_ref() != Some(&now) {
                         let Some(rpc) = weak.upgrade() else { return };
                         let _ = tokio::task::spawn_blocking(move || rpc.broadcast_update_status()).await;
+                        last = Some(now);
                     }
-                    last = fingerprint;
                 }
                 let Some(notify) = weak.upgrade().and_then(|rpc| rpc.updates()).map(|updates| updates.changed.clone()) else { return };
                 tokio::select! {
@@ -1006,8 +1146,80 @@ impl WorkspaceRpc {
             log::warn!("a collaboration list of an unknown version gives participants no access");
             Default::default()
         });
+        let _admission = self.collab.enter_admission();
         let first = !self.collab.known();
         let diff = self.collab.set_members(map);
+        self.reconcile_collaboration(diff, first);
+    }
+
+    /// Install the existing refresh response before processing its attachments.
+    /// Capability advertisement remains v1-only pending coordinated rollout.
+    pub(crate) fn set_refresh_collaboration(&self, value: Option<Value>, generation: u64, negotiated_v2: bool) -> anyhow::Result<()> {
+        let _admission = self.collab.enter_admission();
+        anyhow::ensure!(generation == self.generation.load(Ordering::SeqCst), "retired collaboration refresh generation");
+        let first = !self.collab.known();
+        let Some(value) = value else {
+            if self.collab.runtime_policy.is_v2() {
+                let diff = self.collab.set_members(Default::default());
+                self.reconcile_collaboration(diff, first);
+                anyhow::bail!("missing collaboration snapshot after v2");
+            }
+            return Ok(());
+        };
+        if value.get("v").and_then(Value::as_u64) == Some(2) {
+            if !negotiated_v2 {
+                let diff = self.collab.set_members(Default::default());
+                self.reconcile_collaboration(diff, true);
+                anyhow::bail!("collaboration-v2 was not negotiated by this native runtime");
+            }
+            anyhow::ensure!(self.collab.runtime_policy.matches_generation(generation), "collaboration policy generation changed");
+            let before: Vec<_> = self.live_peers().into_iter().filter_map(|peer| {
+                let user = peer.user_id.clone()?;
+                Some((peer, self.collab.runtime_policy.stamp(&user)))
+            }).collect();
+            let result = serde_json::from_value::<collab::v2::Snapshot>(value)
+                .map_err(anyhow::Error::from).and_then(|snapshot| self.collab.install_v2(snapshot));
+            match result {
+                Ok(diff) => {
+                    // Same-role provenance changes also retire both workspace and
+                    // session attachments. Pending work retains its old stamp.
+                    for (peer, stamp) in before {
+                        if stamp.as_ref().is_some_and(|old| !self.collab.runtime_policy.same_member(old)) {
+                            peer.closed.notify_one();
+                            self.disconnect(&peer);
+                        }
+                    }
+                    self.reconcile_collaboration(diff, true);
+                    Ok(())
+                }
+                Err(error) => {
+                    for peer in self.live_peers() {
+                        peer.closed.notify_one();
+                        self.disconnect(&peer);
+                    }
+                    let diff = self.collab.set_members(Default::default());
+                    self.reconcile_collaboration(diff, first);
+                    Err(error)
+                }
+            }
+        } else {
+            let members = match serde_json::from_value::<collab::Members>(value) {
+                Ok(members) => members,
+                Err(error) => {
+                    let diff = self.collab.set_members(Default::default());
+                    self.reconcile_collaboration(diff, first);
+                    return Err(error.into());
+                }
+            };
+            let known_version = members.v == 1;
+            self.set_collaboration(Some(members));
+            anyhow::ensure!(known_version, "unknown collaboration snapshot version");
+            anyhow::ensure!(!self.collab.runtime_policy.is_v2(), "legacy snapshot after v2");
+            Ok(())
+        }
+    }
+
+    fn reconcile_collaboration(&self, diff: collab::Diff, first: bool) {
         if diff.changed.is_empty() && !first {
             return;
         }
@@ -1161,6 +1373,9 @@ impl WorkspaceRpc {
 
     /// Follow the relay host when it registers a newer generation.
     pub fn set_generation(&self, generation: u64) {
+        let _admission = self.collab.enter_admission();
+        if generation < self.generation.load(Ordering::SeqCst) { return; }
+        self.collab.runtime_policy.set_generation(generation);
         self.generation.store(generation, Ordering::SeqCst);
     }
 
@@ -1336,7 +1551,11 @@ impl WorkspaceRpc {
     fn may_use_ports(&self, peer: &Peer) -> bool {
         let spec = protocol::find_method("ports.open").expect("ports.open is a method");
         let authority = self.authority(peer);
-        authority >= spec.authority && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
+        let user = peer.user_id.as_deref().unwrap_or("");
+        let stamp = self.collab.runtime_policy.stamp(user);
+        authority >= spec.authority && self.access(peer).can_configure()
+            && self.collab.runtime_policy.admit(user, stamp.as_ref(), collab::v2::Action::Configure, None).is_ok()
+            && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
     }
 
     /// Answer `ports.open` in order with the connection's notifications, and
@@ -1352,10 +1571,54 @@ impl WorkspaceRpc {
         }
     }
 
+    /// Run an admitted call. On a machine, a session made, a terminal opened
+    /// or an update asked for goes in the machine's activity log (PRO-357),
+    /// with the project's name or the version and nothing else.
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        let noted = self.is_machine() && matches!(method, "session.create" | "pty.create" | "machine.update");
+        let asked_project = params["projectId"].as_str().map(str::to_string);
+        let asked_version = params["version"].as_str().filter(|_| method == "machine.update").map(str::to_string);
+        let result = self.run_method(peer, method, params, ticket).await;
+        if let (true, Ok(value), Some(access)) = (noted, &result, self.machine_access.get()) {
+            let project = value["projectId"].as_str().or(value["session"]["projectId"].as_str()).map(str::to_string).or(asked_project);
+            access.note(&peer.device_id, method, project.as_deref(), asked_version.as_deref());
+        }
+        result
+    }
+
+    async fn run_method(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+        // Native stamp, captured before handing work to the blocking pool.
+        // Never read a stamp or generation supplied in request params.
+        let policy_stamp = peer.user_id.as_deref().and_then(|user| self.collab.runtime_policy.stamp_for_peer(user, peer));
+        if method == "environment.cancel" {
+            return super::environment::cancel(peer.id(), &params);
+        }
+        if method == "environment.report" {
+            // Retain admission until every probe and its I/O have ended.
+            let _privacy = ticket.enter().map_err(|_| RpcError::forbidden("Environment report is unavailable"))?;
+            return super::environment::report(peer.id(), &params, || {
+                ticket.valid() && !peer.hung_up() && peer.granted("environment/1") &&
+                    self.authority(peer) == Authority::Manage
+            }).await;
+        }
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket).await;
+            if !self.may_use_ports(peer) {
+                self.ports.revoke(peer);
+                return Err(RpcError::forbidden("Ports require current explicit configuration authority"));
+            }
+            let permit = collab::v2::Permit::new(self.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp, collab::v2::Action::Configure).for_peer(peer);
+            return self.ports.handle_admitted(peer, method, params, &|| self.may_use_ports(peer), ticket, Some(permit)).await;
+        }
+        // A fresh device token for the paired computer that asks (`machine/5`, PRO-357).
+        if method == "machine.rotateCredential" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.rotate_credential(&peer.device_id).await,
+                None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
+            };
         }
         // A round trip to the relay, for a paired computer only (`machine/2`).
         if method == "machine.relayAccess" {
@@ -1381,14 +1644,30 @@ impl WorkspaceRpc {
                 let hook = BEFORE_REMOTE_WORK.lock().unwrap().take();
                 if let Some(hook) = hook { hook(); }
             }
-            crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params))
+            let action = if matches!(method.as_str(), "session.decide") { collab::v2::Action::Approve }
+                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt") { collab::v2::Action::Drive }
+                else { collab::v2::Action::Configure };
+            let permit = collab::v2::Permit::new(rpc.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp.clone(), action).for_peer(&peer);
+            permit.with(|| crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp)))
         })
             .await
             .map_err(RpcError::internal)?
     }
 
-    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         self.check_named_project(method, &params)?;
+        let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
+        // Raw input only enters a queue here. Its final physical writer holds
+        // admission after acquiring the PTY lock; taking it at ingress would
+        // block acknowledgement of a queued request behind a partial write.
+        let _configuration_admission = (configuration && method != "pty.write").then(|| self.collab.enter_admission());
+        if configuration {
+            if !self.access(peer).can_configure() {
+                return Err(RpcError::forbidden("Agent settings and terminal input need independent approval rights"));
+            }
+            self.collab.runtime_policy.admit(peer.user_id.as_deref().unwrap_or(""), policy_stamp.as_ref(), collab::v2::Action::Configure, None)
+                .map_err(|_| RpcError::forbidden("Agent settings and terminal input require current explicit configuration authority"))?;
+        }
         // The project a call names, resolved once and checked before it runs.
         let project = || self.project(peer, &params);
         match method {
@@ -1430,6 +1709,22 @@ impl WorkspaceRpc {
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "machine.updateStatus" | "machine.update" => self.machine_update_call(peer, method, &params),
+            "machine.agentSetup" => match &self.scope {
+                Scope::Machine { .. } => self.machine_agent_setup(peer, params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.agentSetupRunning" => match &self.scope {
+                Scope::Machine { .. } => self.machine_agent_setup_running(&params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.browse" | "machine.addProject" | "machine.removeProject" | "machine.cloneProject" | "machine.cloneStatus" | "machine.cloneCancel" => match &self.scope {
+                Scope::Machine { .. } => self.machine_projects_call(method, &params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "machine.sessionActions" | "machine.runAction" | "machine.setupRerun" | "machine.setupStop" => match &self.scope {
+                Scope::Machine { .. } => self.machine_session_run_call(peer, method, &params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
             "cleanup.scan" => self.cleanup_scan(),
             "cleanup.size" => self.cleanup_size(peer, params),
             "cleanup.cancel" => self.cleanup_cancel(peer),
@@ -1461,6 +1756,9 @@ impl WorkspaceRpc {
                 if params.get("repository").is_some_and(|target| !target.is_null()) && !peer.granted("session-repository/1") {
                     return Err(RpcError::new("capability_not_granted", "Repository session routing was not negotiated."));
                 }
+                if params.get("baseRef").is_some_and(|base| !base.is_null()) && !peer.granted("session-base/1") {
+                    return Err(RpcError::new("capability_not_granted", "Choosing the branch a session starts from was not negotiated."));
+                }
                 // On a machine, refused here without `machine/1` or a project.
                 if self.is_machine() {
                     project()?;
@@ -1469,11 +1767,18 @@ impl WorkspaceRpc {
             },
             "session.close" => self.session_close(params),
             "session.send" if self.durable_command(peer, protocol::find_method("session.send").expect("session.send is a method")) => {
-                self.agent_command(peer, "session.send", params)
+                self.agent_command(peer, "session.send", params, policy_stamp)
             }
             "session.send" => self.session_send(peer, params),
-            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params),
-            "session.interrupt" => self.session_interrupt(peer, params),
+            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params, policy_stamp),
+            "session.interrupt" => {
+                let _admission = self.collab.enter_admission();
+                if let Some(permit) = collab::v2::current().filter(|_| self.collab.runtime_policy.is_v2()) {
+                    let (session, tab) = self.known_tab(&params)?;
+                    permit.check(self.manager()?.collaboration_v2_witness(&session, &tab).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+                }
+                self.session_interrupt(peer, params)
+            },
             "session.toTerminal" => self.session_to_terminal(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
@@ -1485,7 +1790,7 @@ impl WorkspaceRpc {
             "session.update" => self.session_update(peer, params),
             "session.addTab" => self.session_add_tab(peer, params),
             "session.delete" => self.session_delete(peer, params),
-            "runtime.agents" => self.runtime_agents(),
+            "runtime.agents" => self.runtime_agents(peer, &params),
             "session.nudge" => {
                 self.agents()?.poll.raise();
                 Ok(json!({}))
@@ -1558,6 +1863,11 @@ impl WorkspaceRpc {
         }
         // Before its streams are ended, so an open still connecting sees it.
         peer.gone.store(true, Ordering::SeqCst);
+        {
+            // Publish cancellation before waiting for an admitted physical
+            // write. Queued writers waiting for input capacity own no guard.
+            let _admission = self.collab.enter_admission();
+        }
         // Released here, not when the last reference to the peer goes: a
         // connection that ended must not keep the workspace awake.
         *peer.attached.lock().unwrap() = None;
@@ -1757,13 +2067,14 @@ impl WorkspaceRpc {
             let terminals = self.terminals.clone();
             let pending = input_pending.clone();
             let pane = pty_id.to_string();
+            let manager = self.manager().ok().cloned();
             std::thread::Builder::new()
                 .name(format!("agent-pty-input-{tab_id}"))
                 .spawn(move || {
                     // Ends when the entry (the sender) is dropped with its tab.
                     for data in queue {
                         // Between two CLIs there is nothing to type into.
-                        let _ = terminals.write_remote(&pane, &data.data, &data.privacy);
+                        let _ = data.write(&terminals, manager.as_ref(), &pane);
                         pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                     }
                 })
@@ -1795,6 +2106,8 @@ impl WorkspaceRpc {
                     input_pending,
                     subscribers: HashMap::new(),
                     agent: Some(AgentPty { tab_id: tab_id.to_string(), session_id: None }),
+                    setup: None,
+                    run: None,
                 },
             );
         }
@@ -1925,6 +2238,14 @@ impl WorkspaceRpc {
             described["tabId"] = json!(agent.tab_id);
             described["running"] = json!(self.terminals.is_running(pty_id));
         }
+        if let Some(setup) = &pty.setup {
+            described["setup"] = json!({ "harness": setup.harness, "step": setup.step.name() });
+        }
+        // `machine/7`: one of its session's script runs, which the dock shows
+        // under Setup and Run rather than as a numbered shell.
+        if let Some(run) = &pty.run {
+            described["run"] = run.wire();
+        }
         // `pty/2`, and only a session this peer may see; absent for a
         // terminal that belongs to no session.
         if let Some(session_id) = pty.session_id.as_ref().filter(|id| scope.is_some_and(|visible| visible.contains(*id))) {
@@ -1978,28 +2299,49 @@ impl WorkspaceRpc {
         if !cwd.is_dir() {
             return Err(RpcError::invalid("cwd is not a directory"));
         }
+        let start_in = cwd.to_string_lossy().into_owned();
+        self.start_pty(
+            peer,
+            NewPty {
+                cwd: project.files.relative(&cwd),
+                start_in: &start_in,
+                command: None,
+                session_id: session.map(|session| session.id),
+                project_id: project.id.clone(),
+                cols: p.cols,
+                rows: p.rows,
+                setup: None,
+            },
+        )
+        .map(|(_, described)| described)
+    }
+
+    /// Start a terminal this runtime's peers attach to, as `pty.create`
+    /// does: its id and how `pty.list` describes it.
+    fn start_pty(&self, peer: &Peer, new: NewPty<'_>) -> Result<(String, Value), RpcError> {
         let pty_id = format!("{PTY_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
         let input_pending = Arc::new(AtomicUsize::new(0));
         {
             let mut ptys = self.ptys.lock().unwrap();
-            if ptys.values().filter(|pty| pty.agent.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
+            // A setup step is not one of the shells this limit is for.
+            if new.setup.is_none() && ptys.values().filter(|pty| pty.agent.is_none() && pty.setup.is_none() && pty.run.is_none() && pty.exit.is_none() && !pty.closed).count() >= MAX_PTYS {
                 return Err(RpcError::new("unavailable", format!("at most {MAX_PTYS} terminals may run at once")));
             }
             ptys.insert(
                 pty_id.clone(),
                 PtyState {
                     number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
-                    cwd: project.files.relative(&cwd),
-                    session_id: session.map(|session| session.id),
-                    project_id: project.id.clone(),
+                    cwd: new.cwd,
+                    session_id: new.session_id,
+                    project_id: new.project_id,
                     created_at_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|elapsed| elapsed.as_millis() as u64)
                         .unwrap_or(0),
                     pid: None,
-                    cols: p.cols,
-                    rows: p.rows,
+                    cols: new.cols,
+                    rows: new.rows,
                     controller: Some(peer.device_id.clone()),
                     controller_user: Some((peer.user_id.clone(), peer.authority)),
                     controller_installation: peer.installation_key.clone(),
@@ -2014,23 +2356,26 @@ impl WorkspaceRpc {
                     input_pending: input_pending.clone(),
                     subscribers: HashMap::new(),
                     agent: None,
+                    setup: new.setup,
+                    run: None,
                 },
             );
         }
         let scope = self.pty_session_scope(peer);
-        let cwd = cwd.to_string_lossy().into_owned();
-        let spec = PaneSpec { cwd: &cwd, cols: p.cols, rows: p.rows, command: None, env: &[] };
+        // The machine's own environment: nothing of the caller's is passed.
+        let spec = PaneSpec { cwd: new.start_in, cols: new.cols, rows: new.rows, command: new.command, env: &[] };
         if let Err(error) = self.terminals.spawn(self.sink.clone(), &pty_id, spec) {
             self.ptys.lock().unwrap().remove(&pty_id);
             return Err(RpcError::internal(error));
         }
         let terminals = self.terminals.clone();
         let writer_id = pty_id.clone();
+        let manager = self.manager().ok().cloned();
         let spawned = std::thread::Builder::new().name(format!("pty-input-{pty_id}")).spawn(move || {
             // Ends when the terminal's entry (the sender) is dropped, or the
             // program is gone; its exit is reported through `pty.exit`.
             for data in queue {
-                let written = terminals.write_remote(&writer_id, &data.data, &data.privacy);
+                let written = data.write(&terminals, manager.as_ref(), &writer_id);
                 input_pending.fetch_sub(data.data.len(), Ordering::SeqCst);
                 // A program that stopped reading loses this input, not every
                 // later keystroke: it may read again.
@@ -2047,21 +2392,28 @@ impl WorkspaceRpc {
         let mut ptys = self.ptys.lock().unwrap();
         let pty = ptys.get_mut(&pty_id).ok_or_else(|| RpcError::internal("the terminal exited while starting"))?;
         pty.pid = self.terminals.pid(&pty_id);
-        Ok(self.describe_pty(&pty_id, pty, peer, scope.as_ref()))
+        let described = self.describe_pty(&pty_id, pty, peer, scope.as_ref());
+        Ok((pty_id, described))
     }
 
     /// Terminals of this runtime, oldest first; closed ones are gone.
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let scope = self.pty_session_scope(peer);
         let connected = self.connected_devices();
+        // Read before the terminals are locked: the runtime's own panes.
+        let shells = if self.is_machine() && scope.is_some() { self.terminals.shells() } else { Vec::new() };
         let mut ptys = self.ptys.lock().unwrap();
+        self.record_session_runs(&mut ptys, &shells, scope.as_ref());
         for (pty_id, pty) in ptys.iter_mut().filter(|(_, pty)| !pty.closed && pty.agent.is_none()) {
             self.resume_control(pty_id, pty, peer, &connected);
         }
         let mut listed: Vec<(u64, Value)> = ptys
             .iter()
             // An agent tab's terminal is reached from its tab, never listed as a shell.
-            .filter(|(_, pty)| !pty.closed && pty.agent.is_none())
+            // Nor is an agent's setup step: the machine's page shows it (PRO-350).
+            .filter(|(_, pty)| !pty.closed && pty.agent.is_none() && pty.setup.is_none())
+            // A session's script run is listed only to those who see its session.
+            .filter(|(_, pty)| pty.run.is_none() || pty.session_id.as_ref().is_some_and(|id| scope.as_ref().is_some_and(|visible| visible.contains(id))))
             .map(|(id, pty)| (pty.number, self.describe_pty(id, pty, peer, scope.as_ref())))
             .collect();
         listed.sort_by_key(|(number, _)| *number);
@@ -2135,6 +2487,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_write(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let seq = params.get("seq").and_then(Value::as_u64).filter(|seq| *seq > 0).ok_or_else(|| RpcError::invalid("seq must be a positive integer"))?;
         let data = required_str(&params, "data")?;
         if data.len() > MAX_WRITE_BYTES {
@@ -2185,7 +2538,7 @@ impl WorkspaceRpc {
             return Err(RpcError::new("backpressure", "the program is not reading its input yet; retry"));
         }
         pty.input_pending.fetch_add(data.len(), Ordering::SeqCst);
-        if pty.input.send(PtyInput { data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
+        if pty.input.send(PtyInput { collaboration: collab::v2::current(), pid: self.terminals.pid(&pty_id), data: data.as_bytes().to_vec(), privacy: crate::data_privacy::remote_ticket().unwrap_or_else(crate::data_privacy::Ticket::denied) }).is_err() {
             pty.input_pending.fetch_sub(data.len(), Ordering::SeqCst);
             return Err(RpcError::new("unavailable", "the terminal has exited"));
         }
@@ -2251,6 +2604,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_resize(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let (cols, rows) = Self::size_params(&params)?.ok_or_else(|| RpcError::invalid("cols and rows must be between 1 and 1000"))?;
         if let Some((session_id, tab_id)) = self.agent_pty(peer, &params)? {
             if let Some(refusal) = self.agent_input_refusal(peer, &session_id, &tab_id) {
@@ -2272,6 +2626,7 @@ impl WorkspaceRpc {
 
     /// Take over a terminal's input and size, optionally at this client's size.
     fn pty_control(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let size = Self::size_params(&params)?;
         let scope = self.pty_session_scope(peer);
         let agent = self.agent_pty(peer, &params)?;
@@ -2388,6 +2743,9 @@ impl WorkspaceRpc {
         let (pty_id, exited) = {
             let mut ptys = self.ptys.lock().unwrap();
             let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
+            if pty.run == Some(SessionRun::Setup) {
+                return Err(RpcError::forbidden("a workspace's setup is stopped with machine.setupStop"));
+            }
             pty.closed = true;
             (pty_id, pty.exit.is_some())
         };
@@ -2404,6 +2762,9 @@ impl WorkspaceRpc {
     /// is gone. Returns their subscriptions, to forget once unlocked.
     fn remove_pty(ptys: &mut HashMap<String, PtyState>, pty_id: &str) -> Vec<String> {
         let Some(pty) = ptys.remove(pty_id) else { return Vec::new() };
+        if pty.setup.is_some() {
+            crate::harness::setup::ended_elsewhere(pty_id);
+        }
         for (subscription_id, peer) in &pty.subscribers {
             peer.notify("pty.closed", json!({ "subscriptionId": subscription_id, "ptyId": pty_id }));
         }
@@ -2421,6 +2782,7 @@ impl WorkspaceRpc {
     }
 
     fn pty_attach(&self, peer: &Arc<Peer>, params: Value) -> Result<Value, RpcError> {
+        self.setup_pty_refusal(peer, &params)?;
         let since = params.get("sinceOffset").and_then(Value::as_u64);
         if since.is_some() {
             let generation = params.get("runtimeGeneration").and_then(Value::as_u64);
@@ -2480,9 +2842,117 @@ impl WorkspaceRpc {
         Ok(result)
     }
 
+    /// The entry of a session's script run (`machine/7`), made on its first
+    /// output, on the listing that first finds it, or when `machine.runAction`
+    /// starts it. `title` is the pane's, which names the action. An entry made
+    /// for a pane whose program has already exited (`backfill`) is given what
+    /// the runtime kept of its output: nothing more can arrive to repeat it.
+    /// A pane still running is recorded from here on, so one that started
+    /// before this server existed shows its output from then. Called with the
+    /// terminals locked; `None` for a pane of no session of this machine.
+    fn run_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pane: &str, title: Option<&str>, discovery: RunDiscovery) -> Option<&'a mut PtyState> {
+        if !ptys.contains_key(pane) {
+            let observed_exit = matches!(discovery, RunDiscovery::Exit);
+            // The runtime can finish the pane before delivering its exit.
+            // If listing found it in that interval, let the real exit take
+            // its place in the retention order even after backfill eviction.
+            if self.evicted_runs.lock().unwrap().get(pane)
+                .is_some_and(|evicted| !observed_exit || matches!(evicted, EvictedRun::Observed))
+            {
+                return None;
+            }
+            let Scope::Machine { projects, .. } = &self.scope else { return None };
+            let (session_id, run) = SessionRun::of_pane(pane, title.map(str::to_string).or_else(|| self.terminals.title(pane).map(|(title, _)| title)).as_deref())?;
+            let session = index::get(&session_id).ok()?;
+            let project = projects.get(&machine::project_id(&session.project_path)).ok()?;
+            let running = !observed_exit && self.terminals.is_running(pane);
+            if !running && self.terminals.shell(pane).is_none() {
+                return None;
+            }
+            // Historical runs can fill spare slots. Only observed exits can
+            // displace records, and an observed exit always outranks backfill.
+            if !running && !observed_exit
+                && ptys.values().filter(|pty| pty.exit.is_some() && !pty.stop_pending).count() >= MAX_EXITED_PTYS
+            {
+                return None;
+            }
+            let cwd = std::fs::canonicalize(&session.cwd).ok().filter(|cwd| project.files.contains(cwd)).map(|cwd| project.files.relative(&cwd)).unwrap_or_else(|| ".".into());
+            let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
+            let input_pending = Arc::new(AtomicUsize::new(0));
+            let terminals = self.terminals.clone();
+            let pending = input_pending.clone();
+            let writer = pane.to_string();
+            let manager = self.manager().ok().cloned();
+            std::thread::Builder::new()
+                .name(format!("run-pty-input-{session_id}"))
+                .spawn(move || {
+                    for data in queue {
+                        let written = data.write(&terminals, manager.as_ref(), &writer);
+                        pending.fetch_sub(data.data.len(), Ordering::SeqCst);
+                        if written.is_err_and(|error| !error.is::<crate::pty::InputStalled>()) {
+                            break;
+                        }
+                    }
+                })
+                .ok()?;
+            let ring: VecDeque<u8> = if !running && !matches!(discovery, RunDiscovery::Active) {
+                let kept = self.terminals.read_output(pane).unwrap_or_default();
+                kept[kept.len().saturating_sub(PTY_RING_BYTES)..].iter().copied().collect()
+            } else {
+                VecDeque::new()
+            };
+            ptys.insert(
+                pane.to_string(),
+                PtyState {
+                    number: self.next_pty_number.fetch_add(1, Ordering::SeqCst),
+                    cwd,
+                    session_id: Some(session_id),
+                    project_id: project.id.clone(),
+                    created_at_ms: crate::cloud_agents::now_ms(),
+                    pid: self.terminals.pid(pane),
+                    cols: 120,
+                    rows: 30,
+                    controller: None,
+                    controller_user: None,
+                    controller_installation: None,
+                    end: ring.len() as u64,
+                    ring,
+                    // Its code was the runtime's to hear; this server did not.
+                    exit: (!running).then_some(None),
+                    exited_at: None,
+                    closed: false,
+                    stop_pending: false,
+                    applied_seq: HashMap::new(),
+                    input,
+                    input_pending,
+                    subscribers: HashMap::new(),
+                    agent: None,
+                    setup: None,
+                    run: Some(run),
+                },
+            );
+        }
+        ptys.get_mut(pane).filter(|pty| pty.run.is_some())
+    }
+
+    /// Discover live runs of visible sessions and fill spare exit slots from
+    /// the runtime's history. Keep eviction history while the pane exists.
+    /// Called with the terminals locked.
+    fn record_session_runs(&self, ptys: &mut HashMap<String, PtyState>, shells: &[crate::pty::ShellPane], scope: Option<&HashSet<String>>) {
+        let Some(visible) = scope else { return };
+        self.evicted_runs.lock().unwrap().retain(|id, _| self.terminals.shell(id).is_some());
+        for shell in shells {
+            if visible.contains(&shell.session_id) && !ptys.contains_key(&shell.id) && SessionRun::of_pane(&shell.id, None).is_some() {
+                self.run_entry(ptys, &shell.id, shell.title.as_deref(), RunDiscovery::Backfill);
+            }
+        }
+    }
+
     fn on_pty_data(&self, data: PtyData) {
         let agent = data.id.starts_with(AGENT_PTY_PREFIX);
-        if !agent && !data.id.starts_with(PTY_PREFIX) {
+        // A session's script run on a machine is recorded from its first byte, as an agent's terminal is.
+        let run = !agent && self.is_machine() && SessionRun::of_pane(&data.id, None).is_some();
+        if !agent && !run && !data.id.starts_with(PTY_PREFIX) {
             return;
         }
         let Ok(bytes) = STANDARD.decode(&data.data) else { return };
@@ -2498,6 +2968,11 @@ impl WorkspaceRpc {
                     Ok(pty) => pty,
                     // Its tab is gone (the last bytes of a CLI that was just stopped).
                     Err(_) => return,
+                }
+            } else if run {
+                match self.run_entry(&mut ptys, &data.id, None, RunDiscovery::Active) {
+                    Some(pty) => pty,
+                    None => return,
                 }
             } else {
                 let Some(pty) = ptys.get_mut(&data.id) else { return };
@@ -2555,7 +3030,22 @@ impl WorkspaceRpc {
         let mut ended = Vec::new();
         let evicted = {
             let mut ptys = self.ptys.lock().unwrap();
-            let Some(pty) = ptys.get_mut(&exit.id) else { return };
+            let pty = if ptys.contains_key(&exit.id) {
+                ptys.get_mut(&exit.id)
+            } else if self.is_machine() && SessionRun::of_pane(&exit.id, None).is_some() {
+                self.run_entry(&mut ptys, &exit.id, None, RunDiscovery::Exit)
+            } else {
+                None
+            };
+            let Some(pty) = pty else { return };
+            if pty.setup.is_some() {
+                // Installed or signed in, or not: what the agents' logins say now is read again.
+                crate::harness::setup::ended_elsewhere(&exit.id);
+                super::machine_agents::forget();
+            }
+            if pty.run.is_some() {
+                self.evicted_runs.lock().unwrap().remove(&exit.id);
+            }
             pty.exit = Some(exit.code);
             pty.exited_at = Some(Instant::now());
             for (subscription_id, peer) in &pty.subscribers {
@@ -2569,14 +3059,23 @@ impl WorkspaceRpc {
             }
             // Exited terminals keep their output for a late reader, up to a
             // bound: the oldest are dropped first.
-            let mut exited: Vec<(Instant, String)> =
-                ptys.iter().filter(|(_, pty)| !pty.stop_pending).filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+            let mut exited: Vec<_> = ptys.iter()
+                .filter(|(_, pty)| pty.exit.is_some() && !pty.stop_pending)
+                .map(|(id, pty)| (pty.exited_at, id.clone()))
+                .collect();
             let mut evicted = Vec::new();
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
-                for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                for (exited_at, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                    // A session's script run is the runtime's pane: only this record of it goes.
+                    let owned = ptys.get(&id).is_some_and(|pty| pty.run.is_none());
                     ended.extend(Self::remove_pty(&mut ptys, &id));
-                    evicted.push(id);
+                    if owned {
+                        evicted.push(id);
+                    } else {
+                        let eviction = if exited_at.is_some() { EvictedRun::Observed } else { EvictedRun::Backfilled };
+                        self.evicted_runs.lock().unwrap().insert(id, eviction);
+                    }
                 }
             }
             evicted
@@ -2878,8 +3377,13 @@ impl WorkspaceRpc {
             /// `machine/1`: the project the session runs in.
             #[serde(default)]
             project_id: Option<String>,
+            /// `session-base/1` (PRO-348): the branch the new worktree is cut
+            /// from, as `git.branches` lists it; the default branch without it.
+            #[serde(default)]
+            base_ref: Option<String>,
         }
         let mut p: Params = parse(params)?;
+        let base_ref = p.base_ref.take().filter(|_| p.use_worktree).map(|base| check_base_ref(&base)).transpose()?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
@@ -2944,7 +3448,7 @@ impl WorkspaceRpc {
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
-                base_ref: None,
+                base_ref,
                 checkout_branch: None,
                 checkout_pr: None,
                 worktree_name: p.worktree_name.filter(|_| p.use_worktree),
@@ -3162,8 +3666,23 @@ impl WorkspaceRpc {
 
     /// `agents/1`: the installed agents, each with its models (and their
     /// efforts) and the launch modes it takes. Paths on the VM stay here.
-    fn runtime_agents(&self) -> Result<Value, RpcError> {
-        let installed: Vec<crate::harness::HarnessInfo> = self.offered_agents().into_iter().filter(|agent| agent.available).collect();
+    fn runtime_agents(&self, peer: &Peer, params: &Value) -> Result<Value, RpcError> {
+        let offered = self.offered_agents();
+        // PRO-350: on a machine, each agent's version and login there, and
+        // the agents it has no CLI for. A cloud workspace's agents sign in
+        // through its own flows, so it starts no probe.
+        let machine = matches!(self.scope, Scope::Machine { .. });
+        // Each probe starts a process there: only a manager makes them run
+        // now; anyone else is answered from the kept check.
+        let refresh = params["refresh"].as_bool().unwrap_or(false) && peer.authority == Authority::Manage;
+        let missing = machine.then(|| super::machine_agents::missing(&offered));
+        let installed: Vec<crate::harness::HarnessInfo> = offered.into_iter().filter(|agent| agent.available).collect();
+        let sign_ins: HashMap<String, super::machine_agents::SignIn> = if machine {
+            let probe = self.sign_in_probe();
+            installed.iter().map(|agent| (agent.id.clone(), super::machine_agents::sign_in(agent, refresh, &*probe))).collect()
+        } else {
+            HashMap::new()
+        };
         // Codex's list depends on the signed-in account; ask only when it can run.
         let codex = if installed.iter().any(|agent| agent.id == "codex") {
             match &self.sessions {
@@ -3200,17 +3719,277 @@ impl WorkspaceRpc {
                     })
                     .collect();
                 let modes: &[&str] = if agent.caps.permission_modes { &PERMISSION_MODES } else { &[] };
-                json!({
+                let mut described = json!({
                     "id": agent.id,
                     "name": agent.name,
                     "caps": agent.caps,
                     "models": own,
                     "modes": modes,
                     "defaultMode": index::DEFAULT_PERMISSION_MODE,
-                })
+                });
+                if let Some(sign_in) = sign_ins.get(&agent.id) {
+                    described["version"] = json!(sign_in.version);
+                    described["signIn"] = json!(sign_in.state);
+                    described["signInCheckedAt"] = json!(sign_in.checked_at);
+                }
+                described
             })
             .collect();
-        Ok(json!({ "agents": agents }))
+        let mut listed = json!({ "agents": agents });
+        if let Some(missing) = missing {
+            listed["missing"] = missing;
+        }
+        Ok(listed)
+    }
+
+    /// How an agent's login is read: its CLI, or a stand-in under test.
+    fn sign_in_probe(&self) -> Box<dyn Fn(&crate::harness::HarnessInfo) -> super::machine_agents::Probed> {
+        #[cfg(test)]
+        if let Some(states) = self.sign_ins_for_tests.lock().unwrap().clone() {
+            return Box::new(move |agent| states.get(&agent.id).cloned().unwrap_or((crate::harness::readiness::State::Unknown, None)));
+        }
+        Box::new(super::machine_agents::probe)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_sign_ins_for_tests(&self, states: HashMap<String, super::machine_agents::Probed>) {
+        *self.sign_ins_for_tests.lock().unwrap() = Some(states);
+    }
+
+    /// `machine/4`: an agent's install or sign-in in a terminal on the
+    /// machine (PRO-350). The command is the registry's, made here; the
+    /// caller names only the agent and the step. One step at a time per
+    /// agent, whoever asks: the machine's own window included.
+    fn machine_agent_setup(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        #[derive(Deserialize)]
+        struct Params {
+            harness: String,
+            step: String,
+            #[serde(default = "default_cols")]
+            cols: u16,
+            #[serde(default = "default_rows")]
+            rows: u16,
+        }
+        let p: Params = parse(params)?;
+        if p.cols == 0 || p.rows == 0 || p.cols > 1000 || p.rows > 1000 {
+            return Err(RpcError::invalid("cols and rows must be between 1 and 1000"));
+        }
+        let step = crate::harness::setup::Step::parse(&p.step).map_err(|error| RpcError::invalid(error.to_string()))?;
+        let command = self.setup_command(&p.harness, step)?;
+        let home = dirs::home_dir().ok_or_else(|| RpcError::internal("no home directory"))?;
+        let home = home.to_string_lossy().into_owned();
+        let mut started: Option<(String, Value)> = None;
+        let mut failed: Option<RpcError> = None;
+        // Its terminal id is made as it starts: noted as a step for another
+        // computer, which the window's own setup counts too.
+        let begun = crate::harness::setup::begin(
+            &p.harness,
+            None,
+            step,
+            || self.setup_running(&p.harness),
+            || {
+                match self.start_pty(
+                    peer,
+                    NewPty { cwd: "~".into(), start_in: &home, command: Some(&command), session_id: None, project_id: None, cols: p.cols, rows: p.rows, setup: Some(SetupPty { harness: p.harness.clone(), step }) },
+                ) {
+                    Ok(pty) => {
+                        crate::harness::setup::began_elsewhere(&p.harness, &pty.0);
+                        started = Some(pty);
+                    }
+                    Err(error) => {
+                        failed = Some(error);
+                        anyhow::bail!("not started");
+                    }
+                }
+                Ok(())
+            },
+        );
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        if let Err(error) = begun {
+            // Someone else's step of this agent runs: the caller follows it.
+            let run = self.setup_run(&p.harness);
+            let refused = RpcError::new("setup_busy", error.to_string());
+            return Err(match run {
+                Some(run) => refused.with_data(run),
+                None => refused,
+            });
+        }
+        let (_, described) = started.ok_or_else(|| RpcError::internal("the setup step did not start"))?;
+        Ok(described)
+    }
+
+    /// An agent's setup terminal is the manager's alone (PRO-350): a sign-in
+    /// shows a device code or a login address, and whoever completes it
+    /// decides whose account the machine's CLI signs in to.
+    fn setup_pty_refusal(&self, peer: &Peer, params: &Value) -> Result<(), RpcError> {
+        let Some(pty_id) = params["ptyId"].as_str() else { return Ok(()) };
+        let setup = self.ptys.lock().unwrap().get(pty_id).is_some_and(|pty| pty.setup.is_some());
+        if setup && peer.authority != Authority::Manage {
+            return Err(RpcError::new("forbidden", "only a manager may follow an agent's sign-in or install"));
+        }
+        Ok(())
+    }
+
+    /// `machine.agentSetupRunning`: the step of `harness` running in a
+    /// terminal a peer can attach to.
+    /// `machine/6` (PRO-351): a machine's projects from another computer.
+    /// Adding or removing one emits `projects_changed`, as `projects.add`
+    /// on the control socket does, so `machine.changed` goes out.
+    fn machine_projects_call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use super::machine_projects as projects;
+        match method {
+            "machine.browse" => projects::browse(&self.machine_home()?, params),
+            "machine.addProject" => {
+                let added = projects::add(&self.machine_home()?, params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(added)
+            }
+            "machine.removeProject" => {
+                let removed = projects::remove(params)?;
+                self.sink.emit("projects_changed", &());
+                Ok(removed)
+            }
+            "machine.cloneProject" => self.machine_clones.start(&self.machine_home()?, params, self.sink.clone()),
+            "machine.cloneStatus" => self.machine_clones.status(params),
+            "machine.cloneCancel" => self.machine_clones.cancel(params),
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/6 method"))),
+        }
+    }
+
+    /// The home directory `machine/6` stays under: the runtime user's.
+    fn machine_home(&self) -> Result<std::path::PathBuf, RpcError> {
+        #[cfg(test)]
+        if let Some(home) = self.home_for_tests.lock().unwrap().clone() {
+            return Ok(home);
+        }
+        super::machine_projects::home()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_home_for_tests(&self, home: &Path) {
+        *self.home_for_tests.lock().unwrap() = Some(std::fs::canonicalize(home).unwrap());
+    }
+
+    /// `machine/7` (PRO-403): a session's Setup and Run on this machine. The
+    /// project's saved actions, preview URLs and setup script are read from
+    /// this machine's own store, and every run is this runtime's, in the
+    /// session's folder here, exactly as for a session of its own window.
+    fn machine_session_run_call(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(params, "sessionId")?)?;
+        if method == "machine.sessionActions" {
+            return self.machine_session_actions(&session);
+        }
+        let manager = self.manager()?;
+        // What the runtime refuses (a removed worktree, an action no longer saved, a restart still stopping) is the person's to read.
+        let refused = |error: anyhow::Error| RpcError::new("conflict", format!("{error:#}"));
+        match method {
+            "machine.runAction" => {
+                let action_id = required_str(params, "actionId")?;
+                let restart = params.get("restart").and_then(Value::as_bool).unwrap_or(false);
+                let outcome = crate::action_runner::run(manager, &session.id, action_id, crate::action_runner::RunOptions { restart }).map_err(refused)?;
+                let scope = self.pty_session_scope(peer);
+                let mut ptys = self.ptys.lock().unwrap();
+                let terminal = self.run_entry(&mut ptys, &outcome.run.pane_id, Some(&outcome.run.name), RunDiscovery::Active).map(|pty| {
+                    // The person who started it types into it (a Ctrl-C, an answer to a prompt).
+                    if outcome.started {
+                        pty.controller = Some(peer.device_id.clone());
+                        pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+                        pty.controller_installation = peer.installation_key.clone();
+                    }
+                    self.describe_pty(&outcome.run.pane_id, pty, peer, scope.as_ref())
+                });
+                Ok(json!({
+                    "started": outcome.started,
+                    "run": {
+                        "actionId": outcome.run.action_id,
+                        "name": outcome.run.name,
+                        "ptyId": outcome.run.pane_id,
+                        "state": outcome.run.state,
+                        "exitCode": outcome.run.exit_code,
+                    },
+                    "terminal": terminal,
+                }))
+            }
+            "machine.setupRerun" => {
+                let setup = crate::workspace_setup::start(manager, &session.id, true).map_err(refused)?;
+                Ok(json!({ "setup": setup.as_ref().map(setup_wire) }))
+            }
+            "machine.setupStop" => {
+                let setup = crate::workspace_setup::stop(manager, &session.id, required_str(params, "paneId")?).map_err(refused)?;
+                Ok(json!({ "setup": setup.as_ref().map(setup_wire) }))
+            }
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/7 method"))),
+        }
+    }
+
+    /// `machine.sessionActions`: what the Run menu, the Open button and the
+    /// dock's Setup and Run tabs show for `session`, as this machine has it.
+    fn machine_session_actions(&self, session: &SessionEntry) -> Result<Value, RpcError> {
+        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let wanted = canonical(&session.project_path);
+        let project = machine::registered()?.into_iter().find(|project| canonical(&project.path) == wanted);
+        let (actions, preview_urls) = project.map(|project| (project.actions, project.preview_urls)).unwrap_or_default();
+        let setup = match self.manager() {
+            Ok(manager) => crate::workspace_setup::current(manager, &session.id).map_err(RpcError::internal)?,
+            Err(_) => None,
+        };
+        Ok(json!({
+            "actions": actions,
+            "previewUrls": preview_urls,
+            "setupScript": crate::workspace_setup::saved_script(&session.project_path),
+            // A workspace's own checkout runs setup; the project's folder does not.
+            "setupApplies": !session.worktree_removed && session.worktree_name.is_some() && session.cwd != session.project_path,
+            "available": !session.worktree_removed,
+            // What $PORT and $PORT_1..$PORT_9 are on the machine; null when not known.
+            "ports": index::workspace_ports::ports(&session.cwd).ok().filter(|ports| !ports.is_empty()),
+            "setup": setup.as_ref().map(setup_wire),
+        }))
+    }
+
+    fn machine_agent_setup_running(&self, params: &Value) -> Result<Value, RpcError> {
+        let harness = required_str(params, "harness")?;
+        Ok(json!({ "run": self.setup_run(harness) }))
+    }
+
+    /// The command for a step started from another computer.
+    fn setup_command(&self, harness: &str, step: crate::harness::setup::Step) -> Result<String, RpcError> {
+        #[cfg(test)]
+        if let Some(command) = self.setup_command_for_tests.lock().unwrap().clone() {
+            return Ok(command);
+        }
+        crate::harness::setup::command_elsewhere(harness, step).map_err(|error| RpcError::invalid(error.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_setup_command_for_tests(&self, command: &str) {
+        *self.setup_command_for_tests.lock().unwrap() = Some(command.to_string());
+    }
+
+    /// Every running setup step of `harness`: this runtime's peers' terminals
+    /// and its own window's setup panes.
+    fn setup_running(&self, harness: &str) -> Vec<String> {
+        let mut running: Vec<String> = self
+            .ptys
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, pty)| pty.setup.as_ref().is_some_and(|setup| setup.harness == harness) && pty.exit.is_none() && !pty.closed)
+            .map(|(id, _)| id.clone())
+            .collect();
+        running.extend(
+            self.terminals.panes().into_iter().filter(|pane| pane.running && crate::harness::setup::is_pane(harness, &pane.id)).map(|pane| pane.id),
+        );
+        running
+    }
+
+    /// `{ ptyId, step }` of the setup step of `harness` a peer can attach to, if one runs.
+    fn setup_run(&self, harness: &str) -> Option<Value> {
+        let ptys = self.ptys.lock().unwrap();
+        ptys.iter()
+            .filter(|(_, pty)| pty.exit.is_none() && !pty.closed)
+            .find_map(|(id, pty)| pty.setup.as_ref().filter(|setup| setup.harness == harness).map(|setup| json!({ "ptyId": id, "step": setup.step.name() })))
     }
 
     /// `session/2`: rename, pin or archive a session. Archiving only hides it.
@@ -3612,17 +4391,27 @@ impl WorkspaceRpc {
     }
 
     fn session_send(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let _policy = self.collab.enter_admission();
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let tab_id = required_str(&params, "tabId")?;
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
-        // Images uploaded with `session.attach` ride with the text, or alone.
+        if self.collab.runtime_policy.is_v2() {
+            let permit = collab::v2::current().ok_or_else(|| RpcError::forbidden("Collaboration provenance missing"))?;
+            permit.check(self.manager()?.collaboration_v2_witness(&session.id, &tab.id).as_ref()).map_err(|_| RpcError::forbidden("Collaboration policy or tab safety changed"))?;
+            if self.collab.runtime_policy.everyone(peer.user_id.as_deref().unwrap_or("")) && slash::is_command(params.get("text").and_then(Value::as_str).unwrap_or("")) {
+                permit.check_configuration().map_err(|_| RpcError::forbidden("Explicit configuration authority required"))?;
+            }
+        }
+        // Images and files uploaded with `session.attach` ride with the text, or alone.
         let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
+        let file_ids = crate::cloud_agents::attachments::named_files(&params).ok_or_else(|| RpcError::invalid("files is a list of uploaded attachments; with the images, at most 10"))?;
+        let attached = !image_ids.is_empty() || !file_ids.is_empty();
         let text = match params.get("text").and_then(Value::as_str) {
             Some(text) => text,
-            None if !image_ids.is_empty() => "",
+            None if attached => "",
             None => return Err(RpcError::invalid("text is required")),
         };
-        if text.trim().is_empty() && image_ids.is_empty() {
+        if text.trim().is_empty() && !attached {
             return Err(RpcError::invalid("text is empty"));
         }
         // The same rule as a mailbox send (contract §21.5), for managers
@@ -3662,7 +4451,24 @@ impl WorkspaceRpc {
                 RpcError::invalid("Not sent: an image of this message did not reach the workspace. Attach it and send again.").with_data(json!({ "reason": "attachment-missing" }))
             })?
         };
-        let sent = self.manager().and_then(|manager| manager.send(&session.id, &tab.id, text.to_string(), images).map_err(RpcError::internal));
+        // Into the session's attachments folder on this computer (PRO-407):
+        // the agent is handed their paths here, as a local tab's files are.
+        let files = if file_ids.is_empty() {
+            Vec::new()
+        } else {
+            use crate::cloud_agents::attachments::FilesError;
+            match self.agents()?.attachments.take_files(&attachment_owner(peer), &session.id, &file_ids) {
+                Ok(files) => files,
+                Err(error) => {
+                    self.agents()?.attachments.remove(&image_ids);
+                    return Err(match error {
+                        FilesError::Missing(_) => RpcError::invalid(crate::cloud_agents::mailbox::FILE_MISSING_MESSAGE).with_data(json!({ "reason": "attachment-missing" })),
+                        FilesError::Failed(error) => RpcError::internal(error),
+                    });
+                }
+            }
+        };
+        let sent = self.manager().and_then(|manager| manager.send_pressed(&session.id, &tab.id, text.to_string(), images, None, files).map_err(RpcError::internal));
         if !image_ids.is_empty() {
             self.agents()?.attachments.remove(&image_ids);
         }
@@ -3705,7 +4511,7 @@ impl WorkspaceRpc {
     ///   twice. A steer goes into the running turn.
     /// - A decision names its `requestId`; one already answered, or gone,
     ///   is refused (`conflict`, `request-not-pending`).
-    fn agent_command(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+    fn agent_command(&self, peer: &Peer, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         use super::agent_commands::{self as receipts, Known};
         let journal = self.agent_commands.get().ok_or_else(|| RpcError::new("method_not_found", format!("{method} is not a workspace method")))?;
         let agents = self.agents()?;
@@ -3749,6 +4555,7 @@ impl WorkspaceRpc {
             // in tab leases.
             leases: peer.user_id.is_some(),
             access: self.access(peer),
+            policy_stamp,
             plaintext: &params,
         };
         match crate::cloud_agents::mailbox::decide(agents, &command, || journal.applying(&key, &digest, now)) {
@@ -3902,8 +4709,14 @@ impl WorkspaceRpc {
         if !session.tabs.iter().any(|tab| tab.id == tab_id) {
             return Err(RpcError::not_found("no such tab"));
         }
+        // `kind: "file"` (`composer/4`, PRO-407): a file other than an image.
+        let file = match params.get("kind").and_then(Value::as_str) {
+            None | Some("image") => false,
+            Some("file") => true,
+            Some(_) => return Err(RpcError::invalid("kind is image or file")),
+        };
         if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
-            return Err(RpcError::forbidden("attaching an image needs driver access to the workspace"));
+            return Err(RpcError::forbidden(if file { "attaching a file needs driver access to the workspace" } else { "attaching an image needs driver access to the workspace" }));
         }
         let id = required_str(&params, "attachmentId")?;
         let media_type = required_str(&params, "mediaType")?;
@@ -3912,11 +4725,13 @@ impl WorkspaceRpc {
         let last = params.get("last").and_then(Value::as_bool).unwrap_or(false);
         let name = params.get("name").and_then(Value::as_str);
         use crate::cloud_agents::attachments::AttachError;
-        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, last) {
+        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, file, last) {
             Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
             Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
+            Err(AttachError::Refused(why)) => Err(RpcError::invalid(why).with_data(json!({ "reason": "file-refused" }))),
+            Err(AttachError::TooLarge) if file => Err(RpcError::invalid(format!("the file is larger than {} MB", crate::attachments::MAX_ATTACHMENT_BYTES / 1024 / 1024)).with_data(json!({ "reason": "file-too-large" }))),
             Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
-            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many attachments are waiting to be sent here; try again later").with_data(json!({ "reason": "attachments-full" }))),
             Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
         }
     }
@@ -4069,6 +4884,29 @@ fn default_rows() -> u16 {
     24
 }
 
+/// A base branch for `session.create` (`session-base/1`): a branch name as
+/// `git.branches` lists it, never something git could read as an option or a
+/// revision expression. Whether it exists is git's to say when the worktree
+/// is cut.
+fn check_base_ref(base: &str) -> Result<String, RpcError> {
+    let base = base.trim();
+    let valid = !base.is_empty()
+        && base.len() <= 255
+        && !base.starts_with('-')
+        && !base.starts_with('/')
+        && !base.ends_with('/')
+        && !base.ends_with(".lock")
+        && !base.contains("..")
+        && !base.contains("@{")
+        && !base.contains("//")
+        && base.chars().all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+    if valid {
+        Ok(base.to_string())
+    } else {
+        Err(RpcError::invalid("baseRef is not a branch name"))
+    }
+}
+
 fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
     serde_json::from_value(params).map_err(|error| RpcError::invalid(error.to_string()))
 }
@@ -4134,3 +4972,40 @@ mod pipeline_reviewer_tests;
 
 #[cfg(test)]
 pub(crate) static BEFORE_REMOTE_WORK: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn environment_rpc_preserves_handshake_capability_and_member_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(crate::sink::BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
+        let (peer, _events) = Peer::for_user("environment-viewer".into(), Authority::Participate, Some("viewer".into()));
+        let call = |method: &'static str, params: Value| {
+            let rpc = rpc.clone();
+            let peer = peer.clone();
+            async move { rpc.handle(&peer, &json!({"id": "env-test", "method": method, "params": params})).await }
+        };
+        let params = json!({"requestId": uuid::Uuid::new_v4().to_string()});
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "hello_required");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["fs/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "capability_not_granted");
+        call("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]})).await;
+        assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": "viewer"}]})).unwrap()));
+        for role in ["viewer", "driver", "manager"] {
+            rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "viewer", "role": role}]})).unwrap()));
+            assert_eq!(call("environment.report", params.clone()).await["error"]["code"], "forbidden", "a listed {role} cannot consume the manager probe slot");
+            assert_eq!(call("environment.cancel", params.clone()).await["error"]["code"], "forbidden");
+        }
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": [{"userId": "owner", "role": "manager"}]})).unwrap()));
+        let (manager, _events) = Peer::for_user("environment-owner".into(), Authority::Manage, Some("owner".into()));
+        let invoke = |method: &str, params: Value| json!({"id": "owner-env", "method": method, "params": params});
+        rpc.handle(&manager, &invoke("rpc.hello", json!({"protocol": PROTOCOL, "want": ["environment/1"]}))).await;
+        assert_eq!(rpc.handle(&manager, &invoke("environment.cancel", params.clone())).await["ok"], true);
+        assert_eq!(rpc.handle(&manager, &invoke("environment.report", json!({"requestId": "bad", "command": "env"}))).await["error"]["code"], "invalid_params");
+        rpc.set_collaboration(Some(serde_json::from_value(json!({"v": 1, "members": []})).unwrap()));
+        assert_eq!(call("environment.report", params).await["error"]["code"], "forbidden");
+    }
+}

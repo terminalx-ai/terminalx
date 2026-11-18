@@ -48,6 +48,13 @@ pub enum Action {
     Http { generation: u64, tag: String, method: String, url: String, body: Option<Value> },
 }
 
+/// Native-only action plus its original operation. No serde or wire authority.
+/// Legacy adapter constructors keep using Action until their writer integration.
+pub(crate) struct ProviderAction {
+    pub context: crate::session::provider_authority::OperationContext,
+    pub action: Action,
+}
+
 /// Which CLI a PTY-first tab is running. The two differ in their launch line,
 /// their hook plumbing and their transcript, and in the stand-in they draw
 /// for a long paste.
@@ -183,6 +190,13 @@ struct Setup {
     writes: &'static [&'static str],
     /// The CLI's own sign-in, after the binary.
     login: &'static [&'static str],
+    /// The sign-in for a person at another computer (a machine's page,
+    /// PRO-350), where the CLI has one that needs no browser on this
+    /// computer: its own login would wait for a callback on this
+    /// computer's loopback, which that person's browser cannot reach.
+    /// `None`: `login` works from anywhere (it prints an address and takes
+    /// the code pasted back).
+    login_elsewhere: Option<&'static [&'static str]>,
     /// A page of the provider's that answers when the network does, asked
     /// only after a failure, to tell an outage from a refusal.
     probe: &'static str,
@@ -209,6 +223,7 @@ const REGISTRY: &[Spec] = &[
             runner: &["bash"],
             writes: &[".local/bin", ".local/share/claude", ".claude"],
             login: &["auth", "login"],
+            login_elsewhere: None,
             probe: "https://claude.ai/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
@@ -229,6 +244,8 @@ const REGISTRY: &[Spec] = &[
             runner: &["env", "CODEX_NON_INTERACTIVE=1", "sh"],
             writes: &[".local/bin", ".codex"],
             login: &["login"],
+            // A device code: the address and code open in any browser.
+            login_elsewhere: Some(&["login", "--device-auth"]),
             probe: "https://chatgpt.com/codex/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
@@ -280,6 +297,11 @@ pub fn catalog() -> Vec<HarnessInfo> {
 /// What an agent is called in a sentence the reader is shown.
 pub fn display_name(harness: &str) -> &'static str {
     REGISTRY.iter().find(|spec| spec.id == harness).map_or("The agent", |spec| spec.name)
+}
+
+/// The npm package an agent's releases are published as, the first one when it has several.
+pub fn npm_package(harness: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.id == harness).and_then(|spec| spec.packages.first().copied())
 }
 
 /// Programs that run a script named by their first argument that is not an

@@ -14,6 +14,36 @@ pub struct Reviewer {
     pub kind: String,
     pub state: String,
     pub requested: bool,
+    /// The account's display name, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// When its latest review was submitted, or for a pending request when it was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+/// How a merged pull request merged, for the panel's merged card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Merged {
+    pub at: Option<String>,
+    pub by: Option<String>,
+    pub commit: Option<String>,
+    /// The merge commit has two parents: it merged with a merge commit, not squash or rebase.
+    pub merge_commit: bool,
+    /// GitHub no longer has the head branch.
+    pub branch_deleted: bool,
+}
+
+/// The repository's merge methods for this viewer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMethods {
+    /// MERGE | SQUASH | REBASE
+    pub default: Option<String>,
+    pub merge: bool,
+    pub squash: bool,
+    pub rebase: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +73,14 @@ pub struct Conversation {
     pub reviewers: Vec<Reviewer>,
     pub unresolved_threads: usize,
     pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub commits: Option<u64>,
+    #[serde(default)]
+    pub merged: Option<Merged>,
+    #[serde(default)]
+    pub merge_methods: Option<MergeMethods>,
 }
 
 /// Mutation and reconciliation are one request. A completed mutation stays
@@ -87,6 +125,7 @@ impl Target {
 
 fn string(v: &Value, key: &str) -> String { v[key].as_str().unwrap_or_default().into() }
 fn optional(v: &Value, key: &str) -> Option<String> { v[key].as_str().map(str::to_string) }
+fn display_name(actor: &Value) -> Option<String> { actor["name"].as_str().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string) }
 
 fn response(raw: &str) -> Result<Value> {
     let value: Value = serde_json::from_str(raw)?;
@@ -154,10 +193,22 @@ fn parse(value: &Value) -> Result<Conversation> {
         let state = string(review, "state");
         if login.is_empty() || state == "PENDING" || login.eq_ignore_ascii_case(&string(&pr["author"], "login")) { continue; }
         let kind = if review["author"]["__typename"] == "Bot" || login.ends_with("[bot]") { "bot" } else { "user" };
-        let reviewer = reviewers.entry(login.to_lowercase()).or_insert(Reviewer { login, kind: kind.into(), state: "COMMENTED".into(), requested: false });
+        let reviewer = reviewers.entry(login.to_lowercase()).or_insert(Reviewer { login, kind: kind.into(), state: "COMMENTED".into(), requested: false, name: None, at: None });
+        if reviewer.name.is_none() { reviewer.name = display_name(&review["author"]); }
         // A comment after an approval/change request does not revoke that decision.
         if state != "COMMENTED" || !matches!(reviewer.state.as_str(), "APPROVED" | "CHANGES_REQUESTED") {
             reviewer.state = state;
+            reviewer.at = optional(review, "submittedAt").or(reviewer.at.take());
+        }
+    }
+    // When each open request was made: the latest request event for that reviewer.
+    let mut requested_at: BTreeMap<String, String> = BTreeMap::new();
+    for event in pr["timelineItems"]["nodes"].as_array().into_iter().flatten().filter(|node| node["__typename"] == "ReviewRequestedEvent") {
+        let who = &event["requestedReviewer"];
+        let login = if who["__typename"] == "Team" { format!("{}/{}", string(&who["organization"], "login"), string(who, "slug")) } else { string(who, "login") };
+        if let (false, Some(at)) = (login.is_empty(), optional(event, "createdAt")) {
+            let entry = requested_at.entry(login.to_lowercase()).or_default();
+            if *entry < at { *entry = at; }
         }
     }
     for request in pr["reviewRequests"]["nodes"].as_array().context("GitHub omitted review requests")? {
@@ -165,7 +216,9 @@ fn parse(value: &Value) -> Result<Conversation> {
         let team = who["__typename"] == "Team";
         let login = if team { format!("{}/{}", string(&who["organization"], "login"), string(who, "slug")) } else { string(who, "login") };
         if login.is_empty() { continue; }
-        reviewers.insert(login.to_lowercase(), Reviewer { login, kind: if team { "team" } else if who["__typename"] == "Bot" { "bot" } else { "user" }.into(), state: "PENDING".into(), requested: true });
+        let name = display_name(who).or_else(|| reviewers.get(&login.to_lowercase()).and_then(|known| known.name.clone()));
+        let at = requested_at.get(&login.to_lowercase()).cloned();
+        reviewers.insert(login.to_lowercase(), Reviewer { login, kind: if team { "team" } else if who["__typename"] == "Bot" { "bot" } else { "user" }.into(), state: "PENDING".into(), requested: true, name, at });
     }
     let unresolved_threads = pr["reviewThreads"]["nodes"].as_array().context("GitHub omitted review threads")?.iter()
         .filter(|thread| thread["isResolved"] == false).filter_map(|thread| thread["id"].as_str()).collect::<BTreeSet<_>>().len();
@@ -188,9 +241,20 @@ fn parse(value: &Value) -> Result<Conversation> {
             after: if kind == "commit" { optional(commit, "oid") } else { optional(&node["afterCommit"], "oid") },
         })
     }).collect();
+    let repository = &value["data"]["repository"];
+    let merged = (pr["state"] == "MERGED").then(|| Merged {
+        at: optional(pr, "mergedAt"), by: optional(&pr["mergedBy"], "login"), commit: optional(&pr["mergeCommit"], "oid"),
+        merge_commit: pr["mergeCommit"]["parents"]["totalCount"].as_u64().is_some_and(|parents| parents > 1),
+        branch_deleted: pr.get("headRef").is_some_and(Value::is_null),
+    });
+    let merge_methods = repository["squashMergeAllowed"].is_boolean().then(|| MergeMethods {
+        default: optional(repository, "viewerDefaultMergeMethod"),
+        merge: repository["mergeCommitAllowed"] == true, squash: repository["squashMergeAllowed"] == true, rebase: repository["rebaseMergeAllowed"] == true,
+    });
     Ok(Conversation { url: string(pr, "url"), title: string(pr, "title"), body: string(pr, "body"), state: string(pr, "state"),
         author: string(&pr["author"], "login"), viewer: string(&value["data"]["viewer"], "login"),
-        can_edit: pr["viewerCanUpdate"] == true, reviewers: reviewers.into_values().collect(), unresolved_threads, activity })
+        can_edit: pr["viewerCanUpdate"] == true, reviewers: reviewers.into_values().collect(), unresolved_threads, activity,
+        base: string(pr, "baseRefName"), commits: pr["commits"]["totalCount"].as_u64(), merged, merge_methods })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -283,6 +347,47 @@ mod tests {
         assert_eq!(conversation.viewer, conversation.author);
         assert!(!conversation.title.is_empty());
         assert_eq!(conversation.unresolved_threads, 0);
+    }
+
+    #[test]
+    fn reviewer_names_times_merge_details_and_methods() {
+        let mut value = fixture();
+        value["data"]["repository"]["viewerDefaultMergeMethod"] = json!("SQUASH");
+        value["data"]["repository"]["mergeCommitAllowed"] = json!(false);
+        value["data"]["repository"]["squashMergeAllowed"] = json!(true);
+        value["data"]["repository"]["rebaseMergeAllowed"] = json!(true);
+        let pr = &mut value["data"]["repository"]["pullRequest"];
+        pr["state"] = json!("MERGED");
+        pr["baseRefName"] = json!("main");
+        pr["mergedAt"] = json!("2026-11-16T10:00:00Z");
+        pr["mergedBy"] = json!({"login":"ada"});
+        pr["mergeCommit"] = json!({"oid":"a91c3e0ffff","parents":{"totalCount":1}});
+        pr["headRef"] = Value::Null;
+        pr["commits"] = json!({"totalCount":4});
+        pr["reviews"]["nodes"] = json!([
+            {"state":"COMMENTED","submittedAt":"2026-11-16T08:00:00Z","author":{"login":"Ada","name":"Ada Lovelace"}},
+            {"state":"APPROVED","submittedAt":"2026-11-16T09:00:00Z","author":{"login":"Ada","name":"Ada Lovelace"}},
+            {"state":"COMMENTED","submittedAt":"2026-11-16T09:30:00Z","author":{"login":"Ada","name":"Ada Lovelace"}}
+        ]);
+        pr["reviewRequests"]["nodes"] = json!([{"requestedReviewer":{"__typename":"User","login":"Ben","name":" "}}]);
+        pr["timelineItems"]["nodes"].as_array_mut().unwrap().extend([
+            json!({"__typename":"ReviewRequestedEvent","id":"rr1","createdAt":"2026-11-15T10:00:00Z","requestedReviewer":{"__typename":"User","login":"ben"}}),
+            json!({"__typename":"ReviewRequestedEvent","id":"rr2","createdAt":"2026-11-15T16:00:00Z","requestedReviewer":{"__typename":"User","login":"Ben"}}),
+        ]);
+        let result = parse(&value).unwrap();
+        let ada = result.reviewers.iter().find(|r| r.login == "Ada").unwrap();
+        assert_eq!((ada.state.as_str(), ada.name.as_deref(), ada.at.as_deref()), ("APPROVED", Some("Ada Lovelace"), Some("2026-11-16T09:00:00Z")));
+        let ben = result.reviewers.iter().find(|r| r.login == "Ben").unwrap();
+        assert_eq!((ben.name.as_deref(), ben.at.as_deref()), (None, Some("2026-11-15T16:00:00Z")));
+        // Request events are only the request's time, never activity.
+        assert_eq!(result.activity.len(), 11);
+        assert_eq!(result.merged, Some(Merged { at: Some("2026-11-16T10:00:00Z".into()), by: Some("ada".into()), commit: Some("a91c3e0ffff".into()), merge_commit: false, branch_deleted: true }));
+        assert_eq!(result.merge_methods, Some(MergeMethods { default: Some("SQUASH".into()), merge: false, squash: true, rebase: true }));
+        assert_eq!((result.base.as_str(), result.commits), ("main", Some(4)));
+        // An older recording without these fields: nothing is made up.
+        let old = parse(&fixture()).unwrap();
+        assert!(old.merge_methods.is_none());
+        assert!(old.reviewers.iter().all(|r| r.at.is_none()));
     }
 
     #[test]

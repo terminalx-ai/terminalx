@@ -11,7 +11,9 @@ vi.mock("@tauri-apps/api/event", async () => {
   return { listen: backend.listen };
 });
 const native = vi.hoisted(() => ({ ask: vi.fn(async () => true), reveal: vi.fn(async () => undefined) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: native.ask, message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+// "ask" is the app's own confirmation (PRO-400), not the system alert.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: native.ask, chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: native.reveal, openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -170,36 +172,41 @@ describe("a tab's right-click menu", () => {
 
   it("offers an agent tab everything that applies to one, and nothing that does not", () => {
     render(<Menu tab="agent:a3" />);
+    // The design's four groups (PRO-381, 03.14), then More › with everything else, then closing.
     expect(items()).toEqual([
-      "Rename…",
+      "Rename chat…",
+      "Mark as unread",
+      "Pin tab",
+      "Mute notifications for this tab",
+      "Move to the right pane",
       "Switch to terminal view",
+      "Fork to new tab",
+      "Copy transcript",
+      "As Markdown",
+      "As plain text",
+      "Copy link to this tab",
+      "Restart agent",
+      "More",
       "Duplicate tab",
-      "Fork conversation",
       "Hand off to Codex",
       "Open in floating window",
-      "Restart agent",
       "Copy",
       "Tab title",
       "Working directory",
       "Conversation id",
       "Reveal working directory in the file manager",
       "Skills for this agent…",
-      "Pin tab",
-      "Mute notifications for this tab",
       "Session “Session a”",
       "Archive",
       "Share…",
       "Link to issue…",
       "Link pull request…",
       "Delete…",
-      "Split right",
       "Move tab",
       "Move tab left",
       "Move tab right",
       "Move to start",
       "Move to end",
-      "Close tab",
-      "Close other tabs…",
       "Close tabs to the right…",
       "Close tabs to the left…",
       "Close idle tabs…",
@@ -210,6 +217,8 @@ describe("a tab's right-click menu", () => {
       "Gemininot installed",
       "New terminal",
       "New browser tab",
+      "Close tab",
+      "Close other tabs",
     ]);
     // An agent that is not installed cannot be opened.
     expect(item("Gemininot installed").getAttribute("aria-disabled")).toBe("true");
@@ -217,10 +226,10 @@ describe("a tab's right-click menu", () => {
 
   it("offers a terminal and a browser page their own actions", () => {
     const { unmount } = render(<Menu tab={`terminal:${shell}`} />);
-    for (const absent of ["Switch to terminal view", "Fork conversation", "Open in floating window", "Restart agent", "Restart shell", "Reload", "Conversation id", "Page address", "Skills for this agent…", "Mute notifications for this tab"]) {
+    for (const absent of ["Switch to terminal view", "Fork to new tab", "Open in floating window", "Restart agent", "Restart shell", "Reload", "Conversation id", "Page address", "Skills for this agent…", "Mute notifications for this tab"]) {
       expect(offered(absent)).toBe(false);
     }
-    for (const present of ["Rename…", "Duplicate tab", "Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
+    for (const present of ["Rename tab…", "Duplicate tab", "Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
     // An exited shell can be started again.
     act(() => backend.emit("pty_exit", { id: shell, code: 1 }));
     expect(offered("Restart shell")).toBe(true);
@@ -229,7 +238,7 @@ describe("a tab's right-click menu", () => {
     render(<Menu tab="browser:page-feature" />);
     for (const present of ["Reload", "Page address", "Tab title", "Duplicate tab", "Pin tab"]) expect(offered(present)).toBe(true);
     // A page belongs to the workspace, not to a session or a folder of its own.
-    for (const absent of ["Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Restart agent", "Mute notifications for this tab", "Fork conversation"]) {
+    for (const absent of ["Working directory", "Reveal working directory in the file manager", "Session “Session a”", "Restart agent", "Mute notifications for this tab", "Fork to new tab"]) {
       expect(offered(absent)).toBe(false);
     }
   });
@@ -242,15 +251,15 @@ describe("a tab's right-click menu", () => {
     await refreshSessions();
     const terminal = render(<Menu tab="agent:a2" />);
     // There is no agent in it to fork from, restart or give skills to.
-    for (const absent of ["Fork conversation", "Restart agent", "Skills for this agent…", "Switch to terminal view"]) expect(offered(absent)).toBe(false);
+    for (const absent of ["Fork to new tab", "Restart agent", "Skills for this agent…", "Switch to terminal view"]) expect(offered(absent)).toBe(false);
     // It is the session's tab all the same: its last conversation is one switch away, and it floats and mutes like one.
-    for (const present of ["Rename…", "Switch to chat view", "Duplicate tab", "Open in floating window", "Mute notifications for this tab", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
+    for (const present of ["Rename tab…", "Switch to chat view", "Duplicate tab", "Open in floating window", "Mute notifications for this tab", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
     terminal.unmount();
 
     render(<Menu tab="agent:a3" />);
     // The reader started it, so the reader restarts it; everything else of an agent's applies.
     expect(offered("Restart agent")).toBe(false);
-    for (const present of ["Switch to chat view", "Fork conversation", "Conversation id", "Skills for this agent…"]) expect(offered(present)).toBe(true);
+    for (const present of ["Switch to chat view", "Fork to new tab", "Conversation id", "Skills for this agent…"]) expect(offered(present)).toBe(true);
   });
 
   it("leaves out what does not apply at the ends of the row, and turns off a move that goes nowhere", () => {
@@ -302,15 +311,61 @@ describe("a tab's right-click menu", () => {
     await choose("Reveal working directory in the file manager");
     expect(native.reveal).toHaveBeenCalledWith(FEATURE);
 
-    await choose("Fork conversation");
+    await choose("Fork to new tab");
     expect(backend.calls.find((call) => call.command === "fork_session")?.args).toEqual({ sessionId: "a", tabId: "a2" });
     // The open tab was never touched.
     expect(getTerminalState().selected.a).toEqual({ kind: "agent", id: "a1" });
   });
 
+  it.each([
+    { status: "idle", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: false, disabled: false },
+    { status: "completed", markedUnread: false, readOnly: false, disabled: true },
+    { status: "completed", markedUnread: true, readOnly: false, disabled: true },
+    { status: "idle", markedUnread: false, readOnly: true, disabled: true },
+    { status: "idle", markedUnread: true, readOnly: true, disabled: true },
+  ] as const)("Mark as unread: $status, markedUnread=$markedUnread, readOnly=$readOnly", async ({ status, markedUnread, readOnly, disabled }) => {
+    Object.assign(backend.sessions.find((entry) => entry.id === "a")!.tabs[0], { status, markedUnread });
+    await refreshSessions();
+    render(<Menu tab="agent:a1" readOnlyReason={readOnly ? "View only" : undefined} />);
+
+    expect(item("Mark as unread").getAttribute("aria-disabled")).toBe(disabled ? "true" : null);
+    await choose("Mark as unread");
+    expect(backend.callsOf("set_tab_unread")).toEqual(disabled ? [] : [{ sessionId: "a", tabId: "a1", unread: true }]);
+  });
+
+  it("does what the design's new items say (PRO-381)", async () => {
+    const at = (seq: number, payload: object) => ({ id: `e${seq}`, sessionId: "a", tabId: "a2", harness: "codex", seq, ts: "2026-11-16T10:00:00Z", payload });
+    backend.events["a/a2"] = [
+      at(1, { type: "user_message", text: "Why is the test flaky?", queued: false }),
+      at(2, { type: "turn_started" }),
+      at(3, { type: "turn_completed", status: "ok", finalText: "It races the clock.", authFailed: false }),
+    ];
+    render(<Menu tab="agent:a2" />);
+    const copied = () => backend.callsOf("copy_text").at(-1);
+
+    await choose("Mark as unread");
+    expect(backend.callsOf("set_tab_unread")).toEqual([{ sessionId: "a", tabId: "a2", unread: true }]);
+
+    await choose("Copy link to this tab");
+    expect(copied()).toEqual({ text: "terminalx://tab/a/a2" });
+
+    await choose("As Markdown");
+    await waitFor(() => expect(copied()).toEqual({ text: "## You\n\nWhy is the test flaky?\n\n## Codex\n\nIt races the clock." }));
+    await choose("As plain text");
+    await waitFor(() => expect(copied()).toEqual({ text: "You:\nWhy is the test flaky?\n\nCodex:\nIt races the clock." }));
+
+    // One pane: the tab splits off to the right; from there it goes back to the left.
+    await choose("Move to the right pane");
+    expect(layout().panes?.find((pane) => pane.id === "right")?.tabs).toEqual(["agent:a2"]);
+    expect(offered("Move to the left pane")).toBe(true);
+    // Closing keeps the menu's own colour: it is no destructive act.
+    expect(item("Close tab").className ?? "").not.toContain("destructive");
+  });
+
   it("opens the rename dialog, and offers to reset a title the reader gave", async () => {
     render(<Menu tab="browser:page-feature" />);
-    await choose("Rename…");
+    await choose("Rename tab…");
     expect(asked().rename).toEqual({ sessionId: "a", tab: "browser:page-feature" });
     const { renamePeer, workspaceRow } = await import("@/lib/tabActions");
     const row = workspaceRow(getSessionStore().sessions.find((session) => session.id === "a")!);
@@ -323,7 +378,7 @@ describe("a tab's right-click menu", () => {
 
   it("asks before a bulk close rather than closing", async () => {
     render(<Menu tab="agent:a2" />);
-    await choose("Close other tabs…");
+    await choose("Close other tabs");
     expect(asked().close).toEqual({ sessionId: "a", action: "others", tab: "agent:a2" });
     expect(backend.callsOf("remove_tab")).toEqual([]);
   });
@@ -362,6 +417,7 @@ describe("a tab's right-click menu", () => {
     native.ask.mockResolvedValueOnce(false);
     await choose("Restart agent");
     expect(native.ask).toHaveBeenCalledTimes(1);
+    expect((native.ask.mock.calls as unknown[][])[0][0]).toMatchObject({ title: "Restart the agent?", action: "Restart", destructive: true });
     expect(backend.callsOf("stop_tab")).toEqual([]);
     await choose("Restart agent");
     expect(backend.callsOf("stop_tab")).toEqual([{ sessionId: "a", tabId: "a2" }]);
@@ -378,7 +434,7 @@ describe("a tab's right-click menu", () => {
     const reason = "View only: this session is shared with you to watch.";
     render(<Menu tab="agent:a2" readOnlyReason={reason} />);
     expect(screen.getByRole("note").textContent).toBe(reason);
-    const off = ["Rename…", "Duplicate tab", "Fork conversation", "Hand off to Claude Code", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs…", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
+    const off = ["Rename chat…", "Mark as unread", "Duplicate tab", "Fork to new tab", "Hand off to Claude Code", "Restart agent", "Pin tab", "Mute notifications for this tab", "Archive", "Delete…", "Move tab right", "Close tab", "Close other tabs", "Close all tabs…", "New agent tab", "New terminal", "New browser tab"];
     for (const name of off) expect(item(name).getAttribute("aria-disabled")).toBe("true");
     // Looking is still allowed.
     for (const name of ["Tab title", "Working directory", "Reveal working directory in the file manager", "Skills for this agent…"]) expect(item(name).getAttribute("aria-disabled")).toBeNull();

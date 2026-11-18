@@ -88,6 +88,26 @@ for (const width of [200, 268, 420]) {
     const listBox = rect(await list.boundingBox());
     const orgA = page.locator('[data-testid="cloud-org-list"][data-org="org-a"]');
 
+    // The quota belongs to the fold's description and is reachable without a nested tab stop.
+    const fold = orgA.getByRole("button", { name: "Share Lab", exact: true });
+    await fold.focus();
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+    await page.getByRole("tooltip").waitFor();
+    const keyboardFocused = await fold.evaluate((el) => document.activeElement === el);
+    const quotaTooltip = await page.getByRole("tooltip").textContent();
+    await page.keyboard.press("Escape");
+    await page.getByRole("tooltip").waitFor({ state: "hidden" });
+    const quotaDescription = await fold.evaluate((el) => document.getElementById(el.getAttribute("aria-describedby"))?.textContent);
+    await page.keyboard.press("Enter");
+    const keyboardCollapsed = await fold.getAttribute("aria-expanded") === "false";
+    await page.keyboard.press("Space");
+    failed += report(`cloud quota keyboard (${name})`, {
+      "Tab reaches the organization fold and reveals usage": keyboardFocused && quotaTooltip === "1 of 2 cloud workspaces running",
+      "usage remains described after Escape": quotaDescription === "1 of 2 cloud workspaces running",
+      "Enter and Space still toggle the fold": keyboardCollapsed && await fold.getAttribute("aria-expanded") === "true",
+    });
+
     // The titlebar: every button inside the sidebar, the View menu's last among the left ones.
     const titlebar = await page.getByTestId("sidebar-titlebar").getByRole("button").evaluateAll((buttons) =>
       buttons.map((button) => {
@@ -100,8 +120,8 @@ for (const width of [200, 268, 420]) {
     const orgB = page.locator('[data-testid="cloud-org-list"][data-org="org-b"]');
     const orgBHeader = orgB.locator("section > div").first();
     await orgB.locator("#list-org\\:org-b").hover();
-    const orgBName = orgB.locator("#list-org\\:org-b > span");
-    const orgBMenu = rect(await orgB.getByRole("button", { name: /^Menu for / }).boundingBox());
+    const orgBName = orgB.locator("#list-org\\:org-b > [data-list-name]");
+    const orgBMenu = rect(await orgB.getByRole("button", { name: "Menu for Second Laboratory of Very Long Names", exact: true }).boundingBox());
     const orgBAdd = rect(await orgB.getByRole("button", { name: /^Add project to / }).boundingBox());
     const orgBNameBox = rect(await orgBName.boundingBox());
     const orgBTruncated = await orgBName.evaluate((element) => element.scrollWidth > element.clientWidth);
@@ -109,8 +129,7 @@ for (const width of [200, 268, 420]) {
     void orgBHeader;
 
     // A long section name, hovered so its menu shows.
-    const sections = await page.getByTestId("cloud-section-row").all();
-    const long = sections[1];
+    const long = orgA.locator('[data-section="s2"] [data-testid="cloud-section-row"]');
     const longName = long.getByTestId("cloud-section-name");
     const longMenu = long.getByRole("button", { name: /^Menu for section/ });
     await long.hover();
@@ -143,9 +162,9 @@ for (const width of [200, 268, 420]) {
       "nothing in the list is wider than it": overflowing.length === 0,
       "every titlebar button is inside the sidebar": titlebar.every((button) => button.left >= box.left - SLACK && button.right <= box.right + SLACK),
       "a long organization name truncates where it does not fit": orgBTruncated || width > 268,
-      "a long organization name ends before its chip and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
+      "a long organization name ends before its note and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
       "the organization's + and menu are inside the sidebar": inside(orgBAdd, box) && inside(orgBMenu, box),
-      "sections come first, then the projects in none": JSON.stringify(order) === JSON.stringify(["section:Active", "cloud:org-a:blank/accone", "cloud:org-a:github.com/acme/api", "section:Parked until the quarterly release review is done", "cloud:org-a:blank/acctwo"]),
+      "sections come first, then the projects in none": JSON.stringify(order) === JSON.stringify(["section:My workspaces", "section:Shared with me", "section:Active", "section:Parked until the quarterly release review is done"]),
       "a long section name truncates where it does not fit": truncated || width > 268,
       "a long section name ends before the menu button": !!nameBox && !!menuBox && nameBox.right <= menuBox.left + SLACK,
       "the section's menu button is inside the sidebar": inside(menuBox, box),
@@ -155,30 +174,31 @@ for (const width of [200, 268, 420]) {
       "the loading organization says so": (await loading.textContent()) === "Loading cloud projects…" && inside(rect(await loading.boundingBox()), listBox),
     }, { order, nameBox, menuBox, box, titlebar, overflowing, orgBNameBox, orgBQuota });
 
-    // A project with two workspaces: each named with its state, and the project's menu with their lifecycle.
-    const api = orgA.locator('[data-testid="cloud-project-group"][data-project="cloud:org-a:github.com/acme/api"]');
-    const stopped = api.locator('[data-testid="cloud-workspace-group"][data-workspace="w5"]');
+    // Sections contain individual workspaces. Each retains its lifecycle menu.
+    const stopped = orgA.locator('[data-testid="cloud-workspace-group"][data-workspace="w5"]');
     const state = stopped.getByTestId("cloud-workspace-row-state");
-    await api.locator("div").first().hover();
-    await api.getByRole("button", { name: "Project menu for acme/api" }).click();
-    await page.getByRole("menuitem", { name: "api-perf-investigation" }).hover();
-    await page.getByRole("menuitem", { name: "Resume" }).waitFor();
-    const menus = await page.getByRole("menu").all();
-    const menuBoxes = await Promise.all(menus.map(settledBox));
-    failed += report(`project menu (${name})`, {
-      "the stopped workspace says so, inside its row": (await state.textContent()) === "Stopped" && inside(rect(await state.boundingBox()), rect(await stopped.boundingBox())),
-      "the project's menu and its workspace's submenu are inside the window": menuBoxes.length === 2 && menuBoxes.every((menu) => inWindow(menu, size)),
-    }, menuBoxes);
-    await shot("project-menu");
-    await page.keyboard.press("Escape");
+    await stopped.scrollIntoViewIfNeeded();
+    await page.mouse.move(700, 300);
+    // Row metadata intentionally gives way to actions on hover; measure its resting state first.
+    const stoppedLabel = await state.textContent();
+    const stoppedStateBox = rect(await state.boundingBox());
+    const stoppedRowBox = rect(await stopped.boundingBox());
+    await stopped.locator("div").first().hover();
+    await stopped.getByRole("button", { name: "Actions for api-perf-investigation", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Resume", exact: true }).waitFor();
+    const workspaceMenu = await settledBox(page.getByRole("menu"));
+    failed += report(`workspace menu (${name})`, {
+      "the stopped workspace says so, inside its row": stoppedLabel === "Stopped" && inside(stoppedStateBox, stoppedRowBox),
+      "the workspace lifecycle menu is inside the window": inWindow(workspaceMenu, size),
+    }, workspaceMenu);
+    await shot("workspace-menu");
     await page.keyboard.press("Escape");
 
-    // Moving a project: the project's menu, then its "Move to section" submenu.
-    const acctwo = orgA.locator('[data-testid="cloud-project-group"][data-project="cloud:org-a:blank/acctwo"]');
+    const acctwo = orgA.locator('[data-testid="cloud-workspace-group"][data-workspace="w2"]');
     await acctwo.locator("div").first().hover();
-    await acctwo.getByRole("button", { name: "Project menu for acctwo" }).click();
-    await page.getByRole("menuitem", { name: "Move to section" }).hover();
-    await page.getByRole("menuitemradio", { name: "Active" }).waitFor();
+    await acctwo.getByRole("button", { name: "Actions for acctwo", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
+    await page.getByRole("menuitem", { name: "Active", exact: true }).waitFor();
     const submenu = await settledBox(page.getByRole("menu").last());
     failed += report(`move to section (${name})`, { "the submenu is inside the window": inWindow(submenu, size) });
     await shot("move-to-section");
@@ -220,7 +240,12 @@ for (const width of [200, 268, 420]) {
     if (width === 268) {
       await page.getByRole("button", { name: /^Search/ }).click();
       await page.getByLabel("Command palette search").fill("accone");
-      await page.locator('[role="option"][id^="cloud-project:"]').nth(1).waitFor();
+      // The palette defers its query: cloud rows already exist before typing.
+      // Wait for all three expected results before taking the assertion snapshot.
+      await page.waitForFunction(() => {
+        const rows = [...document.querySelectorAll('[role="option"][id^="cloud-project:"], [role="option"][id^="project:"]')].map((row) => row.textContent ?? "");
+        return ["Share Lab cloud · no repository", "Second Laboratory of Very Long Names cloud · no repository", "Local · /Users/alice/code/accone"].every((label) => rows.some((row) => row.startsWith("accone") && row.endsWith(label)));
+      });
       const projectRows = await page.locator('[role="option"][id^="cloud-project:"], [role="option"][id^="project:"]').allTextContents();
       failed += report(`search (${name})`, {
         "lists both organizations' accone and the local one, each labelled": ["Share Lab cloud · no repository", "Second Laboratory of Very Long Names cloud · no repository", "Local · /Users/alice/code/accone"].every((label) => projectRows.some((row) => row.startsWith("accone") && row.endsWith(label))),

@@ -14,6 +14,8 @@ export interface AgentEvent {
   ts: string;
   /** Verified source/send time; legacy `ts` may only record when history was imported. */
   messageTs?: string;
+  /** Correlates a recorded desktop Create prompt with its pending preview. */
+  promptRequestId?: string;
   subagent?: SubagentRef;
   payload: Payload;
 }
@@ -79,6 +81,10 @@ export interface Usage {
   costUsd?: number;
   /** The full id of the model that produced this reading, when the agent says. */
   model?: string;
+  /** The reasoning effort the turn ran at, when the agent's records say. */
+  effort?: string;
+  /** Whether the turn ran in the agent's fast mode, when its records say. */
+  fast?: boolean;
 }
 
 export type TurnStatus = "ok" | "error" | "aborted";

@@ -1,5 +1,6 @@
-import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
-import type { SettingRow } from "@/components/ui/controls";
+import { cloneElement, createContext, useContext, type ComponentProps, type ReactElement, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { SETTING_ROW_CLASS, type SettingRow } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { SHORTCUT_ACTIONS } from "@/lib/shortcuts";
 import { setPrefs } from "@/lib/prefs";
@@ -8,40 +9,38 @@ import { userFileKeys } from "@/lib/settingSources";
 import { UserFileRowAccessory } from "./SettingSources";
 
 export const NATIVE_CODEX_DESCRIPTION =
-  "New Codex sessions connect to Codex directly instead of running it in a terminal, so the chat reliably shows when Codex is compacting its context. The chat is the main view: opening a session's terminal view moves that session to Codex's own terminal for good. Needs Codex 0.164.0 or newer; otherwise new sessions use the terminal as usual. Existing sessions and other agents are not changed.";
+  "New Codex sessions connect to Codex directly, so the chat shows when it compacts. Needs Codex 0.164.0 or newer; opening the terminal view moves a session to Codex’s own terminal.";
 
 export const LOCAL_VM_TASKS_DESCRIPTION =
-  "Settings → Local VMs, choosing which computer a tab's agent uses in the Computer tab, and Local VM task cards in a conversation. Off, a new agent gets the Local VM's desktop tools while it runs, as before. The terminalx vm commands work either way.";
-
-export const MACHINES_DESCRIPTION =
-  "Settings → Machines: let other computers that run TerminalX operate this Mac, and add machines this Mac can operate. Each computer pairs with a one-time code and a fingerprint you compare on both screens before choosing Allow.";
+  "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.";
 
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
-  "A session can lead a run: it splits one goal into pieces, and each piece goes to a worker session on its own branch. Shows the Run view in a session, where you approve the lead's plan before any worker starts, and Settings → Orchestrator. The terminalx runs commands work either way.";
+  "A session can lead a run, splitting one goal into pieces for worker sessions. Shows the Run view and Settings → Orchestrator.";
 
 // PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
 export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
+// PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has one introductory description.
 export const SETTINGS_SECTIONS = {
-  account: { title: "Account", group: "Personal", entry: "account.identity" },
-  devices: { title: "Devices", group: "Personal", entry: "devices.pairing" },
-  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating" },
-  general: { title: "General", group: "Personal", entry: "general.websiteLinks" },
-  appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme" },
-  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup" },
-  orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval" },
-  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables" },
-  localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks" },
-  transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model" },
-  integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github" },
-  projects: { title: "Project templates", group: "Projects", entry: "projects.templates" },
-  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath" },
-  organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar" },
-  storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup" },
-  shortcuts: { title: "Shortcuts", group: "More", entry: "shortcuts.systemWide" },
-  experimental: { title: "Experimental", group: "More", entry: "experimental.nativeCodex" },
-  about: { title: "About", group: "More", entry: "about.version" },
-} as const satisfies Record<string, { title: string; group: SettingsGroup; entry: string }>;
+  general: { title: "General", group: "Personal", entry: "general.websiteLinks", subtitle: "How TerminalX opens links, shows its work, and where your settings live." },
+  account: { title: "Account", group: "Personal", entry: "account.identity", subtitle: "Your TerminalX account, this Mac’s name and what it shares." },
+  appearance: { title: "Appearance", group: "Personal", entry: "appearance.theme", subtitle: "Theme, text size, the sidebar and the status bar." },
+  shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
+  devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: "Phones paired with this Mac." },
+  machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them." },
+  agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "The agent CLIs TerminalX runs on this Mac, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account." },
+  orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
+  environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: "Variables for new agent and shell tabs, kept in the Keychain." },
+  localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
+  transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model", subtitle: "Dictation: the model, your microphone and your words." },
+  integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github", subtitle: "GitHub and Linear, for issues and pull requests." },
+  projects: { title: "Project templates", group: "Projects", entry: "projects.templates", subtitle: "Starting points for new projects." },
+  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath", subtitle: "Where this project’s workspaces live and what runs in them." },
+  organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
+  storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup", subtitle: "When finished workspaces are deleted, and what is left behind." },
+  experimental: { title: "Experimental", group: "More", entry: "experimental.nativeCodex", subtitle: "Early features. They may change or go away." },
+  about: { title: "About", group: "More", entry: "about.version", subtitle: "Version, updates and changes." },
+} as const satisfies Record<string, { title: string; group: SettingsGroup; entry: string; subtitle: string }>;
 export type SettingsSection = keyof typeof SETTINGS_SECTIONS;
 export type SettingsScope = "user" | "repository" | "organization";
 export interface SettingStorage {
@@ -61,6 +60,8 @@ interface SettingDefinition {
   layout?: "row" | "content";
   /** Some existing rows have no visible help text; metadata remains searchable. */
   hideDescription?: boolean;
+  /** No “…” menus beside the title: the theme cards are the whole row (design 09.08, PRO-377). */
+  hideRowMenu?: boolean;
   /**
    * A setting link with `?enable=1` may turn this row on from outside the app
    * (PRO-127). `enable` calls the row's existing setter. Only reversible,
@@ -87,22 +88,23 @@ export interface SettingRegistration extends SettingDefinition {
 function defineSetting<const T extends SettingDefinition>(definition: T): T & SettingRegistration {
   // A row kept in the user file shows "Your value" and its row menu beside its title (PRO-140).
   const keys = userFileKeys(definition.storage.location);
-  const accessory = keys.length ? <UserFileRowAccessory keys={keys} title={definition.title} /> : undefined;
+  const accessory = keys.length ? <UserFileRowAccessory keys={keys} /> : undefined;
   return { ...definition, render: ({ children, instance, ...props }) => {
     const anchor = { "data-setting-id": definition.id, "data-setting-instance": instance, tabIndex: -1 };
     if (definition.layout === "content") {
       return children ? cloneElement(children as ReactElement<Record<string, unknown>>, anchor) : null;
     }
     // SettingRow's own structure and classes (controls.tsx), with the row's “…” actions beside the title (design 09.04, 09.23).
-    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id } = props;
+    const { label = definition.title, description = definition.hideDescription ? undefined : definition.description, control = null, stacked, disabled, id, titleAccessory } = props;
     return <div {...anchor} className="group/setting min-w-0 outline-none">
-      <div className={cn("flex flex-col gap-1.5 py-2", disabled && "opacity-60")}>
+      <div className={cn(SETTING_ROW_CLASS, disabled && "opacity-60")}>
         <div className={cn("flex gap-4", stacked ? "flex-col" : "items-center justify-between")}>
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] font-medium">
               <span id={id} className="min-w-0">{label}</span>
               {accessory}
-              <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} />
+              {titleAccessory}
+              {!definition.hideRowMenu && <SettingRowActions id={definition.id as SettingId} title={definition.title} label={label} userKeys={keys.length ? keys : undefined} />}
             </div>
             {description && <div className="text-xs leading-relaxed text-muted-foreground">{description}</div>}
           </div>
@@ -169,12 +171,6 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machineName" }, layout: "content",
   }),
   defineSetting({
-    id: "account.organizations", section: "account", title: "Organization membership",
-    description: "Create, join, or open an organization.",
-    searchTerms: ["account", "organization", "membership"], scope: "user",
-    storage: { kind: "service", location: "TerminalX account organizations" }, layout: "content",
-  }),
-  defineSetting({
     id: "account.sharing", section: "account", title: "What this Mac shares",
     description: "Inspect the fields sent to the account directory.",
     searchTerms: ["account", "what", "this", "mac", "shares"], scope: "user",
@@ -223,7 +219,7 @@ export const SETTINGS_ROWS = [
     storage: { kind: "system", location: "Agent CLI installations and credentials; API keys in the macOS Keychain, $TERMINALX_HOME/agent-logins.json names which login each agent uses" }, layout: "content",
   }),
   defineSetting({
-    id: "appearance.theme", hideDescription: true, section: "appearance", title: "Theme",
+    id: "appearance.theme", hideDescription: true, hideRowMenu: true, section: "appearance", title: "Theme",
     description: "Choose the application color palette.",
     searchTerms: ["appearance", "theme"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.theme" },
@@ -235,75 +231,75 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.mode" },
   }),
   defineSetting({
-    id: "appearance.textSize", section: "appearance", title: "Text size",
+    id: "general.textSize", section: "general", title: "Text size",
     description: "Scales the transcript and composer. Chrome stays the same size.",
-    searchTerms: ["appearance", "text", "size", "font", "font size", "zoom", "bigger", "smaller"], scope: "user",
+    searchTerms: ["text", "size", "font", "font size", "zoom", "bigger", "smaller"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.fontScale" },
   }),
   defineSetting({
-    id: "appearance.transcriptLayout", section: "appearance", title: "Transcript layout",
+    id: "general.transcriptLayout", section: "general", title: "Transcript layout",
     description: "Wide puts your prompt as a full-width card. Chat right-aligns it like a message.",
-    searchTerms: ["appearance", "transcript", "layout"], scope: "user",
+    searchTerms: ["transcript", "layout"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.transcriptLayout" },
   }),
   defineSetting({
-    id: "appearance.customOrder", section: "appearance", title: "Custom order",
+    id: "general.customOrder", section: "general", title: "Custom order",
     description: "Use your saved arrangement in this window; row order is shared across windows. Arrange sessions and projects with their drag handles. Press Space to pick up, arrows to move, Space to drop, or Escape to cancel. Pins do not change custom order. Off restores pin and recency order and keeps your arrangement.",
-    searchTerms: ["appearance", "custom order", "drag", "reorder", "sidebar", "sessions", "projects"], scope: "user",
+    searchTerms: ["custom order", "drag", "reorder", "sidebar", "sessions", "projects"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/sessions/index.json#sidebarOrder" },
   }),
   defineSetting({
-    id: "appearance.tabBar", section: "appearance", title: "Tab bar",
+    id: "general.tabBar", section: "general", title: "Tab bar",
     description: "A session's agents, terminals and browser pages as a row of tabs under the title bar, in the same order as the sidebar. Off leaves them in the sidebar only.",
-    searchTerms: ["appearance", "tab", "bar"], scope: "user",
+    searchTerms: ["tab", "bar"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.tabStrip" },
   }),
   defineSetting({
-    id: "appearance.branchSessions", section: "appearance", title: "Sessions on a branch",
+    id: "general.branchSessions", section: "general", title: "Sessions on a branch",
     description: "Several sessions on one branch: as tabs beside each other in the tab bar, with one row for the branch in the sidebar; or listed under the branch in the sidebar, with the tab bar holding only the open session's tabs. Without the tab bar they are in the sidebar.",
-    searchTerms: ["appearance", "sessions", "on", "a", "branch"], scope: "user",
+    searchTerms: ["sessions", "on", "a", "branch"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.branchSessions" },
   }),
   defineSetting({
-    id: "appearance.colourLineCounts", section: "appearance", title: "Colour line counts on every row",
-    description: "Use green and red for added and removed lines even when the sidebar row is not selected.",
-    searchTerms: ["sidebar", "diff", "lines", "color", "colour"], scope: "user",
+    id: "appearance.colourLineCounts", section: "appearance", title: "Colored sidebar diffs",
+    description: "Line counts in the sidebar stay green and red on every row, not only the selected one.",
+    searchTerms: ["sidebar", "diff", "lines", "line counts", "color", "colour", "colored", "coloured"], scope: "user",
     storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
   }),
   defineSetting({
-    id: "appearance.openUsage", section: "appearance", title: "Usage",
+    id: "general.openUsage", section: "general", title: "Usage",
     description: "Tokens, cost and rate limits across every agent, by day and by project.",
-    searchTerms: ["appearance", "usage"], scope: "user",
+    searchTerms: ["usage"], scope: "user",
     storage: { kind: "action", location: "Usage page" },
   }),
   defineSetting({
-    id: "appearance.statusBar", section: "appearance", title: "Status bar",
+    id: "general.statusBar", section: "general", title: "Status bar",
     description: "Show app-wide agent usage and the resources used by live tabs along the bottom edge.",
-    searchTerms: ["appearance", "status", "bar"], scope: "user",
+    searchTerms: ["status", "bar"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.visible" },
   }),
   defineSetting({
-    id: "appearance.usage", section: "appearance", title: "Usage",
+    id: "general.usage", section: "general", title: "Usage",
     description: "Show the tightest usage window and its reset countdown.",
-    searchTerms: ["appearance", "usage"], scope: "user",
+    searchTerms: ["usage"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.usage" },
   }),
   defineSetting({
-    id: "appearance.resources", section: "appearance", title: "Resources",
+    id: "general.resources", section: "general", title: "Resources",
     description: "Show the live agent count and the most recently sampled memory total.",
-    searchTerms: ["appearance", "resources"], scope: "user",
+    searchTerms: ["resources"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.resources" },
   }),
   defineSetting({
-    id: "appearance.usageDisplay", section: "appearance", title: "Usage display",
+    id: "general.usageDisplay", section: "general", title: "Usage display",
     description: "Meters can show what has been used or what remains; urgency always follows usage.",
-    searchTerms: ["appearance", "usage", "display"], scope: "user",
+    searchTerms: ["usage", "display"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.percent" },
   }),
   defineSetting({
-    id: "appearance.usageRefresh", section: "appearance", title: "Usage auto-refresh interval",
+    id: "general.usageRefresh", section: "general", title: "Usage auto-refresh interval",
     description: "How often usage is fetched again while the app is on screen. Off still refreshes when you return to the app or press Refresh.",
-    searchTerms: ["appearance", "usage", "auto-refresh", "interval"], scope: "user",
+    searchTerms: ["usage", "auto-refresh", "interval"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#statusBar.usageRefreshMinutes" },
   }),
   defineSetting({
@@ -326,8 +322,8 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "machines.yours", section: "machines", title: "Your machines",
-    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it.",
-    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version"], scope: "user",
+    description: "Computers this Mac can operate, each a section in the sidebar: add one from your account, by pairing code or as a headless server, open it, update it, or remove it. Agents in this Mac's sessions can operate the paired machines with the terminalx command line.",
+    searchTerms: ["machines", "add", "a", "machine", "pair", "operate", "mac mini", "server", "headless", "account", "route", "relay", "remove", "connected", "offline", "update", "needs update", "version", "guide", "help", "cli", "terminalx"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/machines.json; Keychain (device tokens)" }, layout: "content",
   }),
   defineSetting({
@@ -377,12 +373,6 @@ export const SETTINGS_ROWS = [
     description: LOCAL_VM_TASKS_DESCRIPTION,
     searchTerms: ["experimental", "local vm", "vm", "virtual machine", "computer", "desktop", "tasks", "guest", "linux", "macos"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
-  }),
-  defineSetting({
-    id: "experimental.machines", section: "experimental", title: "Machines",
-    description: MACHINES_DESCRIPTION,
-    searchTerms: ["experimental", "machines", "operate", "remote", "computer", "pair", "pairing code", "mac mini", "server"], scope: "user",
-    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.machines" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
@@ -492,8 +482,9 @@ export const SETTINGS_ROWS = [
     searchTerms: ["orchestrator", "routing", "table", "model", "effort", "tier", "kind", "haiku", "sonnet", "opus", "fable", "luna", "terra", "sol", "astra", "escalate", "retry"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#orchestrator.routing" }, layout: "content",
   }),
+  // PRO-375: data privacy mode moved from General to Account; links to its old id still open it (MOVED_ROWS).
   defineSetting({
-    id: "general.dataPrivacy", section: "general", title: "Data privacy mode",
+    id: "account.dataPrivacy", section: "account", title: "Data privacy mode",
     description: "Keep TerminalX cloud and remote features off on this Mac. Your agents still use their own network connections. Your sign-in stays saved.",
     searchTerms: ["privacy", "cloud", "remote", "organisations", "organizations", "pairing", "MCP", "logging", "managed"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/data-privacy.json#enabled; macOS managed DataPrivacyMode preference" },
@@ -538,7 +529,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "general.foldToolCalls", section: "general", title: "Fold tool calls",
-    description: "Once an agent starts answering, the tool calls it made collapse under one line. Off (the default) keeps every step in view.",
+    description: "Once an agent has answered, the tool calls it made fold under one line; opened, they read in the order it made them. On by default. Off keeps every step in view.",
     searchTerms: ["general", "fold", "tool", "calls"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.foldToolCalls" },
   }),
@@ -649,9 +640,15 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
-    id: "organizations.compute", section: "organizations", title: "Compute",
-    description: "Cloud providers, workspaces and usage.",
-    searchTerms: ["organizations", "compute"], scope: "organization",
+    id: "organizations.providers", section: "organizations", title: "Cloud providers",
+    description: "Connect the cloud providers this organization's workspaces run on.",
+    searchTerms: ["organizations", "cloud", "compute", "providers", "hetzner", "connect", "key"], scope: "organization",
+    storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
+  }),
+  defineSetting({
+    id: "organizations.compute", section: "organizations", title: "Compute limits",
+    description: "Cloud workspace limits, pausing new workspaces, and usage.",
+    searchTerms: ["organizations", "cloud", "compute", "limits"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
@@ -693,7 +690,7 @@ export const SETTINGS_ROWS = [
   defineSetting({
     id: "organizations.environment", section: "organizations", title: "Environment",
     description: "Configure and build the cloud workspace environment.",
-    searchTerms: ["organizations", "environment"], scope: "organization",
+    searchTerms: ["organizations", "cloud", "compute", "environment", "build", "versions"], scope: "organization",
     storage: { kind: "service", location: "TerminalX organization service" }, layout: "content",
   }),
   defineSetting({
@@ -1028,7 +1025,16 @@ export const SETTINGS_ROWS = [
 export type SettingId = (typeof SETTINGS_ROWS)[number]["id"];
 const byId = new Map<string, SettingRegistration>(SETTINGS_ROWS.map((row) => [row.id, row]));
 if (byId.size !== SETTINGS_ROWS.length) throw new Error("Duplicate settings row id");
-export function settingById(id: string): SettingRegistration | undefined { return byId.get(id); }
+/** Rows that moved to another section, by their old id, so links copied before still open them. */
+const MOVED_ROWS: Readonly<Record<string, SettingId>> = {
+  "general.dataPrivacy": "account.dataPrivacy",
+  // PRO-377: Appearance keeps the design's rows; these moved to General.
+  ...Object.fromEntries(
+    (["textSize", "transcriptLayout", "customOrder", "tabBar", "branchSessions", "openUsage", "statusBar", "usage", "resources", "usageDisplay", "usageRefresh"] as const)
+      .map((key) => [`appearance.${key}`, `general.${key}` satisfies SettingId]),
+  ),
+};
+export function settingById(id: string): SettingRegistration | undefined { return byId.get(id) ?? (Object.hasOwn(MOVED_ROWS, id) ? byId.get(MOVED_ROWS[id]) : undefined); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }
 /** Whether a section has rows that show "Your value" (rows kept in the user file, drawn as rows). */
 export function sectionShowsUserValues(section: SettingsSection): boolean {
@@ -1039,15 +1045,29 @@ type RegisteredProps = Omit<RowProps, "children" | "control"> & (
   | { setting: ContentSettingId; children: ReactElement; control?: never }
   | { setting: Exclude<SettingId, ContentSettingId>; control: ReactNode; children?: never }
 );
+/**
+ * Settings search (PRO-374, design 09.01): each result row carries its live control. The result's page is
+ * rendered (hidden) inside this context, so its state adapters run as on the page itself: a row drawn as a row
+ * draws itself as usual and also puts a copy of its control in the slot of its result. Both read and write the
+ * same state. The row stays in one shape (a fragment) with or without slots, so the page and its editors keep
+ * their state when a search starts or ends.
+ */
+export const SettingControlSlots = createContext<ReadonlyMap<string, HTMLElement> | null>(null);
 export function RegisteredSetting({ setting, ...props }: RegisteredProps) {
-  return byId.get(setting)!.render(props);
+  const slots = useContext(SettingControlSlots);
+  const slot = slots && byId.get(setting)!.layout !== "content" && !props.instance ? slots.get(setting) : undefined;
+  return <>{byId.get(setting)!.render(props)}{slot && props.control ? createPortal(props.control, slot) : null}</>;
 }
-/** Accept old section entry points and new row links; reject events and unknown strings. */
+/** Whether a link names one row (by its id, or a moved row's old id) rather than a section or nothing known. */
+export function isRowLink(target: unknown): boolean {
+  return typeof target === "string" && settingById(target) !== undefined;
+}
+/** Accept old section entry points, moved rows' old ids and new row links; reject events and unknown strings. */
 export function resolveSetting(target: unknown): SettingRegistration {
   if (typeof target === "string") {
-    const row = byId.get(target);
+    const row = settingById(target);
     if (row) return row;
     if (Object.hasOwn(SETTINGS_SECTIONS, target)) return byId.get(SETTINGS_SECTIONS[target as SettingsSection].entry)!;
   }
-  return byId.get("account.identity")!;
+  return byId.get(SETTINGS_SECTIONS.general.entry)!;
 }

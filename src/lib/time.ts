@@ -13,6 +13,12 @@ export function relativeTime(iso: string, now = Date.now()): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** An epoch-millisecond time as "just now", "1h ago", "3d ago", or a short date ("Oct 12") past a week. */
+export function ago(timestamp: number, now = Date.now()): string {
+  const label = relativeTime(new Date(timestamp).toISOString(), now);
+  return label === "now" ? "just now" : /^\d+[mhd]$/.test(label) ? `${label} ago` : label;
+}
+
 /** `relativeTime` for the last six days, and nothing older: a row past that shows no age. */
 export function recentTime(iso: string, now = Date.now()): string {
   const label = relativeTime(iso, now);

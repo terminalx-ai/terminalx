@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use base64::Engine as _;
-use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, Kem as _, OpModeS, Serializable};
+use hpke::{aead::ChaCha20Poly1305, kdf::HkdfSha256, kem::X25519HkdfSha256, Deserializable, OpModeS, Serializable};
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use serde_json::{json, Value};
 
@@ -290,6 +289,7 @@ fn the_directory_maps_online_offline_not_available_this_mac_and_paired() {
             last_seen_at: None,
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         })
         .unwrap();
@@ -506,6 +506,13 @@ fn refusals_carry_the_prefixes_the_dialog_reads() {
 }
 
 /// A fake whose grant answers `state` on its first poll.
+/// The grant id this computer minted for its request (the server echoes it;
+/// the fake answers "g", so the revoke is matched on the posted id).
+fn requested_grant(account: &FakeAccount) -> String {
+    let posted = account.find("POST", "/v1/account/pairing-grant-requests").into_iter().find(|request| !request.path.ends_with("/revoke")).expect("a grant request");
+    posted.body.as_ref().unwrap()["grantRequestId"].as_str().unwrap().to_string()
+}
+
 fn grant_ending(state: &'static str) -> (FakeAccount, String) {
     let machine = host_key(30);
     let hosts = json!({ "hosts": [host(&machine, "Mac mini", BOTH, "live", None)] });
@@ -554,7 +561,7 @@ fn waiting_is_cancelled_and_the_grant_revoked() {
     }
     rig.pairing.cancel();
     assert!(waiting.join().unwrap().unwrap_err().starts_with("cancelled:"));
-    assert_eq!(account.find("POST", "/g/revoke").len(), 1);
+    assert_eq!(account.find("POST", &format!("/{}/revoke", requested_grant(&account))).len(), 1);
 }
 
 #[test]
@@ -563,5 +570,5 @@ fn a_grant_still_pending_at_the_deadline_expires() {
     let mut rig = rig(&account.base, true, Vec::new());
     Arc::get_mut(&mut rig.pairing).unwrap().wait = Duration::from_millis(60);
     assert!(rig.pairing.request(&id).unwrap_err().starts_with("grant_expired:"));
-    assert_eq!(account.find("POST", "/g/revoke").len(), 1);
+    assert_eq!(account.find("POST", &format!("/{}/revoke", requested_grant(&account))).len(), 1);
 }

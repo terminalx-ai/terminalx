@@ -47,7 +47,13 @@ fn a_message_carries_its_files_and_the_agent_is_handed_their_paths() {
     let rig = Rig::new(claude_tab(None), LISTENS);
     let files = rig.stored();
 
-    let sent = rig.manager.send_pressed(SESSION, TAB, "Review this".into(), Vec::new(), Some(chrono::Utc::now().timestamp_millis()), files.clone()).unwrap();
+    let request_id = uuid::Uuid::new_v4();
+    let sent = rig.manager.send_pressed_with_request(SESSION, TAB, "Review this".into(), Vec::new(), Some(chrono::Utc::now().timestamp_millis()), files.clone(), Some(request_id)).unwrap();
+    let event = &sent.events[0];
+    assert_eq!(event.prompt_request_id, Some(request_id));
+    assert_eq!(serde_json::to_value(event).unwrap()["promptRequestId"], request_id.to_string());
+    let history = rig.manager.load_events(SESSION, TAB).unwrap();
+    assert_eq!(history.iter().find(|record| record.id == event.id).unwrap().prompt_request_id, Some(request_id));
 
     // The chat's message is what was typed, with its files beside it.
     let Payload::UserMessage { text, files: carried, images, .. } = &sent.events[0].payload else { panic!("{:?}", sent.events) };

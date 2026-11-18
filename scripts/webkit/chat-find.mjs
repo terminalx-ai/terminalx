@@ -122,7 +122,7 @@ try {
     await chat.getByRole("status").filter({ hasText: "1 of 1" }).waitFor();
     await visibleHighlight("buried-output");
     assert.ok(await scroller.locator('pre').filter({ hasText: 'buried-output' }).evaluate((el) => el.scrollTop > 0));
-    await chat.getByRole("button", { name: "Include tool output" }).click();
+    await chat.getByRole("checkbox", { name: "Tool output" }).click();
     await chat.getByRole("status").filter({ hasText: "No matches" }).waitFor();
     await input.fill("hidden thought");
     await visibleHighlight("hidden thought");

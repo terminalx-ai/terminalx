@@ -613,10 +613,6 @@ pub struct ExperimentalSettings {
     /// gets the Local VM's tools while it runs, as before, and a choice kept
     /// from while it was on is not read. `terminalx vm` works either way.
     pub local_vm_tasks: bool,
-    /// Machines (PRO-338): Settings → Machines, to let other computers
-    /// operate this one and to pair with one by code (PRO-342), until
-    /// PRO-349 builds the Machines page.
-    pub machines: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -859,7 +855,7 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"machines":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false}));
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
@@ -872,9 +868,10 @@ mod tests {
         assert!(!legacy.experimental.local_vm_tasks);
         let vms: Settings = serde_json::from_value(serde_json::json!({"experimental":{"localVmTasks":true}})).unwrap();
         assert!(vms.experimental.local_vm_tasks && !vms.experimental.orchestrator_runs);
-        assert!(!legacy.experimental.machines, "Machines are off until turned on");
-        let machines: Settings = serde_json::from_value(serde_json::json!({"experimental":{"machines":true}})).unwrap();
-        assert!(machines.experimental.machines && !machines.experimental.local_vm_tasks);
+        // Machines left Experimental (PRO-360): a settings file that still has the switch reads, and drops it on save.
+        let machines: Settings = serde_json::from_value(serde_json::json!({"experimental":{"machines":true,"localVmTasks":true}})).unwrap();
+        assert!(machines.experimental.local_vm_tasks);
+        assert!(serde_json::to_value(&machines).unwrap()["experimental"].get("machines").is_none());
     }
 
     #[test]

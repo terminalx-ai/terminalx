@@ -1,12 +1,14 @@
-import { CircleAlert, Clock, LoaderCircle, ShieldAlert } from "@/icons";
+import { Circle, CircleAlert, Clock, LoaderCircle, ShieldAlert } from "@/icons";
 import { cn } from "@/lib/cn";
 import { isMac, useShortcutKeys } from "@/lib/hotkeys";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import { resetClock } from "@/lib/orchestration";
 import type { Run } from "@/types/orchestration";
 
-/** What a lead's title bar says of its run (18.01, 18.03): that it needs the person, else how many workers run. `null` for neither. */
-export function runPillOf(run: Run | null | undefined): { kind: "needs" | "approval" | "running" | "waiting"; text: string; why: string } | null {
+/** What a lead's title bar says of its run (18.01, 18.03): that it needs the person, else how many workers run; Idle for a
+ * session with no run yet (18.08). `null` while the run is still being read, and for a run with nothing to say. */
+export function runPillOf(run: Run | null | undefined): { kind: "needs" | "approval" | "running" | "waiting" | "idle"; text: string; why: string } | null {
+  if (run === null) return { kind: "idle", text: "Idle", why: "This session leads no run. Open the Run view" };
   if (!run || ["done", "stopped"].includes(run.state)) return null;
   if (run.state === "awaitingApproval") return { kind: "approval", text: "Needs you", why: "The plan waits for your approval" };
   // Paused on its own points, it goes on by itself at the reset (#1004): said, not asked.
@@ -27,14 +29,14 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
   const reduced = useReducedMotion();
   const pill = runPillOf(run);
   if (!pill) return null;
-  const Icon = pill.kind === "running" ? LoaderCircle : pill.kind === "waiting" ? Clock : pill.kind === "approval" ? ShieldAlert : CircleAlert;
+  const Icon = pill.kind === "running" ? LoaderCircle : pill.kind === "waiting" ? Clock : pill.kind === "approval" ? ShieldAlert : pill.kind === "idle" ? Circle : CircleAlert;
   return (
     <div
       role="button" tabIndex={0} data-testid="run-pill" data-pill={pill.kind} title={pill.why}
       onClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(); } }}
       className={cn(
         "mr-1.5 inline-flex h-7 shrink-0 cursor-default items-center gap-1.5 self-center rounded-md px-2.5 text-[12.5px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-        pill.kind === "running" || pill.kind === "waiting" ? "bg-veil-raised text-muted-foreground hover:text-foreground" : "bg-accent text-accent-foreground hover:bg-accent/90",
+        pill.kind === "running" || pill.kind === "waiting" || pill.kind === "idle" ? "bg-veil-raised text-muted-foreground hover:text-foreground" : "bg-accent text-accent-foreground hover:bg-accent/90",
       )}
     >
       <Icon aria-hidden className={cn("size-3.5", pill.kind === "running" && !reduced && "animate-spin")} />
@@ -44,7 +46,7 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
 }
 
 /**
- * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⌘⇧O run view". The reader's
+ * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⇧⌘O run view". The reader's
  * own keys when they changed them (Settings → Keyboard shortcuts); nothing when the action has none.
  */
 export function RunViewHint({ className }: { className?: string }) {

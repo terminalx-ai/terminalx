@@ -92,6 +92,13 @@ export function personName(userId: string | null | undefined): string {
   return member?.displayName?.trim() || member?.email || known.get(userId) || `User ${userId.slice(0, 8)}`;
 }
 
+/** The signed-in person's user id, found by their email in the loaded rosters. */
+export function userIdForEmail(email: string | null | undefined): string | null {
+  if (!email) return null;
+  const wanted = email.trim().toLowerCase();
+  return cachedOrganizationRosters().flatMap((roster) => roster.members).find((person) => person.email?.trim().toLowerCase() === wanted)?.userId ?? null;
+}
+
 /** Forget names and the roster (sign-out, organization switch, tests). */
 export function resetPeople() {
   epoch++;

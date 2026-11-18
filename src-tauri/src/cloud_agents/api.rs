@@ -23,6 +23,17 @@ pub struct Actor {
     pub role: Option<String>,
     #[serde(default)]
     pub can_approve: Option<bool>,
+    /// V2 lease provenance from the same authoritative transaction as role,
+    /// approval and the enclosing runtime generation. Absent for v1.
+    #[serde(default)]
+    pub collaboration_revision: Option<String>,
+    /// Outer None means omitted; Some(None) is the required explicit null.
+    #[serde(default, deserialize_with = "present_write_source")]
+    pub(crate) write_source: Option<Option<crate::remote::collab::v2::WriteSource>>,
+}
+
+fn present_write_source<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<crate::remote::collab::v2::WriteSource>>, D::Error> {
+    Option::<crate::remote::collab::v2::WriteSource>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,7 +192,8 @@ fn error_code(body: &Value) -> &str {
 impl MailboxApi for HttpMailboxApi {
     fn lease(&self, storage_incarnation_id: &str, limit: u32) -> Result<Leased, CallError> {
         let body = json!({ "v": 1, "storageIncarnationId": storage_incarnation_id, "limit": limit.clamp(1, 16) });
-        match self.call("POST", "/v1/cloud-workspace-bootstrap/agent-commands/lease", Some(body))? {
+        match self.call_with("POST", "/v1/cloud-workspace-bootstrap/agent-commands/lease", Some(body),
+            &[(crate::cloud_bootstrap::CAPABILITIES_HEADER, crate::cloud_bootstrap::CAPABILITIES)])? {
             (200, body) => serde_json::from_value(body).map_err(|error| CallError::Transient(anyhow!("lease: unreadable response: {error}"))),
             (status, body) => Err(CallError::Transient(anyhow!("lease: HTTP {status} {}", error_code(&body)))),
         }

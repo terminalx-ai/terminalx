@@ -314,7 +314,10 @@ async fn client_against_release(release: &Release) {
         let machine_id = "a-machine-from-before-machines";
         let (supervisor, mut heard) = supervise(machine_id, raccoon_lib::relay_e2ee::HostKeypair::from_secret([3u8; 32]).public_key_b64(), port);
         let ended = heard
-            .state(&format!("offline against {tag}"), Duration::from_secs(90), |state| matches!(state, MachineConnectionState::Offline { .. } | MachineConnectionState::NeedsUpdate { .. }))
+            // Each round starts by reporting "trying now" (`retry_in_ms: 0`),
+            // which past 30 s reads offline too; the state to check is the
+            // wait between rounds, which names when it tries again.
+            .state(&format!("offline against {tag}"), Duration::from_secs(90), |state| matches!(state, MachineConnectionState::Offline { retry_in_ms, .. } if *retry_in_ms > 0) || matches!(state, MachineConnectionState::NeedsUpdate { .. }))
             .await;
         if let MachineConnectionState::Offline { retry_in_ms, .. } = ended {
             assert!(retry_in_ms > 0, "{tag}: offline names when it tries again");

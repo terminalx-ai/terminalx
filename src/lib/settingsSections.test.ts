@@ -15,20 +15,15 @@ describe("sections behind an Experimental switch", () => {
   });
 });
 
-describe("Settings → Machines behind Experimental → Machines (PRO-342)", () => {
-  it("is hidden, and none of its rows findable, unless experimental.machines is on", () => {
+describe("Settings → Machines for everyone (PRO-342, PRO-360)", () => {
+  it("is offered, with every row findable, whatever the Experimental switches say", () => {
     const rows = settingsInSection("machines");
     expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.thisMac", "machines.pairingCode", "machines.yours", "machines.computers"]);
-    try {
-      noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: true, localVmTasks: true });
-      expect(settingsSectionOffered("machines")).toBe(false);
-      for (const row of rows) expect(settingOffered(row)).toBe(false);
-      noteExperimentalSettings({ nativeCodex: false, machines: true });
-      expect(settingsSectionOffered("machines")).toBe(true);
-      for (const row of rows) expect(settingOffered(row)).toBe(true);
-      noteExperimentalSettings({ nativeCodex: false, machines: false });
-      expect(settingsSectionOffered("machines")).toBe(false);
-    } finally { noteExperimentalSettings({ nativeCodex: false, machines: false, orchestratorRuns: false, localVmTasks: false }); }
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
+    expect(settingsSectionOffered("machines")).toBe(true);
+    for (const row of rows) expect(settingOffered(row)).toBe(true);
+    // Experimental no longer has a Machines switch.
+    expect(settingsInSection("experimental").map((row) => row.id)).not.toContain("experimental.machines");
     expect(PALETTE_SECTIONS.some((section) => section.id === "machines")).toBe(true);
     expect(SETTINGS_SECTIONS.machines).toMatchObject({ title: "Machines", entry: "machines.allowOperating" });
   });

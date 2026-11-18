@@ -94,6 +94,13 @@ export interface RemoteSearchQuery {
   /** A directory to search under; the whole workspace by default. */
   path?: string;
   maxResults?: number;
+  /** `path` may be a machine project's worktree outside its folder, by absolute path (`remoteFilePath`). */
+  absolute?: boolean;
+}
+
+/** Whether a call may name a machine project's worktree outside its folder by absolute path (`remoteFilePath`). */
+export interface PathScope {
+  absolute?: boolean;
 }
 
 export class RemotePathError extends Error {
@@ -118,17 +125,35 @@ export function remotePath(path: string): string {
   return parts.join("/");
 }
 
+/**
+ * A path a file call may name: workspace-relative (`remotePath`), or, only
+ * when the caller says so (`absolute`, a file source rooted at a machine
+ * project's worktree outside its folder, PRO-405), the absolute path
+ * `git.repositories` lists that worktree by, with no `.` or `..` part. The
+ * runtime takes an absolute path only inside one of the project's own
+ * worktrees and refuses every other (`path_forbidden`); this only keeps a
+ * malformed one, or any absolute one nobody asked for, from being sent.
+ */
+export function remoteFilePath(path: string, absolute = false): string {
+  if (!absolute || !path.startsWith("/")) return remotePath(path);
+  if (path.includes("\0") || path.includes("\\")) throw new RemotePathError(`${path} is not a path on the machine`);
+  const parts = path.split("/").filter(Boolean);
+  if (!parts.length) throw new RemotePathError(`${path} is not a worktree`);
+  if (parts.some((part) => part === "." || part === "..")) throw new RemotePathError(`${path} leaves the worktree`);
+  return `/${parts.join("/")}`;
+}
+
 export function isConflict(error: unknown): boolean {
   return error instanceof WorkspaceRpcError && error.code === "conflict";
 }
 
-export async function listRemoteDir(client: WorkspaceRpcClient, path: string): Promise<RemoteListing> {
-  return client.call<RemoteListing>("fs.list", { path: remotePath(path) });
+export async function listRemoteDir(client: WorkspaceRpcClient, path: string, scope: PathScope = {}): Promise<RemoteListing> {
+  return client.call<RemoteListing>("fs.list", { path: remoteFilePath(path, scope.absolute) });
 }
 
 /** `etag`: hash files up to the remote limit too, not only small ones. */
-export async function statRemote(client: WorkspaceRpcClient, path: string, options: { etag?: boolean } = {}): Promise<RemoteStat> {
-  return client.call<RemoteStat>("fs.stat", { path: remotePath(path), ...(options.etag ? { etag: true } : {}) });
+export async function statRemote(client: WorkspaceRpcClient, path: string, options: { etag?: boolean } & PathScope = {}): Promise<RemoteStat> {
+  return client.call<RemoteStat>("fs.stat", { path: remoteFilePath(path, options.absolute), ...(options.etag ? { etag: true } : {}) });
 }
 
 interface ReadPart {
@@ -144,7 +169,7 @@ interface ReadPart {
   dataB64?: string;
 }
 
-export interface ReadOptions {
+export interface ReadOptions extends PathScope {
   signal?: AbortSignal;
   /** Refuse files larger than this (`too_large`) after the first part. */
   maxBytes?: number;
@@ -156,7 +181,7 @@ export interface ReadOptions {
  * `conflict`.
  */
 export async function readRemoteFile(client: WorkspaceRpcClient, path: string, options: ReadOptions = {}): Promise<RemoteFile> {
-  const rel = remotePath(path);
+  const rel = remoteFilePath(path, options.absolute);
   for (let attempt = 0; ; attempt++) {
     try {
       return await readOnce(client, rel, options);
@@ -216,8 +241,9 @@ export async function writeRemoteFile(
   path: string,
   content: string | Uint8Array,
   expectedEtag: string | null | undefined,
+  scope: PathScope = {},
 ): Promise<RemoteWriteResult> {
-  const rel = remotePath(path);
+  const rel = remoteFilePath(path, scope.absolute);
   const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
   if (bytes.length > FS_MAX_FILE_BYTES) throw new WorkspaceRpcError("too_large", `${rel} is larger than ${FS_MAX_FILE_BYTES} bytes`, "fs.write");
   const condition = expectedEtag === undefined ? {} : { expectedEtag };
@@ -242,7 +268,7 @@ export async function searchRemote(client: WorkspaceRpcClient, query: RemoteSear
   abortIfNeeded(signal);
   const searchId = `search-${crypto.randomUUID().replace(/-/g, "")}`;
   const params: Record<string, unknown> = { searchId, query: query.query, regex: !!query.regex, caseSensitive: !!query.caseSensitive };
-  if (query.path) params.path = remotePath(query.path);
+  if (query.path) params.path = remoteFilePath(query.path, query.absolute);
   if (query.maxResults) params.maxResults = query.maxResults;
   const request = client.call<RemoteSearchResult & { searchId: string }>("fs.search", params);
   if (!signal) return request;

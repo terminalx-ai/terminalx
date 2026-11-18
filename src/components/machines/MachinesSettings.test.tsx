@@ -1,14 +1,17 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MachineConnectionView, MachineHostView, PairedMachine } from "@/types/machines";
+import type { MachineActivityEntry, MachineConnectionView, MachineHostView, PairedMachine } from "@/types/machines";
 import { computer, hostView, pairedMachine } from "./machineFixtures.test-utils";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  // The opener plugin calls the Tauri internals itself, not @tauri-apps/api/core.
+  openUrl: vi.fn(async (_url: string) => undefined),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, listener: (event: { payload: unknown }) => void) => {
     mocks.listeners.set(name, listener);
@@ -23,6 +26,7 @@ let view: MachineHostView;
 let machines: PairedMachine[];
 let connections: MachineConnectionView[];
 let privacy: boolean;
+let activity: MachineActivityEntry[];
 const CODE = { code: "txm2.eyJ2IjoyfQ", expiresAt: Date.now() + 300_000 };
 const MINI = "cs1uhCLEB_ttCYaQ";
 const STUDIO = "dYd7tB05O1-4RVzm";
@@ -33,6 +37,8 @@ beforeEach(async () => {
   vi.resetModules();
   mocks.listeners.clear();
   privacy = false;
+  activity = [];
+  mocks.openUrl.mockClear();
   view = hostView({ allowOperating: false }, { machineId: MINI, computers: [computer({ keyId: STUDIO, route: "lan" })] });
   machines = [
     pairedMachine(),
@@ -65,6 +71,12 @@ beforeEach(async () => {
       return true;
     }
     if (command === "machines_account_list") return { signedIn: false };
+    if (command === "machines_activity") return activity;
+    if (command === "machines_disconnect" || command === "machines_let_back") {
+      const held = command === "machines_disconnect" ? Date.now() : null;
+      view = { ...view, status: { ...view.status!, computers: view.status!.computers.map((one) => (one.id === args.id ? { ...one, connected: false, route: null, disconnectedAt: held } : one)) } };
+      return view;
+    }
     throw new Error(`unexpected ${command}`);
   });
   ({ MachinesSettings } = await import("./MachinesSettings"));
@@ -76,6 +88,36 @@ const card = async (name: string) => {
   const list = await screen.findByRole("list", { name: "Your machines" });
   return within(list).getByRole("button", { name: `Open ${name}` }).closest("li") as HTMLElement;
 };
+
+describe("Settings → Machines with no machine paired (PRO-360)", () => {
+  it("says how to start in three steps and links the guide, in place of an empty list", async () => {
+    machines = [];
+    connections = [];
+    render(<MachinesSettings />);
+    const firstRun = await screen.findByTestId("machines-first-run");
+    expect(screen.queryByRole("list", { name: "Your machines" })).toBeNull();
+    expect(within(firstRun).getByText("No machines yet")).toBeTruthy();
+    const steps = within(within(firstRun).getByRole("list", { name: "How to add a machine" })).getAllByRole("listitem");
+    expect(steps.map((step) => step.querySelector(".font-medium")?.textContent)).toEqual(["Get the other computer ready", "Add it here", "Start a session there"]);
+    expect(steps[0].textContent).toContain("“Let other computers operate this Mac”");
+    expect(steps[0].textContent).toContain("terminalx-serve pair");
+    // Add a machine stays the page's one primary button.
+    expect(screen.getAllByRole("button", { name: "Add a machine" })).toHaveLength(1);
+    fireEvent.click(within(firstRun).getByRole("button", { name: "Machines guide" }));
+    const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
+    expect(MACHINES_GUIDE_URL).toMatch(/\/blob\/main\/docs\/MACHINES-GUIDE\.md$/);
+  });
+
+  it("keeps the guide linked under the page's lead once machines are paired", async () => {
+    render(<MachinesSettings />);
+    await card("Mac mini");
+    expect(screen.queryByTestId("machines-first-run")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Machines guide" }));
+    const { MACHINES_GUIDE_URL } = await import("./MachinesSettings");
+    await waitFor(() => expect(mocks.openUrl.mock.calls).toEqual([[MACHINES_GUIDE_URL]]));
+  });
+});
 
 describe("Settings → Machines (screen 21.02)", () => {
   it("shows the switch, This Mac with its name and key label, your machines and the computers that can operate this Mac", async () => {
@@ -194,14 +236,88 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(await within(dialog).findByTestId("account-sign-in")).toBeTruthy();
   });
 
-  it("explains that remote features are off in data privacy mode, as Devices does", async () => {
+  it("says data privacy mode turns off both operating and being operated", async () => {
     privacy = true;
-    const { refreshDataPrivacy } = await import("@/lib/dataPrivacy");
+    const { privacyBlocksCommand, refreshDataPrivacy } = await import("@/lib/dataPrivacy");
     await act(async () => refreshDataPrivacy());
     render(<MachinesSettings />);
-    expect(screen.getByRole("status").textContent).toBe("Turned off by data privacy mode");
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Turned off by data privacy mode");
+    expect(status.textContent).toContain("This Mac neither operates other computers nor lets them operate it.");
+    expect(status.textContent).toContain("no connection to a machine is made");
     expect(screen.queryByRole("switch")).toBeNull();
     expect(mocks.invoke).not.toHaveBeenCalledWith("machines_host_status");
+    for (const command of ["machines_pair", "machines_create_code", "machines_approve", "machines_let_back", "machines_reconnect", "machine_remote_attach"]) {
+      expect(privacyBlocksCommand(command), command).toBe(true);
+    }
+    for (const command of ["machines_list", "machines_host_status", "machines_connections", "machines_activity", "machines_set_allow_operating", "machine_name", "set_machine_name"]) {
+      expect(privacyBlocksCommand(command), command).toBe(false);
+    }
+  });
+
+  it("Disconnect closes a connected computer at once and holds it off until Let back (PRO-357)", async () => {
+    render(<MachinesSettings />);
+    const computers = await screen.findByRole("list", { name: "Computers that can operate this Mac" });
+    expect(within(computers).getByTestId("computer-connected").textContent).toBe("Connected now");
+    fireEvent.click(within(computers).getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_disconnect", { id: "computer-1" }));
+    expect((await within(computers).findByTestId("computer-disconnected")).textContent).toBe("Disconnected");
+    expect(within(computers).queryByTestId("computer-connected")).toBeNull();
+    expect(within(computers).getByText(/until you let it back/)).toBeTruthy();
+    expect(within(computers).queryByRole("button", { name: "Disconnect" })).toBeNull();
+    fireEvent.click(within(computers).getByRole("button", { name: "Let back" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_let_back", { id: "computer-1" }));
+    await waitFor(() => expect(within(computers).queryByTestId("computer-disconnected")).toBeNull());
+  });
+
+  it("shows no Disconnect for a computer that is not connected", async () => {
+    view = hostView({ allowOperating: true }, { machineId: MINI, computers: [computer({ connected: false, route: null })] });
+    render(<MachinesSettings />);
+    const computers = await screen.findByRole("list", { name: "Computers that can operate this Mac" });
+    expect(within(computers).getByRole("button", { name: "Revoke" })).toBeTruthy();
+    expect(within(computers).queryByRole("button", { name: "Disconnect" })).toBeNull();
+  });
+
+  it("lists the activity log under the computers, newest first, with the computer and the time", async () => {
+    const at = Date.now() - 60_000;
+    activity = [
+      { at: at + 3, kind: "terminalOpened", computerId: "computer-1", computer: "Paresh’s MacBook Air", detail: "raccoon" },
+      { at: at + 2, kind: "sessionCreated", computerId: "computer-1", computer: "Paresh’s MacBook Air", detail: "raccoon" },
+      { at: at + 1, kind: "connected", computerId: "computer-1", computer: "Paresh’s MacBook Air", detail: "relay" },
+      { at, kind: "paired", computerId: "computer-1", computer: "Paresh’s MacBook Air" },
+    ];
+    render(<MachinesSettings />);
+    const list = await screen.findByRole("list", { name: "Activity on this Mac" });
+    const rows = within(list).getAllByRole("listitem").map((row) => row.textContent);
+    expect(rows[0]).toContain("Paresh’s MacBook Air opened a terminal in raccoon");
+    expect(rows[1]).toContain("Paresh’s MacBook Air started a session in raccoon");
+    expect(rows[2]).toContain("Paresh’s MacBook Air connected through Relay");
+    expect(rows[3]).toContain("Paresh’s MacBook Air was allowed to operate this Mac");
+    expect(rows[0]).toMatch(/today at \d\d:\d\d/);
+    // It sits in the computers' own section (21.02).
+    const section = screen.getByRole("list", { name: "Computers that can operate this Mac" }).closest("section")!;
+    expect(section.contains(list)).toBe(true);
+  });
+
+  it("words every kind of activity without anything but names, projects, routes and versions", async () => {
+    const { activityText } = await import("./MachinesSettings");
+    const one = (kind: MachineActivityEntry["kind"], detail?: string) => activityText({ at: 1, kind, computer: "Air", detail });
+    expect(one("connected", "lan")).toBe("Air connected on this network");
+    expect(one("connected", "tailscale")).toBe("Air connected over Tailscale");
+    expect(one("disconnected")).toBe("Air disconnected");
+    expect(one("update", "0.2.34")).toBe("Air asked to update TerminalX to 0.2.34");
+    expect(one("revoked")).toBe("Air’s access was revoked");
+    expect(one("expired")).toBe("Air’s access expired after 90 days unused");
+    expect(one("held")).toBe("Air was disconnected until let back");
+    expect(one("letBack")).toBe("Air was let back");
+    expect(activityText({ at: 1, kind: "projectAdded", detail: "site" })).toBe("Project site was added while a computer was connected");
+    expect(activityText({ at: 1, kind: "projectRemoved" })).toBe("A project was removed while a computer was connected");
+    expect(one("other")).toBe("Air: an event from a newer TerminalX");
+  });
+
+  it("says when there is no activity yet", async () => {
+    render(<MachinesSettings />);
+    expect(await within(await screen.findByTestId("machine-activity")).findByText("Nothing yet.")).toBeTruthy();
   });
 });
 
@@ -215,4 +331,13 @@ describe("running sessions on a machine's card", () => {
     expect(runningText(1)).toBe("1 session running");
     expect(runningText(3)).toBe("3 sessions running");
   });
+});
+
+
+it("retains the complete introduction when Machines is rendered standalone", async () => {
+  render(<MachinesSettings />);
+  await card("Mac mini");
+  const { SETTINGS_SECTIONS } = await import("../settings/settingsRegistry");
+  expect(screen.getByText(SETTINGS_SECTIONS.machines.subtitle, { exact: false })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Your machines" })).toBeTruthy();
 });

@@ -6,9 +6,9 @@ import type { SettingRegistration } from "@/components/settings/settingsRegistry
 // Integrations, Devices, Agents, Environment), each page the design does not draw after the one it sits with
 // in Settings. The names are the ones Settings gives its pages, so a row here and the page it opens read the same.
 export const SETTINGS_SECTIONS = [
-  { id: "general", title: "General", description: "Data privacy, website links, sounds, chat and worktree defaults", terms: ["browser link actions command line cli pixel raccoon fold tool calls files changed prompt map autocorrect quick chat floating window cloud control user settings file json config preferences reload layered configuration trust managed locked branch prefix"] },
+  { id: "general", title: "General", description: "Data privacy, website links, text size, tab bar, status bar, sounds, chat and worktree defaults", terms: ["text size font transcript layout tab bar branches usage resources refresh percent custom order drag reorder sidebar sessions projects status bar browser link actions command line cli pixel raccoon fold tool calls files changed prompt map autocorrect quick chat floating window cloud control user settings file json config preferences reload layered configuration trust managed locked branch prefix"] },
   { id: "account", title: "Account", description: "Sign in, profile and account diagnostics", terms: ["login email subscription"] },
-  { id: "appearance", title: "Appearance", description: "Themes, font size, transcript layout and status bar", terms: ["text size light dark mode tabs branches usage resources refresh percent custom order drag reorder sidebar sessions projects"] },
+  { id: "appearance", title: "Appearance", description: "Theme, light or dark mode and colored sidebar diffs", terms: ["light dark mode theme colors colours sidebar diffs line counts"] },
   { id: "shortcuts", title: "Shortcuts", description: "Customize keyboard shortcuts", terms: ["key bindings hotkeys"] },
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },
@@ -22,7 +22,7 @@ export const SETTINGS_SECTIONS = [
   { id: "repositories", title: "Projects", description: "Project paths, preview URLs, files to copy, scripts, actions and workspace cleanup", terms: ["repositories repository project git root worktrees ignored glob patterns env worktreeinclude setup archive hooks terminal"] },
   { id: "organizations", title: "Organizations", description: "Members, cloud workspaces and organization settings", terms: ["team invite billing compute environment agent logins routes github setup"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks and Machines", terms: ["machines operate other computers", "app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, and Local VM tasks", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;
 
@@ -32,7 +32,6 @@ export type SettingsTab = (typeof SETTINGS_SECTIONS)[number]["id"];
 export function settingsSectionOffered(tab: SettingsTab): boolean {
   if (tab === "orchestrator") return getExperimentalSettings()?.orchestratorRuns === true;
   if (tab === "localVms") return getExperimentalSettings()?.localVmTasks === true;
-  if (tab === "machines") return getExperimentalSettings()?.machines === true;
   return true;
 }
 

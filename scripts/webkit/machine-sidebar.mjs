@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // PRO-346: each paired machine's sidebar section lists its projects and,
-// under each, its sessions (screen 21.01), in the desktop's WebKit with
-// Experimental → Machines on.
+// under each, its sessions (screen 21.01), in the desktop's WebKit.
 //
 // Two machines are paired: "Mac mini" (macOS, Direct) with two projects, one
 // of them named as a project on the other machine, and "dev-server" (Linux,
@@ -15,8 +14,13 @@
 // - the header's + lists the machine's projects; choosing one opens the
 //   machine's view with the new-agent form on that project, and Start agent
 //   sends `session.create` with its projectId and selects the new session;
-// - Mac mini going offline keeps its section and its sessions, dimmed;
-// - the sidebar never scrolls sideways; with Machines off nothing shows.
+// - Mac mini going offline keeps its section and its sessions, dimmed, with
+//   the "Mac mini isn't reachable" card under them (PRO-352, 21.09): when it
+//   was last seen, Try again and Machine settings, inside the sidebar, no
+//   text under 12 px; Try again asks the native side to reconnect;
+// - Mac mini revoking this Mac shows "no longer allows this Mac" with Pair
+//   again; coming back removes the card;
+// - the sidebar never scrolls sideways; with no machine paired nothing shows.
 //
 // Pictures of each state go to MACHINE_SIDEBAR_SHOTS when it is set (the
 // PR evidence uses ~/.raccoon/pr-evidence/pro-346/), named after the state.
@@ -32,13 +36,20 @@ const shoot = async (page, name) => {
   if (shots) await page.screenshot({ path: join(shots, `${name}.png`) });
 };
 
-const LAST_SEEN = Date.parse("2026-11-15T14:02:00");
+// Yesterday at 14:02 local time, whatever day the check runs: a fixed date read "at 14:02" on that day only.
+const LAST_SEEN = (() => {
+  const day = new Date();
+  day.setDate(day.getDate() - 1);
+  return day.setHours(14, 2, 0, 0);
+})();
 
 // Runs in the page, after the stub: the two machines, their projects and sessions, and their runtimes.
-const fixture = (machines) => `(() => {
+const fixture = (paired) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
+  // This desktop's version, which a machine's view compares with the machine's (PRO-354).
+  answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5", directEndpoints: ["ws://192.168.1.20:6768/machine/1"],
     route: "relayAndNearby", pairedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: ${LAST_SEEN}, lastRoute: null, relay: null, ...patch });
   answers.machines_list = [
@@ -50,6 +61,8 @@ const fixture = (machines) => `(() => {
     "m-server": { state: "relay", route: { kind: "relay", endpoint: null }, since: Date.now(), rttMs: 41 },
   };
   answers.machines_connections = () => Object.entries(views).map(([machineId, state]) => ({ machineId, state }));
+  // No machine paired (PRO-360): the app is as it was before Machines.
+  if (!${paired}) { answers.machines_list = []; answers.machines_connections = () => []; }
 
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const project = (projectId, name, path) => ({ projectId, name, path, kind: "git", defaultBranch: "main", archived: false });
@@ -128,7 +141,9 @@ const fixture = (machines) => `(() => {
     }
     return true;
   };
-  answers.machines_reconnect = null;
+  // Try again (PRO-352): counted, so the check sees it asked the native side.
+  window.__PW_RECONNECTS__ = 0;
+  answers.machines_reconnect = () => { window.__PW_RECONNECTS__++; return null; };
   answers.cloud_remote_detach = null;
   window.__PW_MACHINE__ = (machineId, state) => {
     views[machineId] = state;
@@ -218,7 +233,8 @@ for (const colorScheme of ["light", "dark"]) {
 
   // The overview: machine sessions in the table, a Where column naming each machine, and the All machines menu with a count per machine.
   {
-    await page.getByRole("button", { name: /^Dashboard/ }).first().click();
+    // The sidebar destination is "Overview" since PRO-384 (#1046).
+    await page.getByRole("button", { name: /^Overview/ }).first().click();
     await page.getByRole("button", { name: "Table", exact: true }).click();
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     await table.locator("tbody tr[data-session]").first().waitFor();
@@ -244,15 +260,16 @@ for (const colorScheme of ["light", "dark"]) {
     }, { headers, rows, entries });
   }
 
-  // A session row opens the machine's view on it.
+  // A session row opens that session (PRO-347), not the machine's own page.
   {
-    await page.locator('[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"] button').first().click();
-    await page.locator('[data-testid="machine-main"][data-machine="m-mini"]').waitFor();
-    const selected = await page.locator('[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"]').getAttribute("class");
+    const row = '[data-testid="machine-session-row"][data-session="machine:m-mini:p-tx:s-flaky"]';
+    await page.locator(`${row} button`).first().click();
+    await page.waitForFunction((row) => /\bbg-selected\b/.test(document.querySelector(row)?.className ?? "") && !!document.querySelector("main"), row);
+    const opened = await page.evaluate(() => ({ session: !!document.querySelector("main") && !document.querySelector('[data-testid="machine-main"]'), main: document.querySelector("main")?.textContent?.slice(0, 200) ?? null }));
     failed += report(`select a machine session (${colorScheme})`, {
-      "the machine's view opens": true,
-      "the row is selected": /\bbg-selected\b/.test(selected ?? ""),
-    });
+      "the session opens in the session view, not the machine's page": opened.session,
+      "the row is selected": true,
+    }, opened);
     await shoot(page, `session-selected-${colorScheme}`);
   }
 
@@ -298,19 +315,70 @@ for (const colorScheme of ["light", "dark"]) {
     }, m);
     await shoot(page, `offline-${colorScheme}`);
   }
+
+  // PRO-352 (21.09): the offline section's card, and Try again.
+  {
+    const card = page.locator('[data-testid="machine-section"][data-machine="m-mini"] [data-testid="machine-away-card"]');
+    await card.waitFor();
+    const c = await card.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const aside = node.closest("aside, nav, [data-testid='sidebar']")?.getBoundingClientRect() ?? null;
+      const texts = [...node.querySelectorAll("*")].filter((el) => el.childElementCount === 0 && el.textContent.trim()).map((el) => parseFloat(getComputedStyle(el).fontSize));
+      return {
+        state: node.getAttribute("data-state"),
+        text: node.textContent.replace(/\s+/g, " ").trim(),
+        buttons: [...node.querySelectorAll("button")].map((button) => button.textContent.trim()),
+        inside: !aside || (box.left >= aside.left - 1 && box.right <= aside.right + 1),
+        smallest: Math.min(...texts),
+      };
+    });
+    const before = await page.evaluate(() => window.__PW_RECONNECTS__);
+    await card.getByRole("button", { name: "Try again" }).click();
+    await page.waitForTimeout(200);
+    const after = await page.evaluate(() => window.__PW_RECONNECTS__);
+    failed += report(`offline card (${colorScheme})`, {
+      "the card is for the offline state": c.state === "offline",
+      "it says Mac mini isn't reachable": c.text.includes("Mac mini isn’t reachable"),
+      "it says when it was last seen": /Last seen yesterday at 14:02\./.test(c.text),
+      "it says sessions keep running and the list catches up": c.text.includes("Sessions there keep running, and this list catches up when it reconnects."),
+      "it offers Try again and Machine settings": c.buttons.join(",") === "Try again,Machine settings",
+      "it stays inside the sidebar": c.inside,
+      "no text under 12 px": c.smallest >= 12,
+      "Try again asks to reconnect": after > before,
+    }, { ...c, before, after });
+    await shoot(page, `offline-card-${colorScheme}`);
+
+    await page.evaluate(() => window.__PW_MACHINE__("m-mini", { state: "accessRemoved" }));
+    await page.locator('[data-testid="machine-away-card"][data-state="accessRemoved"]').waitFor();
+    const removed = await page.locator('[data-testid="machine-away-card"][data-state="accessRemoved"]').evaluate((node) => ({
+      text: node.textContent.replace(/\s+/g, " ").trim(),
+      buttons: [...node.querySelectorAll("button")].map((button) => button.textContent.trim()),
+    }));
+    failed += report(`access removed card (${colorScheme})`, {
+      "it says Mac mini no longer allows this Mac": removed.text.includes("Mac mini no longer allows this Mac"),
+      "it offers Pair again and Machine settings": removed.buttons.join(",") === "Pair again,Machine settings",
+    }, removed);
+    await shoot(page, `access-removed-card-${colorScheme}`);
+
+    await page.evaluate(() => window.__PW_MACHINE__("m-mini", { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: Date.now(), rttMs: 3 }));
+    await page.waitForTimeout(300);
+    failed += report(`back (${colorScheme})`, {
+      "the card is gone": (await page.locator('[data-testid="machine-away-card"]').count()) === 0,
+    });
+  }
   await page.close();
 }
 
-// Machines off: nothing of the machines shows.
+// No machine paired: nothing of the machines shows (PRO-360).
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1000, height: 620 }, { extra: fixture(false) });
   await sidebar(page);
   await page.waitForTimeout(500);
-  failed += report("machines off", {
+  failed += report("no machine paired", {
     "there is no Machines section": (await page.locator('[data-testid="machines-section"]').count()) === 0,
     "there are no machine rows": (await page.locator('[data-testid="machine-session-row"], [data-testid="machine-project"]').count()) === 0,
   });
-  await shoot(page, "machines-off");
+  await shoot(page, "no-machine-paired");
   await page.close();
 }
 

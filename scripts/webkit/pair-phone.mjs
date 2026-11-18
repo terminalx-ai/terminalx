@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// PRO-314: the Pair a phone dialog and the connected bar in the desktop's WebKit,
+// The Pair a phone dialog and Device dock tab in the desktop's WebKit,
 // at the window's smallest size (760×520, tauri.conf.json) and a roomy one, in
 // the light and the dark theme. The dialog opens from the command palette; then
 // it shows a live code, a phone waiting for approval, an expired code, and Relay
 // down with Only this network chosen. In each: the dialog stays inside the
 // window and its two columns, nothing overlaps or is cut, no text is under
-// 11 px, the fingerprints are mono, device rows are 56 px, and the connected
-// bar sits top-centre, whole, clear of the dialog.
+// 11 px, the fingerprints are mono and device rows are 56 px. The Device tab
+// sits beside Terminal and offers access to live connections from the folded
+// dock or the lower-right Device button when the right panel is hidden.
 //
 // Pictures of every case go to PAIR_PHONE_SHOTS, by default scripts/webkit/output/pair-phone;
 // that default folder ignores itself, so a run leaves the worktree clean.
@@ -15,7 +16,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, open, report, serve } from "./harness.mjs";
+import { launch, open, report, serve, sidebar } from "./harness.mjs";
 
 const output = fileURLToPath(new URL("./output/", import.meta.url));
 const shots = process.env.PAIR_PHONE_SHOTS ?? join(output, "pair-phone");
@@ -27,7 +28,6 @@ const RELAY_DOWN = "TerminalX Relay service is temporarily unavailable. Retrying
 // Runs in the page, after the stub: the Mac's pairing status, and a way to change it as the Mac would.
 const fixture = `(() => {
   const answers = window.__PW_STUB__.answers;
-  const now = Date.now();
   const offer = (mode) => ({
     pairingUrl: "terminalx://pair?v=2&code=" + "A1b2C3d4E5".repeat(mode === "automatic" ? 40 : 12),
     expiresAt: Date.now() + 292000,
@@ -53,21 +53,26 @@ const fixture = `(() => {
   };
   answers.pairing_status = () => status;
   answers.pairing_generate = ({ connectionMode }) => (status = { ...status, activePairing: offer(connectionMode) });
+  answers.pairing_disconnect = ({ deviceId }) => (status = {
+    ...status,
+    devices: status.devices.map((device) => device.id === deviceId ? { ...device, connection: undefined } : device),
+  });
   window.__PAIRING__ = {
-    now,
     set(patch) {
       status = { ...status, ...patch };
       window.__PW_STUB__.emit("pairing_status", status);
+    },
+    reconnect() {
+      this.set({ devices });
     },
     offer,
   };
 })();`;
 
-/** Layout facts about the open dialog and the connected bar. */
+/** Layout facts about the open dialog. */
 function measure(page) {
   return page.evaluate(() => {
     const dialog = document.querySelector('[role="dialog"]');
-    const bar = document.querySelector('[data-testid="phone-connected-bar"]');
     const box = (element) => {
       const r = element.getBoundingClientRect();
       return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
@@ -127,7 +132,10 @@ function measure(page) {
       out.qr = !!dialog.querySelector('img[alt="TerminalX phone pairing QR code"]');
       out.text = dialog.textContent;
     }
-    if (bar) out.bar = { ...box(bar), text: bar.textContent, cut: [...bar.querySelectorAll("span")].some((s) => s.scrollWidth > s.clientWidth + 1) };
+    const code = document.querySelector('[data-testid="pairing-code"]');
+    if (code) out.code = box(code);
+    const path = document.querySelector('[role="radiogroup"][aria-label="How the phone reaches this Mac"]');
+    if (path) out.path = { ...box(path), column: box(path.parentElement) };
     return out;
   });
 }
@@ -145,12 +153,14 @@ function commonChecks(m) {
     "paired device rows are 56 px": m.rows.length === 2 && m.rows.every((h) => h === 56),
     "fingerprints are mono": m.fingerprints.length >= 2 && m.fingerprints.every((f) => f.mono),
     "fingerprints fit their boxes": m.fingerprints.every((f) => f.fits),
-    "the connected bar is top-centre and whole": !!m.bar && Math.abs((m.bar.left + m.bar.right) / 2 - vw / 2) < 1.5 && m.bar.top < 12 && !m.bar.cut && m.bar.text.startsWith("Paresh’s iPhone is connected · it can see and drive your sessions"),
-    "the connected bar is clear of the dialog": !!m.bar && !!m.dialog && m.bar.bottom <= m.dialog.top,
+    "the code is 228 px square": !m.code || (Math.abs(m.code.width - 228) < 1 && Math.abs(m.code.height - 228) < 1),
+    "the path picker spans its column": !m.path || Math.abs(m.path.width - (m.path.column.width - 40)) < 1.5,
   };
 }
 
-const settle = (page) => page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running"));
+const settle = (page) => page.waitForFunction(() => document.getAnimations().every((animation) =>
+  animation.playState !== "running" || animation.effect?.getTiming().iterations === Infinity,
+));
 
 const server = await serve();
 const browser = await launch();
@@ -160,16 +170,85 @@ try {
     for (const viewport of [{ width: 760, height: 520 }, { width: 1280, height: 800 }]) {
       const name = `${mode}, ${viewport.width}×${viewport.height}`;
       const shot = (state) => join(shots, `pair-phone-${mode}-${viewport.width}x${viewport.height}-${state}.png`);
-      const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, viewport, {
-        extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${fixture}`,
+      const page = await open(browser, server.url, { cloud: true, localProjects: 1, localSession: true }, viewport, {
+        colorScheme: mode,
+        extra: fixture,
       });
-      await page.locator('[data-testid="sidebar-rail"]').waitFor();
+      const rail = await sidebar(page);
+      await rail.getByTestId("conversation-list").getByRole("button", { name: /Local long session$/ }).click();
+      await page.keyboard.press("Meta+B");
+      await settle(page);
+
+      const dock = page.getByTestId("panel-terminal");
+      const deviceStatus = page.getByRole("button", { name: "Device · 1 connected phone", exact: true });
+      await deviceStatus.waitFor();
+      await page.evaluate(() => window.__PW_STUB__.emit("status_bar_settings", { visible: false }));
+      await page.locator("[data-status-bar]").waitFor({ state: "hidden" });
+      const panelHidden = await dock.count() === 0;
+      const statusAtBottomRight = await deviceStatus.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        return box.left > innerWidth / 2 && box.bottom > innerHeight - 24;
+      });
+      await deviceStatus.click();
+      const statusDetails = page.getByRole("dialog", { name: "Device", exact: true });
+      await statusDetails.getByRole("button", { name: "Disconnect Paresh’s iPhone", exact: true }).click();
+      await deviceStatus.waitFor({ state: "hidden" });
+      failed += report(`${name}, hidden right panel`, {
+        "Device status is in the lower-right corner with no dock": panelHidden && statusAtBottomRight,
+        "Disconnect clears the live status and closes its controls": await statusDetails.count() === 0,
+      });
+      await page.evaluate(() => window.__PAIRING__.reconnect());
+      await deviceStatus.waitFor();
+
+      // Live remote access is discoverable and can be ended from the folded dock.
+      await page.keyboard.press("Meta+E");
+      const deviceTab = dock.getByRole("tab", { name: "Device · 1", exact: true });
+      const toggle = dock.getByRole("button", { name: "Show Device tab (1 connected phone)", exact: true });
+      await toggle.waitFor();
+      await settle(page);
+      const dockOnly = await deviceStatus.count() === 0;
+      const collapsed = (await toggle.getAttribute("aria-expanded")) === "false";
+      const bannerGone = await page.getByTestId("phone-connected-bar").count() === 0;
+      const placement = await deviceTab.evaluate((tab) => {
+        const terminal = tab.previousElementSibling;
+        const row = tab.parentElement.getBoundingClientRect();
+        const box = tab.getBoundingClientRect();
+        return {
+          besideTerminal: terminal?.textContent.trim() === "Terminal" && terminal.getBoundingClientRect().right <= box.left,
+          lowerRight: box.left > innerWidth / 2 && box.top > innerHeight / 2,
+          fits: box.top >= row.top && box.bottom <= row.bottom && box.right <= Math.min(row.right, innerWidth),
+          unselected: tab.getAttribute("aria-selected") === "false",
+        };
+      });
+      await page.screenshot({ path: shot("device-collapsed") });
+      await toggle.click();
+      const devicePanel = dock.getByRole("tabpanel", { name: /^Device/ });
+      const disconnect = devicePanel.getByRole("button", { name: "Disconnect Paresh’s iPhone" });
+      await disconnect.waitFor();
+      await page.screenshot({ path: shot("device-open") });
+      const explainsAccess = (await devicePanel.innerText()).includes("see and drive sessions on this Mac");
+      await disconnect.click();
+      await devicePanel.getByText("No devices connected", { exact: true }).waitFor();
+      failed += report(`${name}, Device dock`, {
+        "Device is immediately after Terminal in the lower-right dock and fits its tab row": placement.besideTerminal && placement.lowerRight && placement.fits,
+        "a connection leaves the tab unselected and the dock collapsed": placement.unselected && collapsed,
+        "there is no floating connection banner": bannerGone,
+        "the collapsed toggle opens Device and the panel explains remote access": explainsAccess,
+        "the Device tab takes over from the lower-right Device button": dockOnly,
+        "Disconnect clears the tab count and keeps the phone paired": await dock.getByRole("tab", { name: "Device", exact: true }).count() === 1 &&
+          await page.evaluate(async () => (await window.__PW_STUB__.answers.pairing_status()).devices.some((device) => device.id === "phone-1" && !device.connection)),
+      }, placement);
+
+      await page.evaluate(() => window.__PAIRING__.reconnect());
       await page.keyboard.press("Meta+K");
       const palette = page.getByRole("dialog");
       await palette.locator("input").fill("Pair a phone");
       await palette.getByRole("option", { name: /^Pair a phone…/ }).click();
       const dialog = page.getByRole("dialog", { name: "Pair a phone" });
       await dialog.getByAltText("TerminalX phone pairing QR code").waitFor();
+      const connectedRow = dialog.getByTestId("paired-device").filter({ hasText: "Paresh’s iPhone" });
+      await connectedRow.getByRole("button", { name: "Disconnect Paresh’s iPhone", exact: true }).waitFor();
+      await connectedRow.getByRole("button", { name: "Revoke Paresh’s iPhone", exact: true }).waitFor();
       await settle(page);
 
       // 1. A live Relay code.

@@ -77,7 +77,7 @@ async fn connect_saved_phone(manager: &PairingManager, port: u16) {
 #[test]
 fn startup_restores_the_listener_for_a_saved_phone_without_sign_in_or_a_new_code() {
     let _home = crate::store::temp_home();
-    DeviceRegistry::default().add(saved_device()).unwrap();
+    DeviceRegistry.add(saved_device()).unwrap();
     let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = reserved.local_addr().unwrap().port();
     drop(reserved);
@@ -91,7 +91,7 @@ fn startup_restores_the_listener_for_a_saved_phone_without_sign_in_or_a_new_code
 #[test]
 fn startup_retries_a_busy_port_and_accepts_the_saved_phone_when_it_is_released() {
     let _home = crate::store::temp_home();
-    DeviceRegistry::default().add(saved_device()).unwrap();
+    DeviceRegistry.add(saved_device()).unwrap();
     let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = occupied.local_addr().unwrap().port();
     let manager = configure(port);
@@ -120,7 +120,7 @@ fn startup_leaves_the_listener_off_without_a_claimed_unrevoked_device() {
     ] {
         let _home = crate::store::temp_home();
         for device in devices {
-            DeviceRegistry::default().add(device).unwrap();
+            DeviceRegistry.add(device).unwrap();
         }
         let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let manager = configure(reserved.local_addr().unwrap().port());

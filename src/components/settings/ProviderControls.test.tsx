@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type CloudProviderConnection, type CloudProviderSummary } from "@/lib/api";
+import { describedAs } from "@/test/cloudProviderDescriptors";
 import { ProviderControls } from "./ProviderControls";
 
 vi.mock("@/lib/api", () => ({
@@ -66,6 +67,7 @@ beforeEach(() => {
           sourceSelection: "optional",
           pricing: "estimate",
         },
+        descriptor: null,
       },
     ],
   }));
@@ -447,6 +449,109 @@ describe("organization provider controls", () => {
       fireEvent.click(screen.getByRole("button", { name: "Check key again" }));
       expect((await screen.findByRole("alert")).textContent).toMatch(/Validation failed/);
       expect(screen.getByText("Original account")).toBeTruthy();
+    });
+  });
+
+  // PRO-452: a provider TerminalX itself provides. There is nothing to
+  // connect, so it shows as a connected provider does, without anything
+  // about a key, and no connection of the organization's is read for it.
+  describe("a provider TerminalX provides", () => {
+    const platform = (overrides: Partial<CloudProviderSummary> = {}): CloudProviderSummary => ({
+      id: "terminalx-cloud",
+      displayName: "TerminalX Cloud",
+      canManage: true,
+      availability,
+      connection: null,
+      capabilities: { suspend: true, resume: true, releaseDisposition: "destroyed", locationSelection: "required", sourceSelection: "optional", pricing: "provider-rate" },
+      descriptor: describedAs("terminalx-cloud"),
+      ...overrides,
+    });
+    const KEY_CONTROLS = /Connect provider|Replace|Validate|Disconnect|Check key again/;
+
+    it("shows as ready to use, with no connection read and nothing about a key", async () => {
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({ providers: [platform()] }));
+      render(<ProviderControls contextRevision="org-revision" />);
+      await screen.findByText("Setup complete — provided by TerminalX");
+      expect(screen.getByTestId("provider-platform").textContent).toContain("TerminalX provides TerminalX Cloud, so there is no key to connect and it is ready to use.");
+      expect(screen.queryByRole("button", { name: KEY_CONTROLS })).toBeNull();
+      expect(screen.queryByText("Credential version")).toBeNull();
+      expect(screen.queryByText("Resources and remaining charges")).toBeNull();
+      expect(screen.queryByText(/provider keys/)).toBeNull();
+      expect(api.cloudProvider).not.toHaveBeenCalled();
+    });
+
+    it("still lets an owner or admin pause its new machines and allow them again", async () => {
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({ providers: [platform()] }));
+      vi.mocked(api.cloudProviderSetCreationEnabled).mockImplementation(async (_provider, _revision, enabled) => {
+        availability = enabled ? "available" : "disabled-for-create";
+        return {} as CloudProviderSummary;
+      });
+      render(<ProviderControls contextRevision="org-revision" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Pause new machines" }));
+      expect((await screen.findByTestId("provider-creation-paused")).textContent).toContain("New machines are paused on TerminalX Cloud.");
+      expect(api.cloudProviderSetCreationEnabled).toHaveBeenLastCalledWith("terminalx-cloud", "org-revision", false);
+      expect(screen.getByTestId("provider-notice").textContent).toContain("Existing workspaces are not affected");
+
+      fireEvent.click(await screen.findByRole("button", { name: "Allow new machines" }));
+      await waitFor(() => expect(screen.queryByTestId("provider-creation-paused")).toBeNull());
+      expect(api.cloudProviderSetCreationEnabled).toHaveBeenLastCalledWith("terminalx-cloud", "org-revision", true);
+      expect(screen.getByRole("button", { name: "Pause new machines" })).toBeTruthy();
+      // Nothing about a credential was read or sent.
+      expect(api.cloudProvider).not.toHaveBeenCalled();
+      expect(api.cloudProviderConnect).not.toHaveBeenCalled();
+      expect(api.cloudProviderRevalidate).not.toHaveBeenCalled();
+      expect(api.cloudProviderDisconnect).not.toHaveBeenCalled();
+    });
+
+    it("shows a member that it is ready, with no switch and no word about keys", async () => {
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({ providers: [platform({ canManage: false })] }));
+      render(<ProviderControls contextRevision="member" />);
+      await screen.findByText("Setup complete — provided by TerminalX");
+      expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: KEY_CONTROLS })).toBeNull();
+      expect(screen.queryByText(/provider keys|repair the provider connection/)).toBeNull();
+      expect(api.cloudProvider).not.toHaveBeenCalled();
+    });
+
+    it("says it is not available when it needs attention, without a key to replace", async () => {
+      availability = "attention-required";
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({ providers: [platform()] }));
+      render(<ProviderControls contextRevision="org-revision" />);
+      await screen.findByText("Compute setup incomplete — provider needs attention");
+      expect(screen.getByTestId("provider-platform").textContent).toContain("TerminalX Cloud isn't available to this organization right now.");
+      expect(screen.queryByRole("button", { name: KEY_CONTROLS })).toBeNull();
+      expect(screen.queryByRole("button", { name: /new machines/ })).toBeNull();
+      expect(api.cloudProvider).not.toHaveBeenCalled();
+    });
+
+    it("opens on the provider the organization connected, and reads no connection once it is chosen", async () => {
+      const box = (await api.cloudProviders()).providers[0]!;
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({
+        providers: [platform(), { ...box, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: null } }],
+      }));
+      await ready();
+      expect(api.cloudProvider).toHaveBeenCalledTimes(1);
+      expect(api.cloudProvider).toHaveBeenCalledWith("box");
+      expect((screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement).value).toBe("box");
+
+      vi.mocked(api.cloudProvider).mockClear();
+      fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), { target: { value: "terminalx-cloud" } });
+      await screen.findByText("Setup complete — provided by TerminalX");
+      await act(async () => {});
+      expect(api.cloudProvider).not.toHaveBeenCalled();
+      expect(screen.queryByText("Original account")).toBeNull();
+      expect(screen.queryByRole("button", { name: KEY_CONTROLS })).toBeNull();
+    });
+
+    it("opens on it when the organization connected nothing, even listed after a provider that is not connected", async () => {
+      const box = (await api.cloudProviders()).providers[0]!;
+      vi.mocked(api.cloudProviders).mockImplementation(async () => ({
+        providers: [{ ...box, availability: "not-connected", descriptor: describedAs("box", { order: 1 }) }, platform()],
+      }));
+      render(<ProviderControls contextRevision="org-revision" />);
+      await screen.findByText("Setup complete — provided by TerminalX");
+      expect((screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement).value).toBe("terminalx-cloud");
+      expect(api.cloudProvider).not.toHaveBeenCalled();
     });
   });
 });

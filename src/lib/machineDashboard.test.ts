@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MachineProject, RuntimeSession } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, MachineProject, RuntimeSession } from "@terminalx/portable/workspace";
 import type { MachineConnectionsState } from "@/lib/machineConnections";
 import type { MachineCatalogEntry, MachineCatalogState } from "@/lib/machineCatalog";
 import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
@@ -126,26 +126,54 @@ describe("projecting machine sessions", () => {
   });
 });
 
-describe("the Machines switch", () => {
-  it("gives nothing while off, the sessions of paired machines while on, and tells readers when it turns off", async () => {
+describe("waking after the machine finished a turn (PRO-352)", () => {
+  it("shows a turn that finished while this Mac slept as finished, with its unread mark, once the machine is back", () => {
+    const scope = catalog.machineAgentScope(MINI.machineId);
+    const tab = (status: "in_progress" | "completed") =>
+      ({ sessionId: "s1", tabId: "s1-tab", title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: 0 }) as unknown as AgentTabInfo;
+    const live = { machines: [MINI], agentTabs: (machineId: string) => agents.getCloudAgents(catalog.machineAgentScope(machineId)).tabs };
+
+    // Before sleep: the machine said the turn was working.
+    agents.applyLiveTabs(scope, [tab("in_progress")]);
+    const before = dashboard.projectMachineSessions({ ...live, catalog: { machines: { [MINI.machineId]: entry([session("s1", "in_progress")], "live") } } });
+    expect(before[0].tabs[0].status).toBe("in_progress");
+
+    // Asleep: only what was saved, and a saved "working" is not believed.
+    const asleep = dashboard.projectMachineSessions({ ...live, catalog: { machines: { [MINI.machineId]: entry([session("s1", "in_progress")], "cache") } } });
+    expect(asleep[0].tabs[0].status).toBe("idle");
+
+    // Awake: the reconnect lists the tab again, finished.
+    agents.applyLiveTabs(scope, [tab("completed")]);
+    const awake = { [MINI.machineId]: entry([session("s1", "completed")], "live") };
+    const after = dashboard.projectMachineSessions({ ...live, catalog: { machines: awake } });
+    expect(after[0].tabs[0].status).toBe("completed");
+    expect(dashboard.machineSessionMark(after[0])).toBe("completed");
+    // The sidebar row carries the unread mark.
+    const [row] = catalog.buildMachineSessions(MINI.machineId, awake[MINI.machineId], live.agentTabs(MINI.machineId));
+    expect(row.tabs[0].unread).toBe(true);
+  });
+});
+
+describe("paired machines", () => {
+  it("gives the sessions of each paired machine, follows them as machines come and go, and nothing with none paired", async () => {
     saved({ [MINI.machineId]: { sessions: [session("s1", "waiting")] }, [SERVER.machineId]: { sessions: [session("s2", "idle")] } });
     pair([MINI, SERVER]);
     const heard = vi.fn();
     dashboard.subscribeMachineDashboard(heard);
-    expect(dashboard.getMachineDashboard()).toEqual([]);
-
-    dashboard.setMachineDashboardEnabled(true);
     await flush();
     expect(dashboard.getMachineDashboard().map((row) => `${row.machineName}/${row.sessionId}`).sort()).toEqual(["Mac mini/s1", "dev-server/s2"]);
-    expect(heard).toHaveBeenCalled();
 
     // A machine unpaired leaves the list with its sessions.
+    heard.mockClear();
     pair([MINI]);
     await flush();
     expect(dashboard.getMachineDashboard().map((row) => row.sessionId)).toEqual(["s1"]);
+    expect(heard).toHaveBeenCalled();
 
+    // With no machine paired there is nothing, and readers are told.
     heard.mockClear();
-    dashboard.setMachineDashboardEnabled(false);
+    pair([]);
+    await flush();
     expect(heard).toHaveBeenCalled();
     expect(dashboard.getMachineDashboard()).toEqual([]);
   });
@@ -173,7 +201,7 @@ describe("machine attention", () => {
     expect(done.map((event) => `${event.kind}:${event.session.sessionId}`)).toEqual(["done:s3"]);
   });
 
-  it("raises nothing from the save, and starts over after a reconnect or with Machines off", () => {
+  it("raises nothing from the save, and starts over after a reconnect or once the machine is removed", () => {
     const observe = dashboard.createMachineAttentionTracker();
     observe(live([session("s1", "idle")]));
     observe(live([session("s1", "idle")]));
@@ -181,7 +209,7 @@ describe("machine attention", () => {
     expect(observe(cached([session("s1", "waiting")]))).toEqual([]);
     // Back: the first connected pass is known again.
     expect(observe(live([session("s1", "waiting"), session("s2", "waiting")]))).toEqual([]);
-    // Machines off: nothing seen, everything forgotten; on again, nothing old is raised.
+    // Removed: nothing seen, everything forgotten; paired again, nothing old is raised.
     expect(observe([])).toEqual([]);
     expect(observe(live([session("s1", "waiting")]))).toEqual([]);
   });

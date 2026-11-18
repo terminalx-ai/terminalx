@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// PRO-345: a paired machine's connection in the desktop's WebKit, with
-// Experimental → Machines on. The sidebar lists each paired machine as its
+// PRO-345: a paired machine's connection in the desktop's WebKit. The sidebar
+// lists each paired machine as its
 // own section (screen 21.01): a monitor for a Mac, a server for Linux, its
 // name, and its live state. Choosing one opens its view (21.08) with the
 // header chip and the "Runs on …" strip; the chip's hover text says what the
@@ -13,7 +13,7 @@
 // width (1440×900), in the light and the dark theme. In each: the label and the hover text are the
 // ones the screens name, the section and the chip stay inside the sidebar and
 // the header, the sidebar does not scroll sideways, no text is under 12 px and
-// no UI text is mono. With Machines off, the section is not there at all.
+// no UI text is mono. With no machine paired, the section is not there at all.
 //
 // PRO-398: while the view is not connected it speaks from the machine's own
 // state (an offline machine isn't reachable and its sessions keep running,
@@ -40,10 +40,10 @@ const SLACK = 1;
 const LAST_SEEN = Date.parse("2026-11-15T14:02:00");
 
 // Runs in the page, after the stub: two paired machines, both attachable, and a way to move their states on.
-const fixture = (machines) => `(() => {
+const fixture = (paired) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: ${machines} };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   // This desktop's version, which the machine's view compares with the machine's (PRO-354).
   answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5", directEndpoints: ["ws://192.168.1.20:6768/machine/1"],
@@ -57,11 +57,13 @@ const fixture = (machines) => `(() => {
     "m-server": { state: "relay", route: { kind: "relay", endpoint: null }, since: Date.now(), rttMs: 41 },
   };
   answers.machines_connections = () => Object.entries(views).map(([machineId, state]) => ({ machineId, state }));
+  // No machine paired (PRO-360): the app is as it was before Machines.
+  if (!${paired}) { answers.machines_list = []; answers.machines_connections = () => []; }
   // The transport state the native side sends on cloud_remote_event for each
   // machine state (docs/MACHINES.md "As built (PRO-345)"): connected carries
   // the link, offline is reconnecting, needs update and access removed end it.
   // Every feature this desktop uses, so a connected machine is not shown as needing an update (PRO-354).
-  const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3"];
+  const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7"];
   const links = {};
   const transport = (machineId, view) => {
     switch (view.state) {
@@ -255,14 +257,14 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
   }
 }
 
-// Machines off: no section, and the sidebar is as before.
+// No machine paired: no section, and the sidebar is as before (PRO-360).
 {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1000, height: 620 }, { extra: fixture(false) });
   await sidebar(page);
   await page.waitForTimeout(500);
   const sections = await page.locator('[data-testid="machines-section"]').count();
-  failed += report("machines off", { "there is no Machines section": sections === 0, "there is no Development section": (await page.locator('[data-testid="dev-runtime-section"]').count()) === 0 });
-  await page.screenshot({ path: join(shots, "machines-off.png") });
+  failed += report("no machine paired", { "there is no Machines section": sections === 0, "there is no Development section": (await page.locator('[data-testid="dev-runtime-section"]').count()) === 0 });
+  await page.screenshot({ path: join(shots, "no-machine-paired.png") });
   await page.close();
 }
 

@@ -56,7 +56,7 @@ function CommandBox({ command, label }: { command: string; label: string }) {
   );
 }
 
-function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
+export function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
   const Title = titleFor ? "label" : "div";
   return (
     <li className="flex gap-3">
@@ -165,11 +165,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
       </div>
       <footer className="flex min-h-[52px] flex-wrap items-center gap-2 border-t border-hairline px-5 py-2.5">
         <span className="mr-auto flex items-center gap-1.5 text-[12px] text-faint">
-          <BookOpen className="size-[13px] shrink-0" aria-hidden />
-          <span data-testid="headless-agents-note">
-            Sign in the agents in a terminal on the server: run <code className="font-mono text-muted-foreground">claude</code>, or{" "}
-            <code className="font-mono text-muted-foreground">codex login --device-auth</code>.
-          </span>
+          <BookOpen className="size-[13px] shrink-0" aria-hidden /> Agents sign in on the server after pairing, from its machine page.
         </span>
         {step.kind === "paired" ? (
           <Button size="sm" onClick={onDone}>Done</Button>

@@ -1,8 +1,15 @@
 import { useEffect, useState } from "react";
+import { Popover } from "radix-ui";
 import { LoaderCircle, Lock } from "@/icons";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { disconnectMachine, machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
+import { memoryText } from "@/lib/machineNewSession";
+import { selectCloudWorkspace } from "@/lib/sessions";
+import { machineSectionKey } from "@/types/target";
 import type { MachineConnectionState, MachineRouteKind, MachineRouteUsed, PairedMachine } from "@/types/machines";
-import { PlatformIcon } from "./machineText";
+import { PlatformIcon, clockTime, keyLabel, osLabel, seenText } from "./machineText";
+import { useFreeMemory, useRunningSessions } from "./useRunningSessions";
 
 /**
  * How a machine's connection reads (screens 21.01, 21.08 and 21.09): a short
@@ -26,21 +33,25 @@ export function machineTone(state: MachineConnectionState): MachineTone {
     case "updating":
       return "updating";
     case "accessRemoved":
+    case "disconnected":
       return "removed";
     default:
       return "idle";
   }
 }
 
-/** "14:02": the 24-hour clock the screens use (21.09), whatever the reader's locale. */
-export function clockTime(epochMs: number): string {
-  return new Date(epochMs).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-}
+export { clockTime };
 
 /** The machine's last contact: the offline state's, else the record's. */
 function lastSeen(state: MachineConnectionState, machine: PairedMachine | null): number | null {
   if (state.state === "offline" && state.lastSeenAt) return state.lastSeenAt;
   return machine?.lastSeenAt ?? null;
+}
+
+/** "Last seen at 14:02." the same day, else "Last seen yesterday at 14:02." (21.09). */
+export function lastSeenSentence(seen: number, now = Date.now()): string {
+  const text = seenText(seen, now);
+  return `Last seen ${text.startsWith("today at ") ? text.slice("today ".length) : text}.`;
 }
 
 /**
@@ -67,6 +78,8 @@ export function machineStateLabel(state: MachineConnectionState, machine: Paired
       return "Updating";
     case "accessRemoved":
       return "Access removed";
+    case "disconnected":
+      return "Disconnected";
     default:
       return "Not connected";
   }
@@ -96,6 +109,8 @@ export function machineStateHint(state: MachineConnectionState, name: string, no
       return "Back in under a minute";
     case "accessRemoved":
       return "Revoked on that Mac";
+    case "disconnected":
+      return "Disconnected on that Mac";
     default:
       return "Not connected from this Mac";
   }
@@ -108,7 +123,7 @@ const ROUTE_WORDS: Record<MachineRouteKind, string> = { lan: "this network", tai
  * "Trying this network, then Relay." Each route keeps its own name, as
  * {@link routeText} does: Tailscale is not "this network".
  */
-function tryingText(trying: MachineRouteKind[]): string | null {
+export function tryingText(trying: MachineRouteKind[]): string | null {
   const routes = (["lan", "tailscale", "relay"] as const).filter((kind) => trying.includes(kind)).map((kind) => ROUTE_WORDS[kind]);
   if (routes.length === 0) return null;
   return `Trying ${routes.length === 1 ? routes[0] : `${routes.slice(0, -1).join(", ")}, then ${routes[routes.length - 1]}`}.`;
@@ -132,6 +147,8 @@ export function machineViewStatus(state: MachineConnectionState, name: string): 
       return `${name} is updating. Back in under a minute. Sessions there keep running.`;
     case "accessRemoved":
       return `${name} no longer allows this Mac. Pair again to reconnect.`;
+    case "disconnected":
+      return `${name} disconnected this Mac. Try again once it lets this Mac back.`;
     case "idle":
       return `Not connected to ${name}.`;
     default:
@@ -211,25 +228,159 @@ export function useTick(on: boolean): number {
   return now;
 }
 
-/** The header chip (21.08, 21.09): icon, name, mark and label; the hover text says what the state means. */
+/**
+ * The header chip (21.08, 21.09): icon, name, mark and label; the hover text
+ * says what the state means. Choosing it opens the connection popover.
+ */
 export function MachineChip({ machine, name, state }: { machine: PairedMachine | null; name: string; state: MachineConnectionState }) {
   const now = useTick(state.state === "reconnecting");
+  const [open, setOpen] = useState(false);
   const tone = machineTone(state);
   const label = machineStateLabel(state, machine);
   const hint = machineStateHint(state, name, now);
-  return (
-    <span
-      className="inline-flex h-6 min-w-0 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2 text-[12px]"
-      title={hint}
-      aria-label={`${name}: ${label}. ${hint}`}
-      data-testid="machine-chip"
-      data-state={state.state}
-    >
+  const face = (
+    <>
       <MachineIcon machine={machine} className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 truncate text-foreground">{name}</span>
       <MachineStateMark state={state} />
       <span className={cn("shrink-0", TONE_TEXT[tone])}>{label}</span>
-    </span>
+    </>
+  );
+  const chip = "inline-flex h-6 min-w-0 shrink-0 items-center gap-1.5 rounded-md border border-hairline px-2 text-[12px]";
+  // A machine no longer paired has nothing to open.
+  if (!machine) {
+    return (
+      <span className={chip} title={hint} aria-label={`${name}: ${label}. ${hint}`} data-testid="machine-chip" data-state={state.state}>
+        {face}
+      </span>
+    );
+  }
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          className={cn(chip, "outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40", open && "bg-veil-raised")}
+          title={hint}
+          aria-label={`${name}: ${label}. ${hint}`}
+          data-testid="machine-chip"
+          data-state={state.state}
+        >
+          {face}
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          sideOffset={6}
+          aria-label={`${name} connection`}
+          className="z-(--z-tooltip) w-[340px] max-w-[calc(100vw-16px)] rounded-xl bg-popover p-4 text-popover-foreground shadow-surface hairline"
+          data-testid="machine-popover"
+        >
+          <MachineConnectionDetails machine={machine} state={state} onDone={() => setOpen(false)} />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+/** The popover's word for the state: Connected on either route, else the chip's own label. */
+export function popoverStateLabel(state: MachineConnectionState, machine: PairedMachine | null): string {
+  return state.state === "direct" || state.state === "relay" ? "Connected" : machineStateLabel(state, machine);
+}
+
+/**
+ * The rows of the connection popover (21.09): how this Mac reaches the
+ * machine and how fast, that the link is end to end and the machine's key
+ * label, its TerminalX and system, and what runs there. Each row has its
+ * label and value; a value that is not known yet is left out.
+ */
+export function machineDetailRows(
+  machine: PairedMachine,
+  state: MachineConnectionState,
+  live: { running: number | null; freeBytes: number | null },
+  now = Date.now(),
+): { label: string; value: string }[] {
+  const rows: { label: string; value: string }[] = [];
+  const linked = state.state === "direct" || state.state === "relay";
+  rows.push({ label: "Path", value: machinePathText(state) ?? machineStateHint(state, machine.name, now) });
+  const key = keyLabel(machine.machineId);
+  rows.push({ label: "Encryption", value: key ? `End to end · ${key}` : "End to end" });
+  rows.push({ label: "TerminalX", value: `${machine.version} · ${osLabel(machine.os)}` });
+  if (linked) {
+    const parts = [
+      live.running === null ? null : `${live.running} session${live.running === 1 ? "" : "s"}`,
+      live.freeBytes === null ? null : `${memoryText(live.freeBytes)} memory free`,
+    ].filter((part): part is string => !!part);
+    if (parts.length) rows.push({ label: "Running", value: parts.join(" · ") });
+  } else {
+    const seen = state.state === "offline" && state.lastSeenAt ? state.lastSeenAt : machine.lastSeenAt;
+    if (seen) rows.push({ label: "Last seen", value: seenText(seen, now) });
+  }
+  return rows;
+}
+
+function MachineConnectionDetails({ machine, state, onDone }: { machine: PairedMachine; state: MachineConnectionState; onDone: () => void }) {
+  const store = useMachineConnections();
+  const { connection } = machineConnection(store, machine.machineId);
+  const linked = state.state === "direct" || state.state === "relay";
+  const running = useRunningSessions(connection, linked);
+  const freeBytes = useFreeMemory(linked ? (connection?.client ?? null) : null);
+  const now = useTick(state.state === "reconnecting");
+  const tone = machineTone(state);
+  const rows = machineDetailRows(machine, state, { running, freeBytes }, now);
+  // A connection that is up or being reached can be let go; one that is away or let go is tried again.
+  const holds = linked || state.state === "connecting" || state.state === "reconnecting" || state.state === "updating";
+  return (
+    <div className="grid gap-3 text-[13px]">
+      <div className="flex min-w-0 items-center gap-2">
+        <MachineIcon machine={machine} className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">{machine.name}</span>
+        <MachineStateMark state={state} />
+        <span className={cn("shrink-0 text-[12px]", TONE_TEXT[tone])} data-testid="machine-popover-state">
+          {popoverStateLabel(state, machine)}
+        </span>
+      </div>
+      <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-2" data-testid="machine-popover-rows">
+        {rows.map((row) => (
+          <div key={row.label} className="contents">
+            <dt className="text-muted-foreground">{row.label}</dt>
+            <dd className="min-w-0 truncate text-foreground" title={row.value}>
+              {row.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            onDone();
+            selectCloudWorkspace(machineSectionKey(machine.machineId));
+          }}
+        >
+          Machine settings
+        </Button>
+        {holds ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-muted-foreground"
+            onClick={() => {
+              onDone();
+              disconnectMachine(machine.machineId);
+            }}
+          >
+            Disconnect
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" onClick={() => void reconnectMachine(machine.machineId)}>
+            Try again
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 

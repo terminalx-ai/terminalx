@@ -544,7 +544,7 @@ impl Rig {
         let pane = self.launched_running("t1", CliKind::Codex, &transcript, &format!("sh -c 'read line; printf \"%s\\n\" \"{last}\"; exit 1'"));
         // As the composer sends one, keystrokes aside.
         let rt = self.runtime("t1");
-        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "fix the build".into(), display: "fix the build".into() };
         self.manager.record_composer_prompt(&mut rt.lock().unwrap(), &prompt, Vec::new(), self.dir.path().to_str().unwrap(), None);
         self.exit(&pane);
         self.wait("the exit to be settled", || matches!(self.runtime("t1").lock().unwrap().engine, Engine::None));
@@ -1148,4 +1148,32 @@ fn by_hand_drained_history_and_live_records_cannot_cross_launches() {
             assert_eq!(turn_open, replace, "only the unchanged launch restores historical first-read state");
         }
     }
+}
+
+
+#[test]
+fn phase2_collaboration_v2_actual_shell_adoption_and_safe_reports_never_authorize_everyone() {
+    use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let transcript = rig.dir.path().join("claude.jsonl");
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &transcript)), Some(Activity::Idle));
+    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+    let tab = rig.tab();
+    assert!(tab.by_hand());
+    index::update_tab(SESSION, &tab.id, |tab| { tab.permission_mode = "plan".into(); Ok(()) }).unwrap();
+    let rt = rig.manager.runtime(SESSION, &tab.id).unwrap();
+    rig.manager.provider_settings(&mut rt.lock().unwrap(), Signal::Permissions { stance: settings::Stance::Mode { mode:"plan".into() } });
+    let policy = Arc::new(Collaboration::new());
+    policy.runtime_policy.bind(rig.dir.path(), 1).unwrap();
+    let snapshot: Snapshot = serde_json::from_value(json!({"v":2,"revision":"1","members":[{
+        "userId":"guest","role":"driver","canApprove":true,"writeSource":"everyone"
+    }]})).unwrap();
+    policy.install_v2(snapshot).unwrap();
+    let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Drive);
+    assert!(permit.with(|| rig.manager.send(SESSION, &tab.id, "must not reach adopted process".into(), vec![])).is_err());
+    rig.manager.pane_foreground(&pane, None);
+    assert!(rig.tab().is_terminal());
+    assert!(permit.with(|| rig.manager.send(SESSION, &tab.id, "must not wake shell".into(), vec![])).is_err());
+    assert!(!rig.typed(&pane).contains("must not"));
 }

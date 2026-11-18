@@ -93,11 +93,18 @@ import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
 import { dropSessionTerminals, selectSessionTab } from "@/lib/terminal";
 import { TERMINAL_VIEW_OLD_RUNTIME, resetCloudWakes } from "@/lib/sessionBackend";
+import { resetTabLayouts, saveTabLayout } from "@/lib/tabLayouts";
+import { workspaceRow } from "@/lib/sessionTabs";
 import { resetTabViews } from "@/lib/tabViews";
 import { addProject, getSessionStore, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FakeAgentRuntime, agentTab, fakeXterm, type FakeXterm } from "@/test/fakeAgentRuntime";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 Element.prototype.scrollIntoView ??= function scrollIntoView() {};
@@ -159,6 +166,7 @@ beforeEach(async () => {
   enqueued = [];
   cache = {};
   guard.handlers = {
+    phase2_desktop_contracts_available: () => false,
     data_privacy_status: () => ({ enabled: false, managed: false }),
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
@@ -195,6 +203,7 @@ afterEach(() => {
   resetCloudConnections();
   resetCollab();
   resetTabViews();
+  resetTabLayouts();
   client.close();
 });
 
@@ -367,6 +376,49 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
   });
 
+  it.each([false, true])("keeps one switch per split pane with tabStrip=%s, then restores the header when collapsed (#1107)", async (strip) => {
+    mocks.prefs.tabStrip = strip;
+    const header = show();
+    const row = workspaceRow(local());
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:st-2"], active: "agent:st-2" },
+    ] }));
+    const strips = screen.getAllByTestId("workspace-tab-strip");
+    expect(strips).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(2);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    for (const pane of strips) {
+      fireEvent.click(within(pane).getByRole("button", { name: "Show terminal view" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Back to chat" })).toBeTruthy());
+      fireEvent.click(within(pane).getByRole("button", { name: "Back to chat" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Show terminal view" })).toBeTruthy());
+    }
+    // A saved second pane with no surviving tabs is not a rendered split.
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1", "agent:st-2"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:closed"], active: "agent:closed" },
+    ] }));
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(1);
+    expect(screen.queryAllByTestId("workspace-tab-strip")).toHaveLength(strip ? 1 : 0);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" }) !== null).toBe(!strip);
+  });
+
+  it("puts the terminal view switch at the right end of the strip, not in the title bar (PRO-381)", async () => {
+    const header = show();
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    const toggle = await screen.findByTestId("strip-terminal-view");
+    expect(toggle.getAttribute("aria-label")).toBe("Show terminal view");
+    expect(toggle.textContent).toContain("terminal view");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Back to chat"));
+    expect(screen.getByTestId("strip-terminal-view").textContent).toBe("Claude Code · same process");
+    // The tab says it is in its terminal view.
+    expect(within(screen.getByRole("tab", { name: "Investigate" })).getByLabelText("In terminal view").textContent).toBe("terminal view");
+    fireEvent.click(screen.getByTestId("strip-terminal-view"));
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Show terminal view"));
+  });
+
   it("names the place in the title bar, with the actions at the right, and puts the tabs in a row under it with the + after them", () => {
     const header = show();
     // The title bar: the project and the branch, with the session's chips.
@@ -516,7 +568,7 @@ describe("a local session's row of tabs under the title bar", () => {
     // The title bar and the row of tabs under it.
     const header = show({ tabs: [tab("st-1", "claude", "Investigate")] }).parentElement!;
     fireEvent.click(within(header).getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(1));
     const tabs = () => within(header).getAllByRole("tab");
     await waitFor(() => expect(tabs().map((item) => item.getAttribute("aria-selected"))).toEqual(["false", "true"]));
@@ -587,10 +639,11 @@ describe("a quick chat in the floating window's compact chrome", () => {
     guard.local = () => null;
   });
 
-  it("is the same session view with less around it: no sidebar toggle, no panel, the window's own controls in the header", async () => {
+  it.each([false, true])("keeps the compact header switch with tabStrip=%s and the window's own controls", async (tabStrip) => {
     const session = quick();
     upsertSession(session);
-    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={{ ...compact, tabStrip }} />));
+    expect(screen.queryByTestId("strip-terminal-view")).toBeNull();
     // What a compact window has no room for.
     expect(screen.queryByRole("button", { name: "Show sidebar" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
@@ -642,7 +695,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("workspace-tab-strip")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     const strip = await screen.findByTestId("workspace-tab-strip");
     await waitFor(() => expect(spawned()).toHaveLength(1));
     // In the session's working directory: the scratch folder, not the home directory or a repository.
@@ -650,7 +703,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(spawned()[0].id.startsWith("quick-1:")).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(2));
     const tabs = () => [...strip.querySelectorAll('[role="tab"]')];
     await waitFor(() => expect(tabs().map((tab) => tab.textContent)).toEqual(["claude", "Terminal 1", "Terminal 2"]));
@@ -1352,7 +1405,7 @@ describe("#644 on a cloud agent tab", () => {
     await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
     runtime.events.push(lifecycle({ type: "item_completed", turnId: "turn", itemId: "item" }), lifecycle({ type: "turn_ended", turnId: "turn", outcome: "completed" }));
     await act(async () => runtime.connect());
-    expect(await screen.findByText(/Context compacted/)).toBeTruthy();
+    expect(await screen.findByText(/Chat compacted/)).toBeTruthy();
     expect(screen.queryByText("Compacting context…")).toBeNull();
     expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
   });

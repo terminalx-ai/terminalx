@@ -786,8 +786,9 @@ impl SessionManager {
                     Engine::Cli(p) => p.turn_tail.last_assistant_message().map(str::to_owned),
                     _ => None,
                 };
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             _ => {}
         }
@@ -844,6 +845,8 @@ impl SessionManager {
         drop(rt);
         if turn_was_open {
             self.observer.automation_failed(&entry.id, &tab.id, "The agent left the terminal before the automation turn completed.");
+        } else {
+            self.observer.automation_execution_lost(&entry.id, &tab.id, "The agent left before the automation run completed.");
         }
     }
 
@@ -930,6 +933,8 @@ impl SessionManager {
         if turn_was_open {
             let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
             self.observer.automation_failed(&session, &tab, &format!("The agent process exited{detail} before the automation turn completed."));
+        } else {
+            self.observer.automation_execution_lost(&session, &tab, "The agent process exited before the automation run completed.");
         }
         // The app's own CLI was the pane's process, so the pane went with it:
         // the tab needs a shell to be the terminal it now is. A CLI started
@@ -1065,6 +1070,9 @@ impl SessionManager {
     /// Start a tab's agent again, on the conversation it holds or on one it
     /// held before: the chat's "Resume" for a tab that is a terminal.
     pub fn resume_conversation(&self, session_id: &str, tab_id: &str, harness: &str, provider_session_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         if pty_first(harness).is_none() {
             bail!("{} conversations cannot be resumed here.", crate::harness::display_name(harness));
         }

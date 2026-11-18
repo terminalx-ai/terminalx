@@ -48,8 +48,7 @@ function PairPhoneDialog() {
         closePairPhone();
       }}
     >
-      {/* Below the connected bar, which sits top-centre over everything (top-1.5, 28px tall). */}
-      <DialogContent width="max-w-[700px]" showClose={false} className="top-10 max-h-[calc(100dvh-3.5rem)] p-0">
+      <DialogContent width="max-w-[700px]" showClose={false} className="mb-auto mt-[70px] max-h-[calc(100dvh-86px)] p-0">
         <header className="flex h-14 items-center gap-2 border-b border-hairline px-5">
           <Smartphone className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 leading-4">
@@ -108,7 +107,7 @@ function PairPhoneBody() {
   return (
     <>
       <div className="grid grid-cols-[250px_minmax(0,1fr)]">
-        <div className="grid content-start justify-items-center gap-3 border-r border-hairline p-5">
+        <div className="grid content-start justify-items-center gap-3 border-r border-hairline px-[11px] py-5">
           {status.pendingApproval ? (
             <ApprovalPrompt request={status.pendingApproval} />
           ) : (
@@ -123,7 +122,8 @@ function PairPhoneBody() {
             onChange={changeMode}
             options={MODE_OPTIONS}
             disabled={pairing.busy || status.pendingApproval != null}
-            className="justify-self-start"
+            packed
+            className="h-8 w-full border border-hairline"
           />
           <p className={soft}>{MODE_COPY[mode]}</p>
           {mode === "automatic" && <RelayLine signedIn={signedIn} accountReady={account.ready} accountBusy={account.busy} status={status} />}
@@ -225,7 +225,7 @@ function CodeColumn({ mode, signedIn, canGenerate }: { mode: PairingConnectionMo
       <div
         data-testid="pairing-code"
         className={cn(
-          "flex size-[210px] items-center justify-center overflow-hidden rounded-xl",
+          "flex size-[228px] items-center justify-center overflow-hidden rounded-xl",
           showing ? "bg-white p-1" : "border border-dashed border-hairline-strong bg-well p-4 text-center",
         )}
       >

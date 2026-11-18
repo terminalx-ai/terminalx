@@ -170,6 +170,9 @@ pub enum MachineConnectionState {
         since: i64,
     },
     AccessRemoved,
+    /// The person on the machine pressed Disconnect (PRO-357): refused until
+    /// they let this computer back. Nothing retries until "Try again".
+    Disconnected,
 }
 
 /// Which computer must update for the two to work together (`MachineUpdateSide`).
@@ -442,6 +445,10 @@ pub trait MachineEnv: Send + Sync + 'static {
     /// `directEndpoints`, `lastSeenAt` and `lastRoute`.
     fn described(&self, described: &Value, route: &RouteUsed);
     fn save_relay(&self, credential: &RelayCredential) -> Result<()>;
+    /// Keep a rotated device token in place of the current one (PRO-357).
+    fn save_token(&self, _token: &str) -> Result<()> {
+        Ok(())
+    }
     /// The relay refused the credential: forget it.
     fn drop_relay(&self);
     /// The machine's TerminalX version as the record last saw it, for which
@@ -456,6 +463,8 @@ pub trait MachineEnv: Send + Sync + 'static {
 pub enum DialFailure {
     /// `pairing_refused`, or `4401` once the device token was offered.
     AccessRemoved,
+    /// `pairing_refused` `disconnected`: held off by the person on the machine.
+    Disconnected,
     /// The runtime does not grant `machine/1`, or refused `rpc.hello` with
     /// `update_required`: its version and the namespaces it offers, when it said.
     NeedsUpdate { version: Option<String>, offered: Vec<String> },
@@ -500,6 +509,9 @@ pub struct Established {
     pub frames: mpsc::UnboundedSender<Value>,
     /// Relay access, when it was asked for and the machine has a relay.
     pub relay_access: Option<RelayAccess>,
+    /// A fresh device token (`machine/5`, PRO-357), which the supervisor
+    /// keeps in place of the one it connected with.
+    pub rotated_token: Option<Zeroizing<String>>,
 }
 
 /// What a link sends its supervisor.
@@ -555,6 +567,9 @@ async fn prove(connection: &mut Connection, target: &Target, deadline: tokio::ti
         Ok(Authenticated::Yes) => Ok(()),
         Ok(Authenticated::Refused(reason)) => {
             log::info!("machines: machine {} refused this computer ({reason})", target.machine_id);
+            if reason == crate::machine_wire::REFUSED_DISCONNECTED {
+                return Err(DialFailure::Disconnected);
+            }
             Err(DialFailure::AccessRemoved)
         }
         Err(Closed { code: Some(CREDENTIAL_REFUSED), .. }) => Err(DialFailure::AccessRemoved),
@@ -649,7 +664,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.
@@ -689,8 +704,22 @@ async fn establish(connection: &mut Connection, target: &Target, want_relay_acce
     } else {
         None
     };
+    // A fresh credential on every connection (PRO-357). The machine keeps the
+    // old one working until this computer connects with the new one, so a
+    // lost answer or a token that could not be saved locks nothing out.
+    let rotated_token = if granted(super::machine::MACHINE_5) {
+        match request(connection, "machine.rotateCredential", json!({})).await? {
+            Ok(answer) => answer["deviceToken"].as_str().filter(|token| (16..=256).contains(&token.len())).map(|token| Zeroizing::new(token.to_string())),
+            Err(error) => {
+                log::debug!("machines: machine.rotateCredential refused: {}", error["code"]);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let (frames, _) = mpsc::unbounded_channel();
-    Ok(Established { hello, described, rtt_ms, frames, relay_access })
+    Ok(Established { hello, described, rtt_ms, frames, relay_access, rotated_token })
 }
 
 /// Frames both ways on `connection`, as link `link`, until it ends.
@@ -942,6 +971,7 @@ enum RoundEnd {
     Connected(Route, u64, Box<Established>),
     Failed,
     AccessRemoved,
+    Disconnected,
     NeedsUpdate(Option<String>, Vec<String>),
     Stopped,
 }
@@ -1055,7 +1085,7 @@ impl Run {
                         break;
                     }
                 }
-                RoundEnd::AccessRemoved | RoundEnd::NeedsUpdate(..) => {
+                RoundEnd::AccessRemoved | RoundEnd::Disconnected | RoundEnd::NeedsUpdate(..) => {
                     self.updating = None;
                     let state = match end {
                         RoundEnd::NeedsUpdate(version, offered) => {
@@ -1069,6 +1099,10 @@ impl Run {
                             };
                             let side = update_side(version.as_deref(), &offered, THIS_VERSION);
                             MachineConnectionState::NeedsUpdate { version, side }
+                        }
+                        RoundEnd::Disconnected => {
+                            self.emit(ClientState::Stopped);
+                            MachineConnectionState::Disconnected
                         }
                         _ => {
                             self.emit(ClientState::Stopped);
@@ -1138,7 +1172,14 @@ impl Run {
         if self.updating.as_ref().is_some_and(|(_, _, heard)| heard.elapsed() >= UPDATING_FOR) {
             self.updating = None;
         }
-        let state = if let Some((version, since, _)) = self.updating.as_ref().filter(|_| self.lost_at.is_some()) {
+        let updating = self.updating.as_ref().filter(|_| self.lost_at.is_some()).cloned();
+        // A round starting (`retry` zero) past the offline mark has no next
+        // try to name yet: the state already shown stays, with its real
+        // retry time, rather than an `offline` that says it retries in 0 ms.
+        if retry.is_zero() && updating.is_none() && since.elapsed() >= OFFLINE_AFTER {
+            return;
+        }
+        let state = if let Some((version, since, _)) = updating.as_ref() {
             MachineConnectionState::Updating { version: version.clone(), since: *since }
         } else if since.elapsed() >= OFFLINE_AFTER {
             MachineConnectionState::Offline { last_seen_at: self.last_seen_at, retry_in_ms, local_network_denied: self.local_network_denied }
@@ -1183,6 +1224,7 @@ impl Run {
             match dialed {
                 Ok(established) => return RoundEnd::Connected(route, link, Box::new(established)),
                 Err(DialFailure::AccessRemoved) => return RoundEnd::AccessRemoved,
+                Err(DialFailure::Disconnected) => return RoundEnd::Disconnected,
                 Err(DialFailure::NeedsUpdate { version, offered }) => return RoundEnd::NeedsUpdate(version, offered),
                 Err(DialFailure::RelayCredentialRefused) => {
                     log::info!("machines: the relay refused this computer's credential for machine {}", self.shared.machine_id);
@@ -1219,6 +1261,17 @@ impl Run {
             you: None,
             link: Some(link),
         };
+        // The rotated credential first, so every later connection (the relay
+        // credential's too) proves the new one. Not saved: the old one is
+        // used again, and the machine drops the new one then.
+        if let Some(token) = established.rotated_token.clone() {
+            let env = self.env.clone();
+            match tokio::task::spawn_blocking(move || env.save_token(&token)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("machines: keep machine {}'s fresh credential: {error:#}", self.shared.machine_id),
+                Err(error) => log::warn!("machines: keep machine {}'s fresh credential: {error}", self.shared.machine_id),
+            }
+        }
         // The record first: whoever hears `connected` reads the route it names.
         self.record(&established.described, &route).await;
         *self.shared.outbound.lock().unwrap() = Some(established.frames.clone());

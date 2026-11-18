@@ -5,6 +5,7 @@ import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, Worksp
 import { Chat } from "@/components/chat/Chat";
 import { LinkedText } from "@/components/chat/LinkedText";
 import { Composer } from "@/components/chat/Composer";
+import { goalCommand } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -23,6 +24,7 @@ import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
 import { useConversationView } from "@/lib/conversationView";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
+import { machineAgentSignInReason, useRuntimeModels } from "@/lib/cloudModels";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
 import {
   attachCloudAgentTab,
@@ -35,6 +37,7 @@ import {
   DEV_SCOPE_NOTICE,
   errorText,
   isDevScope,
+  takesLiveCommands,
   flushCloudAgentCache,
   loadCloudAgents,
   markCloudAgentRead,
@@ -82,6 +85,8 @@ export interface AgentProjects {
   onRequestTaken: () => void;
   /** A session was created in a project: the machine selects its row. */
   onCreated: (sessionId: string, projectId: string) => void;
+  /** The machine, to name an agent not signed in there and open its page (PRO-350). */
+  machine?: { name: string; openPage: () => void } | null;
 }
 
 /**
@@ -242,6 +247,7 @@ export function CloudAgentsView({
         <NewAgentForm
           client={workspaceState === "suspended" || workspaceState === "archived" ? null : client}
           projects={projects?.projects ?? null}
+          machine={projects?.machine ?? null}
           project={formProject}
           onProject={setFormProject}
           onCancel={() => setCreating(false)}
@@ -540,6 +546,7 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
 function NewAgentForm({
   client,
   projects = null,
+  machine = null,
   project = null,
   onProject,
   onCreate,
@@ -548,6 +555,8 @@ function NewAgentForm({
   client: WorkspaceRpcClient | null;
   /** A machine's projects: one must be chosen before the agent can start. */
   projects?: AgentProjects["projects"] | null;
+  /** The machine it starts on: an agent not signed in there is named, with a way to its page. */
+  machine?: AgentProjects["machine"];
   project?: string | null;
   onProject?: (projectId: string) => void;
   onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string; projectId?: string }) => Promise<void>;
@@ -563,6 +572,9 @@ function NewAgentForm({
   // A project the machine no longer lists is no choice.
   const chosen = projects ? (projects.find((entry) => entry.projectId === project) ?? (projects.length === 1 ? projects[0] : null)) : null;
   const missingProject = !!projects && !chosen;
+  // The machine's own word on the chosen agent's sign-in; a cloud workspace has none to give here.
+  const runtime = useRuntimeModels(machine ? client : null);
+  const signInReason = machine ? machineAgentSignInReason(runtime?.agents, harness?.id, machine.name) : null;
   return (
     <form
       className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-hairline px-3 py-2 text-xs"
@@ -583,6 +595,14 @@ function NewAgentForm({
       <Button size="sm" type="button" variant="ghost" onClick={onCancel}>
         Cancel
       </Button>
+      {signInReason && machine && (
+        <p className="flex w-full flex-wrap items-center gap-x-2 text-[12px] text-warning" role="status" data-testid="agent-sign-in-reason">
+          <span>{signInReason}</span>
+          <Button size="xs" type="button" variant="link" className="h-auto px-0 text-[12px]" onClick={machine.openPage}>
+            Open machine page
+          </Button>
+        </p>
+      )}
     </form>
   );
 }
@@ -755,7 +775,8 @@ function CloudAgentPane({
 
   const steer = async () => {
     const text = draft.trim();
-    if (!text) return;
+    // A /goal is checked as it is sent (PRO-380): never steered past that check.
+    if (!text || goalCommand(text) !== null) return;
     await interactive(() => steerCloudAgent(scope, tab.tabId, text, connected ? client : null)).then(() => setDraft(""), () => undefined);
   };
 
@@ -823,7 +844,7 @@ function CloudAgentPane({
             unreadNotes={collab.unreadNotes[tab.tabId] ?? 0}
           />
         )}
-        {isDevScope(scope) && (
+        {isDevScope(scope) && connected && !takesLiveCommands(scope, client) && (
           <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
             {DEV_SCOPE_NOTICE}
           </p>
@@ -843,6 +864,7 @@ function CloudAgentPane({
           <Chat
             active={active}
             sessionId={info.sessionId}
+            tabId={tab.tabId}
             transcript={transcript}
             stream={log.stream}
             live={live}
@@ -855,7 +877,7 @@ function CloudAgentPane({
             sending={sending}
             footer={
               <div className="flex flex-col">
-                {live && draft.trim() && !isDevScope(scope) && !blocked && (
+                {live && draft.trim() && goalCommand(draft) === null && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
                   <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
                     <span>Send now queues it for when the agent pauses.</span>
                     <Button size="xs" variant="outline" onClick={() => void steer()}>

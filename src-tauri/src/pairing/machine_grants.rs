@@ -45,6 +45,14 @@ impl PairingManager {
     }
 
     /// What the host binding advertises now.
+    /// The runtime needs a current access token for its relay session
+    /// (PRO-368): refresh the session if it is about to expire, and keep the
+    /// runtime's copy current. Blocking.
+    pub(crate) fn refresh_account_for_runtime(&self) {
+        let _ = self.account.context();
+        self.account.sync_runtime_copy();
+    }
+
     pub(super) fn host_capabilities(&self) -> Vec<String> {
         host_capabilities(crate::store::settings::load().machines.allow_operating, crate::data_privacy::enabled())
     }
@@ -59,6 +67,9 @@ impl PairingManager {
     pub fn machine_operating_changed(self: &Arc<Self>) {
         let manager = self.clone();
         std::thread::spawn(move || {
+            // The runtime registers with the relay from this copy while it is
+            // on, and the copy goes when it is off (PRO-368).
+            manager.account.sync_runtime_copy();
             if let Err(error) = manager.advertise_capabilities() {
                 log::warn!("could not tell the account directory that operating changed: {error:#}");
             }

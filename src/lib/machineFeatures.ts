@@ -35,12 +35,16 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "slashCommands", label: "Slash commands", capability: "composer/1", action: "use slash commands" },
   { id: "fileMentions", label: "File mentions", capability: "composer/2", action: "mention files" },
   { id: "images", label: "Images in prompts", capability: "composer/3", action: "send images" },
+  { id: "files", label: "Files in prompts", capability: "composer/4", action: "send files" },
   { id: "worktreeRemoval", label: "Worktree removal", capability: "workspace/1", action: "remove a session's worktree" },
   { id: "mergedCleanup", label: "Clean-up after merge", capability: "workspace/2", action: "remove merged worktrees" },
   { id: "cleanup", label: "Worktree clean-up", capability: "cleanup/1", action: "clean up worktrees" },
   { id: "pipelines", label: "Issue pipelines", capability: "pipeline/1", action: "run issue pipelines" },
   { id: "pipelineReviewers", label: "Pipeline reviewers", capability: "pipeline/2", action: "choose pipeline reviewers" },
   { id: "updates", label: "Updating it from this Mac", capability: "machine/3", action: "update it from this Mac" },
+  { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
+  { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
+  { id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {

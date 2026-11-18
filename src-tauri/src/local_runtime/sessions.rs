@@ -300,15 +300,18 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.send_pressed(session, tab, text, images, None, Vec::new())
+        self.send_pressed(session, tab, text, images, None, Vec::new(), None)
     }
 
     /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
     /// `files`: stored attachments (PRO-290), sent only when there are any,
     /// so an older runtime is never handed a parameter it does not know.
-    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>) -> Result<SendOutcome> {
+    /// `prompt_request_id`: the Create preview's identity, when there is one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>, prompt_request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let mut params = json!({"text":text,"images":images,"pressedAt":pressed_at});
         if !files.is_empty() { params["files"] = json!(files); }
+        if let Some(id) = prompt_request_id { params["promptRequestId"] = json!(id); }
         self.tab("send", session, tab, params)
     }
 
@@ -343,8 +346,9 @@ impl Sessions {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
 
-    pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
-        self.tab("prepareContinuation", session, tab, json!({}))
+    /// `portable`: for another computer (PRO-348), with no path of this one in it.
+    pub fn prepare_continuation(&self, session: &str, tab: &str, portable: bool) -> Result<crate::continuation::Context> {
+        self.tab("prepareContinuation", session, tab, if portable { json!({ "portable": true }) } else { json!({}) })
     }
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {

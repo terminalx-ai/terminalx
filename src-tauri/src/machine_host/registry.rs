@@ -22,6 +22,8 @@ const FILE: &str = "paired-computers.json";
 const LOCK: &str = "paired-computers.lock";
 /// How long a rewrite waits for another process's.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
+/// A credential unused this long expires (PRO-357): the computer pairs again.
+pub const UNUSED_EXPIRY_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 /// One paired computer. Its device token is never stored, only its SHA-256.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,15 @@ pub struct PairedComputer {
     /// Its device id at the relay, when it was given relay access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_device_id: Option<String>,
+    /// The token handed out by `machine.rotateCredential` and not yet used
+    /// (PRO-357). Admission with it makes it the token; admission with the
+    /// current token drops it, since the computer evidently never kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_hash_b64")]
+    pub next_token_hash: Option<[u8; 32]>,
+    /// When the person on this machine pressed Disconnect: refused until they
+    /// let it reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnected_at: Option<i64>,
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
@@ -67,9 +78,23 @@ impl PairedComputer {
         };
     }
 
-    /// Whether `token` is this computer's, in constant time.
+    /// Whether `token` is this computer's (its token, or the rotated one it
+    /// has not used yet), in constant time.
     pub fn proves(&self, token: &str) -> bool {
-        bool::from(self.token_hash.ct_eq(&token_hash(token)))
+        let hash = token_hash(token);
+        let current = bool::from(self.token_hash.ct_eq(&hash));
+        let next = self.next_token_hash.map(|next| bool::from(next.ct_eq(&hash))).unwrap_or(false);
+        current | next
+    }
+
+    /// When its credential was last used: its last connection, else Allow.
+    pub fn last_used_at(&self) -> i64 {
+        self.last_seen_at.unwrap_or(self.approved_at).max(self.approved_at)
+    }
+
+    /// Unused for [`UNUSED_EXPIRY_MS`] at `now`.
+    pub fn expired(&self, now: i64) -> bool {
+        now.saturating_sub(self.last_used_at()) >= UNUSED_EXPIRY_MS
     }
 }
 
@@ -87,6 +112,22 @@ mod hash_b64 {
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
         let text = String::deserialize(deserializer)?;
         STANDARD.decode(text).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| serde::de::Error::custom("invalid token hash"))
+    }
+}
+
+mod opt_hash_b64 {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(hash: &Option<[u8; 32]>, serializer: S) -> Result<S::Ok, S::Error> {
+        match hash {
+            Some(hash) => serializer.serialize_some(&STANDARD.encode(hash)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error> {
+        let Some(text) = Option::<String>::deserialize(deserializer)? else { return Ok(None) };
+        STANDARD.decode(text).ok().and_then(|bytes| bytes.try_into().ok()).map(Some).ok_or_else(|| serde::de::Error::custom("invalid token hash"))
     }
 }
 
@@ -232,6 +273,62 @@ impl Registry {
         })?;
         Ok(())
     }
+
+    /// A computer was let in with `token` at `at` (PRO-357): note the time,
+    /// and settle a rotation. The rotated token, once used, becomes the token
+    /// and the old one stops working. The old token used instead means the
+    /// computer never kept the rotated one, which is dropped.
+    pub fn admitted(&self, id: &str, token: &str, at: i64) -> Result<()> {
+        let hash = token_hash(token);
+        self.rewrite(|file| {
+            let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(None) };
+            computer.last_seen_at = Some(at);
+            if let Some(next) = computer.next_token_hash.take() {
+                if bool::from(next.ct_eq(&hash)) {
+                    computer.token_hash = next;
+                }
+            }
+            Ok(Some(()))
+        })?;
+        Ok(())
+    }
+
+    /// Keep `next` as the computer's rotated token. Whether it is paired.
+    pub fn rotate(&self, id: &str, next: [u8; 32]) -> Result<bool> {
+        let rotated = self.rewrite(|file| {
+            let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(None) };
+            computer.next_token_hash = Some(next);
+            Ok(Some(()))
+        })?;
+        Ok(rotated.is_some())
+    }
+
+    /// Hold a computer off (`Some(at)`) or let it reconnect (`None`). The
+    /// computer, when it is paired and the hold changed.
+    pub fn set_disconnected(&self, id: &str, at: Option<i64>) -> Result<Option<PairedComputer>> {
+        self.rewrite(|file| {
+            let Some(computer) = file.computers.iter_mut().find(|computer| computer.id == id) else { return Ok(None) };
+            if computer.disconnected_at.is_some() == at.is_some() {
+                return Ok(None);
+            }
+            computer.disconnected_at = at;
+            Ok(Some(computer.clone()))
+        })
+    }
+
+    /// Remove every computer whose credential went unused for 90 days at
+    /// `now`, but those in `keep` (connected now). The ones removed.
+    pub fn remove_expired(&self, now: i64, keep: &[String]) -> Result<Vec<PairedComputer>> {
+        if !self.read()?.computers.iter().any(|computer| computer.expired(now) && !keep.contains(&computer.id)) {
+            return Ok(Vec::new());
+        }
+        let removed = self.rewrite(|file| {
+            let (expired, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut file.computers).into_iter().partition(|computer| computer.expired(now) && !keep.contains(&computer.id));
+            file.computers = kept;
+            Ok((!expired.is_empty()).then_some(expired))
+        })?;
+        Ok(removed.unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +347,8 @@ mod tests {
             approved_at: 1,
             last_seen_at: None,
             relay_device_id: Some(format!("relay-{id}")),
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         }
     }
@@ -347,5 +446,70 @@ mod tests {
         assert_eq!(written["computers"][0]["lastSeenAt"], 42);
         std::fs::write(registry.path(), json!({ "v": 2, "computers": [] }).to_string()).unwrap();
         assert!(registry.list().is_err(), "a version this build cannot read is not read as empty");
+    }
+
+    /// PRO-357: a rotated token works beside the old one until it is used,
+    /// then alone; a computer that never kept it goes on with the old one.
+    #[test]
+    fn a_rotated_token_replaces_the_old_one_once_it_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::in_data_dir(dir.path());
+        registry.put(computer("a", "token-old")).unwrap();
+        assert!(registry.rotate("a", token_hash("token-new")).unwrap());
+        assert!(!registry.rotate("gone", token_hash("token-x")).unwrap(), "not paired");
+        assert_eq!(registry.find_by_token("token-old").unwrap().unwrap().id, "a", "the old token works until the new one is used");
+        assert_eq!(registry.find_by_token("token-new").unwrap().unwrap().id, "a");
+        assert!(!std::fs::read_to_string(registry.path()).unwrap().contains("token-new"), "only its hash is kept");
+        registry.admitted("a", "token-new", 50).unwrap();
+        assert!(registry.find_by_token("token-old").unwrap().is_none(), "the old token stops working once the new one was used");
+        assert_eq!(registry.find_by_token("token-new").unwrap().unwrap().last_seen_at, Some(50));
+        assert!(registry.find_by_relay_device("relay-a", "token-new").unwrap().is_some(), "the relay route takes it too");
+
+        // The reply with the next token was lost: the computer comes back
+        // with the token it has, and the one it never kept is dropped.
+        registry.rotate("a", token_hash("token-lost")).unwrap();
+        registry.admitted("a", "token-new", 60).unwrap();
+        assert!(registry.find_by_token("token-lost").unwrap().is_none(), "a rotated token the computer never used is dropped");
+        assert!(registry.find_by_token("token-new").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_held_computer_is_marked_until_it_is_let_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::in_data_dir(dir.path());
+        registry.put(computer("a", "token-a")).unwrap();
+        assert_eq!(registry.set_disconnected("a", Some(7)).unwrap().unwrap().disconnected_at, Some(7));
+        assert!(registry.set_disconnected("a", Some(8)).unwrap().is_none(), "already held");
+        assert_eq!(registry.list().unwrap()[0].disconnected_at, Some(7));
+        assert!(registry.set_disconnected("a", None).unwrap().is_some());
+        assert_eq!(registry.list().unwrap()[0].disconnected_at, None);
+        assert!(registry.set_disconnected("gone", Some(1)).unwrap().is_none());
+    }
+
+    /// PRO-357: a credential unused for 90 days expires; one in use does not.
+    #[test]
+    fn a_credential_unused_for_ninety_days_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::in_data_dir(dir.path());
+        let day = 24 * 60 * 60 * 1000;
+        let mut old = computer("old", "token-old");
+        old.approved_at = 0;
+        old.last_seen_at = Some(10 * day);
+        let mut connected = computer("connected", "token-connected");
+        connected.approved_at = 0;
+        let mut recent = computer("recent", "token-recent");
+        recent.approved_at = 0;
+        recent.last_seen_at = Some(95 * day);
+        for computer in [old, connected, recent] {
+            registry.put(computer).unwrap();
+        }
+        let now = 100 * day;
+        assert!(registry.list().unwrap().iter().find(|computer| computer.id == "old").unwrap().expired(now));
+        assert!(!registry.list().unwrap().iter().find(|computer| computer.id == "old").unwrap().expired(99 * day), "89 days unused is not expired");
+        let removed: Vec<String> = registry.remove_expired(now, &["connected".to_string()]).unwrap().into_iter().map(|computer| computer.id).collect();
+        assert_eq!(removed, ["old"]);
+        let left: Vec<String> = registry.list().unwrap().into_iter().map(|computer| computer.id).collect();
+        assert_eq!(left, ["connected", "recent"], "a computer connected now is not expired under it");
+        assert!(registry.remove_expired(now, &[]).unwrap().iter().any(|computer| computer.id == "connected"), "once it is gone, it expires too");
     }
 }

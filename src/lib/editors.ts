@@ -1,17 +1,20 @@
 import { useSyncExternalStore } from "react";
 import { recordRecentFile } from "@/lib/recentFiles";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import mediaTypes from "./mediaTypes.json";
 import { extOf, fileName } from "@/lib/paths";
+import { isLocalKey } from "@/types/target";
 import type { ChangeRange } from "./changes";
 import type { PrAssociation } from "./api";
 import { discardStashedBuffers } from "@/lib/workspaceFiles";
 import { clearSelectedReview, getTerminalState, selectSessionTab } from "@/lib/terminal";
 
 /**
- * Files live beside the transcript; diff and PR tabs fill the centre. Nothing
- * here persists unsaved text. Review tabs restore their locations after restart;
- * files come back from disk and unsaved buffers are guarded on close.
+ * A local session's files, diffs and pull requests are tabs of the session,
+ * beside its chat (PRO-402). A cloud workspace's files and a checkout's (no
+ * session) stay in the editor pane. Nothing here persists unsaved text. Tabs
+ * restore their locations after restart; files come back from disk and
+ * unsaved buffers are guarded on close.
  */
 export type ViewMode = "source" | "preview";
 
@@ -74,6 +77,12 @@ export interface DiffEditorEntry extends EditorBase {
     /** The fixed snapshot's name in the tab title ("Turn", "Commit 5be01f4"); chips from historical turns must not say "Latest turn". */
     turnLabel?: string;
     mode: DiffMode;
+    /**
+     * One review tab for the whole scope (PRO-392): every changed file stacked, `rel` being the file it was last opened
+     * on, and `focus` bumped to scroll to it again on a re-open.
+     */
+    stack?: boolean;
+    focus?: number;
   };
 }
 export interface PrEditorEntry extends EditorBase { kind: "pr"; pr: PrAssociation }
@@ -98,10 +107,56 @@ export interface AttachmentEditorEntry extends EditorBase {
   media: FileKind;
   attachment: AttachmentInfo;
 }
-export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
-export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry;
+/**
+ * A pull request check's log, open in a centre tab of its session (PRO-394,
+ * design 05.09). It holds the check as it was when opened; the tab reads the
+ * log itself. Not kept across a restart: a log is read fresh from GitHub.
+ */
+export interface CheckLogEditorEntry extends EditorBase {
+  kind: "checkLog";
+  check: {
+    prUrl: string;
+    prNumber: number;
+    name: string;
+    url: string;
+    state: string;
+    runId: number;
+    jobId: number | null;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    summary?: string | null;
+  };
+  /** How many of the pull request's checks were failing when it was opened, for the hand-off bar. */
+  failures: number;
+}
+export type EditorEntry = FileEditorEntry | DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry | CheckLogEditorEntry;
+export type ReviewEditorEntry = DiffEditorEntry | PrEditorEntry | ConflictEditorEntry | AttachmentEditorEntry | CheckLogEditorEntry;
 export function isReviewEditor(entry: EditorEntry): entry is ReviewEditorEntry {
-  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment";
+  return entry.kind === "diff" || entry.kind === "pr" || entry.kind === "conflict" || entry.kind === "attachment" || entry.kind === "checkLog";
+}
+
+/**
+ * Whether files opened under this id are tabs of a local session: not a checkout with no
+ * session, and not a cloud, machine or guest session, whose files keep their own pane.
+ */
+function hasFileTabs(sessionId: string): boolean {
+  return !sessionId.startsWith("checkout:") && isLocalKey(sessionId);
+}
+
+/**
+ * A file a local session opened: a tab in the session's tab strip, beside the
+ * chat tab and never over it (PRO-402). A cloud workspace's file (`source`),
+ * a cloud session's and a checkout's stay in the editor pane (`EditorSplit`).
+ */
+export function isFileTab(entry: EditorEntry): boolean {
+  return !isReviewEditor(entry) && !entry.source && hasFileTabs(entry.sessionId);
+}
+
+/** An editor that can be a tab of its session: a review, or a file. */
+export type TabEditorEntry = ReviewEditorEntry | FileEditorEntry;
+/** Whether the editor is a tab of its session: a review, or a local session's file. */
+export function isTabEditor(entry: EditorEntry): boolean {
+  return isReviewEditor(entry) || isFileTab(entry);
 }
 
 /** An attachment tab as the file surfaces draw it: a read-only file with the attachment toolbar. */
@@ -115,7 +170,7 @@ const REVIEW_TABS_KEY = "terminalx:review-tabs:v1";
 /** Persist only locators, never snapshot contents, PR bodies or unsaved buffers. */
 export function serializeReviewTabs(value: Pick<State, "editors" | "active" | "collapsed">): string {
   return JSON.stringify({
-    editors: value.editors.filter(isReviewEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
+    editors: value.editors.filter(isTabEditor).map((e) => ({ ...e, dirty: false, jump: undefined })),
     active: value.active,
     collapsed: value.collapsed,
   });
@@ -138,6 +193,7 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         if (!reviewPath(e.root, e.rel)) continue;
         if (d.target != null && typeof d.target !== "string") continue;
         if (d.turnLabel !== undefined && typeof d.turnLabel !== "string") continue;
+        if (d.stack !== undefined && typeof d.stack !== "boolean") continue;
         editors.push({ ...e, created: typeof e.created === "string" ? e.created : undefined, dirty: false, jump: undefined, viewMode: "source", diff: { ...d, mode: d.mode === "edit" ? "diff" : d.mode } });
       } else if (e.kind === "pr" && e.pr?.scope?.kind === "local" && typeof e.pr.scope.cwd === "string"
         && typeof e.pr.url === "string" && typeof e.pr.head === "string" && Number.isSafeInteger(e.pr.number) && e.pr.number > 0) {
@@ -146,6 +202,10 @@ export function restoreReviewTabs(raw: string | null): Pick<State, "editors" | "
         && reviewPath(e.root, e.rel) && e.attachment.path === `${e.root}/${e.rel}` && (e.attachment.sentAt === undefined || typeof e.attachment.sentAt === "string")) {
         editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
           dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: "attachment", media: e.media, attachment: { path: e.attachment.path, ...(e.attachment.sentAt ? { sentAt: e.attachment.sentAt } : {}) } });
+      } else if (["text", "image", "audio", "video"].includes(e.kind) && !e.attachment && hasFileTabs(e.sessionId) && reviewPath(e.root, e.rel) === e.rel) {
+        // A session's file tab: where the file is, never what was typed in it.
+        editors.push({ id: e.id, sessionId: e.sessionId, workspaceRoot: e.workspaceRoot, root: e.root, rel: e.rel, name: e.name, created: typeof e.created === "string" ? e.created : undefined,
+          dirty: false, viewMode: e.viewMode === "preview" ? "preview" : "source", kind: e.kind });
       } else if (e.kind === "conflict" && reviewPath(e.root, e.rel) && e.conflict && isCommit(e.conflict.head) && isCommit(e.conflict.mergeHead)
         && Number.isSafeInteger(e.conflict.conflicts) && e.conflict.conflicts >= 0) {
         const { head, mergeHead, conflicts } = e.conflict;
@@ -210,14 +270,23 @@ export function isMarkdown(rel: string): boolean {
 
 let nonce = 0;
 /**
- * Open (or focus) a file in the session's pane. A jump target implies the
- * reader wants a line, which only source can show, so it forces source mode.
+ * Open (or focus) a file. In a local session it is a tab of the session,
+ * beside the chat tab; a cloud workspace's file (`source`) and a checkout's
+ * open in the editor pane. A jump target implies the reader wants a line,
+ * which only source can show, so it forces source mode.
  */
 export function openFile(sessionId: string, root: string, rel: string, at?: { line: number; col?: number }, workspaceRoot = root, source?: string) {
   recordRecentFile(source ?? `local:${root}`, rel);
   const existing = state.editors.find((e) => !isReviewEditor(e) && !e.attachment && e.sessionId === sessionId && e.root === root && e.rel === rel);
+  const tab = !source && hasFileTabs(sessionId);
   const selected = getTerminalState().selected[sessionId];
-  if (selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
+  if (!tab && selected?.kind === "review") clearSelectedReview(sessionId, selected.id);
+  // A session's file tab is shown by selecting it, like any tab of the session.
+  const show = (id: string) => {
+    if (!tab) return;
+    selectSessionTab(sessionId, { kind: "review", id });
+    setLastFocused("editor");
+  };
   const kind = fileKind(rel);
   const jump = at && kind === "text" ? { ...at, nonce: ++nonce } : undefined;
   const collapsed = { ...state.collapsed, [sessionId]: false };
@@ -227,11 +296,13 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
       active: { ...state.active, [sessionId]: existing.id },
       collapsed,
     });
+    show(existing.id);
     return existing.id;
   }
   const id = JSON.stringify([sessionId, root, rel]);
   const entry: EditorEntry = {
     id,
+    ...(tab ? { created: new Date().toISOString() } : {}),
     sessionId,
     workspaceRoot,
     root,
@@ -244,6 +315,7 @@ export function openFile(sessionId: string, root: string, rel: string, at?: { li
     jump,
   };
   set({ editors: [...state.editors, entry], active: { ...state.active, [sessionId]: id }, collapsed });
+  show(id);
   return id;
 }
 
@@ -276,7 +348,8 @@ export function openAttachment(sessionId: string, file: { path: string; name: st
   return openReview(entry);
 }
 
-export function openReview(entry: ReviewEditorEntry) {
+/** Open (or focus) a tab of a session: a review, or a file tab that was closed and is put back. */
+export function openReview(entry: TabEditorEntry) {
   // Reopening a review focuses its existing buffer without resetting its mode or scroll.
   const existing = state.editors.find((e) => e.id === entry.id);
   if (!existing) set({ editors: [...state.editors, { ...entry, created: entry.created ?? new Date().toISOString() }] });
@@ -306,9 +379,46 @@ export function openDiff(sessionId: string, root: string, rel: string, diff: Omi
     kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff" } });
 }
 
+/** The scope's name in a review tab's title. */
+export function reviewScopeLabel(diff: Pick<DiffEditorEntry["diff"], "scope" | "turnLabel" | "uncommitted">): string {
+  return diff.scope === "turn" ? diff.turnLabel ?? "Latest turn" : diff.uncommitted ? "Uncommitted changes" : "All changes";
+}
+
+/**
+ * Open (or focus) the one review tab of a scope, which stacks every changed file (PRO-392), on `rel`.
+ * A live comparison's tab follows the newest range; a fixed snapshot is a tab of its own.
+ */
+export function openReviewStack(sessionId: string, root: string, rel: string, diff: Omit<DiffEditorEntry["diff"], "mode" | "stack" | "focus" | "oldPath">) {
+  const path = reviewPath(root, rel);
+  if (!path) throw new Error("This file is outside the repository.");
+  if (!diff.range) throw new Error("No snapshots are available for this turn.");
+  const id = JSON.stringify([sessionId, root, "review", diff.scope, diff.scope === "turn" ? diff.range : [diff.target, diff.uncommitted]]);
+  const existing = state.editors.find((e) => e.id === id);
+  if (existing?.kind === "diff") {
+    set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, rel: path, diff: { ...e.diff, range: diff.range, focus: (e.diff.focus ?? 0) + 1 } } : e) });
+    setActiveEditor(sessionId, id);
+    setLastFocused("editor");
+    return id;
+  }
+  return openReview({ id, sessionId, root, workspaceRoot: root, rel: path, name: `Review · ${reviewScopeLabel(diff)}`,
+    kind: "diff", dirty: false, viewMode: "source", diff: { ...diff, mode: "diff", stack: true, focus: 0 } });
+}
+
 export function openPr(sessionId: string, root: string, pr: PrAssociation) {
   const id = JSON.stringify([sessionId, root, "pr", pr.url.toLowerCase().replace(/\/$/, "")]);
   return openReview({ id, sessionId, root, workspaceRoot: root, rel: pr.url, name: `PR #${pr.number}`, kind: "pr", dirty: false, viewMode: "source", pr });
+}
+
+/**
+ * Open (or focus) a check's log in a centre tab (PRO-394). One tab per check:
+ * opening it again for a newer state of the check points the tab at that.
+ */
+export function openCheckLog(sessionId: string, root: string, pr: { url: string; number: number }, check: Omit<CheckLogEditorEntry["check"], "prUrl" | "prNumber">, failures: number) {
+  const id = JSON.stringify([sessionId, root, "checkLog", pr.url.toLowerCase().replace(/\/$/, ""), check.url]);
+  const entry: CheckLogEditorEntry = { id, sessionId, root, workspaceRoot: root, rel: check.url, name: `${check.name} · log`, kind: "checkLog", dirty: false, viewMode: "source",
+    check: { ...check, prUrl: pr.url, prNumber: pr.number }, failures };
+  if (state.editors.some((e) => e.id === id)) set({ editors: state.editors.map((e) => e.id === id ? { ...entry, created: e.created } : e) });
+  return openReview(entry);
 }
 
 /** A conflict tab's title: the file's name and what is left to resolve in it. */
@@ -343,8 +453,12 @@ export async function setDiffMode(id: string, mode: DiffMode) {
   const entry = state.editors.find((e) => e.id === id);
   if (entry?.kind !== "diff" || entry.diff.mode === mode) return;
   if (entry.diff.mode === "edit" && entry.dirty) {
-    const leave = await ask(`${fileName(entry.rel)} has unsaved changes. Leave Edit? Your changes stay in this tab until you save or close it.`,
-      { title: "Unsaved changes", kind: "warning", okLabel: "Leave Edit", cancelLabel: "Keep editing" }).catch(() => false);
+    const leave = await confirmInApp({
+      title: "Leave Edit with unsaved changes?",
+      body: `${fileName(entry.rel)} has unsaved changes. They stay in this tab until you save or close it.`,
+      action: "Leave Edit",
+      cancel: "Keep editing",
+    });
     if (!leave) return;
   }
   set({ editors: state.editors.map((e) => e.id === id && e.kind === "diff" ? { ...e, diff: { ...e.diff, mode } } : e) });
@@ -367,8 +481,14 @@ export function editorLinkContext(entry: EditorEntry) {
 
 async function confirmDiscard(names: string[]): Promise<boolean> {
   if (!names.length) return true;
-  const what = names.length === 1 ? `${names[0]} has unsaved changes.` : `${names.length} files have unsaved changes.`;
-  return ask(`${what} Close and lose them?`, { title: "Unsaved changes", kind: "warning", okLabel: "Discard", cancelLabel: "Keep editing" }).catch(() => false);
+  const one = names.length === 1;
+  return confirmInApp({
+    title: one ? `Close ${names[0]} without saving?` : `Close ${names.length} files without saving?`,
+    body: `${one ? "Its unsaved changes are" : "Their unsaved changes are"} lost. This can't be undone.`,
+    action: "Discard",
+    cancel: "Keep editing",
+    destructive: true,
+  });
 }
 
 export async function closeEditor(id: string) {
@@ -416,9 +536,10 @@ export function dropEditors(match: (entry: EditorEntry) => boolean) {
 
 export function setActiveEditor(sessionId: string, id: string | null) {
   const entry = state.editors.find((e) => e.id === id && e.sessionId === sessionId);
-  if (entry && isReviewEditor(entry)) {
+  if (entry && isTabEditor(entry)) {
     selectSessionTab(sessionId, { kind: "review", id: entry.id });
-    if (!sessionId.startsWith("checkout:")) return;
+    // A file tab is also the session's active file, which the file tree marks.
+    if (isReviewEditor(entry) && !sessionId.startsWith("checkout:")) return;
   }
   set({ active: { ...state.active, [sessionId]: id }, collapsed: { ...state.collapsed, [sessionId]: false } });
 }
@@ -426,7 +547,7 @@ export function setActiveEditor(sessionId: string, id: string | null) {
 /** Called only after the backend's complete session list has arrived. */
 export function pruneReviewTabs(sessions: readonly { id: string; worktreeRemoved?: boolean }[]) {
   const kept = new Set(sessions.filter((s) => !s.worktreeRemoved).map((s) => s.id));
-  dropEditors((e) => isReviewEditor(e) && !e.sessionId.startsWith("checkout:") && !kept.has(e.sessionId));
+  dropEditors((e) => isTabEditor(e) && !e.sessionId.startsWith("checkout:") && !kept.has(e.sessionId));
 }
 
 export function setEditorDirty(id: string, dirty: boolean) {

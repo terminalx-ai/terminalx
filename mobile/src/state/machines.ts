@@ -121,7 +121,7 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     // account has no recent proof, not that it is off: it may still answer directly or over the relay.
     const offline = account?.reachability === "exited";
     const lastSeen = Math.max(account?.lastSeenAt ? Date.parse(account.lastSeenAt) || 0 : 0, host.lastConnectedAt);
-    const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account) };
+    const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account, host) };
     if (active) {
       const { connection } = input;
       const connected = connection === "connected" || connection === "updating";
@@ -175,8 +175,9 @@ export function ago(at: number, now: number): string {
   return unit(Math.floor(days / 365), "year");
 }
 
-/** A machine's mark: a server for SSH or Linux, a laptop by its name, else a desktop. */
-export function iconFor(name: string, account: AccountHost | null): MachineIcon {
+/** A machine's mark: a server for SSH, Linux or one with no TerminalX window (PRO-359), a laptop by its name, else a desktop. */
+export function iconFor(name: string, account: AccountHost | null, paired?: Pick<StoredHost, "headless" | "platform">): MachineIcon {
   if (account?.environmentKind === "ssh" || account?.platform === "linux") return "server";
+  if (paired?.headless === true || paired?.platform === "linux") return "server";
   return /book|laptop/i.test(name) ? "laptop" : "desktop";
 }

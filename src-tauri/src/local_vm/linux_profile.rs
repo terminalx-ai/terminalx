@@ -137,7 +137,7 @@ impl Account {
         let passwd = std::fs::read_to_string("/etc/passwd")?;
         let fields: Vec<_> = passwd
             .lines()
-            .find(|line| line.starts_with("cua:"))
+            .find(|line| line.starts_with("terminalx-owner:"))
             .context("Dedicated account is unavailable")?
             .split(':')
             .collect();
@@ -148,6 +148,39 @@ impl Account {
         {
             bail!("Dedicated account identity changed");
         }
+        let worker = passwd.lines().find(|line| line.starts_with("cua:"))
+            .context("Worker identity is unavailable")?.split(':').collect::<Vec<_>>();
+        if worker.len() != 7 || worker[2].parse::<u32>()? == 0 || worker[3].parse::<u32>()? == 0
+            || worker[2].parse::<u32>()? == self.uid
+            || worker[3].parse::<u32>()? == self.gid || fields[6] != "/usr/sbin/nologin"
+            || passwd.lines().filter(|line| line.split(':').nth(2).and_then(|id| id.parse::<u32>().ok()) == Some(self.uid)).count() != 1
+            || passwd.lines().filter(|line| line.split(':').nth(3).and_then(|id| id.parse::<u32>().ok()) == Some(self.gid)).count() != 1 {
+            bail!("Owner and worker accounts must be distinct and unshared");
+        }
+        let groups = std::fs::read_to_string("/etc/group")?;
+        let mut primary = 0;
+        for line in groups.lines() {
+            let group = line.split(':').collect::<Vec<_>>();
+            if group.len() != 4 { bail!("Invalid group database"); }
+            if group[3].split(',').any(|member| member == self.name) {
+                bail!("Owner supplementary groups are forbidden");
+            }
+            if group[2].parse::<u32>()? == self.gid {
+                primary += 1;
+                if group[0] != self.name || !group[3].is_empty() { bail!("Owner group is shared"); }
+            }
+        }
+        if primary != 1 { bail!("Owner group identity changed"); }
+        // SAFETY: getgroups with zero count only returns the number of groups.
+        if unsafe { libc::getgroups(0, std::ptr::null_mut()) } != 0 {
+            bail!("Owner process has supplementary groups");
+        }
+        for ancestor in ["/", "/var", "/var/lib"] {
+            let metadata = std::fs::symlink_metadata(ancestor)?;
+            if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                bail!("Unsafe owner home ancestor");
+            }
+        }
         let metadata = std::fs::symlink_metadata(&self.home)?;
         // SAFETY: identity accessors take no pointers or memory preconditions.
         if unsafe {
@@ -157,7 +190,8 @@ impl Account {
                 || libc::getegid() != self.gid
         } || !metadata.is_dir()
             || metadata.uid() != self.uid
-            || metadata.mode() & 0o022 != 0
+            || metadata.gid() != self.gid
+            || metadata.mode() & 0o7777 != 0o700
             || metadata.dev() != self.home_device
             || metadata.ino() != self.home_inode
         {
@@ -166,8 +200,8 @@ impl Account {
         Ok(())
     }
     pub(super) fn validate(&self) -> Result<()> {
-        if self.name != "cua"
-            || self.home != "/home/cua"
+        if self.name != "terminalx-owner"
+            || self.home != "/var/lib/terminalx-owner"
             || self.uid == 0
             || self.gid == 0
             || self.home_inode == 0
@@ -248,11 +282,10 @@ pub(super) fn validate_binding(binding: &InstallBinding) -> Result<()> {
         bail!("Linux installer requires an exact container target");
     }
     binding.target.require(Capability::AttachedDesktop)?;
-    if let Some(account) = &binding.account {
-        account.validate()?;
-        if account.architecture != binding.architecture {
-            bail!("Account architecture changed");
-        }
+    let account = binding.account.as_ref().context("Isolated Linux owner account binding required")?;
+    account.validate()?;
+    if account.architecture != binding.architecture {
+        bail!("Account architecture changed");
     }
     journal::validate_id(&binding.environment_id)?;
     journal::validate_id(&binding.generation)
@@ -381,6 +414,8 @@ pub(super) fn execute_prepared(
 }
 pub(super) fn validate_receipt(key: &str, record: &Value, observed: &Value) -> Result<()> {
     let intent = &record["intent"];
+    let installed_binding: InstallBinding = serde_json::from_value(intent["binding"].clone())?;
+    validate_binding(&installed_binding)?;
     let receipt = &observed["receipt"];
     let request = journal::digest(key.as_bytes());
     let binding = &intent["binding"];
@@ -493,15 +528,32 @@ mod tests {
             generation: journal::new_id(),
             architecture: Architecture::Arm64,
             account: Some(Account {
-                name: "cua".into(),
-                uid: 1000,
-                gid: 1000,
-                home: "/home/cua".into(),
+                name: "terminalx-owner".into(),
+                uid: 991,
+                gid: 992,
+                home: "/var/lib/terminalx-owner".into(),
                 home_device: 1,
                 home_inode: 2,
                 architecture: Architecture::Arm64,
             }),
             host_key_sha256: "c".repeat(64),
+        }
+    }
+    #[test]
+    fn shared_or_missing_owner_bindings_cannot_be_staged_or_accepted_as_receipts() {
+        let binding = binding();
+        validate_binding(&binding).unwrap();
+        for account in [None, Some(Account {
+            name: "cua".into(), uid: 1000, gid: 1000, home: "/home/cua".into(),
+            ..binding.account.clone().unwrap()
+        })] {
+            let mut legacy = binding.clone();
+            legacy.account = account;
+            assert!(validate_binding(&legacy).is_err());
+            // Even a self-consistent old receipt cannot authorize activation.
+            let intent = json!({"binding":legacy,"runtimeSha256":"d".repeat(64)});
+            let record = json!({"intent":intent,"inputDigest":journal::digest(&serde_json::to_vec(&intent).unwrap())});
+            assert!(validate_receipt("old", &record, &completion("old", &intent)).is_err());
         }
     }
     #[test]

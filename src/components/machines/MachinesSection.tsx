@@ -1,18 +1,19 @@
-import { ChevronDown, Folder, FolderGit2, Plus } from "@/icons";
+import { useState } from "react";
+import { ChevronDown, Folder, FolderGit2, Plus, RotateCw, ShieldX, WifiOff } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { useFold } from "@/components/layout/useFold";
-import { useExperimentalSettings } from "@/lib/experimentalSettings";
-import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
+import { machineConnection, reconnectMachine, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineProjects, type MachineProjectNode } from "@/lib/machineCatalog";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { selectCloudWorkspace, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import { machineSectionKey } from "@/types/target";
 import type { MachineConnectionState, PairedMachine } from "@/types/machines";
-import { MachineIcon, MachineStateMark, machineStateHint, machineStateLabel, useTick } from "./connectionStatus";
+import { MachineIcon, MachineStateMark, lastSeenSentence, machineStateHint, machineStateLabel, useTick } from "./connectionStatus";
+import { AddMachineDialog } from "./AddMachineDialog";
 import { MachineProjectGroup, shownMachineSessions } from "./MachineSidebarRows";
 import { startMachineSession } from "./machineNewSession";
 
@@ -23,13 +24,12 @@ import { startMachineSession } from "./machineNewSession";
  * one of its projects, and a fold; choosing the name opens the machine's view.
  * Under it come its projects, each with its sessions. A machine that cannot be
  * reached keeps its section, dimmed, with the sessions it last reported.
- * Shown only with Experimental → Machines on.
+ * Nothing shows while no machine is paired.
  */
 export function MachinesSection() {
-  const on = useExperimentalSettings()?.machines === true;
   const store = useMachineConnections();
   const sessions = useSessionStore();
-  if (!on || !store.machines.length) return null;
+  if (!store.machines.length) return null;
   return (
     <div role="group" aria-label="Machines" className="min-w-0" data-testid="machines-section">
       {store.machines.map((machine) => {
@@ -110,6 +110,7 @@ function MachineSection({ machine, state, attachError, selected }: { machine: Pa
             ))}
           </div>
         )}
+        {open && <MachineAwayCard machine={machine} state={state} />}
       </section>
       <div className="absolute right-1 top-0 flex h-7 items-center gap-0.5" data-testid="machine-header-actions" data-machine={machine.machineId}>
         <NewMachineSession machine={machine} projects={startable} />
@@ -172,5 +173,51 @@ function NewMachineSession({ machine, projects }: { machine: PairedMachine; proj
         })}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * Under a machine's rows while it cannot be reached (21.09, "Sidebar ·
+ * machine can't be reached"): that it isn't reachable, when it was last seen,
+ * that its sessions keep running and this list catches up when it
+ * reconnects, with Try again and Machine settings. A machine that revoked
+ * this Mac offers to pair again instead.
+ */
+export function MachineAwayCard({ machine, state }: { machine: PairedMachine; state: MachineConnectionState }) {
+  const [pairing, setPairing] = useState(false);
+  if (state.state !== "offline" && state.state !== "accessRemoved") return null;
+  const removed = state.state === "accessRemoved";
+  const seen = state.state === "offline" && state.lastSeenAt ? state.lastSeenAt : machine.lastSeenAt;
+  const Icon = removed ? ShieldX : WifiOff;
+  const title = removed ? `${machine.name} no longer allows this Mac` : `${machine.name} isn’t reachable`;
+  const detail = removed
+    ? "It was revoked on that Mac. Sessions there keep running; pair again to see them here."
+    : [seen ? lastSeenSentence(seen) : null, "Sessions there keep running, and this list catches up when it reconnects."].filter(Boolean).join(" ");
+  const settings = (
+    <Button size="sm" variant="outline" onClick={() => selectCloudWorkspace(machineSectionKey(machine.machineId))}>
+      Machine settings
+    </Button>
+  );
+  return (
+    <div className="mx-1 mt-1.5 grid gap-1.5 rounded-lg border border-hairline p-3" role="status" data-testid="machine-away-card" data-state={state.state}>
+      <div className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-foreground">
+        <Icon className="size-3.5 shrink-0 text-destructive" aria-hidden />
+        <span className="min-w-0 truncate">{title}</span>
+      </div>
+      <p className="text-[12px] leading-[18px] text-muted-foreground">{detail}</p>
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        {removed ? (
+          <Button size="sm" onClick={() => setPairing(true)}>
+            Pair again
+          </Button>
+        ) : (
+          <Button size="sm" onClick={() => void reconnectMachine(machine.machineId)}>
+            <RotateCw /> Try again
+          </Button>
+        )}
+        {settings}
+      </div>
+      {removed && <AddMachineDialog open={pairing} onOpenChange={setPairing} onPaired={() => void refreshPairedMachines().then(() => reconnectMachine(machine.machineId))} />}
+    </div>
   );
 }

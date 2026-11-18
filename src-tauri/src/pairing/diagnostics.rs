@@ -94,6 +94,8 @@ impl Failure {
             }
         } else if let Some(category) = error.downcast_ref::<Category>() {
             *category
+        } else if error.downcast_ref::<crate::phone::RuntimeUnanswered>().is_some() {
+            Category::LocalRuntime
         } else if stage == Stage::LocalIdentity {
             Category::LocalStorage
         } else if error.chain().any(|cause| {

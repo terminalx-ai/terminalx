@@ -79,6 +79,8 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert!(result.from_include_file);
     assert_eq!(result.patterns.len(), 1);
     assert_eq!(result.patterns[0].matches, patterns(&["config/local/app.json"]));
+    // Settings says how many ignored files the patterns were checked against (PRO-387).
+    assert!(result.ignored_checked >= 2, "{}", result.ignored_checked);
     let created = git::create_worktree(repo.path(), "included", Some("main")).unwrap();
     assert!(Path::new(&created.path).join("config/local/app.json").is_file());
     assert!(!Path::new(&created.path).join(".env").exists());
@@ -90,6 +92,25 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert_eq!(projects::list().unwrap().0[0].repository_settings.files_to_copy, patterns(&[".env*"]));
     // The same serialized Project is returned by `terminalx projects list`.
     assert_eq!(serde_json::to_value(&projects::list().unwrap().0[0]).unwrap()["repositorySettings"]["filesToCopy"], serde_json::json!([".env*"]));
+}
+
+#[test]
+fn workspace_creation_uses_committed_policy_while_a_broader_draft_is_previewed() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    projects::update(&project.path, projects::ProjectPatch {
+        repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env.local"]) }),
+        ..Default::default()
+    }).unwrap();
+    write(repo.path(), ".env.local", "local");
+    write(repo.path(), ".env.production", "production");
+    let draft = preview(repo.path(), Some(&patterns(&["*"])), None).unwrap();
+    assert_eq!(draft.patterns[0].matches, patterns(&[".env.local", ".env.production"]));
+    let created = git::create_worktree(repo.path(), "during-edit", Some("main")).unwrap();
+    assert!(Path::new(&created.path).join(".env.local").is_file());
+    assert!(!Path::new(&created.path).join(".env.production").exists());
+    assert_eq!(projects::repository_settings(repo.path()).unwrap().files_to_copy, patterns(&[".env.local"]));
 }
 
 #[test]
@@ -482,6 +503,7 @@ fn copy_batch_keeps_validated_source_after_ancestor_swap() {
 
 fn copy_path(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
     copy_one(&safe_open::Directory::open_resolved(&fs::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+        .map(|(bytes, warning, _, _, _)| (bytes, warning))
 }
 
 #[cfg(unix)]

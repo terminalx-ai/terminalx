@@ -16,7 +16,6 @@ vi.mock("@/lib/pairing", () => ({
 }));
 vi.mock("@/lib/api", () => ({ api: mocks.api, errorMessage: String }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
-vi.mock("./OrganizationOnboarding", () => ({ OrganizationOnboarding: () => null }));
 vi.mock("./MachineNameSettings", () => ({ MachineNameSettings: () => null }));
 vi.mock("./OrganizationMembers", () => ({ OrganizationMembers: () => null }));
 vi.mock("./OrganizationCompute", () => ({ OrganizationCompute: () => null }));

@@ -15,6 +15,7 @@ it("filters folders and renamed paths, expands matches in collapsed folders, and
   fireEvent.click(screen.getByRole("radio", { name: "Folders" }));
   fireEvent.click(screen.getByRole("button", { name: "Folder src" }));
   expect(screen.queryByRole("button", { name: /one.ts/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Filter files" }));
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "ONE.TS" } });
   expect(screen.getByRole("button", { name: /one.ts/ }).parentElement?.className).toContain("bg-selected");
   expect(screen.queryByRole("button", { name: /README/ })).toBeNull();
@@ -34,6 +35,7 @@ it("marks without selecting a file, counts the entire scope, and unchecks on cha
   fireEvent.click(screen.getByRole("checkbox", { name: "Viewed src/deep/one.ts" }));
   expect(onSelect).not.toHaveBeenCalled();
   expect(screen.getByText("1 of 3 viewed")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Filter files" }));
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "README" } });
   expect(screen.getByText("1 of 3 viewed · 1 matching")).toBeTruthy();
   view.unmount();

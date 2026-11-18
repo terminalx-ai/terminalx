@@ -4,6 +4,7 @@ import { api, type AgentLogin, type CloudProviderSummary } from "@/lib/api";
 import { takeAgentLoginsRequest, takeOrganizationRequest } from "@/lib/settingsLinks";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import { ENVIRONMENT_CHECK_PROMPT, newSetup, type OrganizationSetupRecord } from "@/lib/organizationSetup";
+import { describedAs } from "@/test/cloudProviderDescriptors";
 import { OrganizationSetupSteps } from "./OrganizationSetupSteps";
 
 vi.mock("@/lib/api", () => ({
@@ -405,5 +406,86 @@ describe("a connected provider with new machines paused", () => {
     shown.rerender(view({ providersChanged: 1 }));
     await waitFor(() => expect(record.step).toBe("logins"));
     expect(api.cloudProviders).toHaveBeenCalledTimes(2);
+  });
+});
+
+// PRO-452: a provider TerminalX itself provides is never connected, so the
+// compute step is passed with nothing connected and says who provides it.
+describe("a provider TerminalX provides", () => {
+  const provided = (overrides: Partial<CloudProviderSummary> = {}) => ({
+    id: "terminalx-cloud",
+    displayName: "TerminalX Cloud",
+    availability: "available",
+    canManage: true,
+    connection: null,
+    descriptor: describedAs("terminalx-cloud"),
+    ...overrides,
+  });
+  /** A provider the organization connects, as its list carries it. */
+  const boat = (availability: CloudProviderSummary["availability"]) => ({ id: "box", displayName: "Boat", availability, canManage: true, descriptor: describedAs("box") });
+  const labels = () => screen.getAllByRole("listitem").map((item) => item.textContent ?? "");
+
+  it("passes the compute step with nothing connected, and prepares the setup workspace on it", async () => {
+    vi.mocked(api.cloudProviders).mockResolvedValue({ providers: [boat("not-connected"), provided()] } as never);
+    const shown = render(view());
+    await waitFor(() => expect(record.step).toBe("workspace"));
+    shown.rerender(view());
+    expect(labels().some((label) => label.includes("Compute provided by TerminalX"))).toBe(true);
+    expect(labels().some((label) => label.includes("Connect a compute provider"))).toBe(false);
+    expect(screen.queryByText("Connect a compute provider above.")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Prepare setup workspace" }));
+    await screen.findByTestId("organization-setup-confirm");
+    expect(api.cloudWorkspaceSetup).toHaveBeenCalledWith("terminalx-cloud", null);
+    expect(api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "terminalx-cloud" }), null);
+  });
+
+  it("keeps the step's own label where the organization also connected a provider", async () => {
+    vi.mocked(api.cloudProviders).mockResolvedValue({ providers: [provided(), boat("available")] } as never);
+    const shown = render(view());
+    await waitFor(() => expect(record.step).toBe("workspace"));
+    shown.rerender(view());
+    expect(labels().some((label) => label.includes("Connect a compute provider"))).toBe(true);
+    expect(labels().some((label) => label.includes("Compute provided by TerminalX"))).toBe(false);
+  });
+
+  it("waits on allowing its paused new machines, without a word about a connection", async () => {
+    record = { ...record, logins: undefined };
+    let availability: CloudProviderSummary["availability"] = "disabled-for-create";
+    vi.mocked(api.cloudProviders).mockImplementation(async () => ({ providers: [provided({ availability })] }) as never);
+    vi.mocked(api.cloudProviderSetCreationEnabled).mockImplementation(async (_provider, _revision, enabled) => {
+      availability = enabled ? "available" : "disabled-for-create";
+      return {} as CloudProviderSummary;
+    });
+    render(view());
+    const paused = await screen.findByTestId("organization-setup-compute-paused");
+    expect(paused.textContent).toContain("New machines are paused for Team on TerminalX Cloud.");
+    expect(paused.textContent).toContain("Nothing needs connecting; setup goes on once new machines are allowed.");
+    expect(paused.textContent).not.toContain("connection");
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toContain("Compute provided by TerminalX, new machines paused");
+
+    fireEvent.click(within(paused).getByRole("button", { name: "Allow new machines" }));
+    await waitFor(() => expect(record.step).toBe("logins"));
+    expect(api.cloudProviderSetCreationEnabled).toHaveBeenCalledWith("terminalx-cloud", "rev-1", true);
+  });
+
+  it("says it can't be used when it needs attention, with nothing to connect or repair", async () => {
+    vi.mocked(api.cloudProviders).mockResolvedValue({ providers: [provided({ availability: "attention-required" })] } as never);
+    render(view());
+    const unavailable = await screen.findByTestId("organization-setup-compute-unavailable");
+    expect(unavailable.textContent).toContain("TerminalX Cloud can't be used by Team right now.");
+    expect(unavailable.textContent).toContain("TerminalX provides it, so there is nothing to connect or repair here.");
+    expect(unavailable.textContent).toContain("Check again later, or contact TerminalX support.");
+    expect(record.step).toBe("compute");
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toContain("Compute provided by TerminalX");
+    expect(screen.queryByText("Connect a compute provider above.")).toBeNull();
+  });
+
+  it("points at the providers the organization can connect when there are some", async () => {
+    vi.mocked(api.cloudProviders).mockResolvedValue({ providers: [provided({ availability: "attention-required" }), boat("not-connected")] } as never);
+    render(view());
+    const unavailable = await screen.findByTestId("organization-setup-compute-unavailable");
+    expect(unavailable.textContent).toContain("Check again later, or connect another compute provider above.");
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toContain("Connect a compute provider");
   });
 });

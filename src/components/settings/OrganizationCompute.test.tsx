@@ -2,6 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { organizationCompute, type ComputePolicyView, type ComputeUsageReport } from "@/lib/organizationCompute";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { rememberCloudProviders } from "@/lib/cloudProviders";
+import type { CloudProviderSummary } from "@/lib/api";
+import { describedAs } from "@/test/cloudProviderDescriptors";
 
 vi.mock("@/lib/organizationCompute", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/organizationCompute")>()),
@@ -90,6 +93,12 @@ const report = (overrides: Partial<ComputeUsageReport> = {}): ComputeUsageReport
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // The rows and names come from the providers the server describes
+  // (PRO-415); Machine0 is described as hidden, as the server does while it
+  // keeps Machine0 off.
+  rememberCloudProviders(
+    [describedAs("box"), describedAs("hetzner"), describedAs("machine0", { listed: false })].map((descriptor) => ({ id: descriptor.id, descriptor }) as CloudProviderSummary),
+  );
   api.policy.mockResolvedValue(view());
   api.usage.mockResolvedValue(report());
 });
@@ -106,17 +115,40 @@ it("explains who bills compute and that limits are not a spending cap", async ()
 
 it("separates measured runtime, estimates and delayed provider billing, and lists retained storage", async () => {
   render(<OrganizationCompute contextRevision="account-1" />);
-  const hetzner = await screen.findByLabelText("Hetzner usage");
+  const hetzner = await screen.findByLabelText("Hetzner Cloud usage");
   expect(hetzner.textContent).toContain("5.0 h");
   expect(hetzner.textContent).toContain("from TerminalX records");
   expect(hetzner.textContent).toContain("at quoted rates");
   expect(hetzner.textContent).toContain("(delayed)");
-  expect(screen.getByLabelText("Box usage").textContent).toContain("Not reported to TerminalX");
+  expect(screen.getByLabelText("Boat usage").textContent).toContain("Not reported to TerminalX");
   const alerts = screen.getByRole("list", { name: "Compute alerts" });
   expect(alerts.textContent).toContain("billing report is out of date");
   expect(alerts.textContent).toContain("running limit is reached");
   const retained = screen.getByRole("list", { name: "Retained storage" });
   expect(within(retained).getByRole("listitem", { name: "api-staging" }).textContent).toContain("Archived · 40 GiB");
+  // No provider TerminalX itself provides is described here, so nothing is said of one.
+  expect(screen.queryByTestId("compute-platform-billing")).toBeNull();
+});
+
+// PRO-452: a provider TerminalX itself provides has no account or console of the organization's.
+it("says a platform provider has no provider account to connect and no provider invoice, and limits it like any other", async () => {
+  rememberCloudProviders(
+    [describedAs("terminalx-cloud"), describedAs("box"), describedAs("hetzner")].map((descriptor) => ({ id: descriptor.id, descriptor }) as CloudProviderSummary),
+  );
+  const usage = report();
+  const unreported = usage.providers[1]!;
+  api.usage.mockResolvedValue({ ...usage, providers: [{ ...unreported, provider: "terminalx-cloud" }, unreported] });
+  render(<OrganizationCompute contextRevision="account-1" />);
+  const platform = await screen.findByLabelText("TerminalX Cloud usage");
+  expect(platform.textContent).toContain("Billed by TerminalX. There is no provider invoice for it.");
+  expect(platform.textContent).not.toContain("provider's console");
+  // An organization's provider reads as before.
+  expect(screen.getByLabelText("Boat usage").textContent).toContain("Not reported to TerminalX. Check the provider's console for the invoice.");
+  const notice = screen.getByLabelText("Billing responsibility");
+  expect(notice.textContent).toContain("provider bills the account directly");
+  expect(screen.getByTestId("compute-platform-billing").textContent).toContain("TerminalX Cloud is provided by TerminalX, with no provider account to connect: Billed by TerminalX.");
+  expect(screen.getByLabelText("Allowed sizes for TerminalX Cloud")).toBeTruthy();
+  expect(screen.getByLabelText("Allowed regions for TerminalX Cloud")).toBeTruthy();
 });
 
 it("saves limits with the policy version and account context revision", async () => {
@@ -124,7 +156,7 @@ it("saves limits with the policy version and account context revision", async ()
   render(<OrganizationCompute contextRevision="account-1" />);
   fireEvent.change(await screen.findByLabelText("Maximum workspaces"), { target: { value: "6" } });
   fireEvent.change(screen.getByLabelText("Maximum running workspaces"), { target: { value: "" } });
-  fireEvent.change(screen.getByLabelText("Allowed regions for Hetzner"), { target: { value: "fsn1, nbg1, fsn1" } });
+  fireEvent.change(screen.getByLabelText("Allowed regions for Hetzner Cloud"), { target: { value: "fsn1, nbg1, fsn1" } });
   fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
   await waitFor(() =>
     expect(api.updatePolicy).toHaveBeenCalledWith(
@@ -170,7 +202,7 @@ it("shows members read-only limits without usage or edit controls", async () => 
   render(<OrganizationCompute contextRevision="account-1" />);
   const limits = await screen.findByLabelText("Compute limits");
   expect(limits.textContent).toContain("Only owners and admins can change compute limits.");
-  expect(limits.textContent).toContain("Hetzner: sizes cx22, cx32; regions any");
+  expect(limits.textContent).toContain("Hetzner Cloud: sizes cx22, cx32; regions any");
   expect(screen.queryByRole("button", { name: "Save limits" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Pause new workspaces" })).toBeNull();
   expect(api.usage).not.toHaveBeenCalled();
@@ -317,7 +349,7 @@ it("neither shows nor sends the create budget to a server that does not have it,
 it("shows no Machine0 limits row while the server hides Machine0, unless the policy already limits it", async () => {
   api.policy.mockResolvedValue(view());
   render(<OrganizationCompute contextRevision="account-1" />);
-  await screen.findByLabelText("Allowed sizes for Box");
+  await screen.findByLabelText("Allowed sizes for Boat");
   expect(screen.queryByLabelText("Allowed sizes for Machine0")).toBeNull();
   cleanup();
 

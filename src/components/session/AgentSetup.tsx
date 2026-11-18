@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Download, Loader2, RotateCw } from "@/icons";
+import { Check, Download, Loader2, RotateCw, X } from "@/icons";
+import { AgentMark, agentVendor } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { copyText } from "@/lib/clipboard";
 import { READINESS_LABELS, type AgentReadiness } from "@/lib/agentReadiness";
 import { cancelAgentSetup, dismissAgentSetup, retryAgentSetup, setupActive, startAgentSetup, useAgentSetupFlow, useSetupTerminalHost, type AgentSetupFlow, type SetupProblem } from "@/lib/agentSetupFlow";
 import type { HarnessInfo } from "@/types/session";
+import { cn } from "@/lib/cn";
 
 /** What the status line says while a setup run is under way or has stopped. */
 export function setupStatus(flow: AgentSetupFlow): string | null {
@@ -36,45 +38,38 @@ function problemText(problem: SetupProblem, harness: HarnessInfo, detail?: strin
 }
 
 /**
- * The same setup at first launch, in Settings → Agents and in the new-session
- * view: install the agent and sign in to it from here (PRO-152), or copy the
- * commands and run them in a terminal of one's own.
+ * The same setup in Settings → Agents and in the new-session view: install
+ * the agent and sign in to it from here (PRO-152), or copy the commands and
+ * run them in a terminal of one's own. First run draws the same steps as a
+ * card per agent ({@link AgentSetupCard}).
  */
-export function AgentSetup({ harness, value, checking, onRefresh, compact = false, headless = false, newSession = false }: {
+export function AgentSetup({ harness, value, checking, onRefresh, headless = false, newSession = false }: {
   harness: HarnessInfo;
   value: AgentReadiness | null;
   checking: boolean;
   onRefresh: () => void;
-  /** The welcome screen's: the agent's name first, no path or own re-check, and a word about what to do once ready. */
-  compact?: boolean;
   /** Settings → Agents: the agent's tab says its status, version and path above this, so only what to do is shown. */
   headless?: boolean;
   /** Keep the composer focused: only setup/recovery, without the executable path. */
   newSession?: boolean;
 }) {
   const [copyStatus, setCopyStatus] = useState("");
-  const [manual, setManual] = useState(false);
   const flow = useAgentSetupFlow(harness.id);
   const active = setupActive(flow);
   const state = value?.state ?? "unknown";
-  const command = state === "missing" ? harness.installHint : harness.id === "codex" ? "codex login" : "claude auth login";
+  const command = setupCommand(harness, state);
   const status = active ? setupStatus(flow) : checking ? "Checking installation and login…" : READINESS_LABELS[state];
   const install = state === "missing";
-  const showCommand = !compact || manual || !harness.installable;
   if (newSession && state === "ready" && !active) return null;
   return <section aria-label={`${harness.name} setup`} className="min-w-0 rounded-lg bg-well p-3 text-xs">
     {!headless && <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      {compact && <span className="text-[13px] font-medium">{harness.name}</span>}
-      <span role="status" className={compact ? "text-muted-foreground" : "font-medium"}>{status}</span>
-      {value?.version && <span className="text-muted-foreground">{compact ? value.version : `${harness.name} ${value.version}`}</span>}
-      {!compact && value?.checkedAt && <time dateTime={value.checkedAt} className="text-faint">Checked {new Date(value.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
-      {/* The welcome screen checks every agent again from one button of its own. */}
-      {!compact && <Button type="button" size="xs" variant="ghost" disabled={checking || active} onClick={onRefresh}>Check again</Button>}
+      <span role="status" className="font-medium">{status}</span>
+      {value?.version && <span className="text-muted-foreground">{`${harness.name} ${value.version}`}</span>}
+      {value?.checkedAt && <time dateTime={value.checkedAt} className="text-faint">Checked {new Date(value.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>}
+      <Button type="button" size="xs" variant="ghost" disabled={checking || active} onClick={onRefresh}>Check again</Button>
     </div>}
-    {!newSession && !compact && !headless && harness.path && <p className="mt-1 break-all font-mono text-[11px] text-faint">{harness.path}</p>}
-    {active ? <SetupRun harness={harness} flow={flow} /> : state === "ready" ? <p className="mt-1 text-muted-foreground">{compact
-      ? `${harness.name} is ready. Open a project above to start a session with it.`
-      : "Local login found. Provider access and model availability are checked when you run a task."}</p> : <>
+    {!newSession && !headless && harness.path && <p className="mt-1 break-all font-mono text-[11px] text-faint">{harness.path}</p>}
+    {active ? <SetupRun harness={harness} flow={flow} /> : state === "ready" ? <p className="mt-1 text-muted-foreground">Local login found. Provider access and model availability are checked when you run a task.</p> : <>
       {harness.installable ? <>
         <p className="mt-1.5 text-muted-foreground">{install
           ? `Runs ${harness.name}'s official installer here, then its sign-in. Node and npm are not needed.`
@@ -85,40 +80,149 @@ export function AgentSetup({ harness, value, checking, onRefresh, compact = fals
             onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
             {install && <Download />} {install ? "Install and sign in" : "Sign in"}
           </Button>
-          {/* The welcome screen keeps each agent to a line or two: the commands are one press away. */}
-          {compact && <Button type="button" size="xs" variant="ghost" aria-expanded={manual} onClick={() => setManual(!manual)}>Run it yourself</Button>}
         </div>
-        {showCommand && <p className="mt-2 text-faint">Or run it in a terminal of your own:</p>}
+        <p className="mt-2 text-faint">Or run it in a terminal of your own:</p>
       </> : <p className="mt-2 text-muted-foreground">{install
         ? "Open a terminal and run this command to install the provider's CLI, then sign in."
         : state === "signed_out" ? `Open a terminal and run this command to sign in to ${harness.name}.`
         : "The login could not be verified. You can continue if your CLI already works, or sign in and check again."}</p>}
-      {showCommand && <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
         <code className="min-w-0 break-all rounded bg-background px-2 py-1">{command}</code>
         <Button type="button" size="xs" variant="outline" onClick={() => {
           void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
         }}>Copy command</Button>
         <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
         {copyStatus && <span role="status">{copyStatus}</span>}
-      </div>}
-      {!compact && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
+      </div>
+      {!newSession && <p className="mt-2 text-faint">A TerminalX account is optional for local work. This signs in to the agent provider.</p>}
     </>}
   </section>;
 }
 
-/** A run under way, or stopped: what it is doing, why it stopped, and its terminal. */
-function SetupRun({ harness, flow }: { harness: HarnessInfo; flow: Extract<AgentSetupFlow, { phase: "running" | "checking" | "failed" }> }) {
+/** The command that moves an agent on when it is run by hand: its install, or its sign-in. */
+function setupCommand(harness: HarnessInfo, state: AgentReadiness["state"]): string {
+  return state === "missing" ? harness.installHint : harness.id === "codex" ? "codex login" : "claude auth login";
+}
+
+/** "Ready", as the first-run screen marks an agent that can run. */
+export function ReadyBadge() {
+  return <span className="flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-add/10 px-2 text-xs text-add"><Check aria-hidden className="size-3" />Ready</span>;
+}
+
+/**
+ * One agent on the first-run screen (PRO-399): its mark in a tile, its name
+ * and who makes it, where it stands, and the one action that moves it on at
+ * the right. A run started from it shows its terminal inside the card, under
+ * the status line. An agent the app cannot install itself shows the command
+ * to run instead of that action.
+ */
+export function AgentSetupCard({ harness, value, checking }: { harness: HarnessInfo; value: AgentReadiness | null; checking: boolean }) {
+  const [copyStatus, setCopyStatus] = useState("");
+  const flow = useAgentSetupFlow(harness.id);
+  const active = setupActive(flow);
+  const state = value?.state ?? "unknown";
+  const install = state === "missing";
+  const vendor = agentVendor(harness.id);
+  const running = active && flow.phase !== "failed";
+  const status = active ? setupStatus(flow) : checking ? "Checking installation and login…" : READINESS_LABELS[state];
+  const command = setupCommand(harness, state);
+  return <section aria-label={`${harness.name} setup`} className={cn("flex min-w-0 items-start gap-3 rounded-lg border bg-card p-3", running ? "border-accent/40" : "border-border")}>
+    <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-md bg-muted"><AgentMark id={harness.id} className="size-[18px]" decorative /></span>
+    <div className="min-w-0 flex-1">
+      <div className="flex min-h-9 flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="min-w-0 flex-1 basis-40">
+          <div className="text-[13px] font-medium leading-5">{harness.name}{vendor && <span className="text-xs font-normal text-muted-foreground"> by {vendor}</span>}</div>
+          <div className={cn("flex items-center gap-1.5 text-xs leading-4", running ? "text-accent" : "text-muted-foreground")}>
+            {running && <Loader2 aria-hidden className="size-3 shrink-0 animate-spin" />}
+            <span role="status">{status}</span>
+            {!active && value?.version && <span className="font-mono text-faint">{value.version}</span>}
+          </div>
+        </div>
+        {running ? <Button type="button" variant="ghost" aria-label={`Cancel ${harness.name} setup`} onClick={() => cancelAgentSetup(harness.id)}>Cancel</Button>
+          : active ? null
+          : state === "ready" ? <ReadyBadge />
+          : harness.installable ? <Button type="button" variant="outline" disabled={checking} aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
+            onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
+            {install ? "Install and sign in" : "Sign in"}
+          </Button> : null}
+      </div>
+      {active ? <SetupRun harness={harness} flow={flow} card /> : state !== "ready" && !harness.installable && <div className="mt-2 text-xs text-muted-foreground">
+        <p>{install ? "Open a terminal and run this command to install it, then sign in." : `Open a terminal and run this command to sign in to ${harness.name}.`}</p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          <code className="min-w-0 break-all rounded bg-background px-2 py-1">{command}</code>
+          <Button type="button" size="sm" variant="outline" onClick={() => {
+            void copyText(command).then(() => setCopyStatus("Copied"), () => setCopyStatus("Could not copy. Select the command to copy it."));
+          }}>Copy command</Button>
+          <Button type="button" size="sm" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+          {copyStatus && <span role="status">{copyStatus}</span>}
+        </div>
+      </div>}
+    </div>
+  </section>;
+}
+
+/**
+ * New Session's word on one agent (#1064): a single line, and only when this Mac knows the agent is
+ * missing or signed out. An unverified login or a check still under way says nothing, since the CLI may
+ * work. The line offers the install or sign-in and the setup guide; the full setup opens from it on
+ * demand, and shows by itself while a run it started is under way or has stopped.
+ */
+export function AgentSetupNotice({ harness, value, checking, onRefresh, blocking, onDismiss }: {
+  harness: HarnessInfo;
+  value: AgentReadiness | null;
+  checking: boolean;
+  onRefresh: () => void;
+  /** No other agent can start this chat: say so, and that the draft stays. */
+  blocking: boolean;
+  /** Set when the person picked this agent for setup: closing the notice drops that pick. */
+  onDismiss?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const flow = useAgentSetupFlow(harness.id);
+  const active = setupActive(flow);
+  const state = value?.state;
+  if (!active && state !== "missing" && state !== "signed_out") return null;
+  if (active || open) return <div className="min-w-0">
+    <AgentSetup newSession harness={harness} value={value} checking={checking} onRefresh={onRefresh} />
+    {!active && <div className="mt-1 flex justify-end">
+      <Button type="button" size="xs" variant="ghost" aria-expanded onClick={() => setOpen(false)}>Hide details</Button>
+    </div>}
+  </div>;
+  const install = state === "missing";
+  const text = install
+    ? (blocking ? `Install ${harness.name} to start a chat. Your draft is kept.` : `${harness.name} isn't installed.`)
+    : (blocking ? `Sign in to ${harness.name} to start a chat. Your draft is kept.` : `${harness.name} is signed out.`);
+  return <div role="note" aria-label={`${harness.name} setup`} data-testid="agent-setup-notice"
+    className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-well py-1.5 pl-3 pr-1.5 text-xs">
+    <span className="min-w-0 flex-1 text-muted-foreground">{text}</span>
+    {harness.installable && <Button type="button" size="xs" disabled={checking} aria-label={install ? `Install ${harness.name} and sign in` : `Sign in to ${harness.name}`}
+      onClick={() => void startAgentSetup(harness.id, install ? "install" : "login", { chain: install })}>
+      {install && <Download />} {install ? "Install and sign in" : "Sign in"}
+    </Button>}
+    <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+    <Button type="button" size="xs" variant="ghost" aria-expanded={false} onClick={() => setOpen(true)}>Details</Button>
+    {onDismiss && <Button type="button" size="icon-xs" variant="ghost" aria-label={`Dismiss ${harness.name} setup`} onClick={onDismiss}><X /></Button>}
+  </div>;
+}
+
+/**
+ * A run under way, or stopped: what it is doing, why it stopped, and its terminal.
+ * The first-run card says what is running in its own status line and holds Cancel.
+ */
+function SetupRun({ harness, flow, card = false }: { harness: HarnessInfo; flow: Extract<AgentSetupFlow, { phase: "running" | "checking" | "failed" }>; card?: boolean }) {
   const pane = flow.pane;
   const host = useSetupTerminalHost(pane);
-  return <div className="mt-2 min-w-0">
+  // First run has no text under 12px (PRO-399): its buttons are a size up.
+  const size = card ? "sm" : "xs";
+  return <div className={cn("min-w-0 text-xs", card ? "mt-3" : "mt-2")}>
     {flow.phase === "failed" ? <div role="alert" className="rounded-md bg-destructive/10 px-2.5 py-2 text-destructive">
       <p>{problemText(flow.problem, harness, flow.detail)}</p>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-        <Button type="button" size="xs" variant="secondary" onClick={() => void retryAgentSetup(harness.id)}><RotateCw /> Try again</Button>
-        <Button type="button" size="xs" variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
-        <Button type="button" size="xs" variant="ghost" onClick={() => dismissAgentSetup(harness.id)}>{pane ? "Hide output" : "Dismiss"}</Button>
+        <Button type="button" size={size} variant="secondary" onClick={() => void retryAgentSetup(harness.id)}><RotateCw /> Try again</Button>
+        <Button type="button" size={size} variant="ghost" onClick={() => void openUrl(harness.installUrl)}>Setup guide</Button>
+        <Button type="button" size={size} variant="ghost" onClick={() => dismissAgentSetup(harness.id)}>{pane ? "Hide output" : "Dismiss"}</Button>
       </div>
-    </div> : <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+    </div> : card ? null : <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
       <Loader2 aria-hidden className="size-3.5 shrink-0 animate-spin" />
       <span className="min-w-0 flex-1">{flow.phase === "checking"
         ? "Checking installation and login…"
@@ -128,7 +232,7 @@ function SetupRun({ harness, flow }: { harness: HarnessInfo; flow: Extract<Agent
       <Button type="button" size="xs" variant="ghost" aria-label={`Cancel ${harness.name} setup`} onClick={() => cancelAgentSetup(harness.id)}>Cancel</Button>
     </div>}
     {pane && <div data-testid="agent-setup-terminal" aria-label={`${harness.name} setup output`} role="region"
-      className="mt-2 h-52 min-w-0 overflow-hidden rounded-md bg-background py-1 hairline">
+      className={cn("h-52 min-w-0 overflow-hidden rounded-md bg-background py-1 hairline", !(card && flow.phase !== "failed") && "mt-2")}>
       {host
         ? <TerminalView id={pane} visible redraw={false} />
         : <p className="flex h-full items-center justify-center px-3 text-center text-faint">The output is showing in the view in front.</p>}

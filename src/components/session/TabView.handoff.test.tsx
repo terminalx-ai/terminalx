@@ -18,6 +18,7 @@ vi.mock("@/lib/tabViews", async (importOriginal) => ({
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 vi.mock("@/components/chat/Composer", () => ({ Composer: ({ agentHandoff }: { agentHandoff?: { name: string; run: () => void } }) => agentHandoff ? <button onClick={agentHandoff.run}>Hand off to {agentHandoff.name}</button> : null }));
 
+import { TabDialogs } from "./TabDialogs";
 import { TabView } from "./TabView";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { applyEvent } from "@/lib/agentEvents";
@@ -28,9 +29,9 @@ import { getDraft, setDraft } from "@/lib/drafts";
 let seq = 0;
 let session: SessionEntry;
 const emit = (payload: Payload) => act(() => applyEvent({ id: `e${++seq}`, seq, sessionId: session.id, tabId: session.tabs[0].id, harness: session.tabs[0].harness, ts: new Date().toISOString(), payload }));
-function Harness() {
+function Harness({ dialogs = false }: { dialogs?: boolean }) {
   const request = useDialogs().agentHandoff;
-  return <TooltipProvider><TabView session={session} tab={session.tabs[0]} active /><output data-testid="request">{JSON.stringify(request)}</output></TooltipProvider>;
+  return <TooltipProvider><TabView session={session} tab={session.tabs[0]} active />{dialogs && <TabDialogs />}<output data-testid="request">{JSON.stringify(request)}</output></TooltipProvider>;
 }
 const request = () => JSON.parse(screen.getByTestId("request").textContent!);
 
@@ -88,4 +89,49 @@ it("hides both actions when the other agent is not installed", async () => {
   emit({ type: "turn_completed", status: "ok", authFailed: false });
   expect(screen.queryByRole("button", { name: /Hand off/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "Second opinion" })).toBeNull();
+});
+
+
+it.each([
+  { text: "Inspect these attachments", image: true, file: true },
+  { text: "Inspect this image", image: true, file: false },
+  { text: "Read this file", image: false, file: true },
+  { text: "", image: true, file: false },
+  { text: "", image: false, file: true },
+  { text: "Text only", image: false, file: false },
+])("retries $text (images: $image, files: $file) through the attachment-capable native request", async ({ text, image, file }) => {
+  const images = image ? [{ url: "/saved/one.png", name: "one.png" }, { url: "/saved/two.png", name: "two.png" }] : [];
+  const files = file ? [{ path: "/saved/notes.md", name: "notes.md", mediaType: "text/markdown", size: 12 }] : [];
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command === "read_image_file") return { mediaType: "image/png", data: args.path === images[0].url ? "b25l" : "dHdv", name: "stored.png" };
+    if (command === "add_tab") return { ...session.tabs[0], id: "retry-tab" };
+    if (command === "send_message") return { events: [] };
+    return original(command, args);
+  });
+  render(<Harness dialogs />);
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("load_tab_events", expect.anything()));
+  emit({ type: "user_message", queued: false, text, images, files });
+  emit({ type: "error", message: "Request failed", fatal: true });
+  emit({ type: "turn_completed", status: "error", authFailed: false });
+  fireEvent.click(await screen.findByRole("button", { name: "Retry in a new chat" }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("send_message", expect.objectContaining({
+    sessionId: session.id, tabId: "retry-tab", text, ...(file ? { files } : {}),
+    // send_message routes true to text-only send_confirmed (and rejects files).
+    // false selects send_pressed, the same attachment-aware path as the composer.
+    confirmDelivery: !image && !file,
+    images: image ? [{ mediaType: "image/png", data: "b25l", name: "one.png" }, { mediaType: "image/png", data: "dHdv", name: "two.png" }] : file ? [] : null,
+  })));
+  expect(getDraft(session.tabs[0].id)).toBe("Keep my draft");
+});
+
+it("explains an unavailable image instead of sending a partial retry", async () => {
+  render(<Harness dialogs />);
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("load_tab_events", expect.anything()));
+  emit({ type: "user_message", queued: false, text: "Inspect", images: [{ url: "/missing.png", name: "missing.png" }] });
+  emit({ type: "error", message: "Request failed", fatal: true });
+  emit({ type: "turn_completed", status: "error", authFailed: false });
+  fireEvent.click(await screen.findByRole("button", { name: "Retry in a new chat" }));
+  expect(await screen.findByText(/Cannot retry attachment.*missing.png/)).toBeTruthy();
+  expect(mocks.invoke.mock.calls.filter(([command]) => ["add_tab", "send_message"].includes(command))).toEqual([]);
 });

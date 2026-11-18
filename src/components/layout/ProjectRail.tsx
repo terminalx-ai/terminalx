@@ -1,15 +1,18 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { SessionRowData } from "./SessionRowExtras";
 import { useMemo, useState, type ReactNode } from "react";
-import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, LayoutGrid } from "@/icons";
+import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, Search, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { usePrefs } from "@/lib/prefs";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
-import type { ShortcutId } from "@/lib/shortcuts";
+import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
+import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
+import { useSessionRowFacts } from "@/lib/sessionRowStatus";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
@@ -27,6 +30,7 @@ export interface RailProps {
   onOpenSettings: (tab?: SettingsTab) => void;
   onOpenAccount: () => void;
   onOpenHome: () => void;
+  onNewSession: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
   onOpenStats: () => void;
@@ -35,34 +39,46 @@ export interface RailProps {
   onSearch: () => void;
 }
 
-/** The sidebar in the shape the reader chose: the projects with their conversations, or one flat list of chats. */
+/**
+ * The sidebar in the shape the reader chose: grouped by project, or (by status, or sections and one list) with the
+ * same compact rows (02.13).
+ */
 export function ProjectRail(props: RailProps) {
   const { sidebarLayout } = usePrefs();
   return <SessionRowData>{sidebarLayout !== "simple" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />}</SessionRowData>;
 }
 
 /**
- * Home, the dashboard, issues and automations, with status beside their names.
+ * The destinations at the top of the sidebar (02.01): Home, Overview, New session and Search with their shortcuts, then
+ * Automations and Issues, with status beside their names.
  */
 export function AppDestinations({
   onOpenHome,
+  onNewSession,
+  onSearch,
   onOpenIssues,
   onOpenAgents,
   onOpenAutomations,
-}: Pick<RailProps, "onOpenHome" | "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
+}: Pick<RailProps, "onOpenHome" | "onNewSession" | "onSearch" | "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
   const store = useSessionStore();
   const automationStore = useAutomationStore();
-  // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
+  // The overview's totals count cloud sessions too (PRO-23 CS-19), like the overview itself.
   const cloudSessions = useCloudDashboard();
   const cloud = useOrganizationVisibility();
-  const dashboardBuckets = useMemo(() => bucketSessions([...store.sessions, ...visibleDashboardSessions(cloudSessions, cloud.visibleIds)]), [store.sessions, cloudSessions, cloud.visibleIds]);
+  const localFacts = useSessionRowFacts(store.sessions);
+  const dashboardBuckets = useMemo(() => bucketSessions([
+    ...store.sessions.map((session) => ({ ...session, rowStatus: localFacts[session.id] ?? session.rowStatus })),
+    ...visibleDashboardSessions(cloudSessions, cloud.visibleIds),
+  ]), [store.sessions, localFacts, cloudSessions, cloud.visibleIds]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   const active = onNavView ? store.view : null;
-  const home = { id: "home", label: "Home", shortcut: "app.home", icon: <Home />, onOpen: onOpenHome } satisfies Destination;
-  const dashboard = { id: "agents", label: "Agent dashboard", shortcut: "app.agentDashboard", icon: <LayoutGrid />, onOpen: onOpenAgents, ...dashboardStatus(dashboardBuckets) } satisfies Destination;
+  const home = { id: "home", label: "Home", shortcut: "app.home", kbd: true, icon: <Home />, onOpen: onOpenHome } satisfies Destination;
+  const overview = { id: "agents", label: "Overview", shortcut: "app.agentDashboard", kbd: true, icon: <Home />, onOpen: onOpenAgents, ...dashboardStatus(dashboardBuckets) } satisfies Destination;
+  const newSession = { id: "new", label: "New session", shortcut: "app.newSession", kbd: true, icon: <SquarePen />, onOpen: onNewSession } satisfies Destination;
+  const search = { id: "search", label: "Search", shortcut: "app.commandPalette", kbd: true, icon: <Search />, onOpen: onSearch } satisfies Destination;
   const issues = { id: "issues", label: "Issues", shortcut: "app.issues", icon: <CircleDot />, onOpen: onOpenIssues } satisfies Destination;
   const automations: Destination = {
     id: "automations",
@@ -74,46 +90,54 @@ export function AppDestinations({
     count: automationFailures || undefined,
   };
   // Skills and Usage are reached from Settings (and their shortcuts), not from here.
-  // Named rows, the same in both sidebar layouts.
-  const waiting = dashboardBuckets.needs.length || dashboardBuckets.working.length;
-  return <DestinationList active={active} destinations={[home, { ...dashboard, label: "Dashboard", count: waiting || undefined }, issues, automations]} />;
+  return <DestinationList active={active} destinations={[home, overview, newSession, search, automations, issues]} />;
 }
 
-/** `status` is read out with the label; `dot` marks it when something there wants a look; `count` is shown beside it in a list. */
-type Destination = { id: string; label: string; shortcut: ShortcutId; icon: ReactNode; onOpen: () => void; status?: string; dot?: Dot; count?: number };
+/**
+ * `status` is read out with the label; `dot` marks it when something there wants a look; `count` is shown beside it
+ * in a list; `kbd` shows its shortcut's keys at the row's end.
+ */
+type Destination = { id: string; label: string; shortcut: ShortcutId; kbd?: boolean; icon: ReactNode; onOpen: () => void; status?: string; dot?: Dot; count?: number };
 
-/** The destinations as named rows, each with its count or dot on the right. */
+/** The destinations as named rows, inset and rounded, each with its count or dot, then its shortcut, on the right. */
 function DestinationList({ active, destinations }: { active: string | null; destinations: Destination[] }) {
+  const keycaps = useShortcutKeycaps();
+  const keymap = useKeymap();
   return (
     <div className="flex flex-col gap-0.5" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
       {destinations.map((destination) => {
         const status = destination.status ?? destination.dot?.label;
         const pressed = active === destination.id;
+        const keys = destination.kbd ? keycaps(destination.shortcut) : [];
         return (
           <Button
             key={destination.id}
             variant="ghost"
-            className={cn("-mx-2 justify-start gap-2 rounded-none px-4", pressed && "bg-selected text-foreground")}
+            className={cn("h-8 justify-start gap-2.5 rounded-md px-2.5 text-[13px] font-normal", pressed ? "bg-selected text-foreground" : "text-muted-foreground")}
             aria-label={status ? `${destination.label}, ${status}` : destination.label}
+            aria-keyshortcuts={keymap[destination.shortcut].map((binding) => ariaKeyShortcut(binding)).filter(Boolean).join(" ") || undefined}
             aria-pressed={pressed}
             title={status}
             onClick={destination.onOpen}
           >
             {destination.icon}
             {destination.label}
-            {destination.count ? (
-              <span
-                aria-hidden
-                className={cn(
-                  "ml-auto min-w-4 rounded-full px-1.5 text-center text-[10px] font-medium tabular-nums",
-                  destination.dot?.tone === "warning" ? "bg-warning/15 text-warning" : "bg-info/15 text-info",
-                )}
-              >
-                {destination.count}
-              </span>
-            ) : destination.dot ? (
-              <span aria-hidden className={cn("ml-auto size-1.5 rounded-full", destination.dot.tone === "warning" ? "bg-warning" : "bg-info animate-pulse-soft")} />
-            ) : null}
+            <span className="ml-auto flex items-center gap-2">
+              {destination.count ? (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "min-w-4 rounded-full px-1.5 text-center text-[11px] font-medium tabular-nums",
+                    destination.dot?.tone === "warning" ? "bg-warning/15 text-warning" : "bg-info/15 text-info",
+                  )}
+                >
+                  {destination.count}
+                </span>
+              ) : destination.dot ? (
+                <span aria-hidden className={cn("size-1.5 rounded-full", destination.dot.tone === "warning" ? "bg-warning" : "bg-info animate-pulse-soft")} />
+              ) : null}
+              {keys.length > 0 && <Kbd className="text-faint">{keys.join("")}</Kbd>}
+            </span>
           </Button>
         );
       })}

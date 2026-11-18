@@ -44,4 +44,17 @@ describe("manual status menu", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Runtime disconnected");
     expect(screen.getByRole("menuitemradio", { name: "In review" }).getAttribute("aria-checked")).toBe("true");
   });
+
+  it("picks a status by its number, says what the status is for, and draws In progress as an amber half circle (02.13)", async () => {
+    invoke.mockResolvedValue(undefined);
+    await open();
+    const items = screen.getAllByRole("menuitemradio");
+    expect(items.map((item) => item.getAttribute("aria-keyshortcuts"))).toEqual(["1", "2", "3", "4", "5"]);
+    expect(screen.getByText("Your own status. The agent and PR state still show on the row.")).toBeTruthy();
+    const progress = screen.getByRole("menuitemradio", { name: "In progress" }).querySelector("svg")!;
+    expect(progress.getAttribute("class")).toContain("lucide-contrast");
+    expect(progress.style.color).toBe("var(--status-in-progress)");
+    fireEvent.keyDown(screen.getByRole("menuitemradio", { name: "Backlog" }), { key: "2" });
+    expect(invoke).toHaveBeenCalledWith("set_session_status", { sessionId: "s1", status: "in_progress" });
+  });
 });

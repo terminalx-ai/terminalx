@@ -15,6 +15,7 @@ import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
 import { machineSessionKey, parseMachineKey } from "@/types/target";
 import { MachineChip, MachineLocation, machineViewLabel, machineViewStatus } from "./connectionStatus";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
+import { openMachinePage } from "@/lib/machinePage";
 
 /**
  * A paired machine in the main slot (PRO-345, screen 21.08): the header chip
@@ -37,6 +38,9 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
   const request = useMachineNewSession(machineId);
   const listed = useMemo(() => projects.filter((node) => !node.project.archived).map((node) => ({ projectId: node.project.projectId, name: node.project.name })), [projects]);
   const preferred = parsed?.projectId ?? null;
+  const { machine, state, connection, attachError } = machineConnection(store, machineId);
+  const name = machine?.name ?? "Machine";
+  const machineName = name;
   const agentProjects = useMemo<AgentProjects>(
     () => ({
       projects: listed,
@@ -44,11 +48,10 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
       request: request ? { projectId: request.projectId, nonce: request.nonce } : null,
       onRequestTaken: () => request && takeMachineNewSession(request),
       onCreated: (sessionId, projectId) => selectCloudSession(machineSessionKey(machineId, projectId, sessionId)),
+      machine: { name: machineName, openPage: () => openMachinePage(machineId) },
     }),
-    [listed, preferred, request, machineId],
+    [listed, preferred, request, machineId, machineName],
   );
-  const { machine, state, connection, attachError } = machineConnection(store, machineId);
-  const name = machine?.name ?? "Machine";
   const [clientState, setClientState] = useState<WorkspaceConnectionState>({ state: "idle" });
   // "Needs update" also when the machine is connected but hides a feature this desktop uses (PRO-354).
   const version = machineVersionView(machine, state, connection?.client ?? null, clientState, useThisVersion());

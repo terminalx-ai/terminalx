@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { listedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderInPlace, cloudProviderIsPlatform, cloudProviderLabel, cloudProviderReady } from "@/lib/cloudProviders";
 import {
   api,
   type CloudProviderConnection,
@@ -74,13 +75,16 @@ export function ProviderControls({
       const result = await api.cloudProviders();
       const providers = listedProviders(result.providers);
       // Without a choice, open on the provider the organization connected, not
-      // the first one listed (which reads "setup incomplete" when another is in use).
+      // the first one listed (which reads "setup incomplete" when another is in use);
+      // failing that, on one TerminalX provides, which is ready without connecting.
       const next =
         providers.find((item) => item.id === preferred) ??
         providers.find((item) => item.connection?.state === "connected") ??
-        providers.find((item) => item.connection) ??
+        providers.find(cloudProviderReady) ??
+        providers.find(cloudProviderInPlace) ??
         providers[0];
-      const detail = next ? await api.cloudProvider(next.id) : null;
+      // A platform provider (PRO-452) has no connection of the organization's to read.
+      const detail = next && !cloudProviderIsPlatform(next) ? await api.cloudProvider(next.id) : null;
       if (request !== epoch.current) return;
       setProviders(providers);
       setSelected(next?.id ?? "");
@@ -107,8 +111,11 @@ export function ProviderControls({
     seenChange.current = providersChanged;
     void refresh(selected);
   }, [providersChanged, refresh, selected]);
+  // TerminalX provides this one (PRO-452): no key to connect, replace, check
+  // or disconnect. What is left to an owner or admin is pausing its new machines.
+  const platform = cloudProviderIsPlatform(provider);
   const manage = Boolean(
-    provider?.canManage && connection?.canManage && !loading,
+    provider?.canManage && (platform || connection?.canManage) && !loading,
   );
   const run = async (action: () => Promise<unknown>, done: string | null = null) => {
     if (!manage || busy) return;
@@ -136,7 +143,7 @@ export function ProviderControls({
       setBusy(false);
     }
   };
-  const connected = connection?.state === "connected";
+  const connected = platform ? Boolean(provider && cloudProviderReady(provider)) : connection?.state === "connected";
   // A disconnect that archives is reported apart from retain and destroy (saas contract §10.7).
   const archiving = connection?.disconnectRetention === "archive";
   const disconnectPending = !!connection?.disconnectDisposition || archiving;
@@ -151,6 +158,30 @@ export function ProviderControls({
   const resources = connection?.resources ?? [];
   const hasContract =
     connection?.credentialVersion != null && connection.resources != null;
+  const providerName = provider ? cloudProviderLabel(provider) : "This provider";
+  const creationSwitch = creationSwitchable && (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={busy}
+      aria-pressed={!creationPaused}
+      title={
+        creationPaused
+          ? "Let people create new cloud workspaces on this provider again."
+          : platform
+            ? "Stop new cloud workspaces on this provider. Every workspace that exists stays as it is."
+            : "Stop new cloud workspaces on this provider. The key, and every workspace that exists, stay as they are."
+      }
+      onClick={() =>
+        void run(
+          () => api.cloudProviderSetCreationEnabled(provider!.id, contextRevision, creationPaused),
+          creationPaused ? "New machines are allowed again." : "New machines are paused. Existing workspaces are not affected.",
+        )
+      }
+    >
+      {creationPaused ? "Allow new machines" : "Pause new machines"}
+    </Button>
+  );
   return (
     <div className="mt-3 space-y-3 text-xs">
       <div className="flex items-center gap-2">
@@ -207,15 +238,21 @@ export function ProviderControls({
                 ? `Disconnect pending — workspaces are archived${connection?.retentionDeadline ? ` and deleted on ${new Date(connection.retentionDeadline).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}` : ""}; new provisioning blocked`
                 : "Disconnect pending — new provisioning blocked"
               : setupComplete
-                ? "Setup complete — compute connection validated"
+                ? platform
+                  ? "Setup complete — provided by TerminalX"
+                  : "Setup complete — compute connection validated"
                 : connection?.state === "not-connected"
                   ? "Compute setup incomplete — connect a provider"
                   : "Compute setup incomplete — provider needs attention"}
           </p>
-          <p className="text-muted-foreground">
-            {setupComplete
-              ? "Next: create a cloud workspace. Choose its configuration and review provider charges before launching. Connecting a key does not create a machine."
-              : "Your organization remains usable without cloud compute. Finish setup here later; no machine is created by connecting a key."}
+          <p className="text-muted-foreground" data-testid={platform ? "provider-platform" : undefined}>
+            {platform
+              ? setupComplete
+                ? `Next: create a cloud workspace. Choose its configuration and review the charges before launching. TerminalX provides ${providerName}, so there is no key to connect and it is ready to use.`
+                : `${providerName} isn't available to this organization right now. TerminalX provides it, so there is no key to replace here. Check again later, or contact TerminalX support.`
+              : setupComplete
+                ? "Next: create a cloud workspace. Choose its configuration and review provider charges before launching. Connecting a key does not create a machine."
+                : "Your organization remains usable without cloud compute. Finish setup here later; no machine is created by connecting a key."}
           </p>
           {creationPaused && (
             <p role="status" className="font-medium" data-testid="provider-creation-paused">
@@ -227,13 +264,15 @@ export function ProviderControls({
               </span>
             </p>
           )}
-          {!manage && (
+          {!manage && !platform && (
             <p className="text-muted-foreground">
               {connected
                 ? "Organization owners and administrators manage provider keys."
                 : "Ask an organization administrator to repair the provider connection. Only organization owners and administrators can manage provider keys."}
             </p>
           )}
+          {/* The connected provider's controls minus everything about a key: what is left is pausing new machines. */}
+          {manage && platform && creationSwitch && <div className="flex flex-wrap gap-2">{creationSwitch}</div>}
           {manage && connection && (
             <>
               <dl className="grid grid-cols-[8rem_1fr] gap-1 text-muted-foreground">
@@ -296,27 +335,7 @@ export function ProviderControls({
                     Check key again
                   </Button>
                 )}
-                {creationSwitchable && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    aria-pressed={!creationPaused}
-                    title={
-                      creationPaused
-                        ? "Let people create new cloud workspaces on this provider again."
-                        : "Stop new cloud workspaces on this provider. The key, and every workspace that exists, stay as they are."
-                    }
-                    onClick={() =>
-                      void run(
-                        () => api.cloudProviderSetCreationEnabled(provider!.id, contextRevision, creationPaused),
-                        creationPaused ? "New machines are allowed again." : "New machines are paused. Existing workspaces are not affected.",
-                      )
-                    }
-                  >
-                    {creationPaused ? "Allow new machines" : "Pause new machines"}
-                  </Button>
-                )}
+                {creationSwitch}
               </div>
               {!hasContract && (
                 <p className="text-muted-foreground">

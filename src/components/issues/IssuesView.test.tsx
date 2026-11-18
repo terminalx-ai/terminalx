@@ -819,7 +819,9 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     view.unmount();
     render(<NewSessionView />);
     const agent = screen.getByTestId("agent-menu");
-    await waitFor(() => expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium, Ask every time"));
+    // The new-session box says the model and the permission mode on two chips.
+    await waitFor(() => expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium"));
+    expect(screen.getByTestId("agent-mode").getAttribute("aria-label")).toBe("Permissions: Ask every time");
     expect(agent.getAttribute("title")).toMatch(/^Codex · /);
   });
 

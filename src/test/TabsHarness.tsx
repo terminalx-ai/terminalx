@@ -1,4 +1,4 @@
-import { isReviewEditor, useEditors } from "@/lib/editors";
+import { isTabEditor, useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { useLayoutEffect } from "react";
 import { SessionNode } from "@/components/layout/SidebarTree";
@@ -32,7 +32,7 @@ export function TabsHarness({ readOnlyReason, hideSingle, reviews = false }: { r
         activeTab: session.activeTab,
         terminalIds: terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden).map((pane) => pane.id),
         browserIds: pagesFor(pages, session.cwd).map((page) => page.id),
-        reviewIds: editors.editors.filter((e) => e.sessionId === session.id && isReviewEditor(e)).map((e) => e.id),
+        reviewIds: editors.editors.filter((e) => e.sessionId === session.id && isTabEditor(e)).map((e) => e.id),
       })
     : null;
   const sessionId = session?.id ?? null;

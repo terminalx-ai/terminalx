@@ -1,5 +1,10 @@
 //! Managing an issue from TerminalX: reading it whole, its comments and what
 //! its pickers offer, and changing it. One shape for GitHub and Linear.
+//! Issue operations below are non-deletion actions and execute directly after
+//! provider authentication/validation. Closing, workflow transitions and comment
+//! removal do not delete an issue. Any future issue-deletion API must require
+//! issue_control::authorize(Write::Delete, ...) before calling the provider;
+//! this applies to desktop, CLI and pipeline callers, regardless of agent mode.
 //!
 //! The provider differences live here, not in the UI:
 //!

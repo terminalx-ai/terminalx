@@ -9,7 +9,10 @@ use std::time::Duration;
 use crate::computer_targets::{Capability, Runtime, Target};
 use super::{journal::Environment, process};
 
-pub const LINUX_INSTALL: &str = "/home/cua/.terminalx-local";
+/// Owner identity, receipts and runtime/control state. Never a task workspace.
+pub const LINUX_INSTALL: &str = "/var/lib/terminalx-owner/.terminalx-local";
+/// Journal cwd compatibility: all Linux task workspace paths stay under cua.
+pub const LINUX_WORKER_INSTALL: &str = "/home/cua/.terminalx-local";
 /// The root-owned, read-only runtime the host key is delivered to (#978). The
 /// copy under `LINUX_INSTALL/bin` is the guest account's and never runs.
 pub const SEALED_RUNTIME: &str = "/opt/terminalx-local/bin/terminalx-serve";
@@ -55,6 +58,9 @@ pub(super) fn validate_description(env: &Environment, description: &Value) -> Re
         || description["protocol"] != super::journal::PROTOCOL || description["platform"] != "linux"
         || description["runtimeSha256"] != *runtime_sha256 || description["taskMode"] != "shellFiles" || !description["manualControl"].is_boolean()
     { bail!("Container does not have the expected Linux task runtime/account binding; no enrollment was recorded"); }
+    let account: super::linux_profile::Account = serde_json::from_value(description["identity"]["account"].clone())
+        .context("Isolated Linux owner account binding required")?;
+    account.validate()?;
     Ok(())
 }
 
@@ -70,11 +76,22 @@ pub enum Transport {
 impl Transport {
     pub fn is_legacy_macos(&self) -> bool { matches!(self, Self::MacosLume) }
     pub fn is_macos(&self) -> bool { matches!(self, Self::MacosLume) }
+    /// Historical workspace base, retained for journal cwd compatibility.
+    /// Linux guest workspace operations must use the cua execution boundary;
+    /// the owner cannot safely operate directly on these worker-writable paths.
     pub fn installation(&self) -> Result<String> {
         Ok(match self {
             Self::MacosLume => super::host::GUEST_HOME.into(),
-            Self::LinuxContainer { .. } => LINUX_INSTALL.into(),
+            Self::LinuxContainer { .. } => LINUX_WORKER_INSTALL.into(),
         })
+    }
+
+    /// Private state installation, separate from the task cwd namespace.
+    pub fn owner_installation(&self) -> Result<String> {
+        match self {
+            Self::MacosLume => self.installation(),
+            Self::LinuxContainer { .. } => Ok(LINUX_INSTALL.into()),
+        }
     }
 
     pub fn target(&self, environment_id: &str, generation: &str) -> Target {
@@ -133,7 +150,7 @@ fn linux_rpc_at(path: &Path, env: &Environment, method: &str, mut params: Value,
     if input.len() > super::guest::MAX_RPC_BYTES { bail!("Guest RPC exceeds the request limit"); }
     // No -e NAME, env-file, mounts, shell interpolation or host tokens. The
     // root program proves the sealed runtime matches the digest this host
-    // recorded, drops to cua and executes that inode; only then is the key on
+    // recorded, drops to terminalx-owner and executes that inode; only then is the key on
     // stdin read. A worker that can write the account's files cannot swap it.
     let mut command = super::linux_install::runtime_command(path, &id, &json!({"action":"rpc","runtimeSha256":runtime_sha256}))?;
     decode(&process::run(&mut command, &input, budget)?)
@@ -292,8 +309,14 @@ else: sys.exit(72)
         let journal = Journal::open(dir.path()).unwrap();
         let target = Target::LinuxGuest { runtime: Runtime::Docker, id: "d".repeat(64), environment_id: new_id(), generation: new_id() };
         let env = journal.enroll_container("Guest", &target, &"e".repeat(64)).unwrap();
-        let valid = json!({"environmentId":env.id,"generation":env.generation,"protocol":1,"platform":"linux","taskMode":"shellFiles","manualControl":false,"runtimeSha256":"e".repeat(64)});
+        let valid = json!({"environmentId":env.id,"generation":env.generation,"protocol":1,"platform":"linux","taskMode":"shellFiles","manualControl":false,"runtimeSha256":"e".repeat(64),"identity":{"account":{"name":"terminalx-owner","uid":991,"gid":992,"home":"/var/lib/terminalx-owner","homeDevice":1,"homeInode":2,"architecture":"arm64"}}});
         validate_description(&env, &valid).unwrap();
+        let mut shared = valid.clone();
+        shared["identity"]["account"]["name"] = json!("cua");
+        shared["identity"]["account"]["home"] = json!("/home/cua");
+        assert!(validate_description(&env, &shared).is_err());
+        assert_eq!(env.transport.owner_installation().unwrap(), LINUX_INSTALL);
+        assert_eq!(env.transport.installation().unwrap(), LINUX_WORKER_INSTALL);
         for (key, value) in [("environmentId", json!(new_id())), ("generation", json!(new_id())), ("runtimeSha256", json!("f".repeat(64))), ("protocol", json!(99)), ("platform", json!("macos")), ("taskMode", json!("desktop")), ("manualControl", Value::Null)] {
             let mut changed = valid.clone(); changed[key] = value;
             assert!(validate_description(&env, &changed).is_err(), "{key}");

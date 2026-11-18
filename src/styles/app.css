@@ -39,6 +39,7 @@
   --color-raised: var(--surface-raised);
   --color-add: var(--accent-add);
   --color-merged: var(--accent-merged);
+  --color-merged-foreground: var(--accent-merged-fg);
   --color-merge: var(--accent-merge);
   --color-merge-foreground: var(--accent-merge-fg);
   --color-command: var(--accent-command);
@@ -272,6 +273,24 @@
   overflow-wrap: anywhere;
   color: color-mix(in oklab, var(--foreground) 86%, transparent);
 }
+/* Pull request prose in the side panel (PRO-395, design 05.08): 12.5px, muted, not chat size. */
+.prose-pr .prose-chat {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+}
+.prose-pr .prose-chat pre,
+.prose-pr .prose-chat table {
+  font-size: 12px;
+}
+/* A review thread's comments (PRO-392): 13px in the diff, beside 12px code, not the transcript's 15px. */
+.review-prose .prose-chat {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.review-prose .prose-chat code:not(pre code) {
+  font-size: 12.5px;
+}
 /* A line the eye can follow back: about 70 characters, not the column's 110. Tables and code keep the full width. */
 .prose-chat p,
 .prose-chat li,
@@ -414,7 +433,7 @@
   border-bottom: 1px solid var(--hairline);
   color: var(--ink-muted) !important;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 .prose-chat [data-streamdown="code-block"] > [data-streamdown="code-block-header"] + div:not([data-streamdown]) {
   margin-top: -28px !important;
@@ -434,6 +453,19 @@
   width: 13px;
   height: 13px;
 }
+/* Copy says so: a labelled button at the header's right, not a bare icon. */
+.prose-chat [data-streamdown="code-block-copy-button"] {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px !important;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.prose-chat [data-streamdown="code-block-copy-button"]::after {
+  content: "Copy";
+}
 .prose-chat [data-streamdown="code-block-body"] {
   border: 0 !important;
   border-radius: 0 !important;
@@ -442,6 +474,48 @@
 .prose-chat [data-streamdown="code-block-body"] pre {
   background: transparent !important;
   padding: 10px 12px;
+}
+
+/* File previews inherit chat typography and set their own document layout. */
+.prose-preview .prose-chat p,
+.prose-preview .prose-chat li,
+.prose-preview .prose-chat blockquote,
+.prose-preview .prose-chat h1,
+.prose-preview .prose-chat h2,
+.prose-preview .prose-chat h3,
+.prose-preview .prose-chat h4 {
+  max-width: none;
+}
+.prose-preview .prose-chat h1 {
+  font-size: 22px;
+  line-height: 1.3;
+  margin: 0 0 0.6em;
+}
+.prose-preview .prose-chat h2 {
+  font-size: 15px;
+  line-height: 1.4;
+  margin: 1.6em 0 0.7em;
+  padding-bottom: 0.45em;
+  border-bottom: 1px solid var(--hairline);
+}
+.prose-preview .prose-chat ul:has(> li.task-list-item):not(:has(> li:not(.task-list-item))) {
+  list-style: none;
+  padding-left: 0;
+}
+.prose-preview .prose-chat li.task-list-item {
+  list-style: none;
+}
+.prose-preview .prose-chat li.task-list-item > input[type="checkbox"] {
+  margin: 0 0.5em 0 0;
+  vertical-align: middle;
+}
+.prose-preview .prose-chat [data-streamdown="code-block-header"],
+.prose-preview .prose-chat [data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-header"]),
+.prose-preview .prose-chat [data-streamdown="code-block-header"] + div:has([data-streamdown="code-block-actions"]) {
+  display: none !important;
+}
+.prose-preview .prose-chat [data-streamdown="code-block-body"] pre {
+  font-family: var(--font-mono);
 }
 
 /* Terminal panels supply the ground; xterm's own viewport stays clear. */
@@ -514,6 +588,11 @@ body:has([role="alertdialog"]) [data-star-reminder] {
    left every dialog appearing and vanishing at once. */
 @utility animate-dialog-in { animation: dialog-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 @utility animate-dialog-out { animation: dialog-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+/* A side sheet (`placement="right"`) slides in from the window's right edge instead. */
+@keyframes sheet-in { from { opacity: 0.6; transform: translateX(100%); } to { opacity: 1; transform: none; } }
+@keyframes sheet-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(40%); } }
+@utility animate-sheet-in { animation: sheet-in 340ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@utility animate-sheet-out { animation: sheet-out 200ms cubic-bezier(0.4, 0, 1, 1) both; }
 @utility animate-overlay-in { animation: overlay-in 280ms ease-out both; }
 @utility animate-overlay-out { animation: overlay-out 200ms ease-in both; }
 

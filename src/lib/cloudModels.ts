@@ -75,6 +75,15 @@ function readingFor(client: WorkspaceRpcClient): RuntimeModels {
 const noReading = () => null;
 const noSubscription = () => () => {};
 
+/**
+ * Read the runtime's agents again for every picker on this connection: a
+ * sign-in or install on the machine (PRO-350) changed what the new-session
+ * form says about them.
+ */
+export function refreshRuntimeModels(client: WorkspaceRpcClient): Promise<void> {
+  return readingFor(client).refresh();
+}
+
 export function useRuntimeModels(client: WorkspaceRpcClient | null | undefined): Reading | null {
   const reading = client ? readingFor(client) : null;
   return useSyncExternalStore(reading?.subscribe ?? noSubscription, reading?.snapshot ?? noReading, noReading);
@@ -107,4 +116,16 @@ export function useCloudModelClient(target: CloudTarget | null): WorkspaceRpcCli
     return () => { cancelled = true; held?.release(); };
   }, [key]);
   return useSyncExternalStore(subscribeCloudConnections, () => lease?.key === key && lease.state().state === "connected" ? lease.current()?.client ?? null : null, noReading);
+}
+
+/**
+ * Why an agent on a machine will not work there yet (PRO-350): "Codex is not
+ * signed in on dev-server. Sign in from its machine page." Only a definite
+ * signed out counts: a sign-in its CLI could not tell, or an older runtime
+ * that does not say, is no reason.
+ */
+export function machineAgentSignInReason(agents: readonly RuntimeAgent[] | null | undefined, harness: string | null | undefined, machineName: string): string | null {
+  const agent = harness ? agents?.find((entry) => entry.id === harness) : undefined;
+  if (!agent || agent.signIn !== "signedOut") return null;
+  return `${agent.name} is not signed in on ${machineName}. Sign in from its machine page.`;
 }

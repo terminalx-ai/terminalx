@@ -35,7 +35,7 @@ pub const PORT_ENV: &str = "TERMINALX_MACHINE_HOST_PORT";
 /// payload is the new [`Status`].
 pub const CHANGED_EVENT: &str = "machine_host_changed";
 
-/// Runtime IPC commands. Every one but [`STATUS`] names the window's
+/// Runtime IPC commands. Every one but [`STATUS`] and [`ACTIVITY`] names the window's
 /// attachment (`epoch` and `lease`) and is refused once it is no longer current.
 pub const STATUS: &str = "runtime.machineHost.status";
 pub const ADOPT_KEY: &str = "runtime.machineHost.adoptKey";
@@ -52,6 +52,39 @@ pub const CREATE_CODE: &str = "runtime.machineHost.createCode";
 pub const APPROVE: &str = "runtime.machineHost.approve";
 /// Don't allow it ([`Answer`]): `{ declined: true }`.
 pub const DECLINE: &str = "runtime.machineHost.decline";
+/// The activity log (PRO-357): `{ entries: [...] }`, the last 200, newest first.
+pub const ACTIVITY: &str = "runtime.machineHost.activity";
+/// "Disconnect" ([`ForComputer`]): close the computer's connections and
+/// refuse it until the person lets it back. `{ disconnected: bool }`.
+pub const DISCONNECT: &str = "runtime.machineHost.disconnect";
+/// Let a disconnected computer connect again ([`ForComputer`]). Like
+/// [`APPROVE`], only a person may (`serve_cli::consent`). `{ letBack: bool }`.
+pub const LET_BACK: &str = "runtime.machineHost.letBack";
+/// A relay control request the window makes through the runtime's
+/// registration while the runtime is registered ([`RelayControl`], PRO-368):
+/// a phone's invite, credential install or revocation. Answers the relay's
+/// reply to the request's `reqId` as it came (`control-error` included), or
+/// refuses with `relay_offline` when the runtime is not registered.
+pub const RELAY_CONTROL: &str = "runtime.machineHost.relayControl";
+/// Emitted on the runtime's event sink when the relay hints, on the
+/// runtime's registration, that this host's account pairing grants or
+/// revocations changed. No payload. The window polls the account service.
+pub const RELAY_HINT_EVENT: &str = "machine_host_relay_hint";
+
+/// Phones the runtime serves itself while no window takes them (PRO-359).
+/// Make a phone pairing code ([`PhoneCode`]): answers [`CreatedPhoneCode`],
+/// or refuses with `not_enabled` (hosting is off or not listening yet) or
+/// `window_takes_phones` (a window pairs this Mac's phones in Settings →
+/// Devices). Only a person may (`serve_cli::consent`).
+pub const PHONE_CODE: &str = "runtime.machineHost.phoneCode";
+/// Let the phone waiting with `requestId` in ([`Answer`]): `{ approved: true }`,
+/// or `not_found`. Only a person may.
+pub const PHONE_APPROVE: &str = "runtime.machineHost.phoneApprove";
+/// Don't ([`Answer`]): `{ declined: true }`.
+pub const PHONE_DECLINE: &str = "runtime.machineHost.phoneDecline";
+/// Remove a paired phone ([`ForComputer`], its device id): its connections
+/// close at once. `{ revoked: bool }`.
+pub const PHONE_REVOKE: &str = "runtime.machineHost.phoneRevoke";
 
 /// A pairing code: `txm2.` and base64url, unpadded, of a [`MachineCode`].
 pub const CODE_PREFIX: &str = "txm2.";
@@ -71,6 +104,8 @@ pub const REFUSED_NOT_APPROVED: &str = "not-approved";
 pub const REFUSED_CODE_INACTIVE: &str = "code-inactive";
 pub const REFUSED_ANOTHER_COMPUTER: &str = "another-computer";
 pub const REFUSED_PAIRING_PAUSED: &str = "pairing-paused";
+/// A paired computer the person disconnected, until they let it back (PRO-357).
+pub const REFUSED_DISCONNECTED: &str = "disconnected";
 
 /// The most a header line may take, newline included.
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -88,6 +123,45 @@ pub enum HostKeyState {
     Error,
 }
 
+/// The runtime's own relay registration (PRO-368).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelayState {
+    /// Not registering: the switch is off, the host key is not ready, or
+    /// this build has no relay. Also what an older runtime says.
+    #[default]
+    Off,
+    /// The switch is on and nobody is signed in on this machine.
+    SignedOut,
+    /// Making its first registration. The window waits a while for it
+    /// rather than take the host id from it.
+    Connecting,
+    /// Its registration was lost or refused, and it is trying again. The
+    /// window registers itself meanwhile; the runtime's next registration
+    /// retires the window's.
+    Retrying,
+    /// Registered: [`Status::relay`] says where.
+    Registered,
+    /// A newer runtime process for this machine took the relay; this one
+    /// does not register again until it restarts.
+    Superseded,
+}
+
+/// Where the runtime is registered, for the window to use the registration
+/// for its phones (PRO-368) instead of registering itself: the relay would
+/// close one of the two.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayRegistration {
+    pub relay_host_id: String,
+    pub director_url: String,
+    pub cell_url: String,
+    pub assignment_epoch: u64,
+    /// The relay's generation for the registration (`host-hello-ack`).
+    pub generation: u64,
+    pub runtime_generation: u64,
+}
+
 /// One paired computer, as Settings → Machines lists it. No credential.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +172,9 @@ pub struct ComputerSummary {
     pub approved_at: i64,
     pub last_seen_at: Option<i64>,
     pub connected: bool,
+    /// When the person pressed Disconnect; refused until they let it back (PRO-357).
+    #[serde(default)]
+    pub disconnected_at: Option<i64>,
     /// The relay host id of the computer's client key ([`key_id_of`]); `None`
     /// for a record with no client key, and from a runtime before PRO-349.
     #[serde(default)]
@@ -171,6 +248,67 @@ pub struct Status {
     /// Pairing is paused after five wrong attempts in a minute, until then.
     #[serde(default)]
     pub paused_until: Option<i64>,
+    /// The runtime's own relay registration (PRO-368).
+    #[serde(default)]
+    pub relay_state: RelayState,
+    /// Set while [`RelayState::Registered`].
+    #[serde(default)]
+    pub relay: Option<RelayRegistration>,
+    /// Phones this runtime serves itself (PRO-359). Absent from a runtime
+    /// before PRO-359, which served none.
+    #[serde(default)]
+    pub phones: PhoneStatus,
+}
+
+/// Phones the runtime serves while no window takes them (PRO-359).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneStatus {
+    /// Paired phones connected to this runtime now, by device id.
+    #[serde(default)]
+    pub connected: Vec<String>,
+    /// The live phone pairing code's expiry. Never the code.
+    #[serde(default)]
+    pub code: Option<CodeExpiry>,
+    /// A phone that used the code, waiting for Allow.
+    #[serde(default)]
+    pub pending: Option<PendingPhone>,
+    /// A TerminalX window is open on this Mac: it pairs and serves phones,
+    /// or will once hosting is on, so `pair --phone` sends the person there
+    /// before asking anything.
+    #[serde(default)]
+    pub window_open: bool,
+}
+
+/// A phone waiting for Allow: the fingerprint it shows too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPhone {
+    pub request_id: String,
+    pub device_id: String,
+    pub fingerprint: String,
+    pub requested_at: i64,
+    pub expires_at: i64,
+}
+
+/// Params of [`PHONE_CODE`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PhoneCode {
+    pub epoch: String,
+    pub lease: String,
+}
+
+/// The answer to [`PHONE_CODE`]: the `terminalx://pair` link a phone scans
+/// or pastes, exactly as Settings → Devices shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedPhoneCode {
+    pub link: String,
+    pub expires_at: i64,
+    /// The four-group fingerprint a phone shows needs the phone's key, so
+    /// it is not known yet: the machine id is shown instead.
+    pub machine_id: String,
 }
 
 /// A computer waiting for Allow, as the approval dialog shows it.
@@ -240,6 +378,25 @@ pub struct Revoke {
     pub epoch: String,
     pub lease: String,
     pub id: String,
+}
+
+/// Params of [`DISCONNECT`] and [`LET_BACK`]: the paired computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForComputer {
+    pub epoch: String,
+    pub lease: String,
+    pub id: String,
+}
+
+/// Params of [`RELAY_CONTROL`]. `frame` is the relay control request as the
+/// window would send it on its own registration, with its own `reqId`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelayControl {
+    pub epoch: String,
+    pub lease: String,
+    pub frame: serde_json::Value,
 }
 
 /// Params of [`REVOKE_GRANT`].
@@ -512,6 +669,9 @@ mod tests {
             pending: None,
             code: Some(CodeExpiry { expires_at: 9 }),
             paused_until: None,
+            phones: Default::default(),
+            relay_state: RelayState::Off,
+            relay: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["code"], serde_json::json!({ "expiresAt": 9 }));
@@ -546,6 +706,7 @@ mod tests {
             connected: true,
             key_id: Some(key_id.clone()),
             route: Some(ComputerRoute::Tailscale),
+            disconnected_at: None,
         };
         let value = serde_json::to_value(&computer).unwrap();
         assert_eq!(value["keyId"], key_id.as_str());

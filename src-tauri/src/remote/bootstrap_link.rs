@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use super::collab::Members;
 use super::host::{Attachment, RelaySession, Revocation, Revoked, RuntimeLink};
 use crate::cloud_bootstrap::{Bootstrapped, CallError, HttpApi};
 
@@ -30,33 +29,7 @@ impl RuntimeLink for BootstrapLink {
             return Err(Revoked.into());
         }
         let session = self.cloud.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        // An entry this runtime cannot read is skipped, not fatal: the others
-        // are still answered.
-        let attachments = session
-            .attachments
-            .iter()
-            .filter_map(|value| serde_json::from_value::<Attachment>(value.clone()).map_err(|error| log::warn!("skipping an attachment: {error}")).ok())
-            .collect();
-        let revocations = session
-            .revocations
-            .iter()
-            .filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).map_err(|error| log::warn!("skipping a revocation: {error}")).ok())
-            .collect();
-        // An unreadable list fails closed: participants have no access
-        // until a readable one arrives.
-        let collaboration = session.collaboration.as_ref().map(|value| {
-            serde_json::from_value::<Members>(value.clone()).unwrap_or_else(|error| {
-                log::warn!("an unreadable collaboration list gives participants no access: {error}");
-                Members { v: 0, members: Vec::new() }
-            })
-        });
-        Ok(RelaySession {
-            relay_token: session.relay_token.clone(),
-            director_url: session.director_url.clone(),
-            attachments,
-            revocations,
-            collaboration,
-        })
+        Ok(relay_session(&session, crate::cloud_bootstrap::CAPABILITIES))
     }
 
     fn complete_attachment(&self, attachment_id: &str, pairing_code: &str) -> Result<()> {
@@ -73,5 +46,32 @@ impl RuntimeLink for BootstrapLink {
             Err(CallError::Rejected) => Err(anyhow!("the API refused to complete revocation {attachment_id}")),
             Err(CallError::Transient(error)) => Err(error),
         }
+    }
+}
+
+/// Shared by the authenticated bootstrap link and refresh-path regressions.
+pub(crate) fn relay_session(session: &crate::cloud_bootstrap::Session, requested_capabilities: &str) -> RelaySession {
+    // An entry this runtime cannot read is skipped, not fatal: the others
+    // are still answered.
+    let attachments = session
+        .attachments
+        .iter()
+        .filter_map(|value| serde_json::from_value::<Attachment>(value.clone()).map_err(|error| log::warn!("skipping an attachment: {error}")).ok())
+        .collect();
+    let revocations = session
+        .revocations
+        .iter()
+        .filter_map(|value| serde_json::from_value::<Revocation>(value.clone()).map_err(|error| log::warn!("skipping a revocation: {error}")).ok())
+        .collect();
+    // Preserve the complete versioned payload until it is installed under
+    // the registered host generation and common admission lock.
+    let collaboration = session.collaboration.clone();
+    RelaySession {
+        relay_token: session.relay_token.clone(),
+        director_url: session.director_url.clone(),
+        attachments,
+        revocations,
+        collaboration,
+        collaboration_v2: requested_capabilities.split(',').any(|capability| capability == "collaboration-v2"),
     }
 }

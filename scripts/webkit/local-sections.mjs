@@ -69,7 +69,9 @@ try {
     page.on("pageerror", (error) => errors.push(error.message));
     await sidebar(page);
     const section = (name) => page.getByRole("region", { name: `${name} section`, exact: true });
+    // A section's + and menu show on hover or focus, as a row's do (02.14).
     const menu = async (name, action) => {
+      await section(name).locator("div").first().hover();
       await page.getByRole("button", { name: `Menu for section ${name}`, exact: true }).click();
       await page.getByRole("menuitem", { name: action, exact: true }).click();
     };
@@ -81,7 +83,7 @@ try {
 
     await section("Release").getByText("Prepare release notes", { exact: true }).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Move to section", exact: true }).hover();
-    await page.getByRole("menuitem", { name: /Bugs/ }).click();
+    await page.getByRole("menuitemradio", { name: /Bugs/ }).click();
     await section("Bugs").getByText("Prepare release notes", { exact: true }).waitFor();
     await menu("Bugs", "Move section up");
     assert.equal(await page.locator('[data-local-section]').first().getAttribute('data-local-section'), 'bugs');
@@ -93,7 +95,7 @@ try {
     await page.getByLabel("Emoji (optional)", { exact: false }).fill("W".repeat(32));
     await page.getByRole("button", { name: "Save", exact: true }).click();
     await page.getByRole("dialog").waitFor({ state: "detached" });
-    assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
+    assert.equal(await section("Fixes").getByRole("button", { name: /^Fixes \d+$/ }).evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the section heading");
     assert.equal(await page.getByTestId("conversation-list").evaluate((el) => el.scrollWidth > el.clientWidth + 1), false, "long emoji text stays within the sidebar");
     // Since #840 the sidebar has no standing New section row: a section is made from the
     // command palette (or a chat's Move to section menu).
@@ -111,11 +113,11 @@ try {
     await page.getByLabel("Section name", { exact: true }).fill("Retries");
     await page.getByRole("button", { name: "Create", exact: true }).click();
     await section("Retries").getByText("Fix retry handling", { exact: true }).waitFor();
-    await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).click();
+    await section("Fixes").getByRole("button", { name: /^Fixes \d+$/ }).click();
     await page.reload();
     await section("Fixes").waitFor();
-    assert.equal(await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).getAttribute('aria-expanded'), 'false');
-    await section("Fixes").getByRole("button", { name: "Fixes", exact: true }).click();
+    assert.equal(await section("Fixes").getByRole("button", { name: /^Fixes \d+$/ }).getAttribute('aria-expanded'), 'false');
+    await section("Fixes").getByRole("button", { name: /^Fixes \d+$/ }).click();
     await section("Fixes").getByText("Prepare release notes", { exact: true }).waitFor();
     await menu("Fixes", "Delete section…");
     await page.getByRole("dialog").getByRole("button", { name: "Delete section", exact: true }).click();
@@ -132,7 +134,7 @@ try {
     {
       // From the main list into a section's header, then back out to the main list. In the simple layout the
       // project tree is outside the sections' drag scope and reaches them through SidebarSort's bridge.
-      await hold(page, page.locator('[data-row-sessions~="three"]'), section("Retries").getByRole("button", { name: "Retries", exact: true }));
+      await hold(page, page.locator('[data-row-sessions~="three"]'), section("Retries").getByRole("button", { name: /^Retries \d+$/ }));
       await page.locator('[data-local-section="' + (await section("Retries").getAttribute('data-local-section')) + '"][data-drop-over]').waitFor();
       assert.equal(await page.locator('[data-drop-over]').count(), 1, "only the section under the pointer is lit");
       if (process.env.SCREENSHOTS) await page.screenshot({ path: `${process.env.SCREENSHOTS}/${layout}-${colorScheme}-drag-in.png` });
@@ -157,14 +159,16 @@ try {
     // A section header drags the section: Retries goes above Release.
     assert.equal((await ids())[0], 'release');
     const last = (await ids()).at(-1);
-    await drag(page, section("Retries").getByRole("button", { name: "Retries", exact: true }), section("Release").getByRole("button", { name: "Release", exact: true }));
+    await drag(page, section("Retries").getByRole("button", { name: /^Retries \d+$/ }), section("Release").getByRole("button", { name: /^Release \d+$/ }));
     await page.waitForFunction((id) => document.querySelector('[data-local-section]')?.getAttribute('data-local-section') === id, last);
     assert.equal(await page.getByRole("button", { name: "Reorder section Release", exact: true }).count(), 1, "headers carry a keyboard grip");
     // A failed move raises the error toast and leaves the session where it was.
     await page.evaluate(() => { window.__PW_FAIL_MOVE__ = true; });
-    await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: "Retries", exact: true }));
-    await page.getByText("Something went wrong", { exact: true }).waitFor();
-    await page.getByText("Couldn't move “Fix retry handling” to Retries", { exact: false }).waitFor();
+    await drag(page, section("Release").getByText("Fix retry handling", { exact: true }), section("Retries").getByRole("button", { name: /^Retries \d+$/ }));
+    // 02.20 (PRO-386): titled with what was not done, where it is now, and Try again.
+    await page.getByText("Couldn't move Fix retry handling to Retries", { exact: true }).waitFor();
+    await page.getByText(/It's back in Release\.$/).waitFor();
+    await page.getByRole("button", { name: "Try again", exact: true }).waitFor();
     await page.evaluate(() => { window.__PW_FAIL_MOVE__ = false; });
     await section("Release").getByText("Fix retry handling", { exact: true }).waitFor();
     assert.equal(await inSection("two"), 1);

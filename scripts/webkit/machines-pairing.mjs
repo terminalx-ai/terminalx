@@ -3,7 +3,7 @@
 // and its Headless server tab, screen 21.06) and the approval dialog (screen
 // 21.05) in the desktop's WebKit, at the window's smallest size (760×520,
 // tauri.conf.json), a roomy one and the screens' own width (1440×900), in the
-// light and the dark theme, with Experimental → Machines on.
+// light and the dark theme.
 //
 // The approval dialog shows over the app while a computer waits, then goes
 // when the request ends. Add a machine shows: empty, an invalid code, waiting
@@ -49,7 +49,7 @@ const fixture = `(() => {
   const note = (name, args) => window.__PW_CALLS__.push([name, args ?? null]);
   answers.machine_name = { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
   answers.copy_text = (args) => { note("copy_text", args); return null; };
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: true };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   const computers = [
     { id: "computer-1", label: "Paresh’s MacBook Air", platform: "macos", approvedAt: Date.parse("2026-11-03T09:00:00Z"), lastSeenAt: Date.now(), connected: true },
     { id: "computer-2", label: "build-box", platform: "linux", approvedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: Date.parse("2026-11-14T18:40:00Z"), connected: false },
@@ -73,6 +73,10 @@ const fixture = `(() => {
   answers.machines_decline = (args) => { note("machines_decline", args); return { declined: true }; };
   answers.machines_revoke = (args) => { note("machines_revoke", args); return null; };
   answers.machines_list = () => machines;
+  // The dialog opens on On your account (PRO-349); nobody is signed in here.
+  answers.machines_account_list = { signedIn: false };
+  // Settings lists Your machines from the connections store (PRO-349), which reads their states too.
+  answers.machines_connections = [];
   answers.machines_inspect_code = ({ code }) => {
     note("machines_inspect_code", { code });
     if (!code.startsWith("txm2.")) return Promise.reject("not a machine code");
@@ -267,6 +271,11 @@ try {
         return {
           text: el.textContent,
           scroll: el.scrollWidth <= el.clientWidth + 1,
+          // What reaches past the section's right edge, when something does.
+          wide: [...el.querySelectorAll("*")]
+            .filter((node) => node.getBoundingClientRect().right > el.getBoundingClientRect().right + 1)
+            .map((node) => `${node.tagName.toLowerCase()}${node.dataset.testid ? `[${node.dataset.testid}]` : ""}: ${node.textContent.trim().slice(0, 40)}`)
+            .slice(0, 6),
           headings: ["Your machines", "Computers that can operate this Mac"].map((label) => style(leaf(label))),
           add: add ? { ...style(add), primary: add.classList.contains("bg-primary"), plus: !!add.querySelector('[data-icon="plus"]'), besideHeading: !!yours && Math.abs(add.getBoundingClientRect().bottom - yours.parentElement.getBoundingClientRect().bottom) <= 1 } : null,
           codeAfterYours: after(el.querySelector('[aria-label="Your machines"]') ?? yours, create),
@@ -294,6 +303,7 @@ try {
         "a Mac has the monitor icon": section.macIcons.length > 0 && section.macIcons.every((icon) => icon === "monitor"),
         "Revoke is 13 px": section.revoke?.size === 13,
         "no text in the two lists is under 12 px": section.small.length === 0,
+        "last-seen times are on the 24-hour clock": !/\d [AP]M\b/.test(section.text),
       }, section);
 
       // 21.04, each state.
@@ -301,6 +311,8 @@ try {
         await settings.getByRole("button", { name: "Add a machine" }).click();
         const dialog = page.getByRole("dialog", { name: "Add a machine" });
         await dialog.waitFor();
+        // It opens on On your account (PRO-349); these states are the Pairing code tab's.
+        await dialog.getByRole("tab", { name: "Pairing code" }).click();
         return dialog;
       };
       const closeAdd = async (dialog) => {
@@ -310,7 +322,7 @@ try {
       let dialog = await openAdd();
       await take("add-empty");
       m = await measure(page);
-      failed += report(`${name}, add: empty`, { ...commonChecks(m), "tabs: Pairing code (chosen) and Headless server, no On your account": JSON.stringify(m.tabs) === JSON.stringify([["Pairing code", "true"], ["Headless server", "false"]]) && !m.text.includes("On your account") }, m);
+      failed += report(`${name}, add: empty`, { ...commonChecks(m), "tabs: On your account, Pairing code (chosen) and Headless server": JSON.stringify(m.tabs) === JSON.stringify([["On your account", "false"], ["Pairing code", "true"], ["Headless server", "false"]]) }, m);
 
       await dialog.getByLabel("Pairing code").fill("hello");
       await dialog.getByText("This is not a machine pairing code").waitFor();
@@ -341,6 +353,7 @@ try {
       }, m);
       await dialog.getByRole("button", { name: "Done" }).click();
       await dialog.waitFor({ state: "detached" });
+      await take("settings-paired");
       await settings.getByRole("list", { name: "Your machines" }).getByText("Mac mini").waitFor();
 
       for (const [reason, said] of [
@@ -390,7 +403,7 @@ try {
       m = await measure(page);
       failed += report(`${name}, headless: empty`, {
         ...commonChecks(m),
-        "tabs: Pairing code and Headless server (chosen), no On your account": JSON.stringify(m.tabs) === JSON.stringify([["Pairing code", "false"], ["Headless server", "true"]]) && !m.text.includes("On your account"),
+        "tabs: On your account, Pairing code and Headless server (chosen)": JSON.stringify(m.tabs) === JSON.stringify([["On your account", "false"], ["Pairing code", "false"], ["Headless server", "true"]]),
         "the intro and three numbered steps": m.text.includes("A server runs TerminalX without a window. This Mac connects to it directly, on this network or over Tailscale, so its TCP port 6768 must be reachable from here.")
           && m.steps.length === 3 && m.stepNumbers.join() === "1,2,3" && m.steps[0].startsWith("Install TerminalX on the server") && m.steps[1].startsWith("Create a pairing code there") && m.steps[2].startsWith("Paste the code here"),
         "the install command and what it supports": m.steps[0]?.includes(INSTALL_COMMAND) && m.steps[0]?.includes("Linux x64 and arm64, and macOS. Installs a user service that starts at boot."),

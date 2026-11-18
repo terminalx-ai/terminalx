@@ -1,4 +1,4 @@
-import type { CheckAuthority } from "./api";
+import type { CheckAuthority, PrCheck } from "./api";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
@@ -16,7 +16,8 @@ export interface BranchSnapshot {
   mergeMethod: "merge" | "squash" | "rebase";
   state: BranchState;
   actions: BranchAction[];
-  pr: { number: number; url: string; headSha: string; state: string } | null;
+  /** The checks are GitHub's on the PR's head, as the native step read them. */
+  pr: { number: number; url: string; headSha: string; state: string; checks?: PrCheck[]; validation?: PrCheck[] | null } | null;
   behindUpstream: boolean;
   pullNeedsAgent?: boolean;
 }

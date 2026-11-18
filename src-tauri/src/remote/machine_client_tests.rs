@@ -266,7 +266,7 @@ impl Dialer for Script {
                         }
                         let _ = events.send((link, LinkEvent::Closed(Closed { code: None, reason: "stopped".into() })));
                     });
-                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None })
+                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None, rotated_token: None })
                 }
             }
         })
@@ -779,6 +779,7 @@ fn update_required_carries_the_runtime_version_and_what_it_offers() {
     // An older runtime sends no data.
     assert_eq!(update_required_failure(&json!({ "code": "update_required" })), DialFailure::NeedsUpdate { version: None, offered: vec![] });
     assert!(wanted_capabilities().contains(&crate::remote::machine::MACHINE_3), "this desktop asks for machine/3");
+    assert!(wanted_capabilities().contains(&crate::remote::machine::MACHINE_6), "this desktop asks for machine/6 (PRO-351)");
 }
 
 #[test]

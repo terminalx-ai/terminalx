@@ -25,6 +25,10 @@ vi.mock("@/lib/machineConnections", () => ({
     attachError: null,
   }),
 }));
+vi.mock("@/lib/machineCatalog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/machineCatalog")>()),
+  useMachineProjects: () => ({ entry: undefined, projects: [], sessions: [] }),
+}));
 vi.mock("@/lib/updates", () => ({
   checkForUpdate: mocks.checkForUpdate,
   installUpdate: mocks.installUpdate,
@@ -44,7 +48,7 @@ function HiddenLine({ machineId }: { machineId: string }) {
   return <MachineHiddenFeatures machineId={machineId} view={useMachineVersion(machineId)} />;
 }
 
-const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3"];
+const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7"];
 const LIVE: MachineConnectionState = { state: "relay", route: { kind: "relay", endpoint: null }, since: 1, rttMs: 20 };
 
 function updateStatus(patch: Partial<MachineUpdateStatus> = {}): MachineUpdateStatus {
@@ -64,6 +68,9 @@ function fakeClient(capabilities: string[], runtimeVersion: string, status: Mach
     machineUpdateStatus: vi.fn(async () => status),
     updateMachine: vi.fn(async () => ({ ...status, progress: { phase: "downloading", version: "0.2.33", since: 2 } })),
     onMachineUpdate: vi.fn(() => () => undefined),
+    // The page's agents and resources (PRO-350): none to show here.
+    runtimeAgentsReport: vi.fn(async () => ({ agents: [], missing: [] })),
+    call: vi.fn(async () => ({ v: 1, memory: null, storage: null, cpu: null, observedAt: 1 })),
   };
 }
 

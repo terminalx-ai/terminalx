@@ -22,8 +22,8 @@ import type { MachineConnectionState, PairedMachine } from "@/types/machines";
  * - Not connected: a saved wait (a pending approval) still stands, a saved
  *   "working" is not believed, and a finished turn counts while it is unread.
  *
- * Nothing shows while Settings → Experimental → Machines is off: AppShell
- * turns this on and off with the switch ({@link setMachineDashboardEnabled}).
+ * With no machine paired there is nothing here, and nothing is followed until
+ * a reader subscribes.
  */
 
 export interface MachineDashboardTab extends DashboardTab {
@@ -153,7 +153,6 @@ export function openMachineSession(key: string) {
 // ---- the store -------------------------------------------------------------
 
 const EMPTY: MachineDashboardSession[] = [];
-let enabled = false;
 let snapshot: MachineDashboardSession[] = EMPTY;
 let allSessions: MachineDashboardSession[] = EMPTY;
 let signature = "[]";
@@ -166,39 +165,7 @@ function publish() {
   for (const listener of [...listeners]) listener();
 }
 
-/**
- * Settings → Experimental → Machines, as AppShell reads it. Off, every reader
- * here gets no machine session, and the badge and notifications are told so.
- */
-export function setMachineDashboardEnabled(on: boolean) {
-  if (enabled === on) return;
-  enabled = on;
-  dirty = true;
-  if (!on) {
-    for (const stop of unsubscribers) stop();
-    unsubscribers = [];
-    take(EMPTY);
-    publish();
-    return;
-  }
-  // Readers that subscribed while it was off (the badge) start following now.
-  if (listeners.size) {
-    start();
-    invalidate();
-  }
-}
-
-export function machineDashboardEnabled(): boolean {
-  return enabled;
-}
-
-/** Whether Machines is on, in React: the same gate every reader here uses. */
-export function useMachineDashboardEnabled(): boolean {
-  return useSyncExternalStore(subscribeMachineDashboard, machineDashboardEnabled, machineDashboardEnabled);
-}
-
 function recompute(): MachineDashboardSession[] {
-  if (!enabled) return EMPTY;
   return projectMachineSessions({
     includeArchived: true,
     machines: getMachineConnections().machines,
@@ -229,15 +196,14 @@ function invalidate() {
   queueMicrotask(refresh);
 }
 
-/** Follow the catalog (which also changes with the machines' agent tabs) and the paired machines. Only while on. */
+/** Follow the catalog (which also changes with the machines' agent tabs) and the paired machines, once something reads. */
 function start() {
-  if (!enabled || unsubscribers.length) return;
+  if (unsubscribers.length) return;
   unsubscribers = [subscribeMachineCatalog(invalidate), subscribeMachineConnections(invalidate)];
 }
 
-/** Every non-archived machine session, now; none while Machines is off. */
+/** Every non-archived machine session, now; none while no machine is paired. */
 export function getMachineDashboard(): MachineDashboardSession[] {
-  if (!enabled) return EMPTY;
   start();
   if (dirty && !scheduled) {
     dirty = false;
@@ -248,7 +214,7 @@ export function getMachineDashboard(): MachineDashboardSession[] {
 
 function getAllMachineDashboard(): MachineDashboardSession[] {
   getMachineDashboard();
-  return enabled ? allSessions : EMPTY;
+  return allSessions;
 }
 
 export function subscribeMachineDashboard(listener: () => void): () => void {
@@ -262,12 +228,11 @@ export function useMachineDashboard(includeArchived = false): MachineDashboardSe
   return useSyncExternalStore(subscribeMachineDashboard, get, get);
 }
 
-/** For tests: forget everything, stop following, and turn off. */
+/** For tests: forget everything and stop following. */
 export function resetMachineDashboardForTests() {
   for (const stop of unsubscribers) stop();
   unsubscribers = [];
   listeners.clear();
-  enabled = false;
   snapshot = EMPTY;
   allSessions = EMPTY;
   signature = "[]";

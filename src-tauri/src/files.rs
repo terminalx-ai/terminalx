@@ -173,6 +173,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn create_text_refuses_an_existing_file_and_keeps_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes/new.md");
+        create_text(&path, "").unwrap();
+        std::fs::write(&path, "written by someone else").unwrap();
+        let error = create_text(&path, "").unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "written by someone else");
+    }
+
+    #[test]
     fn indexes_and_matches_names_first() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -448,6 +459,23 @@ pub fn write_text(path: &Path, content: &str) -> Result<u64> {
     }
     std::fs::write(path, content)?;
     Ok(mtime_ms(&std::fs::metadata(path)?))
+}
+
+/// Write a file that must not exist yet. The create is exclusive, so a file
+/// another writer made in the meantime is refused, never emptied or replaced.
+pub fn create_text(path: &Path, content: &str) -> Result<u64> {
+    use std::io::Write;
+    anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!("A file with that name already exists."),
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(content.as_bytes())?;
+    Ok(mtime_ms(&file.metadata()?))
 }
 
 pub fn stat_mtime(path: &Path) -> Option<u64> {

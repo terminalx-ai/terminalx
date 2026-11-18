@@ -30,6 +30,7 @@ import { rememberPeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
 import { cloudProviderName } from "@/lib/cloudSession";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { MachineIcon } from "@/components/machines/connectionStatus";
 import type { PairedMachine } from "@/types/machines";
 import { WorkspacePlaceProvider, type MachinePlace } from "./workspacePlace";
@@ -102,6 +103,8 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
 
 /** Says, wherever a cloud shell is shown, that it runs in the cloud workspace and not on this Mac. */
 export function ExecutionLocation({ provider, name }: { provider: string | null; name: string }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-[11px] text-muted-foreground"

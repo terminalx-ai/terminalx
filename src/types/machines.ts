@@ -37,6 +37,42 @@ export interface PairedComputer {
   keyId?: string | null;
   /** How it is connected now; null when it is not. Absent from a runtime older than PRO-349. */
   route?: MachineRouteKind | null;
+  /**
+   * When the person pressed Disconnect (PRO-357): it is refused until they
+   * let it back. Null otherwise; absent from a runtime older than PRO-357.
+   */
+  disconnectedAt?: number | null;
+}
+
+/**
+ * What an operating computer did on this Mac (PRO-357, `machines_activity`,
+ * `machine_host::activity`). Names and times only: never a prompt, a command
+ * or a file's contents. `other` is a kind a newer TerminalX wrote.
+ */
+export type MachineActivityKind =
+  | "paired"
+  | "connected"
+  | "disconnected"
+  | "sessionCreated"
+  | "terminalOpened"
+  | "projectAdded"
+  | "projectRemoved"
+  | "update"
+  | "revoked"
+  | "expired"
+  | "held"
+  | "letBack"
+  | "other";
+
+export interface MachineActivityEntry {
+  /** Milliseconds since the epoch. */
+  at: number;
+  kind: MachineActivityKind;
+  computerId?: string;
+  /** The computer's name when it happened. Absent for a project added or removed. */
+  computer?: string;
+  /** A project's name, a route (`lan`, `tailscale`, `relay`) or a version. */
+  detail?: string;
 }
 
 /** A computer asking to operate this machine, waiting for Allow. */
@@ -66,6 +102,16 @@ export interface MachineHostStatus {
   code: { expiresAt: number } | null;
   /** Pairing is paused after five wrong attempts in a minute, until then. */
   pausedUntil: number | null;
+  /** The runtime's relay registration from the account (PRO-368); absent from older runtimes. */
+  relayState?: "off" | "signedOut" | "connecting" | "retrying" | "registered" | "superseded";
+  relay?: {
+    relayHostId: string;
+    directorUrl: string;
+    cellUrl: string;
+    assignmentEpoch: number;
+    generation: number;
+    runtimeGeneration: number;
+  } | null;
 }
 
 /**
@@ -105,7 +151,10 @@ export interface InspectedMachineCode {
 /** A machine this computer paired with (`machines.json`); `machines_set_route` answers the updated one. */
 export interface PairedMachine {
   machineId: string;
+  /** The name shown here: the machine's own, or the one given on this computer (`namedHere`). */
   name: string;
+  /** Renamed on this computer (PRO-350, `machines_rename`): the machine's own name no longer replaces it. */
+  namedHere?: boolean;
   os: MachineOs;
   version: string;
   publicKeyB64: string;
@@ -156,6 +205,7 @@ export interface MachineRelayInfo {
  * - `needsUpdate`: the runtime does not serve `machine/1`, or refused `rpc.hello` with `update_required`; `side` says which computer updates.
  * - `updating`: the machine is handing its runtime over to a new version; a lost link is expected (PRO-354).
  * - `accessRemoved`: the machine refused this computer's credential; nothing retries until "Try again".
+ * - `disconnected`: the person on the machine pressed Disconnect (PRO-357); nothing retries until "Try again", which works once they let this computer back.
  *
  * `localNetworkDenied`: macOS refused Local Network access to a `lan` address.
  */
@@ -194,7 +244,8 @@ export type MachineConnectionState =
       version: string;
       since: number;
     }
-  | { state: "accessRemoved" };
+  | { state: "accessRemoved" }
+  | { state: "disconnected" };
 
 /** Which computer must update for the two to work together. */
 export type MachineUpdateSide = "machine" | "thisMac";

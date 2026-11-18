@@ -40,7 +40,7 @@ export function WorkStatusSettings() {
   };
 
   return (
-    <div className="rounded-lg border border-hairline px-3 py-2" data-testid="work-status-settings">
+    <div className="py-1" data-testid="work-status-settings">
       <RegisteredSetting setting="account.workStatus"
         control={<Switch aria-label="Show my team what I’m working on" checked={shareWithTeam ?? true} disabled={shareWithTeam === null} onCheckedChange={(on) => void changeShare(on)} />}
       />

@@ -26,6 +26,7 @@ export interface DashboardSession {
   hasMessages?: boolean;
   archived: boolean;
   tabs: DashboardTab[];
+  rowStatus?: { tabs: readonly { activity?: string | null }[] } | null;
 }
 
 export type ColumnId = "needs" | "working" | "done" | "not-started";
@@ -42,18 +43,25 @@ export const DASHBOARD_STATES: { id: DashboardState; label: string }[] = [...COL
 
 export const DONE_PAGE = 50;
 
+/** Whether a kind of session is left out (the default), shown with the rest, or shown alone. */
+export type Inclusion = "hide" | "show" | "only";
+
 export interface DashboardFilters {
   projects: string[];
   harnesses: string[];
-  columns: DashboardState[];
+  columns: ColumnId[];
   owners?: string[];
-  automated?: boolean;
+  /** Sessions an automation started. Absent: hidden, as the toolbar's "Hiding automations" says. */
+  automations?: Inclusion;
+  /** Archived sessions. Absent: hidden. */
+  archived?: Inclusion;
 }
 
 export const NO_FILTERS: DashboardFilters = { projects: [], harnesses: [], columns: [] };
 
+/** The Filter menu's own choices: project, agent and status. Owners, automations and archives have their own chips. */
 export function hasFilters(filters: DashboardFilters): boolean {
-  return filters.projects.length > 0 || filters.harnesses.length > 0 || filters.columns.length > 0 || !!filters.owners?.length || !!filters.automated;
+  return filters.projects.length > 0 || filters.harnesses.length > 0 || filters.columns.length > 0;
 }
 
 export function toggleFilter<T extends string>(list: T[], value: T): T[] {
@@ -62,7 +70,7 @@ export function toggleFilter<T extends string>(list: T[], value: T): T[] {
 
 export function sessionColumn(session: DashboardSession): ColumnId {
   if (session.tabs.some((tab) => tab.status === "waiting")) return "needs";
-  if (session.tabs.some((tab) => tab.status === "in_progress")) return "working";
+  if (session.tabs.some((tab) => tab.status === "in_progress") || session.rowStatus?.tabs.some((tab) => tab.activity === "background")) return "working";
   // Opening, renaming or configuring a chat changes `modified`, but starts no turn.
   if (session.hasMessages || session.lastMessageAt || session.tabs.some((tab) => tab.hasMessages || tab.lastMessageAt || tab.status === "completed")) return "done";
   return "not-started";
@@ -99,8 +107,11 @@ export function matchesQuery(session: DashboardSession, projectName: string, que
 export function matchesFilters(session: DashboardSession, filters: DashboardFilters): boolean {
   if (filters.projects.length && !filters.projects.includes(session.projectPath)) return false;
   if (filters.harnesses.length && !session.tabs.some((tab) => filters.harnesses.includes(tab.harness))) return false;
-  if (session.archived ? !filters.columns.includes("archived") : filters.columns.length && !filters.columns.includes(sessionColumn(session))) return false;
-  if (filters.automated && !session.automation) return false;
+  const archived = filters.archived ?? "hide";
+  if (session.archived ? archived === "hide" : archived === "only") return false;
+  if (!session.archived && filters.columns.length && !filters.columns.includes(sessionColumn(session))) return false;
+  const automations = filters.automations ?? "hide";
+  if (session.automation ? automations === "hide" : automations === "only") return false;
   if (filters.owners?.length && (!session.ownerId || !filters.owners.includes(session.ownerId))) return false;
   return true;
 }
@@ -135,59 +146,80 @@ export function filterSessions<T extends DashboardSession>(sessions: readonly T[
     && matchesQuery(session, options.projectName(session.projectPath), options.query));
 }
 
+/**
+ * The overview table's columns in the order shown (02.01, 02.05). `menu` is
+ * the Display menu's name where the header's is too short to stand alone.
+ * Status is the session's own status (Checks failing · PR #781), not the board bucket.
+ */
 export const TABLE_COLUMNS = [
-  { id: "status", label: "Status" },
-  { id: "name", label: "Name" },
-  { id: "project", label: "Project" },
-  { id: "branch", label: "Branch" },
-  { id: "agent", label: "Agent" },
-  { id: "pr", label: "PR" },
-  { id: "changes", label: "Changes" },
-  { id: "owner", label: "Owner" },
-  { id: "updated", label: "Updated" },
-  { id: "created", label: "Created" },
+  { id: "name", label: "Session", menu: "Session" },
+  { id: "project", label: "Project", menu: "Project" },
+  { id: "where", label: "Where", menu: "Where" },
+  { id: "branch", label: "Branch", menu: "Branch" },
+  { id: "changes", label: "Changes", menu: "Line changes" },
+  { id: "status", label: "Status", menu: "Status" },
+  { id: "agent", label: "Agent", menu: "Agent" },
+  { id: "pr", label: "PR", menu: "Pull request" },
+  { id: "owner", label: "Owner", menu: "Owner" },
+  { id: "updated", label: "Active", menu: "Last active" },
+  { id: "created", label: "Created", menu: "Created" },
 ] as const;
 /**
  * Where a session runs: This Mac, a paired machine's name, or Cloud (PRO-346).
- * The table shows it only while a machine is paired and Experimental →
+ * The table offers it only while a machine is paired and Experimental →
  * Machines is on, right after Project; otherwise the table is
- * {@link TABLE_COLUMNS} alone.
+ * {@link TABLE_COLUMNS} without it.
  */
-export const WHERE_COLUMN = { id: "where", label: "Where" } as const;
-type BaseColumnId = typeof TABLE_COLUMNS[number]["id"];
-export type TableColumnId = BaseColumnId | typeof WHERE_COLUMN.id;
-export interface TableColumn { readonly id: TableColumnId; readonly label: string }
-const WITH_WHERE: readonly TableColumn[] = [...TABLE_COLUMNS.slice(0, 3), WHERE_COLUMN, ...TABLE_COLUMNS.slice(3)];
+export type TableColumnId = typeof TABLE_COLUMNS[number]["id"];
+export type TableColumn = typeof TABLE_COLUMNS[number];
+export const WHERE_COLUMN = TABLE_COLUMNS.find((column) => column.id === "where")!;
+const WITHOUT_WHERE: readonly TableColumn[] = TABLE_COLUMNS.filter((column) => column.id !== "where");
 /** The columns the table offers: with Where only when `where` (a machine paired, Machines on). */
 export function tableColumns(where: boolean): readonly TableColumn[] {
-  return where ? WITH_WHERE : TABLE_COLUMNS;
+  return where ? TABLE_COLUMNS : WITHOUT_WHERE;
 }
+/** The session name is the row; it cannot be hidden. */
+export const REQUIRED_COLUMN: TableColumnId = "name";
+/** Off until chosen, so the default set fits a 1440-wide window: the status already names the PR. */
+export const DEFAULT_HIDDEN_COLUMNS: TableColumnId[] = ["pr", "created"];
+/** Bumped when a column joins the default-hidden set, so saved choices from before take it too. */
+const COLUMN_SET = 2;
 export interface DashboardSort { column: TableColumnId; direction: "asc" | "desc" }
 export interface DashboardPreferences {
   view: "board" | "table";
   sort: DashboardSort;
   hiddenColumns: TableColumnId[];
+  /** 36px rows instead of 44px. */
+  compact: boolean;
+  /** The people filter is kept on this Mac (02.05). */
+  owners: string[];
+  columnSet: number;
 }
 export const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = {
-  view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: [],
+  view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: DEFAULT_HIDDEN_COLUMNS, compact: false, owners: [], columnSet: COLUMN_SET,
 };
-const isTableColumn = (value: unknown): value is TableColumnId => WITH_WHERE.some((column) => column.id === value);
+const isTableColumn = (value: unknown): value is TableColumnId => TABLE_COLUMNS.some((column) => column.id === value);
 
-/** Ignore invalid/obsolete saved values; always leave at least one column visible. */
+/** Ignore invalid/obsolete saved values; the session column is always shown. */
 export function dashboardPreferences(value: unknown): DashboardPreferences {
   const saved = value && typeof value === "object" ? value as Partial<DashboardPreferences> : {};
-  const hidden = Array.isArray(saved.hiddenColumns) ? [...new Set(saved.hiddenColumns.filter(isTableColumn))] : [];
+  const listed = Array.isArray(saved.hiddenColumns) ? saved.hiddenColumns.filter(isTableColumn) : DEFAULT_HIDDEN_COLUMNS;
+  const current = typeof saved.columnSet === "number" && saved.columnSet >= COLUMN_SET;
+  const hidden = [...new Set(current ? listed : [...listed, ...DEFAULT_HIDDEN_COLUMNS])].filter((id) => id !== REQUIRED_COLUMN);
   return {
     view: saved.view === "table" ? "table" : "board",
     sort: isTableColumn(saved.sort?.column) && (saved.sort?.direction === "asc" || saved.sort?.direction === "desc")
       ? { column: saved.sort.column, direction: saved.sort.direction } : DEFAULT_DASHBOARD_PREFERENCES.sort,
-    // Where is not always offered, so every other column hidden still leaves Name.
-    hiddenColumns: TABLE_COLUMNS.every(({ id }) => hidden.includes(id)) ? hidden.filter((id) => id !== "name") : hidden,
+    hiddenColumns: hidden,
+    compact: saved.compact === true,
+    owners: Array.isArray(saved.owners) ? [...new Set(saved.owners.filter((id): id is string => typeof id === "string" && !!id))] : [],
+    columnSet: COLUMN_SET,
   };
 }
 
-/** Hide or show a column; the last one shown among `columns` (the ones offered) stays. */
+/** Hide or show a column; the session column stays, and so does the last one shown among `columns` (the ones offered). */
 export function toggleTableColumn(hidden: TableColumnId[], column: TableColumnId, columns: readonly TableColumn[] = TABLE_COLUMNS): TableColumnId[] {
+  if (column === REQUIRED_COLUMN) return hidden.filter((id) => id !== column);
   if (!hidden.includes(column) && columns.every(({ id }) => id === column || hidden.includes(id))) return hidden;
   return toggleFilter(hidden, column);
 }
@@ -196,8 +228,11 @@ export function nextDashboardSort(current: DashboardSort, column: TableColumnId)
   return { column, direction: current.column === column && current.direction === "asc" ? "desc" : "asc" };
 }
 
+/** The status labels in the order the status column sorts: what needs the reader first, then work, then PRs. */
+const STATUS_ORDER = ["Needs approval", "Needs you", "Working", "Checks failing", "Draft PR", "In review", "Ready to merge", "Uncommitted", "Not started", "No changes", "Merged"];
+
 /** Values used for ordering are the same values rendered by the view. Unknowns sort last in either direction. */
-export type DashboardTableRow = { id: string } & Record<BaseColumnId, string | number | null> & { where?: string | null };
+export type DashboardTableRow = { id: string } & Record<Exclude<TableColumnId, "where">, string | number | null> & { where?: string | null };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 export function sortDashboardRows<T extends DashboardTableRow>(rows: readonly T[], sort: DashboardSort): T[] {
   const value = (row: T): string | number | null => {
@@ -208,8 +243,9 @@ export function sortDashboardRows<T extends DashboardTableRow>(rows: readonly T[
       return Number.isFinite(date) ? date : null;
     }
     if (sort.column === "status") {
-      const rank = DASHBOARD_STATES.findIndex((state) => state.label === raw);
-      return rank < 0 ? null : rank;
+      const label = String(raw).split(" · ")[0];
+      const rank = STATUS_ORDER.indexOf(label);
+      return rank < 0 ? STATUS_ORDER.length : rank;
     }
     return raw;
   };

@@ -211,8 +211,56 @@ fn check_in(id: &str, path: Option<String>, account: Option<&std::path::Path>) -
     result
 }
 
+/// How long an answer about an agent's latest release is kept (PRO-377).
+const LATEST_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+
+static LATEST: std::sync::Mutex<Vec<(String, std::time::Instant, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The latest published release of an agent's CLI, from the npm registry,
+/// for the "· up to date" beside its version in Settings (PRO-377). `None`
+/// when the agent has no package, data privacy mode is on, or the registry
+/// does not answer; an answer is kept for six hours.
+pub fn latest_version(harness: &str) -> Option<String> {
+    let package = super::npm_package(harness)?;
+    if let Some((_, _, answer)) = LATEST.lock().unwrap().iter().find(|(id, at, _)| id == harness && at.elapsed() < LATEST_FOR) {
+        return answer.clone();
+    }
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(5)).build();
+    let answer = agent
+        .get(&format!("https://registry.npmjs.org/{package}/latest"))
+        .call()
+        .ok()
+        .and_then(|response| response.into_json::<Value>().ok())
+        .and_then(|body| release_version(&body));
+    // A failed lookup is asked again next time rather than kept.
+    if answer.is_some() {
+        let mut cache = LATEST.lock().unwrap();
+        cache.retain(|(id, _, _)| id != harness);
+        cache.push((harness.to_owned(), std::time::Instant::now(), answer.clone()));
+    }
+    answer
+}
+
+/// The `version` of a registry `latest` document, when it looks like one.
+fn release_version(body: &Value) -> Option<String> {
+    let version = body.get("version")?.as_str()?;
+    (!version.is_empty() && version.len() <= 40 && version.starts_with(|c: char| c.is_ascii_digit()) && version.chars().all(|c| c.is_ascii_alphanumeric() || ".-_+".contains(c)))
+        .then(|| version.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_a_release_version_from_the_registry() {
+        assert_eq!(super::release_version(&json!({"name": "@anthropic-ai/claude-code", "version": "2.3.41"})).as_deref(), Some("2.3.41"));
+        assert_eq!(super::release_version(&json!({"version": "<script>"})), None);
+        assert_eq!(super::release_version(&json!({"version": ""})), None);
+        assert_eq!(super::release_version(&json!({})), None);
+        assert_eq!(super::super::npm_package("claude"), Some("@anthropic-ai/claude-code"));
+        assert_eq!(super::super::npm_package("codex"), Some("@openai/codex"));
+        assert_eq!(super::latest_version("no-such-agent"), None);
+    }
+
     use super::*;
 
     #[test]

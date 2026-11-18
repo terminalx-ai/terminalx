@@ -42,9 +42,9 @@ fn invoke_at(binary: &Path, target: &Target, header: &Value) -> Result<Value> {
     }
     command.args([
         "--user",
-        "cua",
+        "0:0",
         "--workdir",
-        "/home/cua",
+        "/",
         id,
         "/usr/bin/python3",
         "-I",

@@ -1,9 +1,14 @@
-import { captureReviewSend, markReviewsSent, restoreReviewSend } from "@/lib/reviewComments";
+import { localCommands } from "@/lib/localCommands";
+import { captureReviewSend, markReviewsSent, pendingReviewCount, restoreReviewSend } from "@/lib/reviewComments";
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, AtSign, ChevronDown, FileText, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { getPrefs, subscribePrefs } from "@/lib/prefs";
+import { ArrowUp, AtSign, Bookmark, ChevronDown, CircleAlert, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { showError } from "@/lib/errorToasts";
+import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
+import { openSettingRow } from "@/lib/settingsLinks";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -44,35 +49,7 @@ import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
 import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
-const commandCache = new Map<string, ComposerCommandList>();
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
-
-const commandsAsked = new Map<string, Promise<ComposerCommandList>>();
-
-/** A local tab's commands: asked of the harness once per directory. */
-function localCommands(cwd: string, harness: string): ComposerCommands {
-  const key = `${cwd}|${harness}`;
-  return {
-    key,
-    known: () => commandCache.get(key) ?? null,
-    load: () => {
-      const known = commandCache.get(key);
-      if (known) return Promise.resolve(known);
-      const pending = commandsAsked.get(key);
-      if (pending) return pending;
-      const asked = filesApi
-        .slashCommands(cwd, harness)
-        .then((commands) => {
-          const list = { commands, note: null };
-          commandCache.set(key, list);
-          return list;
-        })
-        .finally(() => commandsAsked.delete(key));
-      commandsAsked.set(key, asked);
-      return asked;
-    },
-  };
-}
 
 /** Break the line at the caret, through the input event the draft is read from. */
 export function insertNewLine(el: HTMLTextAreaElement) {
@@ -85,6 +62,9 @@ export function insertNewLine(el: HTMLTextAreaElement) {
 }
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
+const savedSnippets = () => getPrefs().promptSnippets;
+/** A picker row that is a saved snippet, not an agent command: its id follows. */
+const SNIPPET = "snippet:";
 const NO_HISTORY: string[] = [];
 
 /**
@@ -119,6 +99,7 @@ export function Composer({
   commands: givenCommands,
   files: givenFiles,
   remote = false,
+  attachFiles,
   busy,
   setupRunning = false,
   draft,
@@ -143,6 +124,7 @@ export function Composer({
   handoffs,
   disabledReason,
   disabled = false,
+  heldReason = null,
   settingsLockedReason = null,
   modelLockedReason = null,
   modeLockedReason = null,
@@ -151,6 +133,7 @@ export function Composer({
   canStop = true,
   stopMode = "stop",
   autoFocus,
+  onOpenCodexTab,
 }: {
   tab: TabEntry;
   /** Stable backend/tab identity; pending sends survive view replacement. */
@@ -162,6 +145,11 @@ export function Composer({
   files?: ComposerFiles | null;
   /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
   remote?: boolean;
+  /**
+   * Files other than images attach (PRO-290; on a machine, PRO-407). Defaults
+   * to `!remote`: a local tab takes any file, a cloud tab images only.
+   */
+  attachFiles?: boolean;
   busy: boolean;
   setupRunning?: boolean;
   draft: string;
@@ -194,6 +182,12 @@ export function Composer({
   disabledReason?: string | null;
   /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
   disabled?: boolean;
+  /**
+   * Typing stays, sending waits (21.09): a machine that is away. The draft is
+   * kept as typed and goes nowhere until the person sends it once the machine
+   * is back; nothing is queued on this computer. Shown as the input's placeholder.
+   */
+  heldReason?: string | null;
   /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
   settingsLockedReason?: string | null;
   /** Set when the model and effort cannot be changed from here whoever asks (an agent started by hand that takes them only at startup, #437). */
@@ -214,6 +208,8 @@ export function Composer({
    */
   stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
+  /** Opens a Codex tab beside this one: offered when a `/goal` is typed to an agent without goals (PRO-380). */
+  onOpenCodexTab?: () => void;
 }) {
   const { models: listed, refresh: refreshPickerModels, loaded: modelsLoaded } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
@@ -255,7 +251,7 @@ export function Composer({
   const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
   const mentionDropped = !remote;
-  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
+  const attach = useAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped, anyFile: attachFiles ?? !remote });
   // Refused chips stay above the draft but are never sent, and alone do not make a message.
   const sendable = useMemo(() => attach.attachments.filter((a) => !a.refused), [attach.attachments]);
 
@@ -374,7 +370,9 @@ export function Composer({
     },
   });
   const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
-  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
+  // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
+  const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
+  const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || snippets.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
@@ -396,13 +394,16 @@ export function Composer({
     if (!token) return [];
     if (token.kind === "slash") {
       const q = token.query.toLowerCase();
-      return commands
+      const saved = snippets
+        .filter((snippet) => snippet.name.includes(q))
+        .map((snippet) => ({ id: `${SNIPPET}${snippet.id}`, label: `/${snippet.name}`, detail: snippet.text.split("\n")[0], hint: "Snippet", icon: <Bookmark className="size-3.5" /> }));
+      return [...saved, ...commands
         .filter((c) => c.name.toLowerCase().includes(q))
         .slice(0, 30)
-        .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }));
+        .map((c) => ({ id: c.name, label: `/${c.name}`, detail: c.description, hint: c.argumentHint ?? (c.source !== "builtin" ? c.source : undefined), icon: <SlashSquare className="size-3.5" /> }))];
     }
     return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
-  }, [token, commands, fileHits]);
+  }, [token, commands, fileHits, snippets]);
 
   // The highlighted row belongs to the list it was chosen in: another token, or a list of another
   // length, starts at its first row. That is read off while rendering, never reset in an effect. A
@@ -422,7 +423,8 @@ export function Composer({
   const complete = useCallback(
     (item: PickerItem) => {
       if (!token) return;
-      const replacement = token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
+      const snippet = token.kind === "slash" && item.id.startsWith(SNIPPET) ? snippets.find((saved) => `${SNIPPET}${saved.id}` === item.id) : undefined;
+      const replacement = snippet ? snippet.text : token.kind === "slash" ? `/${item.id} ` : `@${item.id} `;
       const before = draft.slice(0, token.start);
       const after = draft.slice(caret);
       const next = before + replacement + after;
@@ -437,13 +439,35 @@ export function Composer({
         }
       });
     },
-    [token, draft, caret, onDraftChange],
+    [token, draft, caret, onDraftChange, snippets],
   );
 
   const [reviewReceiptError, setReviewReceiptError] = useState<{ message: string; retry: () => Promise<void> } | null>(null);
+  // "/goal" with nothing after it was pressed in a Codex chat: it stays, said wrong, until the text changes (PRO-380, 03.20).
+  const [emptyGoal, setEmptyGoal] = useState(false);
+  const goalMissing = emptyGoal && isEmptyGoal(draft);
   const send = useCallback(async (alternate = false) => {
     const text = draft.trim();
-    if ((!text && !sendable.length) || disabled || prMention.attaching) return;
+    if ((!text && !sendable.length) || disabled || heldReason || prMention.attaching) return;
+    const goalProblem = goalCommandProblem(text, tab.harness, !!sendable.length, commands);
+    if (goalProblem) {
+      // Goals are Codex's (#256): a bare "/goal" says nothing to set, and another agent has none to set.
+      if (goalProblem === "empty") {
+        setEmptyGoal(true);
+        return;
+      }
+      if (goalProblem === "unsupported") {
+        const name = tab.title?.trim();
+        showError(`${name ? `“${name}”` : "This tab"} runs ${agentName(tab.harness)}, which has no goals. Your text is still in the composer`, undefined, {
+          title: "Goals work in Codex chats only",
+          icon: "target",
+          copy: false,
+          key: `goal-codex-only:${tab.id}`,
+          actions: onOpenCodexTab ? [{ label: "Open a Codex tab", icon: "bot", run: onOpenCodexTab }] : undefined,
+        });
+        return;
+      }
+    }
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
     const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
@@ -482,7 +506,7 @@ export function Composer({
     // Learning belongs to this accepted send even if a newer draft is visible.
     learnOnSuccess();
     finishComposerSend(sendScope, operation);
-  }, [draft, sendable, attach, disabled, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, sendable, attach, disabled, heldReason, prMention.attaching, onSend, sentAfter, onDraftChange, recall.captureSend, sendScope, tab.id, tab.harness, tab.title, commands, onOpenCodexTab, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;
@@ -533,7 +557,7 @@ export function Composer({
   const sendHint = busy && followUps && alternateKeys
     ? `${sendLabel} · ${alternateKeys} ${followUps === "hold" ? "interrupts and sends" : "holds until the turn ends"}`
     : sendLabel;
-  const placeholder = busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up to the agent") : "Ask, build, or describe the next step";
+  const placeholder = heldReason ? heldReason : busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up — it waits until the agent pauses") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
   // The agent answered and named no model: the button says so, as the menu does.
@@ -552,14 +576,26 @@ export function Composer({
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
 
+  // Review comments added from a diff wait in the draft (PRO-392): said above the box until they are sent or removed.
+  const reviewsReady = pendingReviewCount(tab.id, draft);
+
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 pb-4 pt-2">
+    <div className="@container mx-auto w-full max-w-3xl px-6 pb-4 pt-2" data-tab-composer={tab.id}>
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
+      {reviewsReady > 0 && (
+        <div data-testid="review-comments-ready" className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <MessageSquare aria-hidden className="size-3.5 shrink-0 text-mention" />
+          <span className="shrink-0">{reviewsReady} review {reviewsReady === 1 ? "comment" : "comments"} ready to send</span>
+          <span className="min-w-0 truncate text-faint">· {reviewsReady === 1 ? "it goes" : "they go"} to the agent as one message</span>
+        </div>
+      )}
       {reviewReceiptError && <div role="alert" className="mb-2 text-xs text-warning">Message accepted, but review comments could not be marked Sent: {reviewReceiptError.message} <button type="button" onClick={() => void reviewReceiptError.retry().then(() => setReviewReceiptError(null), (error) => setReviewReceiptError({ ...reviewReceiptError, message: String(error) }))}>Retry marking Sent</button></div>}
       <div
         className={cn(
           "relative rounded-2xl bg-composer p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
+          // An outline: the box's hairline is a box-shadow, which a ring would replace.
+          goalMissing && "outline outline-1 -outline-offset-1 outline-destructive/70 focus-within:ring-0",
           attach.dragging && "ring-2 ring-accent/60",
         )}
         // What stays in the corner of the window (the clean-up indicator) keeps off this box.
@@ -578,7 +614,7 @@ export function Composer({
           />
         )}
         {prMention.menu}
-        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
+        <DropHint dragging={attach.dragging} mentionFiles={!attach.imagesOnly} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (
@@ -612,10 +648,13 @@ export function Composer({
             onDraftChange(e.target.value);
             setCaret(e.target.selectionStart ?? e.target.value.length);
             setDismissedToken(null);
+            if (emptyGoal && !isEmptyGoal(e.target.value)) setEmptyGoal(false);
           }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyDown={onKeyDown}
           disabled={disabled}
+          aria-invalid={goalMissing || undefined}
+          aria-describedby={goalMissing ? `${tab.id}-goal-missing` : undefined}
           rows={1}
           placeholder={placeholder}
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
@@ -725,7 +764,7 @@ export function Composer({
               }}
             />
             <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
-              turns={turns} compacting={compacting} compactDisabled={disabled || busy || sending}
+              turns={turns} compacting={compacting} compactDisabled={disabled || !!heldReason || busy || sending}
               onCompact={() => onSend("/compact", [])} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
@@ -743,14 +782,14 @@ export function Composer({
               </WithTooltip>
             ) : (
               <SetupCheckCoach tabId={tab.id}>
-                <WithTooltip label={sending ? "Sending…" : sendHint} keys={keysOf("composer.send")}>
+                <WithTooltip label={sending ? "Sending…" : (heldReason ?? sendHint)} keys={keysOf("composer.send")}>
                   <Button
                     size="icon-sm"
                     className={CORNER}
                     variant={draft.trim() || sendable.length ? "accent" : "secondary"}
                     aria-label={sending ? "Sending" : "Send"}
                     aria-busy={sending}
-                    disabled={disabled || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
+                    disabled={disabled || !!heldReason || sending || prMention.attaching || (!draft.trim() && !sendable.length)}
                     onClick={() => void send()}
                   >
                     <ArrowUp />
@@ -761,6 +800,23 @@ export function Composer({
           </div>
         </div>
       </div>
+      {goalMissing ? (
+        <div id={`${tab.id}-goal-missing`} role="alert" className="flex items-center gap-1.5 px-1 pt-1.5 text-[11.5px] text-destructive" data-testid="goal-missing">
+          <CircleAlert aria-hidden className="size-3 shrink-0" />
+          Type a goal after /goal, like “/goal ship saved views with tests”
+        </div>
+      ) : busy && followUps && alternateKeys && !heldReason && !disabled ? (
+        // What Return and the other chord do with a follow-up while the agent works (PRO-380, 03.12).
+        // One line, cut short rather than pushing the composer up (the whole of it is the tooltip), and none in a
+        // narrow composer, where it would be a stub and its line is the room an approval's buttons need.
+        <div className="truncate px-1 pt-1.5 text-[11.5px] text-faint @max-[34rem]:hidden" data-testid="follow-up-hint"
+          title={`${keysOf("composer.send").join("")} ${followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"} · ${alternateKeys.replaceAll("+", "")} ${followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"} · change the default in Settings › Agents › Follow-ups`}>
+          {keysOf("composer.send").join("")} {followUps === "hold" ? "holds it for after the turn" : "sends it to the agent now"}
+          {" · "}{keysOf("composer.sendAlternate").join("")} {followUps === "hold" ? "sends now and interrupts" : "holds it for after the turn"}
+          {" · "}change the default in{" "}
+          <button type="button" className="underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => openSettingRow("agents.followUps")}>Settings › Agents › Follow-ups</button>
+        </div>
+      ) : null}
       {setupRunning && <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status">Setup running</div>}
       {pendingNote && (
         <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-pending">
@@ -875,3 +931,6 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
 }
 
 const NO_TURNS: readonly Turn[] = [];
+
+
+const isEmptyGoal = (draft: string) => goalCommand(draft) === "";

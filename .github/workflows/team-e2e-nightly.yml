@@ -1,0 +1,38 @@
+name: Two-account foundation artifact collection
+
+# Opt-in only. This checkpoint runs no native/server scenarios and posts no results.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: two-account-local-artifacts
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main' && vars.TEAM_E2E_ARTIFACTS_ENABLED == 'true'
+    environment: team-e2e-local
+    runs-on: [self-hosted, macOS, terminalx-team-e2e]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Collect pending prerequisites (exit 2 is expected and remains non-green)
+        run: node scripts/team-e2e/run.mjs --preflight --artifacts artifacts/team-e2e
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: two-account-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/team-e2e/
+          retention-days: 14
+          if-no-files-found: error

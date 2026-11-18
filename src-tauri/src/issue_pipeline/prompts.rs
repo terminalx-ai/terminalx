@@ -192,6 +192,19 @@ This checkout is now at that commit.{since} Judge the whole change (`git diff {b
     )
 }
 
+/// A review asked again because the branch moved from `overtaken` while the
+/// reviewer read it (#1018): that verdict was set aside, and the new head is
+/// read in the same round.
+pub fn review_moved(request: &ReviewRequest<'_>, overtaken: &str) -> String {
+    format!(
+        "The branch moved from {} to {} while you were reviewing it, so your verdict on {} does not count.\n\n{}",
+        short(overtaken),
+        short(request.commit),
+        short(overtaken),
+        review_again(request, Some(overtaken)),
+    )
+}
+
 /// The light check of a head that only merges the base after a passing
 /// review of `reviewed` (#947): the reviewer reads what the merges did beyond
 /// merging, not the whole change again, and it is not a review round.

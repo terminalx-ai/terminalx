@@ -9,7 +9,8 @@ vi.mock("@tauri-apps/api/event", async () => {
   const { backend } = await import("@/test/tabsBackend");
   return { listen: backend.listen };
 });
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => true), message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn(async () => undefined), openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -18,7 +19,7 @@ vi.mock("@/components/editor/DiffEditorPane", () => ({ DiffEditorPane: () => <di
 vi.mock("@/components/changes/PrPanel", () => ({ PrPanel: () => <div>Review PR</div> }));
 vi.mock("@/components/changes/ConflictView", () => ({ ConflictView: () => <div>Review conflict</div> }));
 const { dropEditors, getEditors, openConflict, openDiff, openPr, setConflictCount, setEditorDirty } = await import("@/lib/editors");
-const { ask } = await import("@tauri-apps/plugin-dialog");
+const { confirmInApp: ask } = await import("@/lib/confirm");
 const { getTerminalState, restoreSessionTabSelection, selectSessionTab } = await import("@/lib/terminal");
 const { newTab } = await import("@/lib/tabActions");
 const { workspaceRow } = await import("@/lib/sessionTabs");
@@ -82,8 +83,10 @@ describe("the new-tab button", () => {
     expect(strip().compareDocumentPosition(plus) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(plus);
     const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual(["Claude Code", "Codex", "Gemininot installed", "Terminalon this computer", "Browser"]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal on this computer" }));
+    // PRO-381 (03.29): each agent's chat says where it opens; Terminal and Browser need no hint.
+    expect(screen.getByText("New tab").textContent).toBe("New tab");
+    expect(items.map((item) => item.textContent)).toEqual(["Claude Code chatSame worktreeCtrlT", "Codex chatSame worktree", "Gemini chatNot installed", "Terminal", "BrowserCtrlShiftB"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal" }));
     await flush();
     expect(backend.callsOf("pty_spawn").at(-1)).toMatchObject({ cwd: FEATURE, title: "Terminal 2" });
     // A tab opened from here goes to the end of the row.
@@ -92,11 +95,11 @@ describe("the new-tab button", () => {
 });
 
 describe("the tab shortcuts", () => {
-  it("are nine remappable actions for a place in the row, with the browser's keys", () => {
+  it("are nine remappable actions for a place in the row, reserving unshifted mod+1 for Overview", () => {
     const places = SHORTCUT_ACTIONS.filter((action) => /^session\.(tab\d|lastTab)$/.test(action.id));
     expect(places.map((action) => action.label)).toEqual([...Array.from({ length: 8 }, (_, i) => `Switch to tab ${i + 1}`), "Switch to last tab"]);
     for (const mac of [true, false]) {
-      expect(places.map((action) => defaultBindings(action.id, mac))).toEqual([...Array.from({ length: 8 }, (_, i) => [`mod+${i + 1}`]), ["mod+9"]]);
+      expect(places.map((action) => defaultBindings(action.id, mac))).toEqual([["mod+shift+1"], ...Array.from({ length: 7 }, (_, i) => [`mod+${i + 2}`]), ["mod+9"]]);
       // Each default is a key the app may take, and no other action has it.
       const all = SHORTCUT_ACTIONS.flatMap((action) => defaultBindings(action.id, mac));
       for (const action of [...places, ...SHORTCUT_ACTIONS.filter((other) => ["session.moveTabLeft", "session.moveTabRight", "session.reopenTab"].includes(other.id))]) {
@@ -139,7 +142,7 @@ describe("the tab shortcuts", () => {
     expect(getSessionStore().selectedSessionId).toBe("b");
     expect(shown()).toBe("Docs");
     for (let n = 1; n <= 9; n++) {
-      press(composer(), digit(n));
+      press(composer(), { ...digit(n), shiftKey: n === 1 });
       await flush();
       expect(getSessionStore().selectedSessionId).not.toBe("other");
     }
@@ -151,7 +154,7 @@ describe("the tab shortcuts", () => {
     press(composer(), { key: "}", code: "BracketRight", altKey: true, shiftKey: true });
     await flush();
     expect(names().slice(0, 2)).toEqual(["Fix flaky test", LONG]);
-    press(composer(), digit(1));
+    press(composer(), { ...digit(1), shiftKey: true });
     expect(shown()).toBe("Fix flaky test");
     press(composer(), { key: "{", code: "BracketLeft", altKey: true, shiftKey: true });
     await flush();
@@ -223,7 +226,7 @@ describe("the local new-tab menu (PRO-291)", () => {
     const started = vi.spyOn(agent, "startOnOpen").mockRejectedValueOnce("codex exited while starting\nerror: unexpected argument '--yolo' found");
     render(<TabsHarness />);
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex chat" }));
     await flush();
     await flush();
     expect(backend.callsOf("add_tab")).toHaveLength(1);
@@ -256,6 +259,14 @@ describe("the cloud new-tab menu's disabled hint", () => {
   it("is absent for a manager and keeps a viewer's own reason", () => {
     expect(newTabBlockedReason(model({ manage: true }))).toBeNull();
     expect(newTabBlockedReason(model({ backend: { readOnlyReason: "View only: shared to watch." } as never }))).toBe("View only: shared to watch.");
+  });
+
+  it("names the machine on a machine session until it is connected (PRO-347)", () => {
+    const machine = { machineId: "m1", projectId: "p1", record: null, name: "Mac mini", state: { state: "direct" } } as never;
+    expect(newTabBlockedReason(model({ machine, manage: true }))).toBeNull();
+    expect(newTabBlockedReason(model({ machine, manage: true, connected: false }))).toBe("Tabs and terminals open once Mac mini is connected.");
+    // The composer's reason while it is away is the one the menu shows too.
+    expect(newTabBlockedReason(model({ machine, connected: false, backend: { readOnlyReason: "Can't send until Mac mini is back" } as never }))).toBe("Can't send until Mac mini is back");
   });
 
   it("reads as a sentence, not the uppercase section header", () => {

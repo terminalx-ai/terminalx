@@ -6,7 +6,8 @@ import type { TextHit, TextSearch } from "@/lib/api";
 const { invoke, ask } = vi.hoisted(() => ({ invoke: vi.fn(), ask: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
+// The replace confirmation is the app's own dialog (PRO-400): one request, answered true or false.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: ask }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: React.ReactNode }) => children, Kbd: ({ children }: { children: React.ReactNode }) => <kbd>{children}</kbd> }));
 
 const { ProjectSearch } = await import("./ProjectSearch");
@@ -41,7 +42,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("ProjectSearch", () => {
-  it("searches on ⌘⇧F without a replace row", async () => {
+  it("searches on ⇧⌘F without a replace row", async () => {
     render(<ProjectSearch sessionId="s1" root="/repo" />);
     openWith("f");
     const search = await screen.findByPlaceholderText("Search in project");
@@ -71,7 +72,7 @@ describe("ProjectSearch", () => {
     const go = screen.getByRole("button", { name: /^Replace 2$/ });
     fireEvent.click(go);
     await waitFor(() => expect(ask).toHaveBeenCalled());
-    expect(ask.mock.calls[0][0]).toMatch(/Replace 2 matches in 2 files with “bar”\?/);
+    expect(ask.mock.calls[0][0]).toMatchObject({ title: "Replace 2 matches in 2 files with “bar”?", action: "Replace" });
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("replace_text", {
         root: "/repo",

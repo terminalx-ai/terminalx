@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// PRO-354: versions and updates in the desktop's WebKit, with Experimental →
-// Machines on, at the screens' width (1440×900) and the window's smallest size
+// PRO-354: versions and updates in the desktop's WebKit, at the screens' width (1440×900) and the window's smallest size
 // (760×520), in the light and the dark theme.
 //
 // Three paired machines: "Mac mini" (0.2.33, everything granted), "dev-server"
@@ -34,14 +33,14 @@ await mkdir(shots, { recursive: true });
 if (!process.env.MACHINES_SHOTS) await writeFile(join(output, ".gitignore"), "*\n");
 
 const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
-  "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3"];
+  "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7"];
 const OLDER = ALL.filter((capability) => !["ports/1", "pipeline/2", "session-status/1"].includes(capability));
 
 // Runs in the page, after the stub.
 const fixture = (newer) => `(() => {
   const answers = window.__PW_STUB__.answers;
   const emit = window.__PW_STUB__.emit;
-  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, machines: true };
+  answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
   answers["plugin:app|version"] = "0.2.33";
   const machine = (patch) => ({ os: { family: "linux", version: "24.04" }, publicKeyB64: "a2V5", directEndpoints: [], route: "relayAndNearby",
     pairedAt: Date.parse("2026-11-12T09:00:00Z"), lastSeenAt: Date.now(), lastRoute: null, relay: null, ...patch });

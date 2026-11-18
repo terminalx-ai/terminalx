@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import {
   Archive,
   ArrowLeft,
@@ -7,11 +8,15 @@ import {
   ArrowRightToLine,
   BellOff,
   BellRing,
+  Columns2,
   Copy,
   CopyPlus,
+  Ellipsis,
   FolderOpen,
   GitFork,
   Globe,
+  Link,
+  Mail,
   MessageSquare,
   MoveHorizontal,
   Pencil,
@@ -23,14 +28,14 @@ import {
   RotateCw,
   Share2,
   Sparkles,
-  Terminal,
+  SquareTerminal,
   TerminalSquare,
   Trash2,
   Undo2,
   UserRound,
   X,
 } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
@@ -40,6 +45,10 @@ import { openAgentHandoff, openCloseTabs, openRenameTab } from "@/lib/dialogs";
 import { otherAgent } from "@/lib/agentHandoff";
 import { showFloatingWindow } from "@/lib/floating";
 import { isMac, useShortcutKeycaps } from "@/lib/hotkeys";
+import type { ShortcutId } from "@/lib/shortcuts";
+import { getTabLog, loadTab } from "@/lib/agentEvents";
+import { tabLinkFor } from "@/lib/tabDeepLink";
+import { transcriptText, type TranscriptFormat } from "@/lib/transcriptCopy";
 import { openSessionShare } from "@/lib/localSharing";
 import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
@@ -128,7 +137,7 @@ export async function openAgentTabTelling(session: Pick<SessionEntry, "id" | "cw
   try {
     tab = await add();
   } catch (error) {
-    showError("", undefined, { title: `Couldn't open a new ${name} tab: ${errorMessage(error).trim().replace(/[.:]+$/, "")}`, key, actions: [retry] });
+    showError("", undefined, { title: `Couldn't open a new ${name} tab: ${errorMessage(error).trim().replace(/[.:]+$/, "")}`, key, actions: [retry], copy: false });
     return false;
   }
   const notStarted = async (error: unknown) => {
@@ -143,7 +152,7 @@ export async function openAgentTabTelling(session: Pick<SessionEntry, "id" | "cw
     const file = settingsFileIn(detail);
     const actions: ErrorToastAction[] = [retry];
     if (file) actions.push({ label: `Open ${file.split("/").pop()}`, keepOpen: true, run: () => openSettingsFile(session.id, session.cwd, file) });
-    showError("", detail || undefined, { title: `Couldn't open a new ${name} tab: ${reason.replace(/[.:]+$/, "")}`, key, actions });
+    showError("", detail || undefined, { title: `Couldn't open a new ${name} tab: ${reason.replace(/[.:]+$/, "")}`, key, actions, copy: false });
   };
   const exits = await hearPaneExits();
   try {
@@ -202,6 +211,8 @@ export async function closeTabTelling(sessionId: string, tab: PeerTab, tabs: Pee
     showError(timedOut ? `${cause}, so “${label}” is still open` : `“${label}” is still open`, timedOut ? undefined : cause, {
       title: chat ? "Couldn't close the chat. Try again." : "Couldn't close the tab. Try again.",
       key,
+      // Try again alone, on one row (03.29): the sentence says all there is to copy.
+      copy: false,
       actions: [{ label: "Try again", icon: "retry", run: () => closeTabTelling(sessionId, tab, tabs, getTerminalState().selected[sessionId] ?? null, label) }],
     });
     return false;
@@ -266,15 +277,49 @@ function SwitchAccountItems({ session, tab, live, off }: { session: SessionEntry
 }
 
 /**
+ * Copy what the agent and the reader said in a tab (PRO-381), read again
+ * when it was never opened in this window, and say so when there is none.
+ */
+async function copyTranscript(session: SessionEntry, tab: TabEntry, format: TranscriptFormat, agentName: string) {
+  const key = `copy-transcript:${session.id}:${tab.id}`;
+  try {
+    if (!getTabLog(session.id, tab.id).loaded) await loadTab(session.id, tab.id);
+    const text = transcriptText(getTabLog(session.id, tab.id).events, format, agentName, tab.providerSessionId);
+    if (!text) throw new Error("nothing has been said in this chat yet");
+    await copyText(text);
+    dismissErrorKey(key);
+  } catch (error) {
+    showError("Couldn't copy the transcript", error, { key });
+  }
+}
+
+async function copyTabLink(session: SessionEntry, tab: TabEntry) {
+  const key = `copy-tab-link:${session.id}:${tab.id}`;
+  try {
+    await copyText(await tabLinkFor(session.id, tab.id));
+    dismissErrorKey(key);
+  } catch (error) {
+    showError("Couldn't copy a link to this tab", error, { key });
+  }
+}
+
+/**
  * The right-click menu of one tab, the same on the title bar strip and on
  * the sidebar's tab rows. It acts on the tab that was clicked, whether or
  * not it is the one on screen.
+ *
+ * It is the design's four groups (PRO-381, screen 03.14): the tab itself
+ * (rename, unread, pin, mute); where it is shown (the other pane, its
+ * terminal view, a fork); what it holds (its transcript, a link to it, a
+ * restart); and closing it. Everything else the tab can do is under
+ * More ›, so nothing is lost and the menu keeps the design's height.
  *
  * An item that does not apply to the tab is left out, and a tab is what
  * runs in its terminal now (#437): one that is a terminal has a terminal's
  * items, whatever it was opened as. An item this person may not use
  * (`readOnlyReason`: a viewer of a shared session) is shown, off, under a
- * line that says why.
+ * line that says why. A shortcut is shown beside an item when it acts on
+ * this tab: the one on screen.
  */
 export function TabMenuItems({
   row,
@@ -298,6 +343,7 @@ export function TabMenuItems({
   const session = row.sessions.find((candidate) => candidate.id === tab.sessionId) ?? row.session;
   const owner = tab.sessionId ? session : null;
   const shown = tab.kind === selected?.kind && tab.id === selected.id;
+  const shortcut = (action: ShortcutId) => (shown && keys(action).length ? <MenuShortcut keys={keys(action)} /> : null);
   const off = !!readOnlyReason;
   const floating = isCompactWindow();
   const wholeRow = useTabRow(row.session);
@@ -306,55 +352,95 @@ export function TabMenuItems({
   const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
   // What is in the tab now: an agent with a conversation, or a terminal.
   const agentTab = tab.kind === "agent" && !isShellPeer(tab) ? tab.tab : null;
+  const agentName = agentTab ? harnessName(agentTab.harness) ?? agentTab.harness : "";
   const counterpart = agentTab && otherAgent(agentTab.harness, store.harnesses);
   const drawnAs = peerAgent(tab);
   const bulk = BULK.map((action) => ({ action, plan: planBulkClose(action, row.tabs, tab) })).filter(({ plan }) => plan.targets.length + plan.pinned.length > 0);
+  const closeOthers = bulk.some(({ action }) => action === "others");
   const open = (what: NewTabKind) => void openTabTelling(row, what, tab);
-  const move = (how: TabMove, text: string, icon: ReactNode, shortcut?: string[]) => (
+  // The other pane: the right one while there is one pane (the tab splits off), else the one it is not in.
+  const toPane = otherPane(wholeRow, tab);
+  const canSplit = !(panes.length === 1 && wholeRow.tabs.length < 2);
+  const move = (how: TabMove, text: string, icon: ReactNode, action?: ShortcutId) => (
     <ContextMenuItem disabled={off || !canMoveTab(row, tab, how)} onSelect={() => moveTabBy(row, tab, how)}>
       {icon} {text}
-      {shortcut?.length ? <MenuShortcut keys={shortcut} /> : null}
+      {action ? shortcut(action) : null}
     </ContextMenuItem>
   );
   const restart = async () => {
     // Restarting ends the turn in flight; that is asked about, not assumed.
-    if (peerIsLive(tab) && !(await ask(`${label} is ${peerStatus(tab) === "waiting" ? "waiting for an answer" : "working"}. Restarting the agent stops this turn; the conversation is kept and resumes.`, { title: "Restart agent", kind: "warning", okLabel: "Restart", cancelLabel: "Cancel" }).catch(() => false))) return;
+    if (peerIsLive(tab) && !(await confirmInApp({
+      title: "Restart the agent?",
+      body: `${label} is ${peerStatus(tab) === "waiting" ? "waiting for an answer" : "working"}. Restarting stops this turn; the conversation is kept and resumes.`,
+      action: "Restart",
+      destructive: true,
+    }))) return;
     await restartTab(row, tab);
   };
+  const unread = !!agentTab && (!!agentTab.markedUnread || agentTab.status === "completed");
+  const markUnread = () => void agentApi.setUnread(session.id, tab.id, true).catch(failed("marking the tab unread"));
 
   return (
     <>
       {readOnlyReason ? <ContextMenuLabel className="max-w-64 whitespace-normal normal-case tracking-normal text-muted-foreground">{readOnlyReason}</ContextMenuLabel> : null}
 
       <ContextMenuItem disabled={off} onSelect={() => openRenameTab(row.session.id, tab.key)}>
-        <Pencil /> Rename…
+        <Pencil /> {agentTab ? "Rename chat…" : "Rename tab…"}
       </ContextMenuItem>
       {hasOwnTitle(tab, row.layout) ? (
         <ContextMenuItem disabled={off} onSelect={() => void renamePeer(row, tab, null).catch(failed("resetting the title"))}>
           <Undo2 /> Reset title
         </ContextMenuItem>
       ) : null}
+      {agentTab ? (
+        <ContextMenuItem disabled={off || unread} onSelect={markUnread}>
+          <Mail /> Mark as unread
+        </ContextMenuItem>
+      ) : null}
+      <ContextMenuItem disabled={off} onSelect={() => setTabPinned(row, tab, !tab.pinned)}>
+        {tab.pinned ? <PinOff /> : <Pin />} {tab.pinned ? "Unpin tab" : "Pin tab"}
+      </ContextMenuItem>
+      {tab.kind === "agent" ? (
+        <ContextMenuItem disabled={off} onSelect={() => setTabMuted(row, tab, !muted)}>
+          {muted ? <BellRing /> : <BellOff />} {muted ? "Unmute notifications for this tab" : "Mute notifications for this tab"}
+        </ContextMenuItem>
+      ) : null}
+
+      <ContextMenuSeparator />
+      {!floating ? (
+        <ContextMenuItem disabled={off || !canSplit} onSelect={() => moveTabToPane(row, tab, toPane, selected)}>
+          <Columns2 /> {toPane === "right" ? "Move to the right pane" : "Move to the left pane"}
+          {shortcut("session.moveTabToOtherPane")}
+        </ContextMenuItem>
+      ) : null}
       {tab.kind === "agent" ? (
         <ContextMenuItem disabled={off || !!tabViews.switching[tab.id]} onSelect={() => void toggleTabView(session, tab.tab)}>
-          {inTerminalView ? <MessageSquare /> : <Terminal />} {inTerminalView ? "Switch to chat view" : "Switch to terminal view"}
+          {inTerminalView ? <MessageSquare /> : <SquareTerminal />} {inTerminalView ? "Switch to chat view" : "Switch to terminal view"}
+          {shortcut("session.toggleTerminalView")}
         </ContextMenuItem>
       ) : null}
-      {tab.kind !== "review" && <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
-        <CopyPlus /> Duplicate tab
-      </ContextMenuItem>}
       {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
-          <GitFork /> Fork conversation
+          <GitFork /> Fork to new tab
+          {shortcut("session.forkTab")}
         </ContextMenuItem>
       ) : null}
-      {agentTab && counterpart ? (
-        <ContextMenuItem disabled={off} onSelect={() => openAgentHandoff(session, agentTab, counterpart.id)}>
-          <AgentMark id={counterpart.id} decorative /> Hand off to {counterpart.name}
-        </ContextMenuItem>
+
+      <ContextMenuSeparator />
+      {agentTab ? (
+        <ContextMenuSub>
+          <ContextMenuSubTrigger>
+            <Copy /> Copy transcript
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuItem onSelect={() => void copyTranscript(session, agentTab, "markdown", agentName)}>As Markdown</ContextMenuItem>
+            <ContextMenuItem onSelect={() => void copyTranscript(session, agentTab, "text", agentName)}>As plain text</ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
       ) : null}
-      {tab.kind === "agent" && !floating ? (
-        <ContextMenuItem onSelect={() => void showFloatingWindow(session.id, tab.id).catch(failed("opening the floating window"))}>
-          <PictureInPicture2 /> Open in floating window
+      {agentTab ? (
+        <ContextMenuItem onSelect={() => void copyTabLink(session, agentTab)}>
+          <Link /> Copy link to this tab
         </ContextMenuItem>
       ) : null}
       {tab.kind === "browser" ? (
@@ -367,7 +453,6 @@ export function TabMenuItems({
           <RotateCw /> Restart agent
         </ContextMenuItem>
       ) : null}
-      {agentTab ? <SwitchAccountItems session={session} tab={agentTab} live={peerIsLive(tab)} off={off} /> : null}
       {tab.kind === "terminal" && peerShell(tab)?.exited ? (
         <ContextMenuItem disabled={off} onSelect={() => void restartTab(row, tab).catch(failed("restarting the shell"))}>
           <RotateCw /> Restart shell
@@ -375,113 +460,125 @@ export function TabMenuItems({
       ) : null}
       <ContextMenuSub>
         <ContextMenuSubTrigger>
-          <Copy /> Copy
+          <Ellipsis /> More
         </ContextMenuSubTrigger>
-        <ContextMenuSubContent>
-          <ContextMenuItem onSelect={() => copy(label)}>Tab title</ContextMenuItem>
-          {tab.kind !== "browser" ? <ContextMenuItem onSelect={() => copy(session.cwd)}>Working directory</ContextMenuItem> : null}
-          {tab.kind === "agent" && tab.tab.providerSessionId ? <ContextMenuItem onSelect={() => copy(tab.tab.providerSessionId!)}>Conversation id</ContextMenuItem> : null}
-          {tab.kind === "browser" && tab.page.url ? <ContextMenuItem onSelect={() => copy(tab.page.url)}>Page address</ContextMenuItem> : null}
-        </ContextMenuSubContent>
-      </ContextMenuSub>
-      {tab.kind !== "browser" ? (
-        <ContextMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("revealing the working directory"))}>
-          <FolderOpen /> {isMac ? "Reveal working directory in Finder" : "Reveal working directory in the file manager"}
-        </ContextMenuItem>
-      ) : null}
-      {drawnAs ? (
-        <ContextMenuItem onSelect={() => openSkills({ agent: drawnAs, projectPath: session.cwd })}>
-          <Sparkles /> Skills for this agent…
-        </ContextMenuItem>
-      ) : null}
-      <ContextMenuItem disabled={off} onSelect={() => setTabPinned(row, tab, !tab.pinned)}>
-        {tab.pinned ? <PinOff /> : <Pin />} {tab.pinned ? "Unpin tab" : "Pin tab"}
-      </ContextMenuItem>
-      {tab.kind === "agent" ? (
-        <ContextMenuItem disabled={off} onSelect={() => setTabMuted(row, tab, !muted)}>
-          {muted ? <BellRing /> : <BellOff />} {muted ? "Unmute notifications for this tab" : "Mute notifications for this tab"}
-        </ContextMenuItem>
-      ) : null}
-      {owner ? (
-        <ContextMenuSub>
-          <ContextMenuSubTrigger>
-            <MessageSquare /> <span className="max-w-56 truncate">Session “{owner.title}”</span>
-          </ContextMenuSubTrigger>
-          <ContextMenuSubContent>
-            <ContextMenuItem disabled={off} onSelect={() => void archiveSession(owner.id, !owner.archived).catch(failed("archiving the session"))}>
-              <Archive /> {owner.archived ? "Unarchive" : "Archive"}
+        <ContextMenuSubContent className="max-h-(--radix-context-menu-content-available-height) overflow-y-auto">
+          {tab.kind !== "review" && <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
+            <CopyPlus /> Duplicate tab
+          </ContextMenuItem>}
+          {agentTab && counterpart ? (
+            <ContextMenuItem disabled={off} onSelect={() => openAgentHandoff(session, agentTab, counterpart.id)}>
+              <AgentMark id={counterpart.id} decorative /> Hand off to {counterpart.name}
             </ContextMenuItem>
-            {/* The floating window has no share dialog to open. */}
-            {!floating ? (
-              <ContextMenuItem disabled={off} onSelect={() => openSessionShare(owner.id)}>
-                <Share2 /> Share…
-              </ContextMenuItem>
-            ) : null}
-            {/* Nor a dialog to link an issue in. */}
-            {!floating ? <IssueLinkContextItems session={owner} disabled={off} /> : null}
-            <ContextMenuItem destructive disabled={off} onSelect={() => void confirmDeleteSession(owner)}>
-              <Trash2 /> {isQuickChat(owner) ? "Delete quick chat…" : "Delete…"}
+          ) : null}
+          {tab.kind === "agent" && !floating ? (
+            <ContextMenuItem onSelect={() => void showFloatingWindow(session.id, tab.id).catch(failed("opening the floating window"))}>
+              <PictureInPicture2 /> Open in floating window
             </ContextMenuItem>
-          </ContextMenuSubContent>
-        </ContextMenuSub>
-      ) : null}
-      {!floating && <ContextMenuItem disabled={off || (panes.length === 1 && wholeRow.tabs.length < 2) || (panes.length === 2 && panes[1].tabs.includes(tab.key))} onSelect={() => moveTabToPane(row, tab, "right", selected)}>
-        <MoveHorizontal /> Split right
-      </ContextMenuItem>}
-      {!floating && row.layout.panes && <ContextMenuItem disabled={off} onSelect={() => moveTabToPane(row, tab, otherPane(wholeRow, tab), selected)}>
-        <MoveHorizontal /> Move tab to other pane
-        <MenuShortcut keys={keys("session.moveTabToOtherPane")} />
-      </ContextMenuItem>}
-      <ContextMenuSub>
-        <ContextMenuSubTrigger>
-          <MoveHorizontal /> Move tab
-        </ContextMenuSubTrigger>
-        <ContextMenuSubContent>
-          {move("left", "Move tab left", <ArrowLeft />, keys("session.moveTabLeft"))}
-          {move("right", "Move tab right", <ArrowRight />, keys("session.moveTabRight"))}
-          {move("start", "Move to start", <ArrowLeftToLine />)}
-          {move("end", "Move to end", <ArrowRightToLine />)}
-        </ContextMenuSubContent>
-      </ContextMenuSub>
-
-      <ContextMenuSeparator />
-      <ContextMenuItem destructive disabled={off} onSelect={() => void closeTabTelling(row.session.id, tab, row.tabs, selected, label)}>
-        <X /> Close tab
-        {shown && keys("session.closeTab").length ? <MenuShortcut keys={keys("session.closeTab")} /> : null}
-      </ContextMenuItem>
-      {bulk.map(({ action }) => (
-        <ContextMenuItem key={action} disabled={off} onSelect={() => openCloseTabs(row.session.id, action, tab.key)}>
-          <X /> {BULK_CLOSE_LABEL[action]}…
-        </ContextMenuItem>
-      ))}
-      {canReopenTab(row, saved) ? (
-        <ContextMenuItem disabled={off} onSelect={() => void reopenClosedTab(row).catch(failed("reopening the tab"))}>
-          <RotateCcw /> Reopen closed tab
-          {keys("session.reopenTab").length ? <MenuShortcut keys={keys("session.reopenTab")} /> : null}
-        </ContextMenuItem>
-      ) : null}
-
-      <ContextMenuSeparator />
-      <ContextMenuSub>
-        <ContextMenuSubTrigger disabled={off}>
-          <Plus /> New agent tab
-        </ContextMenuSubTrigger>
-        <ContextMenuSubContent>
-          {store.harnesses.map((harness) => (
-            <ContextMenuItem key={harness.id} disabled={!harness.available} onSelect={() => open({ kind: "agent", harness: harness.id, model: getPrefs().lastModel[harness.id], effort: getPrefs().lastEffort[harness.id] ?? null, mode: getPrefs().lastMode })}>
-              <AgentMark id={harness.id} decorative />
-              <span>{harness.name}</span>
-              {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
+          ) : null}
+          {agentTab ? <SwitchAccountItems session={session} tab={agentTab} live={peerIsLive(tab)} off={off} /> : null}
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <Copy /> Copy
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              <ContextMenuItem onSelect={() => copy(label)}>Tab title</ContextMenuItem>
+              {tab.kind !== "browser" ? <ContextMenuItem onSelect={() => copy(session.cwd)}>Working directory</ContextMenuItem> : null}
+              {tab.kind === "agent" && tab.tab.providerSessionId ? <ContextMenuItem onSelect={() => copy(tab.tab.providerSessionId!)}>Conversation id</ContextMenuItem> : null}
+              {tab.kind === "browser" && tab.page.url ? <ContextMenuItem onSelect={() => copy(tab.page.url)}>Page address</ContextMenuItem> : null}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          {tab.kind !== "browser" ? (
+            <ContextMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("revealing the working directory"))}>
+              <FolderOpen /> {isMac ? "Reveal working directory in Finder" : "Reveal working directory in the file manager"}
+            </ContextMenuItem>
+          ) : null}
+          {drawnAs ? (
+            <ContextMenuItem onSelect={() => openSkills({ agent: drawnAs, projectPath: session.cwd })}>
+              <Sparkles /> Skills for this agent…
+            </ContextMenuItem>
+          ) : null}
+          {owner ? (
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>
+                <MessageSquare /> <span className="max-w-56 truncate">Session “{owner.title}”</span>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                <ContextMenuItem disabled={off} onSelect={() => void (owner.archived ? archiveSession(owner.id, false) : archiveWithUndo(owner.id)).catch(failed("archiving the session"))}>
+                  <Archive /> {owner.archived ? "Unarchive" : "Archive"}
+                </ContextMenuItem>
+                {/* The floating window has no share dialog to open. */}
+                {!floating ? (
+                  <ContextMenuItem disabled={off} onSelect={() => openSessionShare(owner.id)}>
+                    <Share2 /> Share…
+                  </ContextMenuItem>
+                ) : null}
+                {/* Nor a dialog to link an issue in. */}
+                {!floating ? <IssueLinkContextItems session={owner} disabled={off} /> : null}
+                <ContextMenuItem destructive disabled={off} onSelect={() => void confirmDeleteSession(owner)}>
+                  <Trash2 /> {isQuickChat(owner) ? "Delete quick chat…" : "Delete…"}
+                </ContextMenuItem>
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ) : null}
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <MoveHorizontal /> Move tab
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              {move("left", "Move tab left", <ArrowLeft />, "session.moveTabLeft")}
+              {move("right", "Move tab right", <ArrowRight />, "session.moveTabRight")}
+              {move("start", "Move to start", <ArrowLeftToLine />)}
+              {move("end", "Move to end", <ArrowRightToLine />)}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          {bulk.some(({ action }) => action !== "others") || canReopenTab(row, saved) ? <ContextMenuSeparator /> : null}
+          {bulk.filter(({ action }) => action !== "others").map(({ action }) => (
+            <ContextMenuItem key={action} disabled={off} onSelect={() => openCloseTabs(row.session.id, action, tab.key)}>
+              <X /> {BULK_CLOSE_LABEL[action]}…
             </ContextMenuItem>
           ))}
+          {canReopenTab(row, saved) ? (
+            <ContextMenuItem disabled={off} onSelect={() => void reopenClosedTab(row).catch(failed("reopening the tab"))}>
+              <RotateCcw /> Reopen closed tab
+              {keys("session.reopenTab").length ? <MenuShortcut keys={keys("session.reopenTab")} /> : null}
+            </ContextMenuItem>
+          ) : null}
+          <ContextMenuSeparator />
+          <ContextMenuSub>
+            <ContextMenuSubTrigger disabled={off}>
+              <Plus /> New agent tab
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              {store.harnesses.map((harness) => (
+                <ContextMenuItem key={harness.id} disabled={!harness.available} onSelect={() => open({ kind: "agent", harness: harness.id, model: getPrefs().lastModel[harness.id], effort: getPrefs().lastEffort[harness.id] ?? null, mode: getPrefs().lastMode })}>
+                  <AgentMark id={harness.id} decorative />
+                  <span>{harness.name}</span>
+                  {!harness.available ? <span className="ml-auto pl-3 text-[12px] text-faint">not installed</span> : null}
+                </ContextMenuItem>
+              ))}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+          <ContextMenuItem disabled={off} onSelect={() => open({ kind: "terminal" })}>
+            <TerminalSquare /> New terminal
+          </ContextMenuItem>
+          <ContextMenuItem disabled={off} onSelect={() => open({ kind: "browser" })}>
+            <Globe /> New browser tab
+          </ContextMenuItem>
         </ContextMenuSubContent>
       </ContextMenuSub>
-      <ContextMenuItem disabled={off} onSelect={() => open({ kind: "terminal" })}>
-        <TerminalSquare /> New terminal
+
+      <ContextMenuSeparator />
+      {/* In the menu's own colour (03.14): closing a tab keeps its conversation, so it is no destructive act. */}
+      <ContextMenuItem disabled={off} onSelect={() => void closeTabTelling(row.session.id, tab, row.tabs, selected, label)}>
+        <X /> Close tab
+        {shortcut("session.closeTab")}
       </ContextMenuItem>
-      <ContextMenuItem disabled={off} onSelect={() => open({ kind: "browser" })}>
-        <Globe /> New browser tab
-      </ContextMenuItem>
+      {closeOthers ? (
+        <ContextMenuItem disabled={off} onSelect={() => openCloseTabs(row.session.id, "others", tab.key)}>
+          <span aria-hidden className="size-4 shrink-0" /> {BULK_CLOSE_LABEL.others}
+        </ContextMenuItem>
+      ) : null}
     </>
   );
 }

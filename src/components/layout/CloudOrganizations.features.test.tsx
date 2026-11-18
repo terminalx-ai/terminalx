@@ -12,6 +12,7 @@ import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   api: {
+    cloudCatalogFeed: vi.fn(),
     cloudWorkspaces: vi.fn(),
     cloudWorkspaceRepositories: vi.fn(),
     cloudWorkspaceResume: vi.fn(),
@@ -47,7 +48,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 // The dialog has its own tests (CloudWorkspaceLifecycle.test.tsx); here only what the sidebar hands it.
 vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceLifecycle")>()),
@@ -173,7 +174,7 @@ beforeEach(() => {
     if (command === "cloud_agent_outbox" || command === "cloud_agent_checkpoints") return [];
     return undefined;
   });
-  prefs.setPrefs({ organizationDisplay: "all", hiddenOrganizations: [], selectedOrganization: null, cloudSections: {}, sidebarSections: {}, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
+  prefs.setPrefs({ sidebarProject: null, organizationDisplay: "all", hiddenOrganizations: [], selectedOrganization: null, cloudSections: {}, sidebarSections: {}, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
   act(() => sessions.selectSession(null));
 });
 
@@ -187,7 +188,8 @@ afterEach(async () => {
 
 describe("cloud context menus (PRO-187)", () => {
   it.each(["project", "workspace", "session"])("opens a cloud %s menu with Shift+F10", async (surface) => {
-    await standard();
+    if (surface === "workspace") await load([item("fix-login", { repositories: [acmeApi] }), item("perf-sweep", { repositories: [acmeApi] })]);
+    else await standard();
     mount();
     const target = surface === "project"
       ? within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" })
@@ -202,9 +204,9 @@ describe("cloud context menus (PRO-187)", () => {
 
 describe("personal named sections", () => {
   const mine = () => prefs.getPrefs().cloudSections[ME]?.[ORG] ?? [];
-  const sectionNames = () => screen.queryAllByTestId("cloud-section-name").map((name) => name.textContent);
+  const sectionNames = () => screen.queryAllByTestId("cloud-section-name").filter((name) => !name.closest("[data-section]")?.getAttribute("data-section")?.startsWith("builtin:")).map((name) => name.textContent);
   const section = (name: string) => screen.getByRole("group", { name: `${name} section` });
-  const projectsIn = (element: HTMLElement) => within(element).queryAllByTestId("cloud-project-group").map((group) => group.getAttribute("data-project"));
+  const workspacesIn = (element: HTMLElement) => within(element).queryAllByTestId("cloud-workspace-group").map((group) => group.getAttribute("data-workspace"));
   async function typeName(name: string, key = "Enter") {
     const input = await screen.findByTestId("cloud-section-name-input");
     await waitFor(() => expect(document.activeElement).toBe(input));
@@ -224,28 +226,92 @@ describe("personal named sections", () => {
     await typeName("Active");
     expect(sectionNames()).toEqual(["Active"]);
     expect(mine()).toEqual([{ id: expect.any(String), name: "Active", projects: [] }]);
-    expect(within(section("Active")).getByTestId("cloud-section-empty").textContent).toContain("Move a project here");
+    expect(within(section("Active")).getByTestId("cloud-section-empty").textContent).toContain("Drag a workspace here");
     expectNoAttachOrResume();
   });
 
-  it("moves projects into sections from a project's menu and back, sections first", async () => {
+  it("migrates a legacy project section to workspace rows and moves just one workspace", async () => {
     await standard();
     mount();
     fireEvent.click(within(await moveMenu("acme/api")).getByRole("menuitem", { name: "New section…" }));
     await typeName("Active");
     fireEvent.click(within(await openMenu("Menu for Acme")).getByRole("menuitem", { name: "New section" }));
     await typeName("Parked");
-    expect(projectsIn(section("Active"))).toEqual([`cloud:${ORG}:${API}`]);
-    fireEvent.click(within(await moveMenu("acme/api")).getByRole("menuitemradio", { name: "Parked" }));
-    await waitFor(() => expect(projectsIn(section("Parked"))).toEqual([`cloud:${ORG}:${API}`]));
-    expect(projectsIn(section("Active"))).toEqual([]);
-    const parked = await moveMenu("acme/api");
-    expect(within(parked).getByRole("menuitemradio", { name: "Parked" }).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(within(parked).getByRole("menuitem", { name: "Remove from Parked" }));
-    await waitFor(() => expect(projectsIn(section("Parked"))).toEqual([]));
-    // The sections come first, then the projects in none.
-    const order = within(org()).getAllByTestId(/^cloud-(section|project-group)$/).map((element) => element.getAttribute("data-section") ? "section" : element.getAttribute("data-project"));
-    expect(order).toEqual(["section", "section", `cloud:${ORG}:${API}`, `cloud:${ORG}:${WEB}`]);
+    expect(workspacesIn(section("Active"))).toEqual(["fix-login", "perf-sweep"]);
+    let menu = await openMenu("Actions for fix-login");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to section" }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: /^Parked$/ }));
+    await waitFor(() => expect(workspacesIn(section("Parked"))).toEqual(["fix-login"]));
+    expect(workspacesIn(section("Active"))).toEqual(["perf-sweep"]);
+    menu = await openMenu("Actions for fix-login");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to section" }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: "Main list" }));
+    await waitFor(() => expect(workspacesIn(section("Parked"))).toEqual([]));
+    expect(mine().map((entry) => entry.workspaces)).toEqual([["perf-sweep"], []]);
+    expect(within(project("acme/api")).getByTestId("cloud-session-row").getAttribute("data-session")).toBe(`cloud:${ORG}:fix-login:s1`);
+    const back = await moveMenu("acme/api");
+    const destination = within(back).getByRole("menuitemradio", { name: "Active" });
+    expect(destination.getAttribute("aria-disabled")).not.toBe("true");
+    fireEvent.click(destination);
+    await waitFor(() => expect(workspacesIn(section("Active"))).toEqual(["fix-login", "perf-sweep"]));
+    expectNoAttachOrResume();
+  });
+
+  it("moving under a project filter preserves hidden legacy section membership", async () => {
+    await standard();
+    prefs.setPrefs({ sidebarProject: `cloud:${ORG}:${API}`, cloudSections: { [ME]: { [ORG]: [{ id: "a", name: "API", projects: [API] }, { id: "b", name: "Web", projects: [WEB] }] } } });
+    mount();
+    const menu = await openMenu("Actions for fix-login");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to section" }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: /^Web$/ }));
+    expect(mine().find((s) => s.id === "b")?.workspaces).toEqual(["site", "fix-login"]);
+    fireEvent.click(within(await openMenu("Menu for Acme")).getByRole("menuitem", { name: "New section" }));
+    await typeName("Filtered draft");
+    expect(mine().find((s) => s.name === "Filtered draft")).toBeTruthy();
+    act(() => prefs.setPrefs({ sidebarProject: null }));
+    expect(workspacesIn(section("Web"))).toEqual(["fix-login", "site"]);
+    expectNoAttachOrResume();
+  });
+
+  it("offers the design menu, persists icon and per-section sort, and switches collapse to expand", async () => {
+    await standard();
+    prefs.setPrefs({ cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Release", projects: [API] }, { id: "s2", name: "Other", projects: [] }] } } });
+    mount();
+    let menu = await openMenu("Menu for section Release");
+    expect(items(menu)).toEqual(expect.arrayContaining(["New section…", "Rename section", "Change icon", "Sort byLast active", "Collapse section", "Delete section"]));
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Change icon" }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: "Rocket" }));
+    expect(mine()[0].icon).toBe("🚀");
+    expect(within(section("Release")).getByRole("button", { name: "Release section" }).textContent).toContain("🚀");
+    menu = await openMenu("Menu for section Release");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Sort by/ }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: "Name" }));
+    expect(mine()[0].sort).toBe("name"); expect(mine()[1].sort).toBeUndefined();
+    expect(workspacesIn(section("Release"))).toEqual(["fix-login", "perf-sweep"]);
+    fireEvent.click(within(await openMenu("Menu for section Release")).getByRole("menuitem", { name: "Collapse section" }));
+    expect(workspacesIn(section("Release"))).toEqual([]); expect(mine()[0].collapsed).toBe(true);
+    fireEvent.click(within(await openMenu("Menu for section Release")).getByRole("menuitem", { name: "Expand section" }));
+    expect(workspacesIn(section("Release"))).toEqual(["fix-login", "perf-sweep"]);
+    expectNoAttachOrResume();
+  });
+
+  it("classifies and counts real ownership, preserves Following, and prevents built-in rename/delete", async () => {
+    const rows = [item("owned", { createdBy: "me", you: { role: "manager" } }), item("shared", { createdBy: "teammate", you: { role: "viewer" } }), item("administered", { createdBy: "teammate", you: { role: "manager" } }), item("unknown")];
+    rows[1].following = true;
+    mocks.status.catalogFeed = true;
+    mocks.api.cloudCatalogFeed.mockResolvedValue({ viewerUserId: "me", changed: true, cursor: "1", reset: true, organizations: [{ orgId: ORG, workspaces: rows, quota: null }], deletedWorkspaceIds: [] });
+    await act(async () => { await catalog.refreshCloudFeed(); });
+    mount();
+    expect(workspacesIn(section("My workspaces"))).toEqual(["owned"]);
+    expect(workspacesIn(section("Shared with me"))).toEqual(["administered", "shared"]);
+    expect(within(section("My workspaces")).getByLabelText("1 workspaces").textContent).toBe("1");
+    expect(within(section("Shared with me")).getByLabelText("2 workspaces").textContent).toBe("2");
+    expect(screen.getByRole("region", { name: "Following" }).textContent).toContain("shared");
+    expect(screen.getByRole("group", { name: "unknown" })).toBeTruthy();
+    const menu = await openMenu("Menu for section My workspaces");
+    expect(within(menu).getByRole("menuitem", { name: "Rename section" }).getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByRole("menuitem", { name: "Delete section" }).getAttribute("aria-disabled")).toBe("true");
+    expect(within(menu).getByText("Built-in sections can't be deleted")).toBeTruthy();
     expectNoAttachOrResume();
   });
 
@@ -257,7 +323,7 @@ describe("personal named sections", () => {
     fireEvent.click(within(await openMenu("Menu for section Active")).getByRole("menuitem", { name: "Rename section" }));
     await typeName("Doing");
     expect(sectionNames()).toEqual(["Doing"]);
-    fireEvent.keyDown(screen.getByTestId("cloud-section-row"), { key: "F2" });
+    fireEvent.keyDown(within(section("Doing")).getByTestId("cloud-section-row"), { key: "F2" });
     await typeName("Never mind", "Escape");
     expect(sectionNames()).toEqual(["Doing"]);
     fireEvent.doubleClick(screen.getByRole("button", { name: "Doing section" }));
@@ -287,16 +353,16 @@ describe("personal named sections", () => {
   it("keeps sections and their folds after a relaunch, and shows none to another account", async () => {
     await standard();
     prefs.setPrefs({
-      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [WEB] }, { id: "s2", name: "Active", projects: [API, "github.com/acme/gone"] }] } },
+      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [WEB], collapsed: true }, { id: "s2", name: "Active", projects: [API, "github.com/acme/gone"] }] } },
       sidebarSections: { "cloud-section:s1": "collapsed" },
     });
     mount();
     expect(sectionNames()).toEqual(["Parked", "Active"]);
     expect(within(section("Parked")).getByRole("button", { name: "Parked section" }).getAttribute("aria-expanded")).toBe("false");
     // A project a section names that is not listed now is simply not shown.
-    expect(projectsIn(section("Active"))).toEqual([`cloud:${ORG}:${API}`]);
+    expect(workspacesIn(section("Active"))).toEqual(["fix-login", "perf-sweep"]);
     fireEvent.click(within(section("Parked")).getByRole("button", { name: "Parked section" }));
-    expect(prefs.getPrefs().sidebarSections["cloud-section:s1"]).toBe("expanded");
+    expect(mine().find((entry) => entry.id === "s1")?.collapsed).toBe(false);
     cleanup();
 
     signIn("b@example.com");
@@ -339,7 +405,7 @@ describe("the Unread / Needs you filter", () => {
     expect(within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" }).getAttribute("aria-expanded")).toBe("true");
     // The other project has nothing waiting; the sibling workspace has no row.
     expect(screen.queryByRole("group", { name: "acme/web" })).toBeNull();
-    expect(screen.queryAllByTestId("cloud-workspace-group").map((group) => group.getAttribute("data-workspace"))).toEqual(["asks"]);
+    expect(screen.queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
     expectNoAttachOrResume();
   });
 
@@ -366,7 +432,7 @@ describe("the Unread / Needs you filter", () => {
   it("shows a section only with what matched, opened", async () => {
     await seed();
     prefs.setPrefs({
-      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [WEB] }, { id: "s2", name: "Active", projects: [API] }] } },
+      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [WEB], collapsed: true }, { id: "s2", name: "Active", projects: [API] }] } },
       sidebarSections: { "cloud-section:s2": "collapsed" },
     });
     mount();
@@ -388,8 +454,8 @@ describe("workspace lifecycle menus", () => {
     expectNoAttachOrResume();
   });
 
-  it("names each workspace of a project with several, with its state and its own menu; Resume runs only when chosen", async () => {
-    await standard();
+  it("keeps empty workspaces actionable; Resume runs only when chosen", async () => {
+    await load([item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }), item("perf-sweep", { state: "suspended", repositories: [acmeApi], lastActivityAt: 40 })]);
     mount();
     const groups = within(project("acme/api")).getAllByTestId("cloud-workspace-group");
     expect(groups.map((group) => group.getAttribute("data-workspace"))).toEqual(["fix-login", "perf-sweep"]);
@@ -577,6 +643,7 @@ describe("an organization's states", () => {
     fireEvent.click(within(line).getByRole("button", { name: "Switch" }));
     await waitFor(() => expect(mocks.api.organizationSelect).toHaveBeenCalledWith(OTHER, "s:1"));
     expect(mocks.ask).toHaveBeenCalledTimes(1);
+    expect(mocks.ask.mock.calls[0][0]).toMatchObject({ title: expect.stringMatching(/^Switch the default organization to .+\?$/), body: expect.stringContaining("will close"), action: "Switch" });
   });
 
   it("says once what this Mac dropped of a workspace deleted elsewhere, and the notice can be dismissed", async () => {

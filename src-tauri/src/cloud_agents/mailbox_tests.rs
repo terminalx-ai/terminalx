@@ -13,10 +13,14 @@ type SentImage = (String, String, Option<String>);
 
 #[derive(Default)]
 struct FakeOps {
+    v2_witnesses: Mutex<HashMap<String, crate::remote::collab::v2::TabWitness>>,
+    second_tab: Mutex<bool>,
     busy: Mutex<bool>,
     sent: Mutex<Vec<String>>,
     /// The images of each sent message: (media type, base64, name).
     images: Mutex<Vec<Vec<SentImage>>>,
+    /// The files of each sent message (PRO-407), as stored for its session.
+    files: Mutex<Vec<Vec<crate::events::FileRef>>>,
     stops: Mutex<u32>,
     pending: Mutex<Vec<String>>,
     decisions: Mutex<Vec<(String, String)>>,
@@ -29,8 +33,11 @@ struct FakeOps {
 }
 
 impl AgentOps for FakeOps {
+    fn collaboration_v2_witness(&self, _: &str, tab_id: &str) -> Option<crate::remote::collab::v2::TabWitness> {
+        self.v2_witnesses.lock().unwrap().get(tab_id).cloned()
+    }
     fn tabs(&self) -> Vec<AgentTabInfo> {
-        vec![AgentTabInfo {
+        let mut tabs = vec![AgentTabInfo {
             session_id: "s1".into(),
             tab_id: "tab-1".into(),
             title: None,
@@ -53,7 +60,13 @@ impl AgentOps for FakeOps {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: true,
-        }]
+        }];
+        if *self.second_tab.lock().unwrap() {
+            let mut second = tabs[0].clone();
+            second.tab_id = "tab-2".into();
+            tabs.push(second);
+        }
+        tabs
     }
     fn busy(&self, _: &str, _: &str) -> bool {
         *self.busy.lock().unwrap()
@@ -66,6 +79,10 @@ impl AgentOps for FakeOps {
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> anyhow::Result<()> {
         self.images.lock().unwrap().push(images.into_iter().map(|image| (image.media_type, image.data, image.name)).collect());
         self.send(session_id, tab_id, text)
+    }
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> anyhow::Result<()> {
+        self.files.lock().unwrap().push(files);
+        self.send_with_images(session_id, tab_id, text, images)
     }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
@@ -195,7 +212,7 @@ fn lease_for(agents: &CloudAgents, id: &str, tab_id: &str, kind: &str, body: Val
         key_id,
         iv,
         ciphertext,
-        actor: Actor { user_id: "u1".into(), authority: "manage".into(), role: None, can_approve: None },
+        actor: Actor { collaboration_revision: None, write_source: None, user_id: "u1".into(), authority: "manage".into(), role: None, can_approve: None },
         created_at: now_ms(),
         redelivery: false,
         lease_token: format!("token-{id}"),
@@ -208,6 +225,225 @@ fn open_receipt(agents: &CloudAgents, lease: &Lease, receipt: &Receipt) -> Value
     let aad = crypto::receipt_aad("org_1", "ws_1", &lease.client_command_id, &receipt.outcome, &lease.key_id);
     let bytes = crypto::open(&key, receipt.result_iv.as_ref().unwrap(), receipt.result_ciphertext.as_ref().unwrap(), &aad).unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn v2_snapshot(revision: &str, role: &str, can_approve: bool, source: Value) -> crate::remote::collab::v2::Snapshot {
+    serde_json::from_value(json!({"v": 2, "revision": revision, "members": [
+        {"userId": "u1", "role": role, "canApprove": can_approve, "writeSource": source}
+    ]})).unwrap()
+}
+
+fn v2_collaboration(h: &Harness, snapshot: crate::remote::collab::v2::Snapshot) -> Arc<crate::remote::collab::Collaboration> {
+    let collab = Arc::new(crate::remote::collab::Collaboration::new());
+    h.agents.share_collaboration(collab.clone());
+    collab.install_v2(snapshot).unwrap();
+    collab
+}
+
+fn v2_safe_witness() -> crate::remote::collab::v2::TabWitness {
+    crate::remote::collab::v2::TabWitness {
+        owned: true, harness: "claude".into(), stored_mode: "manual".into(), pending_mode: None,
+        actual: Some(crate::harness::settings::Stance::Mode { mode: "default".into() }),
+    }
+}
+
+#[test]
+fn phase2_collaboration_v2_encrypted_mailbox_manager_false_never_approves_or_configures_via_manage_stamp() {
+    let h = harness();
+    let collab = v2_collaboration(&h, v2_snapshot("9007199254740993", "manager", false, json!("explicit")));
+    let access = collab.access_for(crate::remote::protocol::Authority::Manage, Some("u1"));
+    assert_eq!(access.role, Role::Manager);
+    assert!(!access.can_approve && !access.can_configure());
+    h.ops.pending.lock().unwrap().push("r1".into());
+    // The old mailbox stamp has Manage authority and no role. It cannot
+    // promote the current independent approval right via its legacy fallback.
+    let decision = lease(&h.agents, "v2-decision", "permission-decision", json!({"v": 1, "requestId": "r1", "optionId": "allow"}));
+    assert_eq!(stamped_lease_fixture(&h.agents, &decision).outcome, "rejected");
+    assert_eq!(*h.ops.pending.lock().unwrap(), vec!["r1"]);
+    assert!(h.ops.decisions.lock().unwrap().is_empty());
+    let send = lease(&h.agents, "v2-send", "send", json!({"v": 1, "text": "review", "mode": "bypassPermissions"}));
+    let receipt = stamped_lease_fixture(&h.agents, &send);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(open_receipt(&h.agents, &send, &receipt)["settingsIgnored"], true);
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["review"]);
+    assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "v2-slash", "steer", json!({"v": 1, "text": "/model opus"}))).outcome, "rejected");
+}
+
+#[test]
+fn phase2_collaboration_v2_everyone_drive_is_per_tab_and_explicit_approval_is_independent() {
+    let h = harness();
+    v2_collaboration(&h, v2_snapshot("1", "driver", true, json!("everyone")));
+    *h.ops.second_tab.lock().unwrap() = true;
+    let mut unsafe_tab = v2_safe_witness();
+    unsafe_tab.actual = Some(crate::harness::settings::Stance::Mode { mode: "dontAsk".into() });
+    h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), v2_safe_witness());
+    h.ops.v2_witnesses.lock().unwrap().insert("tab-2".into(), unsafe_tab);
+    let unsafe_send = lease_for(&h.agents, "unsafe", "tab-2", "send", json!({"v": 1, "text": "unsafe"}));
+    assert_eq!(stamped_lease_fixture(&h.agents, &unsafe_send).outcome, "rejected");
+    let safe_send = lease(&h.agents, "safe", "send", json!({"v": 1, "text": "safe", "mode": "bypassPermissions"}));
+    let receipt = stamped_lease_fixture(&h.agents, &safe_send);
+    assert_eq!(receipt.outcome, "applied", "another unsafe tab cannot prohibit safe-tab prose");
+    assert_eq!(open_receipt(&h.agents, &safe_send, &receipt)["settingsIgnored"], true);
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["safe"]);
+    // Explicit viewer+approval combined by the server with Everyone drive:
+    // writeSource describes drive alone, so even this unsafe tab may receive
+    // an explicitly authorized permission decision.
+    h.ops.pending.lock().unwrap().push("r1".into());
+    let decision = lease_for(&h.agents, "approval", "tab-2", "permission-decision", json!({"v": 1, "requestId": "r1", "optionId": "allow"}));
+    assert_eq!(stamped_lease_fixture(&h.agents, &decision).outcome, "applied");
+    assert_eq!(h.ops.decisions.lock().unwrap().len(), 1);
+    assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "raw-command", "steer", json!({"v": 1, "text": "/permissions"}))).outcome, "rejected");
+}
+
+#[test]
+fn phase2_collaboration_v2_encrypted_mailbox_requires_stored_pending_and_raw_actual_mode_witness() {
+    use crate::harness::settings::Stance;
+    let mut cases = vec![("safe Claude", v2_safe_witness(), true)];
+    for mode in ["", "bypassPermissions", "dontAsk", "future-mode", "never, workspace-write"] {
+        let mut witness = v2_safe_witness();
+        witness.stored_mode = mode.into();
+        cases.push(("stored unsafe or unknown", witness, false));
+        let mut witness = v2_safe_witness();
+        witness.pending_mode = Some(mode.into());
+        cases.push(("pending unsafe or unknown", witness, false));
+        let mut witness = v2_safe_witness();
+        witness.actual = Some(Stance::Mode { mode: mode.into() });
+        cases.push(("actual unsafe or unknown", witness, false));
+    }
+    for (approval, sandbox, safe) in [
+        ("never", "danger-full-access", false), ("never", "workspace-write", false),
+        ("unknown", "workspace-write", false), ("on-request", "unknown", false),
+        ("on-request", "danger-full-access", false),
+        ("on-request", "read-only", true), ("on-request", "workspace-write", true),
+    ] {
+        let mut witness = v2_safe_witness();
+        witness.harness = "codex".into();
+        witness.actual = Some(Stance::Sandboxed { approval: approval.into(), sandbox: sandbox.into() });
+        cases.push(("raw Codex stance", witness, safe));
+    }
+    let mut unknown = v2_safe_witness();
+    unknown.actual = None;
+    cases.push(("no actual report", unknown, false));
+    let mut adopted = v2_safe_witness();
+    adopted.owned = false;
+    cases.push(("adopted or by-hand", adopted, false));
+    for harness in ["shell", "opencode", "unsupported"] {
+        let mut witness = v2_safe_witness();
+        witness.harness = harness.into();
+        cases.push(("unsupported engine", witness, false));
+    }
+    for (name, witness, safe) in cases {
+        let h = harness();
+        v2_collaboration(&h, v2_snapshot("1", "driver", false, json!("everyone")));
+        h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), witness);
+        // FakeOps reports zero pending permissions in every case: that
+        // observation must never make an unsafe mode safe.
+        let receipt = stamped_lease_fixture(&h.agents, &lease(&h.agents, "matrix", "send", json!({"v": 1, "text": "prose"})));
+        assert_eq!(receipt.outcome == "applied", safe, "{name}");
+        assert_eq!(h.ops.sent.lock().unwrap().len(), usize::from(safe), "{name}");
+    }
+}
+
+#[test]
+fn phase2_collaboration_v2_followups_fence_same_role_source_revision_generation_and_restart() {
+    for transition in ["source", "revision", "generation", "restart"] {
+        let h = harness();
+        let snapshot = v2_snapshot("10", "driver", false, json!("explicit"));
+        let collab = v2_collaboration(&h, snapshot.clone());
+        *h.ops.busy.lock().unwrap() = true;
+        assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "queued", "send", json!({"v": 1, "text": "queued"}))).outcome, "applied");
+        let on_disk = super::super::receipts::FollowUps::open(h._dir.path()).unwrap();
+        assert!(on_disk.list("tab-1")[0].policy_stamp.is_some());
+        *h.ops.busy.lock().unwrap() = false;
+        let agents = match transition {
+            "source" => {
+                collab.install_v2(v2_snapshot("11", "driver", false, json!("everyone"))).unwrap();
+                h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), v2_safe_witness());
+                h.agents.clone()
+            }
+            "revision" => {
+                collab.install_v2(v2_snapshot("11", "driver", false, json!("explicit"))).unwrap();
+                h.agents.clone()
+            }
+            "generation" => {
+                h.agents.set_generation(8);
+                collab.install_v2(snapshot.clone()).unwrap();
+                h.agents.clone()
+            }
+            _ => {
+                let agents = reopen(&h);
+                let restarted = Arc::new(crate::remote::collab::Collaboration::new());
+                agents.share_collaboration(restarted.clone());
+                assert!(restarted.runtime_policy.stamp("u1").is_none(), "disk state is not authority");
+                restarted.install_v2(snapshot).unwrap();
+                agents
+            }
+        };
+        agents.nudge_follow_ups("tab-1");
+        assert_eq!(agents.dispatch_follow_ups(), 0, "{transition}");
+        assert!(h.ops.sent.lock().unwrap().is_empty(), "{transition}");
+        assert!(agents.follow_ups.list("tab-1").is_empty(), "{transition}");
+    }
+}
+
+#[test]
+fn phase2_collaboration_v2_stale_conflicting_and_failed_durable_policy_never_admit_encrypted_lease_input() {
+    for next in [v2_snapshot("9", "manager", true, json!("explicit")), v2_snapshot("10", "manager", true, json!("explicit"))] {
+        let h = harness();
+        let collab = v2_collaboration(&h, v2_snapshot("10", "driver", false, json!("explicit")));
+        assert!(collab.install_v2(next).is_err());
+        assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "stale", "send", json!({"v": 1, "text": "do not send"}))).outcome, "rejected");
+        assert!(h.ops.sent.lock().unwrap().is_empty());
+        assert!(collab.install_v2(v2_snapshot("10", "driver", false, json!("explicit"))).is_err(), "a conflicting revision stays poisoned");
+        collab.install_v2(v2_snapshot("11", "driver", false, json!("explicit"))).unwrap();
+        assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "current", "send", json!({"v": 1, "text": "current"}))).outcome, "applied");
+    }
+    let h = harness();
+    let collab = v2_collaboration(&h, v2_snapshot("10", "driver", false, json!("explicit")));
+    let path = h._dir.path().join("collaboration-v2-policy.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(collab.install_v2(v2_snapshot("11", "driver", false, json!("explicit"))).is_err());
+    assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "failed-store", "send", json!({"v": 1, "text": "do not send"}))).outcome, "rejected");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn phase2_collaboration_v2_policy_replacement_cannot_cross_native_command_mark_and_synchronous_apply() {
+    use std::sync::mpsc;
+    let h = harness();
+    let collab = v2_collaboration(&h, v2_snapshot("1", "driver", false, json!("explicit")));
+    let stamp = collab.runtime_policy.stamp("u1");
+    let agents = h.agents.clone();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let apply_thread = std::thread::spawn(move || {
+        let body = json!({"text": "first"});
+        let command = Command { kind: "send", tab_id: "tab-1", client_command_id: "atomic", actor_id: "u1", leases: true,
+            access: crate::remote::collab::Access { role: Role::Driver, can_approve: false }, policy_stamp: stamp, plaintext: &body };
+        decide(&agents, &command, || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Ok(())
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let refresh = collab.clone();
+    let (installed_tx, installed_rx) = mpsc::channel();
+    let refresh_thread = std::thread::spawn(move || {
+        refresh.install_v2(v2_snapshot("2", "viewer", false, Value::Null)).unwrap();
+        installed_tx.send(()).unwrap();
+    });
+    assert!(installed_rx.recv_timeout(Duration::from_millis(30)).is_err(), "refresh waits for admitted synchronous apply");
+    release_tx.send(()).unwrap();
+    assert!(matches!(apply_thread.join().unwrap(), Decided::Applied(("applied", _, _))));
+    refresh_thread.join().unwrap();
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["first"]);
+    // A stamp captured before revocation cannot authorize a later invocation.
+    assert_eq!(stamped_lease_fixture(&h.agents, &lease(&h.agents, "after", "steer", json!({"v": 1, "text": "after"}))).outcome, "rejected");
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -350,7 +586,7 @@ fn unreadable_misrouted_unauthorized_or_unknown_commands_are_rejected_untouched(
     let mut moved = lease_for(&h.agents, "c2", "tab-2", "send", json!({ "v": 1, "text": "x" }));
     moved.tab_id = "tab-1".into();
     assert_eq!(handle(&h.agents, &moved).category.as_deref(), Some("decrypt-failed"));
-    let participant = Lease { actor: Actor { user_id: "u2".into(), authority: "participate".into(), role: None, can_approve: None }, ..lease(&h.agents, "c3", "send", json!({ "v": 1, "text": "x" })) };
+    let participant = Lease { actor: Actor { collaboration_revision: None, write_source: None, user_id: "u2".into(), authority: "participate".into(), role: None, can_approve: None }, ..lease(&h.agents, "c3", "send", json!({ "v": 1, "text": "x" })) };
     assert_eq!(handle(&h.agents, &participant).category.as_deref(), Some("forbidden"));
     assert_eq!(handle(&h.agents, &lease_for(&h.agents, "c4", "tab-9", "send", json!({ "v": 1, "text": "x" }))).category.as_deref(), Some("tab-unknown"));
     assert_eq!(handle(&h.agents, &lease(&h.agents, "c5", "send", json!({ "v": 1, "text": " " }))).category.as_deref(), Some("payload-invalid"));
@@ -529,7 +765,7 @@ fn work_resumes_at_once_when_a_device_attaches_after_the_archive() {
 
 fn as_actor(lease: Lease, user: &str, role: &str, can_approve: bool) -> Lease {
     Lease {
-        actor: Actor { user_id: user.into(), authority: "participate".into(), role: Some(role.into()), can_approve: Some(can_approve) },
+        actor: Actor { collaboration_revision: None, write_source: None, user_id: user.into(), authority: "participate".into(), role: Some(role.into()), can_approve: Some(can_approve) },
         ..lease
     }
 }
@@ -587,7 +823,7 @@ fn one_driver_at_a_time_and_the_other_is_told_who_drives() {
     assert_eq!(handle(&h.agents, &bob_stop).category.as_deref(), Some("lease-held"));
     // A manager may stop anyone's turn; sending still needs the lease.
     let boss_stop = Lease {
-        actor: Actor { user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
+        actor: Actor { collaboration_revision: None, write_source: None, user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
         ..lease(&h.agents, "c4", "stop", json!({ "v": 1 }))
     };
     assert_eq!(handle(&h.agents, &boss_stop).outcome, "applied");
@@ -754,7 +990,7 @@ fn a_plain_drivers_slash_command_is_refused_with_the_reason_and_an_approvers_goe
     *h.ops.busy.lock().unwrap() = false;
     assert!(collab.release("tab-1", "bob", false));
     let boss = Lease {
-        actor: Actor { user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
+        actor: Actor { collaboration_revision: None, write_source: None, user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
         ..lease(&h.agents, "boss-1", "send", json!({ "v": 1, "text": "/permissions" }))
     };
     assert_eq!(handle(&h.agents, &boss).outcome, "applied");
@@ -870,7 +1106,7 @@ fn a_command_is_never_steered_into_a_running_turn() {
 
 /// PRO-22: the sender uploads an image first; the message names it.
 fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
-    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), true).unwrap();
+    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), false, true).unwrap();
 }
 
 #[test]
@@ -900,7 +1136,7 @@ fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed
 fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
     let h = harness();
     upload(&h.agents, "u-alice", "attach-0001", b"abc");
-    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false).unwrap();
+    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false, false).unwrap();
     // Someone else's upload, one never completed, one never uploaded, a malformed list, and a steer.
     for (id, kind, body) in [
         ("c1", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
@@ -963,6 +1199,81 @@ fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
     assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
 }
 
+/// PRO-407: a file other than an image, uploaded first like an image.
+fn upload_file(agents: &CloudAgents, owner: &str, id: &str, name: &str, bytes: &[u8]) {
+    agents.attach_part(owner, id, 0, bytes, "text/markdown", Some(name), true, true).unwrap();
+}
+
+#[test]
+fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload_file(&h.agents, "u1", "attach-0002", "plan.md", b"# Plan");
+    let body = json!({ "v": 1, "text": "read the plan", "images": [{ "id": "attach-0001" }], "files": [{ "id": "attach-0002", "name": "plan.md" }] });
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", body)).outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["read the plan"]);
+    assert_eq!(h.ops.images.lock().unwrap()[0].len(), 1, "the image goes as an image");
+    let files = h.ops.files.lock().unwrap()[0].clone();
+    assert_eq!(files.len(), 1);
+    let folder = crate::store::attachments_dir("s1").unwrap().canonicalize().unwrap();
+    assert!(std::path::Path::new(&files[0].path).starts_with(&folder), "{:?}", files[0].path);
+    assert_eq!(std::fs::read(&files[0].path).unwrap(), b"# Plan");
+    assert!(h.agents.attachments.check_files("u1", &["attach-0002".into()]).is_err(), "typed: the upload is gone");
+    // Files alone are a message.
+    *h.ops.busy.lock().unwrap() = false;
+    upload_file(&h.agents, "u1", "attach-0003", "notes.txt", b"notes");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "files": [{ "id": "attach-0003" }] }))).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
+    assert_eq!(h.ops.files.lock().unwrap()[1][0].name, "notes.txt");
+}
+
+#[test]
+fn a_queued_message_takes_its_files_into_the_session_and_types_them_later() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload_file(&h.agents, "u1", "attach-0001", "plan.md", b"# Plan");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "then this", "files": [{ "id": "attach-0001" }] }))).outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    // Stored when it was queued, so a restart or a day's pruning cannot lose it.
+    let queued = h.agents.follow_ups.list("tab-1");
+    assert_eq!(queued[0].files.len(), 1);
+    assert!(std::path::Path::new(&queued[0].files[0].path).is_file());
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["then this"]);
+    assert_eq!(h.ops.files.lock().unwrap()[0], queued[0].files);
+}
+
+#[test]
+fn a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload_file(&h.agents, "u-alice", "attach-0001", "plan.md", b"# Plan");
+    upload(&h.agents, "u1", "attach-0002", b"abc");
+    for (id, body) in [
+        ("c1", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] })),
+        ("c2", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-9999" }] })),
+        // An image named as a file is not one.
+        ("c3", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0002" }] })),
+    ] {
+        let lease = lease(&h.agents, id, "send", body);
+        let receipt = handle(&h.agents, &lease);
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(ATTACHMENT_MISSING)), "{id}");
+        assert!(open_receipt(&h.agents, &lease, &receipt)["message"].as_str().unwrap().starts_with("Not sent: a file"));
+    }
+    let eleven: Vec<Value> = (0..11).map(|index| json!({ "id": format!("attach-1{index:03}") })).collect();
+    for (id, kind, body) in [("c4", "send", json!({ "v": 1, "text": "look", "files": eleven })), ("c5", "steer", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] }))] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, kind, body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.agents.attachments.check_files("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
+}
+
 /// Review of #309: a refused message must not leave its uploads behind, or
 /// retries fill the store until nobody can attach.
 #[test]
@@ -982,4 +1293,81 @@ fn a_refused_message_gives_up_its_senders_uploads_and_nobody_elses() {
     let again = json!({ "v": 1, "text": "what is this?", "images": [{ "id": "attach-0001" }] });
     assert_eq!(handle(&h.agents, &as_actor(lease(&h.agents, "c2", "send", again), "alice", "driver", false)).outcome, "applied");
     assert_eq!(h.ops.images.lock().unwrap().len(), 1);
+}
+
+
+/// Simulated authoritative server Actor, decoded through its real typed wire
+/// shape. The body remains encrypted and passes through handle/decrypt/judge.
+fn stamped_lease_fixture(agents: &CloudAgents, lease: &Lease) -> Receipt {
+    let mut lease = lease.clone();
+    if let Some(stamp) = agents.collab().and_then(|collab| collab.runtime_policy.stamp(&lease.actor.user_id)) {
+        let stamp = serde_json::to_value(stamp).unwrap();
+        lease.actor = serde_json::from_value(json!({
+            "userId":lease.actor.user_id,"authority":lease.actor.authority,
+            "role":stamp["member"]["role"],"canApprove":stamp["member"]["canApprove"],
+            "collaborationRevision":stamp["revision"],"writeSource":stamp["member"]["writeSource"]
+        })).unwrap();
+    }
+    handle(agents, &lease)
+}
+
+#[test]
+fn phase2_collaboration_v2_role_only_mailbox_actor_never_inherits_explicit_authority_from_bootstrap() {
+    for source in ["explicit", "everyone", "implicit"] {
+        let h = harness();
+        v2_collaboration(&h, v2_snapshot("100", "driver", true, json!(source)));
+        h.ops.v2_witnesses.lock().unwrap().insert("tab-1".into(), v2_safe_witness());
+        let mut command = lease(&h.agents, "role-only", "send", json!({"v":1,"text":"must not arrive"}));
+        command.actor.role = Some("driver".into());
+        command.actor.can_approve = Some(true);
+        let receipt = handle(&h.agents, &command);
+        assert_eq!(receipt.outcome, "rejected");
+        assert_eq!(receipt.category.as_deref(), Some("collaboration-provenance-unavailable"));
+        assert!(h.ops.sent.lock().unwrap().is_empty());
+        assert!(h.ops.settings.lock().unwrap().is_empty());
+        assert!(h.agents.follow_ups.list("tab-1").is_empty());
+    }
+}
+
+
+#[test]
+fn phase2_collaboration_v2_encrypted_lease_requires_exact_authoritative_revision_role_approval_and_source() {
+    for (revision, role, approve, source) in [
+        ("11","driver",false,json!("everyone")), // stale explicit bootstrap, fresh Everyone actor
+        ("9","driver",false,json!("explicit")),
+        ("10","driver",false,json!("everyone")),
+        ("10","manager",false,json!("explicit")),
+        ("10","driver",true,json!("explicit")),
+        ("9223372036854775808","driver",false,json!("explicit")),
+    ] {
+        let h = harness();
+        v2_collaboration(&h,v2_snapshot("10","driver",false,json!("explicit")));
+        let mut leased = lease(&h.agents,"mismatch","send",json!({"v":1,"text":"must never arrive"}));
+        leased.actor = serde_json::from_value(json!({"userId":"u1","authority":"manage","role":role,"canApprove":approve,
+            "collaborationRevision":revision,"writeSource":source})).unwrap();
+        let receipt = handle(&h.agents,&leased);
+        assert_eq!(receipt.category.as_deref(),Some("collaboration-provenance-unavailable"));
+        assert!(h.ops.sent.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn phase2_collaboration_v2_required_nullable_actor_source_and_independent_viewer_approval() {
+    let h = harness();
+    v2_collaboration(&h,v2_snapshot("1","viewer",true,Value::Null));
+    h.ops.pending.lock().unwrap().push("r1".into());
+    let mut leased = lease(&h.agents,"nullable-source","permission-decision",json!({"v":1,"requestId":"r1","optionId":"allow"}));
+    for actor in [
+        json!({"userId":"u1","authority":"manage","role":"viewer","canApprove":true,"collaborationRevision":"1"}),
+        json!({"userId":"u1","authority":"manage","role":"viewer","canApprove":true,"writeSource":null}),
+    ] {
+        leased.actor = serde_json::from_value(actor).unwrap();
+        assert!(lease_provenance(h.agents.collab().unwrap(),&leased).is_err());
+    }
+    leased.actor = serde_json::from_value(json!({"userId":"u1","authority":"manage","role":"viewer","canApprove":true,
+        "collaborationRevision":"1","writeSource":null})).unwrap();
+    assert_eq!(handle(&h.agents,&leased).outcome,"applied");
+    assert_eq!(h.ops.decisions.lock().unwrap().len(),1);
+    assert!(serde_json::from_value::<Actor>(json!({"userId":"u1","authority":"manage","collaborationRevision":1,"writeSource":null})).is_err());
+    assert!(serde_json::from_value::<Actor>(json!({"userId":"u1","authority":"manage","collaborationRevision":"1","writeSource":"future-source"})).is_err());
 }

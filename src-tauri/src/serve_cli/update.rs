@@ -813,7 +813,7 @@ fn install(root: &Path, source: &Source, release: &Release, asset: &str, fetch: 
         std::io::Write::write_all(&mut file, &binary)?;
         file.sync_all()?;
     }
-    let ran = Command::new(&staged).arg("--version").stdin(Stdio::null()).output().with_context(|| format!("run the downloaded runtime of {tag}"))?;
+    let ran = run_fresh(Command::new(&staged).arg("--version").stdin(Stdio::null())).with_context(|| format!("run the downloaded runtime of {tag}"))?;
     let said = String::from_utf8_lossy(&ran.stdout).trim().to_string();
     let expected = format!("terminalx-serve {}", release.version);
     if !ran.status.success() || said != expected {
@@ -842,6 +842,23 @@ fn swap_link(link: &Path, target: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&next);
     })
     .with_context(|| format!("swap {} to {}", link.display(), target.display()))
+}
+
+/// Run a binary this process has just written. Closing it is not enough on
+/// Linux: a child another thread forked while the file was open for writing
+/// holds that descriptor until it execs, and until then the kernel refuses
+/// to run the file (`ETXTBSY`). That window is short, so the run is retried
+/// for up to two seconds before the error stands. Once it has run, the
+/// installed copy (the same file, renamed) starts without this.
+fn run_fresh(command: &mut Command) -> std::io::Result<std::process::Output> {
+    const TEXT_FILE_BUSY: i32 = 26; // ETXTBSY on Linux and macOS
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.output() {
+            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            outcome => return outcome,
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

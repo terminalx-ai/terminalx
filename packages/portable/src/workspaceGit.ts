@@ -84,6 +84,8 @@ export interface RemotePullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has for the pull request. Empty or absent on older runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
@@ -107,6 +109,27 @@ export interface PrReviewer {
   kind: "user" | "team" | "bot";
   state: string;
   requested: boolean;
+  /** Display name, when the account has one. Absent on older runtimes. */
+  name?: string;
+  /** When the latest review was submitted, or a pending request made. */
+  at?: string;
+}
+/** How a merged pull request merged. Absent on older runtimes. */
+export interface PrMerged {
+  at: string | null;
+  by: string | null;
+  commit: string | null;
+  /** It merged with a merge commit (two parents), not squash or rebase. */
+  mergeCommit: boolean;
+  /** GitHub no longer has the head branch. */
+  branchDeleted: boolean;
+}
+/** The repository's merge methods for this viewer. */
+export interface PrMergeMethods {
+  default: "MERGE" | "SQUASH" | "REBASE" | null;
+  merge: boolean;
+  squash: boolean;
+  rebase: boolean;
 }
 export interface PrActivity {
   id: string;
@@ -130,6 +153,10 @@ export interface PrConversation {
   reviewers: PrReviewer[];
   unresolvedThreads: number;
   activity: PrActivity[];
+  base?: string;
+  commits?: number | null;
+  merged?: PrMerged | null;
+  mergeMethods?: PrMergeMethods | null;
 }
 export type PrConversationAction =
   | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
@@ -216,6 +243,12 @@ export interface RuntimeResources {
   memory: { totalBytes: number; availableBytes: number } | null;
   /** The disk that holds the workspace; null when it could not be asked. */
   storage: { totalBytes: number; availableBytes: number; totalInodes: number; availableInodes: number } | null;
+  /**
+   * The processor (PRO-350): its logical cores, and how busy all of them
+   * were, 0 to 1, since the previous call (null on the first, which has
+   * nothing to compare with). Absent from an older runtime.
+   */
+  cpu?: { cores: number; usage: number | null } | null;
   observedAt: number;
 }
 
@@ -257,7 +290,7 @@ export class RemoteGit {
     return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
-  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
+  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
   }
 
@@ -334,8 +367,12 @@ export class RemoteGit {
     return this.write("git.prReady", { number });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
-    return this.write("git.prMerge", { number, method });
+  /**
+   * `head` pins the merge to the commit the person saw: GitHub refuses it
+   * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
+   */
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
+    return this.write("git.prMerge", head ? { number, method, head } : { number, method });
   }
 }
 

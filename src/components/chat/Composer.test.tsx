@@ -270,6 +270,37 @@ describe("composer attachments", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "inspect_attachments")).toHaveLength(1);
   });
 
+  it("PRO-407: a machine tab takes any file, sends it with the message, and leaves a dropped folder out with a word", async () => {
+    nativeFiles((path) => (path.endsWith(".png") ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : null));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    const onSend = vi.fn();
+    function Machine() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote attachFiles busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const { container } = render(<Machine />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop files to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt", "/Users/me/project"] } }));
+    expect(await screen.findByTitle("notes.txt")).toBeTruthy();
+    // A folder's path here names nothing on the machine: never mentioned, and said.
+    expect(box.value).toBe("");
+    expect(screen.getByTestId("attach-notice").textContent).toBe("project was not attached: only files can be sent to an agent on another computer, not folders.");
+    // The picker offers every file, not only images.
+    expect(container.querySelector<HTMLInputElement>('input[type="file"]')!.accept).toBe("");
+    fireEvent.change(box, { target: { value: "Read this" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+    expect(onSend).toHaveBeenCalledWith("Read this", [], false, [expect.objectContaining({ name: "notes.txt", path: "/Users/me/notes.txt" })]);
+  });
+
   it("hands over the very same image when a failed send is tried again", async () => {
     const sent: unknown[] = [];
     const onSend = vi.fn(async (_text: string, images: unknown[]) => {
@@ -647,13 +678,13 @@ describe("composer history (PRO-85)", () => {
   // The draft lives outside the composer, as a tab's does, so it outlasts a remount.
   const drafts = new Map<string, string>();
 
-  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold" }) {
+  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps, held = null }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold"; held?: string | null }) {
     const [draft, setDraft] = useState(drafts.get(id) ?? "");
     const change = (text: string) => {
       drafts.set(id, text);
       setDraft(text);
     };
-    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} heldReason={held} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
   }
 
   const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
@@ -797,6 +828,27 @@ describe("composer history (PRO-85)", () => {
     await waitFor(() => expect(field().value).toBe("work in progress"));
     press("ArrowUp");
     expect(field().value).toBe("third message");
+  });
+
+  // PRO-352 (21.09): while a machine is away, what is typed stays, and nothing goes until the person sends it once it is back.
+  it("keeps a prompt typed while its machine is away, and sends it only when the person does after it is back", async () => {
+    const onSend = vi.fn();
+    const view = render(<HistoryComposer onSend={onSend} held="Can't send until Mac mini is back" />);
+    expect(field().disabled).toBe(false);
+    expect(field().placeholder).toBe("Can't send until Mac mini is back");
+    type("check the relay e2e again");
+    press("Enter");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+
+    // Back: nothing was queued, and the prompt goes when the person sends it.
+    view.rerender(<HistoryComposer onSend={onSend} />);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+    press("Enter");
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("check the relay e2e again", []));
   });
 
   it("clears the composer after an ordinary send, and Shift+Return still does not send", async () => {
@@ -950,6 +1002,24 @@ describe("composer history (PRO-85)", () => {
     }
     await act(async () => {});
     expect(selected()).toContain("b.ts");
+  });
+
+  it("offers saved snippets under / by name, and choosing one puts its text in (PRO-379)", async () => {
+    act(() => setPrefs({ promptSnippets: [{ id: "a", name: "review-pr", text: "Review the open PR.\nList risks." }] }));
+    try {
+      const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: null };
+      function CloudComposer() {
+        const [draft, setDraft] = useState("");
+        return <Composer tab={tab} commands={{ key: "cloud|snippets", known: () => null, load: async () => list }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+      }
+      render(<CloudComposer />);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+      await waitFor(() => expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["/review-prReview the open PR.Snippet", "/compactShorten"]));
+      fireEvent.change(box, { target: { value: "/rev", selectionStart: 4 } });
+      fireEvent.mouseDown(await screen.findByRole("option", { name: /review-pr/ }));
+      await waitFor(() => expect(box.value).toBe("Review the open PR.\nList risks."));
+    } finally { act(() => setPrefs({ promptSnippets: [] })); }
   });
 
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
@@ -1169,13 +1239,55 @@ describe("autocorrect in the composer (#525)", () => {
 // #637: hold the delivery promise independently of any agent response.
 // #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
 describe("pending send acknowledgment", () => {
-  it.each(["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
+  it.each(["/goal Reduce p95 latency below 120 ms", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
     const onSend = vi.fn();
     render(<TestComposer onSend={onSend} />);
     const field = screen.getByRole("textbox");
     fireEvent.change(field, { target: { value: command } });
     fireEvent.keyDown(field, { key: "Enter" });
     await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(command, []));
+  });
+
+  // PRO-380 (03.20): a bare /goal says nothing to set; it stays, with the composer edged red and a hint under it.
+  it.each(["/goal", "/goal   "])("keeps %j in a Codex composer and says what is missing", async (command) => {
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: command } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect((await screen.findByRole("alert")).textContent).toBe("Type a goal after /goal, like “/goal ship saved views with tests”");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.value).toBe(command);
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "/goal ship it" } });
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+    fireEvent.change(field, { target: { value: "/goal" } });
+    // Said again only when it is sent again.
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+  });
+
+  it("does not send a /goal to Claude Code and offers a Codex tab", async () => {
+    const { getErrorToasts, dismissError } = await import("@/lib/errorToasts");
+    const onSend = vi.fn();
+    const openCodex = vi.fn();
+    function Claude() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={{ ...tab, harness: "claude", title: "Review saved views" }} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} onOpenCodexTab={openCodex} />;
+    }
+    render(<Claude />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "/goal Keep the overview tests green" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    const toast = getErrorToasts().at(-1)!;
+    expect(toast.title).toBe("Goals work in Codex chats only");
+    expect(toast.action).toBe("“Review saved views” runs Claude Code, which has no goals. Your text is still in the composer");
+    expect(toast.icon).toBe("target");
+    expect(toast.copy).toBe(false);
+    toast.actions![0].run();
+    expect(openCodex).toHaveBeenCalled();
+    expect(field.value).toBe("/goal Keep the overview tests green");
+    expect(onSend).not.toHaveBeenCalled();
+    dismissError(toast.id);
   });
 
   it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {
@@ -1387,6 +1499,17 @@ it.each([false, true])("waits for PR context before sending, unless Escape cance
   fireEvent.click(send);
   await waitFor(() => expect(onSend).toHaveBeenCalledWith(cancel ? "Review #12" : "Review @/context/pr-12.md", []));
   if (cancel) await act(async () => finish("/context/pr-12.md"));
+});
+
+// PRO-352: a held composer (its machine is away) sends nothing, Compact included.
+it("does not compact while its machine is away", async () => {
+  const send = vi.fn();
+  render(<Composer tab={tab} busy={false} draft="" onDraftChange={vi.fn()} onSend={send} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} contextUsed={90000} contextMax={100000} heldReason="Can't send until Mac mini is back" />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  const compact = (await screen.findByRole("button", { name: "Compact now" })) as HTMLButtonElement;
+  expect(compact.disabled).toBe(true);
+  fireEvent.click(compact);
+  expect(send).not.toHaveBeenCalled();
 });
 
 it("compacts from the ring through the CLI send path while keeping the draft", async () => {

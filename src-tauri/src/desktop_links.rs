@@ -42,6 +42,41 @@ impl PendingSettingsLink {
     }
 }
 
+/// The longest session or tab id a tab link may name; the app's ids (UUIDs) are far shorter.
+const MAX_TAB_LINK_ID_LEN: usize = 64;
+
+/// A tab link (`<scheme>://tab/<session-id>/<tab-id>`, PRO-381) after
+/// validation: all the webview is ever handed of it, never the URL text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabLink {
+    pub session_id: String,
+    pub tab_id: String,
+}
+
+/// A plausible session or tab id: letters, digits, '-' and '_', short.
+/// Whether it names a tab that is still open is the webview's call.
+fn is_tab_link_id(id: &str) -> bool {
+    (1..=MAX_TAB_LINK_ID_LEN).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+/// The tab link that arrived last and the webview has not taken yet, as
+/// [`PendingSettingsLink`] keeps a setting link.
+#[derive(Default)]
+pub struct PendingTabLink(Mutex<Option<TabLink>>);
+
+impl PendingTabLink {
+    /// Keep `link` for the webview, in place of one it has not taken.
+    pub fn set(&self, link: TabLink) {
+        *self.0.lock().unwrap() = Some(link);
+    }
+
+    /// The waiting link, once: a second take returns None.
+    pub fn take(&self) -> Option<TabLink> {
+        self.0.lock().unwrap().take()
+    }
+}
+
 /// Selected by the bundled Tauri identity, not Cargo's optimization profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DesktopLinks {
@@ -116,6 +151,43 @@ impl DesktopLinks {
         // above did not look at (an empty `?`, userinfo) slips through.
         let canonical = format!("{}://settings/{id}{}", url.scheme(), if enable { "?enable=1" } else { "" });
         (url.as_str() == canonical).then(|| SettingsLink { id: id.to_owned(), enable })
+    }
+}
+
+impl DesktopLinks {
+    /// The scheme this build's links are written in.
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Self::Release => "terminalx",
+            Self::Dev => "terminalx-dev",
+        }
+    }
+
+    /// The link that opens `tab_id` of `session_id`, or None for ids no link may carry.
+    pub fn tab_link_url(self, session_id: &str, tab_id: &str) -> Option<String> {
+        (is_tab_link_id(session_id) && is_tab_link_id(tab_id)).then(|| format!("{}://tab/{session_id}/{tab_id}", self.scheme()))
+    }
+
+    /// A strictly shaped tab link: this build's scheme, host `tab`, exactly
+    /// two path segments that are plausible ids, and nothing else (no
+    /// credentials, port, query or fragment). Anything else is None.
+    pub fn tab_link(self, url: &Url) -> Option<TabLink> {
+        if !self.accepts_scheme(url.scheme())
+            || url.host_str() != Some("tab")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let (session_id, tab_id) = url.path().strip_prefix('/')?.split_once('/')?;
+        if !is_tab_link_id(session_id) || !is_tab_link_id(tab_id) {
+            return None;
+        }
+        let canonical = format!("{}://tab/{session_id}/{tab_id}", url.scheme());
+        (url.as_str() == canonical).then(|| TabLink { session_id: session_id.to_owned(), tab_id: tab_id.to_owned() })
     }
 }
 
@@ -267,5 +339,47 @@ mod tests {
     fn a_settings_link_reaches_the_webview_as_id_and_enable_only() {
         let link = parse(DesktopLinks::Release, "terminalx://settings/general.sounds?enable=1").unwrap();
         assert_eq!(serde_json::to_value(link).unwrap(), serde_json::json!({ "id": "general.sounds", "enable": true }));
+    }
+
+    #[test]
+    fn a_tab_link_round_trips_in_each_builds_scheme() {
+        let session = "01a16ab6-6ed3-7d71-ba73-9cb44606db13";
+        let tab = "01a16ab6-6ed3-7d71-ba73-9cc746e1371e";
+        for links in [DesktopLinks::Release, DesktopLinks::Dev] {
+            let link = links.tab_link_url(session, tab).unwrap();
+            assert!(link.starts_with(&format!("{}://tab/", links.scheme())));
+            let parsed = links.tab_link(&Url::parse(&link).unwrap()).unwrap();
+            assert_eq!(parsed, TabLink { session_id: session.into(), tab_id: tab.into() });
+        }
+        assert_eq!(DesktopLinks::Release.tab_link(&Url::parse(&format!("terminalx-dev://tab/{session}/{tab}")).unwrap()), None);
+        assert_eq!(DesktopLinks::Release.tab_link_url("a/b", tab), None);
+    }
+
+    #[test]
+    fn tab_links_outside_the_strict_shape_are_rejected() {
+        for link in [
+            "terminalx://tab/s1",
+            "terminalx://tab/s1/t1/extra",
+            "terminalx://tab/s1/t1?x=1",
+            "terminalx://tab/s1/t1#x",
+            "terminalx://user@tab/s1/t1",
+            "terminalx://tab:9/s1/t1",
+            "terminalx://tab//t1",
+            "terminalx://tab/s1/t%201",
+            "terminalx://tab/s1/t1/",
+            "terminalx://settings/s1/t1",
+        ] {
+            assert_eq!(DesktopLinks::Release.tab_link(&Url::parse(link).unwrap()), None, "took {link}");
+        }
+    }
+
+    #[test]
+    fn a_tab_link_reaches_the_webview_as_session_and_tab_ids_only() {
+        let link = TabLink { session_id: "s1".into(), tab_id: "t1".into() };
+        assert_eq!(serde_json::to_value(&link).unwrap(), serde_json::json!({ "sessionId": "s1", "tabId": "t1" }));
+        let pending = PendingTabLink::default();
+        pending.set(link.clone());
+        assert_eq!(pending.take(), Some(link));
+        assert_eq!(pending.take(), None);
     }
 }

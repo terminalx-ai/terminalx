@@ -20,10 +20,10 @@ use crate::remote::server::WorkspaceRpc;
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-struct Rig {
-    host: Arc<MachineHost>,
-    keypair: HostKeypair,
-    port: u16,
+pub(super) struct Rig {
+    pub(super) host: Arc<MachineHost>,
+    pub(super) keypair: HostKeypair,
+    pub(super) port: u16,
     _data: tempfile::TempDir,
     _home: crate::store::TempHome,
 }
@@ -34,7 +34,7 @@ impl Drop for Rig {
     }
 }
 
-fn rig(approval_ttl_ms: i64) -> Rig {
+pub(super) fn rig(approval_ttl_ms: i64) -> Rig {
     let home = crate::store::temp_home();
     let data = tempfile::tempdir().unwrap();
     let keypair = HostKeypair::from_secret([9; 32]);
@@ -45,26 +45,26 @@ fn rig(approval_ttl_ms: i64) -> Rig {
     Rig { host, keypair, port, _data: data, _home: home }
 }
 
-fn public_b64(secret: [u8; 32]) -> String {
+pub(super) fn public_b64(secret: [u8; 32]) -> String {
     STANDARD.encode(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret)).as_bytes())
 }
 
 /// The code, reached on loopback here.
-fn local(code: &str, port: u16) -> MachineCode {
+pub(super) fn local(code: &str, port: u16) -> MachineCode {
     let mut code = MachineCode::decode(code).unwrap();
     assert!(code.direct_endpoints.iter().all(|endpoint| endpoint.ends_with(&format!(":{port}/machine/1"))), "{:?}", code.direct_endpoints);
     code.direct_endpoints = vec![format!("ws://127.0.0.1:{port}/machine/1")];
     code
 }
 
-struct Asked {
+pub(super) struct Asked {
     socket: Socket,
     session: E2eeSession,
     transcript: String,
 }
 
 /// Connect with `secret` as the client key and send `e2ee_auth` with `token`.
-async fn ask(rig: &Rig, secret: [u8; 32], token: &str) -> Asked {
+pub(super) async fn ask(rig: &Rig, secret: [u8; 32], token: &str) -> Asked {
     let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/machine/1", rig.port)).await.unwrap();
     let handshake = E2eeClientHandshake::with_secret(secret, &rig.keypair.public_key_b64(), "direct", None).unwrap();
     socket.send(Message::Text(serde_json::to_string(handshake.hello()).unwrap().into())).await.unwrap();
@@ -81,7 +81,7 @@ async fn ask(rig: &Rig, secret: [u8; 32], token: &str) -> Asked {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Answer {
+pub(super) enum Answer {
     In,
     Refused(String),
     Closed(Option<u16>),
@@ -89,7 +89,7 @@ enum Answer {
 }
 
 impl Asked {
-    async fn answer(&mut self, wait: Duration) -> Answer {
+    pub(super) async fn answer(&mut self, wait: Duration) -> Answer {
         match tokio::time::timeout(wait, self.socket.next()).await {
             Err(_) => Answer::Silent,
             Ok(Some(Ok(Message::Text(text)))) => {
@@ -109,7 +109,7 @@ impl Asked {
         }
     }
 
-    async fn call(&mut self, id: &str, method: &str, params: Value) -> Value {
+    pub(super) async fn call(&mut self, id: &str, method: &str, params: Value) -> Value {
         let request = json!({ "id": id, "method": method, "params": params });
         let sealed = self.session.seal(request.to_string().as_bytes(), PayloadKind::Text).unwrap();
         self.socket.send(Message::Text(STANDARD.encode(sealed).into())).await.unwrap();
@@ -124,7 +124,7 @@ impl Asked {
     }
 
     /// Whether the machine closed this connection within `wait`.
-    async fn closed_within(&mut self, wait: Duration) -> bool {
+    pub(super) async fn closed_within(&mut self, wait: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             match tokio::time::timeout_at(deadline, self.socket.next()).await {
@@ -136,7 +136,7 @@ impl Asked {
     }
 }
 
-async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
+pub(super) async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(found) = check() {
@@ -147,7 +147,7 @@ async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn paired(rig: &Rig, id: &str, secret: [u8; 32], token: &str) {
+pub(super) fn paired(rig: &Rig, id: &str, secret: [u8; 32], token: &str) {
     rig.host
         .registry()
         .put(PairedComputer {
@@ -157,9 +157,12 @@ fn paired(rig: &Rig, id: &str, secret: [u8; 32], token: &str) {
             platform: Some("macos".into()),
             client_public_key_b64: Some(public_b64(secret)),
             fingerprint: None,
-            approved_at: 1,
+            // Now: a credential unused for 90 days would expire (PRO-357).
+            approved_at: chrono::Utc::now().timestamp_millis(),
             last_seen_at: None,
             relay_device_id: None,
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         })
         .unwrap();

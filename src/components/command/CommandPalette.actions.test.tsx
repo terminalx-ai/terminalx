@@ -77,7 +77,7 @@ describe("the Actions tab (design 07.04)", () => {
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-labelledby"))).toEqual(["palette-group-session-actions", "palette-group-commands"]);
     expect(document.getElementById("palette-group-session-actions")!.textContent).toBe("This session · Fix duplicate permission cards");
     const app = optionNames(screen.getByRole("group", { name: "App" }));
-    expect(app.slice(0, 4).map((name) => name!.replace(/[⌘⇧⌥⌃]|Ctrl\+|Shift\+|Alt\+/g, ""))).toEqual(["New sessionN", "New section…Group sessions across local projects", "Add projectO", "AutomationsR"]);
+    expect(app.slice(0, 4).map((name) => name!.replace(/[⇧⌥⌃⌘]|Ctrl\+|Shift\+|Alt\+/g, ""))).toEqual(["New sessionN", "New section…Group sessions across local projects", "Add projectO", "AutomationsR"]);
     // Housekeeping ends the list; it no longer opens it.
     expect(app.at(-1)).toBe("About TerminalX");
     expect(app.indexOf("Check for updates")).toBeGreaterThan(app.length - 5);

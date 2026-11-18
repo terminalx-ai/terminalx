@@ -28,7 +28,7 @@ it.each([["透明 image.png", "image"], ["sound.mp3", "audio"], ["clip.mp4", "vi
   expect(entry).toMatchObject({ kind, rel: name, dirty: false });
   act(() => setPaneCollapsed("opening", true));
   fireEvent.contextMenu(screen.getByText(name));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "Open" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "View" }));
   expect(getEditors().collapsed.opening).toBe(false);
   act(() => mocks.hotkeys.get("files.quickOpen")!());
   // The row's name is the file's, then its folder and marks.

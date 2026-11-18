@@ -22,13 +22,23 @@
 //! `setsid`) is no longer its descendant, and has no terminal. A headless
 //! runtime, which has no window, therefore also refuses a caller with no
 //! controlling terminal: there, only `pair` in a person's terminal answers.
+//!
+//! The window has no terminal either, so on a runtime the desktop launched
+//! the window proves it is the window (PRO-369). On a Mac the machine's host
+//! key is the window's: it lives in a Keychain item only the app may read,
+//! and the window handed the runtime a copy (`machine_host::key`). The window
+//! adds to its `consent` parameter a MAC of the witness socket and nonce under
+//! a key derived from it ([`window_proof`]); the runtime lets a caller with no
+//! terminal through only with that proof. A detached agent cannot read the
+//! Keychain item without asking the person, so it cannot make the proof, and
+//! it cannot borrow the window's: a proof is bound to a nonce only its own
+//! witness can answer.
+//!
 //! What no check here can tell from a person: a process of the same user that
-//! detaches and opens a new pseudo-terminal of its own to run `pair` in. And on
-//! a runtime the desktop launched, where the window (which has no terminal)
-//! must be let through, a process that detaches with `setsid` and asks with no
-//! terminal at all: the runtime cannot yet tell the window from it, because it
-//! does not know which process is the window. Recognising the window is
-//! PRO-369; before this guard, nothing was refused on any runtime.
+//! detaches and opens a new pseudo-terminal of its own to run `pair` in. And a
+//! desktop-launched runtime that keeps its own host key (not on a Mac), which
+//! holds nothing only the window knows, so it still lets a caller with no
+//! terminal through there.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -49,7 +59,9 @@ use crate::machine_wire;
 pub const PARAM: &str = "consent";
 
 /// The runtime IPC commands only a person may send.
-pub const GUARDED: [&str; 2] = [machine_wire::CREATE_CODE, machine_wire::APPROVE];
+/// Letting a disconnected computer back is an approval too (PRO-357).
+/// A phone's code and its Allow are a person's to give too (PRO-359).
+pub const GUARDED: [&str; 5] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK, machine_wire::PHONE_CODE, machine_wire::PHONE_APPROVE];
 
 /// How long the runtime waits for a witness to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
@@ -77,6 +89,9 @@ pub enum Refusal {
     /// A process with no controlling terminal, asking a runtime with no
     /// window: on a headless server a person answers only in a terminal.
     NoTerminal,
+    /// A process with no controlling terminal that did not prove it is the
+    /// window, asking a runtime the desktop launched.
+    NotWindow,
 }
 
 impl Refusal {
@@ -86,6 +101,7 @@ impl Refusal {
             Self::Descendant => "it was asked by a process this runtime started (an agent, or a terminal it runs)",
             Self::RuntimeTerminal => "it was asked from a terminal this runtime runs",
             Self::NoTerminal => "it was asked by a process with no terminal, on a server with no window",
+            Self::NotWindow => "it was asked by a process with no terminal that is not the TerminalX window",
         }
     }
 }
@@ -114,16 +130,92 @@ pub fn judge(peer: libc::pid_t, runtime: libc::pid_t, ptys: &HashSet<Device>) ->
     None
 }
 
-/// For a runtime with no window (`headless`), a caller with no controlling
-/// terminal is refused: the window is the only person without one.
-pub fn terminal_rule(headless: bool, has_terminal: bool) -> Option<Refusal> {
-    (headless && !has_terminal).then_some(Refusal::NoTerminal)
+/// Who the runtime may let through with no controlling terminal.
+pub enum Window {
+    /// None: a runtime with no window (`TERMINALX_LOCAL_DESKTOP` unset).
+    Headless,
+    /// The window, which proves it holds the machine's host key: a runtime
+    /// the desktop launched on a Mac. `None` until the window has handed the
+    /// key over, when no caller can prove it.
+    Keyed(Option<zeroize::Zeroizing<[u8; 32]>>),
+    /// Anyone: a runtime the desktop launched that keeps its own host key,
+    /// so nothing tells the window from another process (see the module).
+    Unrecognisable,
+}
+
+impl Window {
+    /// This runtime's: from `TERMINALX_LOCAL_DESKTOP` and its machine host.
+    fn current() -> Self {
+        if headless() {
+            return Self::Headless;
+        }
+        match crate::machine_host::installed() {
+            Some(host) => host.consent_window(),
+            None if crate::machine_host::window_owns_key() => Self::Keyed(None),
+            None => Self::Unrecognisable,
+        }
+    }
+
+    /// Whether `proof` shows the caller holds the window's key, for the
+    /// request whose witness is `socket` and nonce `nonce`.
+    fn proven(&self, proof: Option<&str>, socket: &Path, nonce: &str) -> bool {
+        let (Self::Keyed(Some(secret)), Some(proof)) = (self, proof) else { return false };
+        let expected = window_proof(secret, socket, nonce);
+        bool::from(subtle::ConstantTimeEq::ct_eq(proof.as_bytes(), expected.as_bytes()))
+    }
+}
+
+/// Whether a caller with a terminal (`has_terminal`) or none may ask a
+/// runtime whose window is `window`; `proven` says the caller proved it is
+/// the window.
+pub fn terminal_rule(window: &Window, has_terminal: bool, proven: bool) -> Option<Refusal> {
+    if has_terminal {
+        return None;
+    }
+    match window {
+        Window::Headless => Some(Refusal::NoTerminal),
+        Window::Keyed(_) => (!proven).then_some(Refusal::NotWindow),
+        Window::Unrecognisable => None,
+    }
 }
 
 /// Whether this runtime has no window: one the desktop started says so in
 /// `TERMINALX_LOCAL_DESKTOP`.
 fn headless() -> bool {
     std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() != Ok("1")
+}
+
+/// The field of the `consent` parameter that carries the window's proof.
+const WINDOW_FIELD: &str = "window";
+
+/// The window's proof for the request whose witness listens on `socket` and
+/// answers `nonce`: HMAC-SHA256 under a key derived from the machine's host
+/// key `host_secret`, never the host key itself, in hex.
+pub fn window_proof(host_secret: &[u8; 32], socket: &Path, nonce: &str) -> String {
+    use hmac::Mac;
+    use std::os::unix::ffi::OsStrExt;
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    hkdf::Hkdf::<sha2::Sha256>::new(None, host_secret)
+        .expand(b"terminalx consent window v1", &mut key[..])
+        .expect("32 bytes is a valid HKDF-SHA256 length");
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key.as_ref()).expect("HMAC takes any key length");
+    mac.update(socket.as_os_str().as_bytes());
+    mac.update(&[0]);
+    mac.update(nonce.as_bytes());
+    mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Where the window's process finds the machine's host key, to prove it is
+/// the window; installed once by the app. No other process has one.
+pub type WindowKey = Box<dyn Fn() -> Option<zeroize::Zeroizing<[u8; 32]>> + Send + Sync>;
+
+static WINDOW_KEY: std::sync::OnceLock<WindowKey> = std::sync::OnceLock::new();
+
+/// Make every guarded request this process sends prove it is the window.
+pub fn speak_as_window(key: WindowKey) {
+    if WINDOW_KEY.set(key).is_err() {
+        log::warn!("the window's consent key was installed twice");
+    }
 }
 
 /// The caller's side: a private socket in the runtime's `run` directory that
@@ -213,14 +305,28 @@ fn challenge(mut stream: UnixStream, expected: &str) -> bool {
 }
 
 /// `params` with a witness's `consent` parameter added, for a command that
-/// needs one; `None` for one that does not.
+/// needs one; `None` for one that does not. In the window's process the
+/// parameter carries the window's proof too ([`speak_as_window`]).
 pub fn witness_for(command: &str, run: &Path, params: &mut Value) -> Result<Option<Witness>> {
     if !guards(command) {
         return Ok(None);
     }
+    let key = WINDOW_KEY.get().and_then(|key| key());
+    witness_proving(command, run, params, key.as_deref())
+}
+
+/// [`witness_for`], proving the caller holds `host_secret` when given.
+pub fn witness_proving(command: &str, run: &Path, params: &mut Value, host_secret: Option<&[u8; 32]>) -> Result<Option<Witness>> {
+    if !guards(command) {
+        return Ok(None);
+    }
     let witness = Witness::open(run)?;
+    let mut consent = witness.param();
+    if let Some(secret) = host_secret {
+        consent[WINDOW_FIELD] = json!(window_proof(secret, &witness.path, &witness.nonce));
+    }
     let object = params.as_object_mut().context("the request's parameters must be an object")?;
-    object.insert(PARAM.into(), witness.param());
+    object.insert(PARAM.into(), consent);
     Ok(Some(witness))
 }
 
@@ -236,6 +342,11 @@ fn refused(message: impl Into<String>) -> ControlError {
 /// out of `params`, ask its witness, and refuse unless a person may have sent
 /// it. `run` is the runtime's private directory.
 pub fn verify(run: &Path, params: &mut Value) -> Result<(), ControlError> {
+    verify_for(run, params, &Window::current())
+}
+
+/// [`verify`], for a runtime whose window is `window`.
+pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(), ControlError> {
     let consent = params
         .as_object_mut()
         .and_then(|object| object.remove(PARAM))
@@ -245,7 +356,10 @@ pub fn verify(run: &Path, params: &mut Value) -> Result<(), ControlError> {
     let peer = witness_pid(run, &socket, nonce).map_err(|error| refused(format!("Could not tell who sent this request ({error:#}), so it is refused.")))?;
     // SAFETY: getpid has no preconditions.
     let runtime = unsafe { libc::getpid() };
-    let refusal = judge(peer, runtime, &runtime_terminals(runtime)).or_else(|| terminal_rule(headless(), controlling_terminal(peer).is_some()));
+    let refusal = judge(peer, runtime, &runtime_terminals(runtime)).or_else(|| {
+        let proven = window.proven(consent[WINDOW_FIELD].as_str(), &socket, nonce);
+        terminal_rule(window, controlling_terminal(peer).is_some(), proven)
+    });
     if let Some(refusal) = refusal {
         log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
@@ -602,9 +716,164 @@ mod tests {
 
     #[test]
     fn a_headless_runtime_refuses_a_caller_with_no_terminal() {
-        assert_eq!(terminal_rule(true, false), Some(Refusal::NoTerminal), "a detached agent on a server");
-        assert_eq!(terminal_rule(true, true), None, "pair in a person's terminal");
-        assert_eq!(terminal_rule(false, false), None, "the window, beside a runtime it started");
+        let headless = Window::Headless;
+        assert_eq!(terminal_rule(&headless, false, false), Some(Refusal::NoTerminal), "a detached agent on a server");
+        assert_eq!(terminal_rule(&headless, false, true), Some(Refusal::NoTerminal), "a server has no window to prove");
+        assert_eq!(terminal_rule(&headless, true, false), None, "pair in a person's terminal");
+    }
+
+    #[test]
+    fn a_desktop_runtime_lets_through_only_the_window_with_no_terminal() {
+        let keyed = Window::Keyed(Some(zeroize::Zeroizing::new([7; 32])));
+        assert_eq!(terminal_rule(&keyed, false, true), None, "the window");
+        assert_eq!(terminal_rule(&keyed, false, false), Some(Refusal::NotWindow), "a detached agent");
+        assert_eq!(terminal_rule(&keyed, true, false), None, "pair in a person's terminal");
+        // Before the window handed the key over, no one can prove it.
+        let unkeyed = Window::Keyed(None);
+        let socket = Path::new("/run/cw-a.sock");
+        assert!(!unkeyed.proven(Some(&window_proof(&[7; 32], socket, "n")), socket, "n"));
+        // A runtime that keeps its own key cannot tell, and refuses no one.
+        assert_eq!(terminal_rule(&Window::Unrecognisable, false, false), None);
+    }
+
+    #[test]
+    fn a_window_proof_holds_for_one_key_one_witness_and_one_nonce() {
+        let keyed = Window::Keyed(Some(zeroize::Zeroizing::new([7; 32])));
+        let socket = Path::new("/run/cw-a.sock");
+        let proof = window_proof(&[7; 32], socket, "nonce");
+        assert_eq!(proof.len(), 64);
+        assert!(keyed.proven(Some(&proof), socket, "nonce"));
+        assert!(!keyed.proven(None, socket, "nonce"));
+        assert!(!keyed.proven(Some(&window_proof(&[8; 32], socket, "nonce")), socket, "nonce"), "another key");
+        assert!(!keyed.proven(Some(&proof), Path::new("/run/cw-b.sock"), "nonce"), "another witness");
+        assert!(!keyed.proven(Some(&proof), socket, "other"), "another request");
+        assert!(!keyed.proven(Some(&proof[..63]), socket, "nonce"));
+        assert!(!proof.contains(&"07".repeat(32)), "the proof is not the key");
+    }
+
+    /// The detached process of
+    /// [`a_detached_process_with_no_terminal_is_refused_unless_it_proves_it_is_the_window`];
+    /// a no-op when the harness runs it as a test.
+    #[test]
+    fn detached_helper() {
+        const STAGE: &str = "TERMINALX_CONSENT_HELPER_STAGE";
+        match std::env::var(STAGE).as_deref() {
+            // The first stage starts the second in a new session, and exits:
+            // the second is no longer the test's descendant, and has no terminal.
+            Ok("1") => {
+                use std::os::unix::process::CommandExt;
+                let mut next = Command::new(std::env::current_exe().unwrap());
+                next.args(helper_args()).env(STAGE, "2").stdin(Stdio::null());
+                // SAFETY: setsid is async-signal-safe.
+                unsafe {
+                    next.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+                }
+                next.spawn().unwrap();
+                std::process::exit(0);
+            }
+            // The second listens, says what it would send, and waits to be told it is done.
+            Ok("2") => {
+                let run = PathBuf::from(std::env::var("TERMINALX_CONSENT_HELPER_RUN").unwrap());
+                let command = std::env::var("TERMINALX_CONSENT_HELPER_COMMAND").unwrap();
+                let secret = std::env::var("TERMINALX_CONSENT_HELPER_KEY").ok().map(|hex| -> [u8; 32] {
+                    (0..32).map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap()
+                });
+                let mut params = json!({ "epoch": "e", "lease": "l" });
+                let witness = witness_proving(&command, &run, &mut params, secret.as_ref()).unwrap().unwrap();
+                let report = json!({ "pid": me(), "terminal": controlling_terminal(me()).is_some(), "params": params });
+                // libtest can write the test name without a trailing newline.
+                println!("\nCONSENT {report}");
+                for _ in 0..600 {
+                    if run.join("done").exists() {
+                        break;
+                    }
+                    if witness.answered() {
+                        // Alive while the runtime judges it.
+                        std::thread::sleep(Duration::from_secs(2));
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    fn helper_args() -> [&'static str; 4] {
+        ["--exact", "serve_cli::consent::tests::detached_helper", "--nocapture", "--test-threads=1"]
+    }
+
+    /// What a process detached from this test (the "runtime") sends for
+    /// `command`, proving `key` if given: its pid, whether it has a terminal,
+    /// and its parameters.
+    fn detached_request(run: &Path, command: &str, key: Option<&[u8; 32]>) -> (libc::pid_t, bool, Value) {
+        let mut first = Command::new(std::env::current_exe().unwrap());
+        first
+            .args(helper_args())
+            .env("TERMINALX_CONSENT_HELPER_STAGE", "1")
+            .env("TERMINALX_CONSENT_HELPER_RUN", run)
+            .env("TERMINALX_CONSENT_HELPER_COMMAND", command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        match key {
+            Some(key) => first.env("TERMINALX_CONSENT_HELPER_KEY", key.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+            None => first.env_remove("TERMINALX_CONSENT_HELPER_KEY"),
+        };
+        let mut first = first.spawn().unwrap();
+        let stdout = first.stdout.take().unwrap();
+        assert!(first.wait().unwrap().success());
+        let line = BufReader::new(stdout).lines().map(Result::unwrap).find_map(|line| line.strip_prefix("CONSENT ").map(str::to_owned)).expect("the detached process reports");
+        let report: Value = serde_json::from_str(&line).unwrap();
+        (report["pid"].as_i64().unwrap() as libc::pid_t, report["terminal"].as_bool().unwrap(), report["params"].clone())
+    }
+
+    #[test]
+    fn a_detached_process_with_no_terminal_is_refused_unless_it_proves_it_is_the_window() {
+        use std::os::unix::fs::PermissionsExt;
+        // Short: the witness's socket path must fit in sun_path.
+        let dir = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = [42u8; 32];
+        let desktop = Window::Keyed(Some(zeroize::Zeroizing::new(key)));
+
+        // Each request asks a fresh process: a witness answers once.
+        let not_window = |result: Result<(), ControlError>, case: &str| {
+            let error = result.expect_err(case);
+            assert_eq!(error.code, "person_required", "{case}: {error:?}");
+            assert!(error.message.contains("not the TerminalX window"), "{case}: {}", error.message);
+        };
+        for command in [machine_wire::CREATE_CODE, machine_wire::APPROVE] {
+            // The agent: detached with `setsid`, no terminal, no key.
+            let (pid, terminal, mut params) = detached_request(&run, command, None);
+            assert!(!terminal, "a process in a new session has no terminal");
+            assert!(!descends_from(pid, me()), "{command}: the agent no longer descends from the runtime");
+            not_window(verify_for(&run, &mut params, &desktop), &format!("{command}: a detached agent"));
+            // Today's gap, where the runtime keeps its own key.
+            let (_, _, mut params) = detached_request(&run, command, None);
+            assert!(verify_for(&run, &mut params, &Window::Unrecognisable).is_ok(), "{command}");
+
+            // The window, which holds the key: the same kind of process, with its proof.
+            let (_, _, mut params) = detached_request(&run, command, Some(&key));
+            assert!(verify_for(&run, &mut params, &desktop).is_ok(), "{command}: the window is let through");
+            let (_, _, mut params) = detached_request(&run, command, Some(&key));
+            not_window(verify_for(&run, &mut params, &Window::Keyed(None)), &format!("{command}: before the key is handed over"));
+            let (_, _, mut params) = detached_request(&run, command, Some(&key));
+            not_window(verify_for(&run, &mut params, &Window::Keyed(Some(zeroize::Zeroizing::new([1; 32])))), &format!("{command}: another key"));
+            let (_, _, mut params) = detached_request(&run, command, Some(&key));
+            let error = verify_for(&run, &mut params, &Window::Headless).unwrap_err();
+            assert!(error.message.contains("no window"), "{command}: a server has no window: {}", error.message);
+
+            // A request that copies the window's proof onto its own witness.
+            let (_, _, window) = detached_request(&run, command, Some(&key));
+            let (_, _, mut agent) = detached_request(&run, command, None);
+            agent[PARAM][WINDOW_FIELD] = window[PARAM][WINDOW_FIELD].clone();
+            not_window(verify_for(&run, &mut agent, &desktop), &format!("{command}: a borrowed proof"));
+        }
+        std::fs::write(run.join("done"), b"").unwrap();
     }
 
     #[test]

@@ -257,7 +257,7 @@ describe("personal sections of cloud projects (PRO-23)", () => {
   it("survive a restart, per account and organization, in their order", async () => {
     const { getPrefs, setPrefs } = await import("./prefs");
     expect(getPrefs().cloudSections).toEqual({});
-    const sections = { "a@example.com": { "org-a": [{ id: "s2", name: "Parked", projects: ["blank/notes"] }, { id: "s1", name: "Active", projects: ["github.com/acme/api"] }] } };
+    const sections = { "a@example.com": { "org-a": [{ id: "s2", name: "Parked", projects: ["blank/notes"], workspaces: ["w1"], icon: "🚀", sort: "name" as const, collapsed: true }, { id: "s1", name: "Active", projects: ["github.com/acme/api"] }] } };
     setPrefs({ cloudSections: sections });
     vi.resetModules();
     const reloaded = await import("./prefs");
@@ -465,7 +465,7 @@ describe("sidebar choices per window (PRO-164)", () => {
 
 describe("dashboard preferences", () => {
   it("restores the view, sorting and hidden columns after a restart", async () => {
-    const saved = { view: "table" as const, sort: { column: "pr" as const, direction: "asc" as const }, hiddenColumns: ["owner" as const, "branch" as const] };
+    const saved = { view: "table" as const, sort: { column: "pr" as const, direction: "asc" as const }, hiddenColumns: ["owner" as const, "branch" as const], compact: true, owners: ["amy"], columnSet: 2 };
     const prefs = await import("./prefs");
     prefs.setPrefs({ dashboard: saved });
     vi.resetModules();
@@ -473,7 +473,7 @@ describe("dashboard preferences", () => {
   });
   it("recovers from malformed dashboard preferences", async () => {
     localStorage.setItem("raccoon.prefs", JSON.stringify({ dashboard: { view: "unknown", sort: null, hiddenColumns: ["branch", "branch", 12] } }));
-    expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch"] });
+    expect((await import("./prefs")).getPrefs().dashboard).toEqual({ view: "board", sort: { column: "updated", direction: "desc" }, hiddenColumns: ["branch", "pr", "created"], compact: false, owners: [], columnSet: 2 });
   });
 });
 

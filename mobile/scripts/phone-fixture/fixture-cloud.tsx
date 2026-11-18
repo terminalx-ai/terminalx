@@ -8,6 +8,8 @@
  *
  * `fixtureCloud: loading` (a launch argument) holds the first read of the
  * list, so the Cloud tab shows what it draws while the list is read.
+ * `fixtureCloudRole: driver` makes this person a driver of "Warm-up run", so
+ * its screen shows the composer (sending would start it) instead of Start.
  */
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type PropsWithChildren } from "react";
 import { Settings } from "react-native";
@@ -35,11 +37,11 @@ const ORGS = [
   ...["Globex", "Initech", "Umbrella", "Hooli", "Vandelay"].map((name) => ({ orgId: `org-${name.toLowerCase()}`, name, role: "member" })),
 ];
 
-function workspace(orgId: string, id: string, name: string, state: string, idleMinutes: number, repository: string, branch: string, role: "manager" | "driver", activity: { activeTurns?: number; pendingApprovals?: number } = {}) {
+function workspace(orgId: string, id: string, name: string, state: string, idleMinutes: number, repository: string, branch: string, role: "manager" | "driver", activity: { activeTurns?: number; pendingApprovals?: number } = {}, provider = "machine0") {
   const now = Date.now();
   return {
     workspace: {
-      id, orgId, name, provider: "machine0", state, accessMode: "organization",
+      id, orgId, name, provider, state, accessMode: "organization",
       you: { role, canApprove: true, canManageShares: role === "manager" },
       sharedWith: 0, createdBy: "fixture", lastActivityAt: now - idleMinutes * MINUTE,
       runtimeActivity: state === "ready" ? { online: true, activeTurns: activity.activeTurns ?? 0, pendingApprovals: activity.pendingApprovals ?? 0, reportedAt: now, stale: false } : null,
@@ -52,8 +54,9 @@ function workspace(orgId: string, id: string, name: string, state: string, idleM
 
 const WORKSPACES: Record<string, ReturnType<typeof workspace>[]> = {
   [ACME]: [
-    workspace(ACME, "ws-checkout", "Checkout redesign", "ready", 0, "acme/app", "checkout-redesign", "manager", { activeTurns: 1 }),
-    workspace(ACME, "ws-warm-up", "Warm-up run", "suspended", 2 * 24 * 60, "acme/app", "warm-up", "manager"),
+    workspace(ACME, "ws-checkout", "Checkout redesign", "ready", 0, "acme/app", "checkout-redesign", "manager", { activeTurns: 1 }, "fixture-compute"),
+    // `fixtureCloudRole: driver` (a launch argument): its saved conversation with the composer a driver keeps, in place of Start.
+    workspace(ACME, "ws-warm-up", "Warm-up run", "suspended", 2 * 24 * 60, "acme/app", "warm-up", Settings.get("fixtureCloudRole") === "driver" ? "driver" : "manager", {}, "fixture-compute"),
     workspace(ACME, "ws-warm-up-five", "Warm-up run, five issues", "suspended", 3 * 24 * 60, "acme/app", "warm-up-five", "manager"),
   ],
   [NORTHWIND]: [workspace(NORTHWIND, "ws-billing", "Billing export", "ready", 6, "northwind/api", "billing-export", "driver", { pendingApprovals: 1 })],
@@ -97,16 +100,24 @@ const never = new Promise<never>(() => undefined);
 /** The cloud service, answered in memory: the requests the list and a stopped workspace make. */
 function server(holdList: boolean): typeof fetch {
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", date: new Date().toUTCString() } });
-  return (async (input: RequestInfo | URL) => {
+  return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname;
     if (path === "/v1/desktop/auth/capabilities") {
       if (holdList) await never;
       return json(200, { organizations: ORGS, capabilities: { flags: {} } });
     }
-    let match = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces$/.exec(path);
-    if (match) return json(200, { workspaces: WORKSPACES[decodeURIComponent(match[1]!)] ?? [], tombstones: [] });
-    match = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces\/([^/]+)\/transcript-checkpoints(?:\/([^/]+))?$/.exec(path);
+    const list = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces$/.exec(path);
+    if (list) {
+      const headers = new Headers(init?.headers);
+      const providers = headers.get("X-TerminalX-Cloud-Workspace-Contract") === "providers-v1"
+        ? (headers.get("X-TerminalX-Cloud-Workspace-Providers") ?? "").split(",").map((value) => value.trim())
+        : ["machine0"];
+      const rows = WORKSPACES[decodeURIComponent(list[1]!)] ?? [];
+      const workspaces = providers.includes("described") ? rows : rows.filter(({ workspace }) => providers.includes(workspace.provider));
+      return json(200, { workspaces, tombstones: [] });
+    }
+    const match = /^\/v1\/mobile\/orgs\/([^/]+)\/cloud-workspaces\/([^/]+)\/transcript-checkpoints(?:\/([^/]+))?$/.exec(path);
     if (match) {
       const [orgId, workspaceId, tabId] = [decodeURIComponent(match[1]!), decodeURIComponent(match[2]!), match[3] ? decodeURIComponent(match[3]) : null];
       // Only "Warm-up run" said anything before it stopped.
@@ -119,7 +130,7 @@ function server(holdList: boolean): typeof fetch {
     if (/\/shares$/.test(path)) return json(200, { shares: [], you: { role: "manager", canApprove: true, canManageShares: true } });
     // Anything else (attaching to a running workspace, starting one) is not part of the fixture.
     return json(404, { error: "cloud_workspace_not_found" });
-  }) as typeof fetch;
+  };
 }
 
 function memory(): CatalogStorage & SecretStorage {

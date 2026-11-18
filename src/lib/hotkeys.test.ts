@@ -344,7 +344,7 @@ describe("the default dictation key by platform", () => {
     expect(toggle).toHaveBeenCalledTimes(1);
   });
 
-  it("is a held Right Option on macOS with nothing stored, and ⌘⇧D still toggles", async () => {
+  it("is a held Right Option on macOS with nothing stored, and ⇧⌘D still toggles", async () => {
     const platform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform")!;
     Object.defineProperty(Navigator.prototype, "platform", { configurable: true, get: () => "MacIntel" });
     vi.resetModules();
@@ -368,5 +368,28 @@ describe("the default dictation key by platform", () => {
       Object.defineProperty(Navigator.prototype, "platform", platform);
       vi.resetModules();
     }
+  });
+});
+
+
+describe("Overview versus the first session tab", () => {
+  it.each(["body", "composer", "terminal"])("routes distinct defaults with focus in %s", (context) => {
+    const overview = vi.fn();
+    const tab = vi.fn();
+    cleanups.push(registerShortcut("app.agentDashboard", overview), registerShortcut("session.tab1", tab));
+    const target = context === "terminal" ? terminal() : context === "composer" ? document.body.appendChild(document.createElement("textarea")) : document.body;
+    if (context === "composer") cleanups.push(() => target.remove());
+    press({ key: "1", code: "Digit1", ctrlKey: true }, target);
+    expect(overview).toHaveBeenCalledOnce();
+    expect(tab).not.toHaveBeenCalled();
+    press({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }, target);
+    expect(tab).toHaveBeenCalledOnce();
+    expect(overview).toHaveBeenCalledOnce();
+    setPrefs({ shortcuts: { "session.tab1": ["mod+1"], "app.agentDashboard": ["mod+shift+a"] } });
+    press({ key: "1", code: "Digit1", ctrlKey: true }, target);
+    expect(tab).toHaveBeenCalledTimes(2);
+    expect(overview).toHaveBeenCalledOnce();
+    press({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }, target);
+    expect(overview).toHaveBeenCalledTimes(2);
   });
 });

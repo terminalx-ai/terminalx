@@ -12,7 +12,6 @@ import { pairedMachine } from "./machineFixtures.test-utils";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  machinesOn: true,
   connections: {
     ready: true,
     machines: [] as unknown[],
@@ -176,11 +175,10 @@ async function mountTwo() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
-  mocks.machinesOn = true;
   mocks.connections = { ready: true, machines: [], states: {}, connections: {}, attachErrors: {}, error: null };
   mocks.listeners.clear();
   mocks.invoke.mockImplementation(async (command: string) => {
-    if (command === "experimental_settings") return { nativeCodex: false, machines: mocks.machinesOn };
+    if (command === "experimental_settings") return { nativeCodex: false };
     return null;
   });
   experimental.resetExperimentalSettingsForTests();
@@ -330,17 +328,11 @@ describe("a machine's sidebar section (PRO-346)", () => {
   });
 });
 
-describe("with Machines off or no machine paired", () => {
-  it("renders nothing", async () => {
-    mocks.machinesOn = false;
-    mini.projects = [project("p-tx", "terminalx")];
-    mini.sessions = [session("s-1", "p-tx", { tabs: [{ id: "t", harness: "claude", title: null, status: "waiting" } as RuntimeSession["tabs"][number]] })];
-    publishConnections({ machines: [MINI], states: { "m-mini": DIRECT }, connections: { "m-mini": mini.asConnection("m-mini") } });
+describe("with no machine paired (PRO-360)", () => {
+  it("renders nothing, and the filter counts no machine session", async () => {
     const { container } = render(<Sidebar />);
-    act(() => mini.connect());
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
+    await act(async () => undefined);
     expect(container.querySelector("nav")?.innerHTML).toBe("");
-    // Nor does the filter count the machine's waiting session.
     prefs.setPrefs({ sidebarFilters: { local: "needs" } });
     let count = -1;
     function Count() {
@@ -349,11 +341,5 @@ describe("with Machines off or no machine paired", () => {
     }
     render(<Count />);
     expect(count).toBe(0);
-  });
-
-  it("renders nothing with Machines on and no machine paired", async () => {
-    const { container } = render(<Sidebar />);
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("experimental_settings"));
-    expect(container.querySelector("nav")?.innerHTML).toBe("");
   });
 });
