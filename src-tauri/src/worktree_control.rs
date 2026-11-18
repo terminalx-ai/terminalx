@@ -322,8 +322,9 @@ pub(crate) fn named_sessions(named: &[String], current: &[SessionEntry], project
 
 /// The sessions among `sessions` that run in the worktree at `path`, by the
 /// rule the delete uses.
-pub(crate) fn sessions_in(sessions: &[SessionEntry], path: &str) -> Vec<SessionEntry> {
-    crate::session_ops::sessions_within(sessions.to_vec(), Path::new(path))
+pub(crate) fn sessions_in(sessions: &[SessionEntry], path: &str) -> Result<Vec<SessionEntry>, String> {
+    crate::session_ops::ensure_workspace_identity(sessions, Path::new(path))?;
+    Ok(crate::session_ops::sessions_within(sessions.to_vec(), Path::new(path)))
 }
 
 #[cfg(test)]

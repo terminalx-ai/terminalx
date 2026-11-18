@@ -963,7 +963,9 @@ pub(crate) fn rename_branch_entries(project_path: &str, from: &str, to: &str) ->
 }
 
 pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
-    index::load().map(|sessions| sessions_within(sessions, path)).map_err(err)
+    let sessions = index::load().map_err(err)?;
+    ensure_workspace_identity(&sessions, path)?;
+    Ok(sessions_within(sessions, path))
 }
 
 /// What deleting a workspace would cost: the git state of its tree plus the
@@ -1049,19 +1051,90 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
 fn checkout_root(project: &Path, path: &Path) -> PathBuf {
     if !path.exists() {
         let roots: std::collections::BTreeSet<_> = index::load().unwrap_or_default().iter()
-            .filter(|session| Path::new(&session.cwd) == path)
-            .map(session_checkout_root).collect();
+            .filter(|session| identity_path(Path::new(&session.cwd)) == identity_path(path))
+            .map(|session| identity_path(&session_checkout_root(session))).collect();
         if roots.len() == 1 { return roots.into_iter().next().unwrap(); }
     }
     checkout_root_path(project, path)
 }
 
+// Canonicalize the existing prefix of a missing path, then normalize its tail.
+fn identity_path(path: &Path) -> PathBuf {
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
+        ancestor = parent;
+    }
+    let mut result = std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+    if let Ok(tail) = path.strip_prefix(ancestor) {
+        for component in tail.components() {
+            match component {
+                std::path::Component::ParentDir => { result.pop(); }
+                std::path::Component::CurDir => {},
+                other => result.push(other.as_os_str()),
+            }
+        }
+    }
+    result
+}
+
+/// Refuse to act on an overlapping legacy cwd when its checkout can no
+/// longer be verified. A missing path can hide a pruned nested checkout, so
+/// neither a surviving ancestor nor a directory name proves its identity.
+pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) -> Result<()> {
+    let target = identity_path(path);
+    for session in sessions {
+        let cwd = Path::new(&session.cwd);
+        if session.worktree_removed {
+            continue;
+        }
+        let normalized = identity_path(cwd);
+        if !normalized.starts_with(&target) && !target.starts_with(&normalized) {
+            continue;
+        }
+        if cwd.exists() {
+            let top = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
+                .map(|top| identity_path(Path::new(top.trim())));
+            let recorded = session.checkout_root().filter(|root| cwd.starts_with(root)).map(|root| identity_path(Path::new(root)));
+            // A failed removal can leave the exact recorded checkout behind
+            // after Git has removed its .git file. A retry of that exact path
+            // remains possible when the project is still a readable repo.
+            let project = Path::new(&session.project_path);
+            let exact_retry = target == normalized && recorded.as_ref() == Some(&normalized)
+                && top.as_ref().is_none_or(|top| *top == identity_path(project))
+                && git::list_worktrees(project).is_ok();
+            // Git can walk through recreated directories to a surviving
+            // parent after a nested worktree was pruned. A legacy descendant
+            // cannot prove that parent was its checkout.
+            if !exact_retry && top.as_ref().is_none_or(|top| recorded.as_ref().map_or(*top != normalized, |root| root != top)) {
+                return Err(format!("Cannot establish the checkout for session ‘{}’ at {}. Nothing was removed.", session.title, cwd.display()));
+            }
+            continue;
+        }
+        let records = git::list_worktrees(Path::new(&session.project_path))
+            .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?;
+        if session.checkout_root().is_some_and(|root| cwd.starts_with(root)) {
+            continue;
+        }
+        let root = session_checkout_root(session);
+        // An ancestor record cannot rule out an unregistered nested checkout
+        // anywhere in the missing suffix, even if its name matches.
+        let registered = identity_path(&root) == normalized && records.into_iter().any(|(record, _)| {
+            identity_path(Path::new(&record)) == normalized
+        });
+        if !registered {
+            return Err(format!("Cannot establish the checkout for session ‘{}’ at {}. Nothing was removed.", session.title, cwd.display()));
+        }
+    }
+    Ok(())
+}
+
 /// The sessions among `sessions` that run in the checkout at `path`.
 pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<SessionEntry> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = identity_path(path);
     sessions
         .into_iter()
-        .filter(|session| session_checkout_root(session) == target)
+        .filter(|session| identity_path(&session_checkout_root(session)) == target)
         .collect()
 }
 
@@ -1071,6 +1144,9 @@ pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<S
 /// has no worktree to remove.
 pub(crate) fn sessions_sharing_worktree(session_id: &str) -> Result<Vec<SessionEntry>> {
     let entry = index::get(session_id).map_err(err)?;
+    if !entry.worktree_removed {
+        ensure_workspace_identity(&index::load().map_err(err)?, Path::new(&entry.cwd))?;
+    }
     if entry.worktree_name.is_none() || entry.worktree_removed {
         return Ok(Vec::new());
     }
@@ -1570,6 +1646,9 @@ pub(crate) fn delete_session_blocking_fallible(sink: &dyn EventSink, session_id:
 /// other sessions use it.
 pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
     let entry = index::get(session_id).map_err(err)?;
+    if !entry.worktree_removed {
+        ensure_workspace_identity(&index::load().map_err(err)?, Path::new(&entry.cwd))?;
+    }
     if entry.worktree_name.is_none() || entry.worktree_removed {
         return Ok(None);
     }
@@ -2854,7 +2933,7 @@ mod tests {
         assert_eq!(sessions_sharing_worktree(&session.id).unwrap()[0].id, companion.id);
         assert_eq!(sessions_in_workspace(&root).unwrap().len(), 2);
         index::update_session(&session.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
-        assert_eq!(sessions_sharing_worktree(&session.id).unwrap()[0].id, companion.id, "older entries use their worktree name");
+        assert!(sessions_sharing_worktree(&session.id).is_err(), "a missing legacy descendant may be a nested checkout");
         index::update_session(&session.id, |entry| { entry.set_checkout_root(root.to_str()); Ok(()) }).unwrap();
         delete_session_blocking(&sink(), &companion.id, &|_| {}).unwrap();
         assert_eq!(sole_workspace_of(&session.id).unwrap().as_deref(), Some(root.to_str().unwrap()));
@@ -2874,12 +2953,107 @@ mod tests {
         git::run(dir.path(), &["worktree", "prune"]).unwrap();
         assert_eq!(sessions_in_workspace(&root).unwrap().iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&session.id]);
         index::update_session(&nested_session.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
-        assert_eq!(sessions_in_workspace(&root).unwrap().iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&session.id], "older nested sessions remain separate too");
-        assert_eq!(workspace_disposition(dir.path(), &root, false).unwrap().session_ids, vec![session.id.clone()]);
+        assert!(sessions_in_workspace(&root).unwrap_err().contains("Cannot establish the checkout"));
+        assert!(workspace_disposition(dir.path(), &root, false).is_err());
+        assert!(remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).is_err());
+        assert!(root.exists());
+        assert!(index::get(&nested_session.id).is_ok());
+        // Once its identity is known, it is kept separate from the parent.
+        index::update_session(&nested_session.id, |entry| { entry.set_checkout_root(nested.to_str()); Ok(()) }).unwrap();
         remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
         assert!(!root.exists());
         assert!(index::get(&session.id).is_err());
         assert!(index::get(&nested_session.id).is_ok());
+        assert!(transcript.exists());
+    }
+
+    #[test]
+    fn pruned_legacy_shared_checkout_is_not_removed_without_identity() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let mut fork = worktree_session(dir.path());
+        let root = PathBuf::from(&fork.cwd);
+        let sub = root.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let companion = session_in(dir.path(), root.to_str().unwrap(), "Root companion");
+        fork.cwd = sub.to_string_lossy().into_owned();
+        fork.set_checkout_root(None);
+        index::update_session(&fork.id, |entry| { *entry = fork.clone(); Ok(()) }).unwrap();
+        index::update_session(&companion.id, |entry| { entry.set_checkout_root(None); entry.worktree_name = None; Ok(()) }).unwrap();
+        let transcript = said(&fork.id, "legacy", "preserve me");
+        assert!(workspace_disposition(dir.path(), &root, false).unwrap_err().contains("Cannot establish the checkout"));
+        std::fs::remove_dir_all(&root).unwrap();
+        git::run(dir.path(), &["worktree", "prune"]).unwrap();
+        for path in [&root, &sub] {
+            assert!(workspace_disposition(dir.path(), path, false).unwrap_err().contains("Cannot establish the checkout"));
+            for fate in [SessionsFate::Delete, SessionsFate::Keep] {
+                let mut removal = request(&fork, fate, Confirmation::Forced, git::DirectDelete::Allowed);
+                removal.path = path.to_str().unwrap();
+                assert!(remove_workspace(&sink(), &removal, &|_| panic!("must not stop sessions")).is_err());
+            }
+        }
+        assert!(sessions_sharing_worktree(&fork.id).is_err());
+        assert!(sole_workspace_of(&fork.id).is_err());
+        assert!(sessions_sharing_worktree(&companion.id).is_err());
+        assert!(sole_workspace_of(&companion.id).is_err());
+        assert!(index::get(&fork.id).is_ok());
+        assert!(index::get(&companion.id).is_ok());
+        assert!(transcript.exists());
+
+        // Once both records have a verified root, either spelling accounts
+        // for both sessions even after Git has pruned the worktree.
+        for id in [&fork.id, &companion.id] {
+            index::update_session(id, |entry| { entry.set_checkout_root(root.to_str()); Ok(()) }).unwrap();
+        }
+        // A remembered path is insufficient if its repository cannot be read.
+        index::update_session(&fork.id, |entry| { entry.project_path = dir.path().join("unavailable").to_string_lossy().into_owned(); Ok(()) }).unwrap();
+        assert!(workspace_disposition(dir.path(), &root, false).unwrap_err().contains("Cannot verify the checkout"));
+        index::update_session(&fork.id, |entry| { entry.project_path = dir.path().to_string_lossy().into_owned(); Ok(()) }).unwrap();
+        for path in [&root, &sub] {
+            let disposition = workspace_disposition(dir.path(), path, false).unwrap();
+            assert_eq!(disposition.sessions, 2);
+            assert!(disposition.session_ids.contains(&fork.id));
+            assert!(disposition.session_ids.contains(&companion.id));
+        }
+        let removed = remove(&fork, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
+        assert_eq!(removed.sessions.len(), 2);
+        assert!(index::get(&fork.id).is_err());
+        assert!(index::get(&companion.id).is_err());
+    }
+
+    #[test]
+    fn recreated_pruned_nested_checkout_does_not_belong_to_parent() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let parent = worktree_session(dir.path());
+        let root = PathBuf::from(&parent.cwd);
+        let nested = root.join("nested");
+        git::run(dir.path(), &["worktree", "add", "-q", "-b", "recreated-nested", nested.to_str().unwrap()]).unwrap();
+        let sub = nested.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let legacy = session_in(dir.path(), sub.to_str().unwrap(), "Legacy nested");
+        let companion = session_in(dir.path(), nested.to_str().unwrap(), "Nested companion");
+        for id in [&legacy.id, &companion.id] {
+            index::update_session(id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        }
+        let transcript = said(&legacy.id, "nested", "keep this conversation");
+        std::fs::remove_dir_all(&nested).unwrap();
+        git::run(dir.path(), &["worktree", "prune"]).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), root.to_str().unwrap());
+        for path in [&root, &nested, &sub] {
+            assert!(workspace_disposition(dir.path(), path, false).unwrap_err().contains("Cannot establish the checkout"));
+            for fate in [SessionsFate::Delete, SessionsFate::Keep] {
+                let mut removal = request(&parent, fate, Confirmation::Forced, git::DirectDelete::Allowed);
+                removal.path = path.to_str().unwrap();
+                assert!(remove_workspace(&sink(), &removal, &|_| panic!("must not stop sessions")).is_err());
+            }
+        }
+        assert!(sessions_sharing_worktree(&legacy.id).is_err());
+        assert!(sole_workspace_of(&legacy.id).is_err());
+        assert!(root.exists());
+        assert!(index::get(&legacy.id).is_ok());
+        assert!(index::get(&companion.id).is_ok());
         assert!(transcript.exists());
     }
 
