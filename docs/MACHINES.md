@@ -1896,12 +1896,14 @@ which runs in a child process because data privacy is one switch per process.
 - **A shell on the operating computer can remove a machine** by editing
   `machines.json` or the Keychain. That loses this computer's own access and
   gains nothing, so no integrity key guards it.
-- **Consent tells the window from a detached process only on a Mac**
-  (`serve_cli::consent`, PRO-369): there the window proves it holds the host
-  key in its Keychain item. A desktop-launched runtime elsewhere keeps its own
-  key and lets a detached process with no terminal through. A same-user
-  process that opens a pseudo-terminal of its own to run
-  `terminalx-serve pair` passes anywhere.
+- **Consent identifies the window on supported Mac desktops**
+  (`serve_cli::consent`, PRO-369): the window proves it holds the host key in
+  its Keychain item. A desktop runtime without a window-owned key, including
+  a non-Mac desktop or a Mac whose application identifier is missing or
+  invalid, refuses consent-guarded pairing actions even from a terminal. A
+  separately launched headless runtime still permits an unrelated interactive
+  terminal. A same-user process that opens its own pseudo-terminal can pass
+  the terminal check on supported Mac desktops and headless runtimes.
 - **A computer on a runtime before PRO-357** does not rotate its token (it
   does not ask for `machine/5`). Its token still expires after 90 days unused.
 - **Whoever holds a computer's client key and token is that computer.** With
