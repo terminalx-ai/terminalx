@@ -2239,6 +2239,8 @@ none of the rest.
   machine runs the checks a local removal runs (uncommitted work, unpushed
   commits, the pull request, the second confirmation's digest). Nothing on
   this computer is read or removed; the machine's path is only shown.
+  Repositories with an archive script require removal from the machine's
+  own workspace dialog. The remote removal refuses before stopping sessions.
 - **Where it is offered.** The machine session's Git actions menu opens the
   standard removal dialog through the machine host. The chat and the merged
   PR's What next section also offer Delete workspace once the machine verifies

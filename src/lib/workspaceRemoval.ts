@@ -36,6 +36,8 @@ export interface WorkspaceHost {
   key: string;
   /** A host must refuse retention when its removal API cannot honor it. */
   keepConversationsUnavailable?: string;
+  /** Offer the bulk cleanup dialog as an alternative for this host. */
+  bulkCleanupAvailable?: boolean;
   /** `fetch` asks for the clean-and-merged verdict the removal dialog shows; without it the read is quick. */
   disposition(options?: { fetch?: boolean }): Promise<WorkspaceDisposition>;
   remove(options: WorkspaceRemoveOptions): Promise<BranchOutcome>;

@@ -216,11 +216,9 @@ export function PrPanel({
     let cancelled = false;
     setLoading(true);
     setCheckedWorkspace(null);
-    const dispositionRequest = machineWorkspace && workspaceKey
-      ? machineWorkspace.host.disposition().then((disposition) => ({ key: workspaceKey, disposition })).catch(() => null)
-      : workspace && workspaceKey
-        ? api.workspaceDisposition(workspace.projectPath, cwd ?? "").then((disposition) => ({ key: workspaceKey, disposition }))
-        : Promise.resolve(null);
+    const dispositionRequest = workspace && workspaceKey
+      ? api.workspaceDisposition(workspace.projectPath, cwd ?? "").then((disposition) => ({ key: workspaceKey, disposition }))
+      : Promise.resolve(null);
     Promise.all([
       source.workStatus().then(async (workStatus) => {
         const pullRequests: { rows: SessionPr[]; error?: string } = selectedPr
@@ -247,6 +245,12 @@ export function PrPanel({
         setCheckedWorkspace(workspaceCheck);
         setError(pullRequests.error ?? actionError.current);
         setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
+        // The machine's cleanup check can finish independently of PR loading and actions.
+        if (machineWorkspace && workspaceKey && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
+          void machineWorkspace.host.disposition().then((disposition) => {
+            if (!cancelled) setCheckedWorkspace({ key: workspaceKey, disposition });
+          }).catch(() => {});
+        }
       })
       .catch((e) => {
         if (cancelled) return;
