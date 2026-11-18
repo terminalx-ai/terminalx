@@ -70,6 +70,7 @@ describe("a machine's version view", () => {
     expect(view.shownState).toEqual({ state: "needsUpdate", version: "0.2.27", side: "machine" });
     // Everything granted: the chip shows the connection as it is.
     expect(update.machineVersionView(machine, live, null, connectedState(ALL), "0.2.33").shownState).toBe(live);
+    expect(update.machineVersionView(machine, live, null, connectedState(ALL.filter((name) => name !== "machine/7")), "0.2.33").gap?.hidden.map((feature) => feature.id)).toEqual(["sessionRuns"]);
   });
 
   it("shows the connection state, not Needs update, once a machine that hid a feature is no longer connected", () => {
