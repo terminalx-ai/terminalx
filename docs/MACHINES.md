@@ -1993,8 +1993,10 @@ direct port now answers phones too, with nothing new on the phone's wire.
   records and the same RPC. The RPC moved from the desktop-only `pairing` module
   into the shared `phone` module, so both builds compile it. When a window
   registers a phone route, the runtime closes the phones it serves; they
-  reconnect and reach the window. With the switch off, the window owns the port
-  and serves phones as before (decision 9 holds).
+  reconnect and reach the window. An approved phone keeps the Mac reachable
+  when its window closes, even with computer operation off. A first pairing
+  can finish on the window's routes before the runtime takes over. The window
+  hands over its host key and, if signed in, saves the session for Relay.
 - **Writes.** A phone served by the runtime writes through the runtime's own
   owner operations (`local_runtime::mobile::execute`) under a lease the runtime
   holds for its phones (`Lifetime::hold`), as a window holds one for its own. It
@@ -2031,9 +2033,10 @@ direct port now answers phones too, with nothing new on the phone's wire.
   registration changes during the request or the relay refuses or fails to
   answer. Endpoint requests can also ask for install status or, on a resume
   connection, resume confirmation (`machine_host/phones.rs`).
-- **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
-  window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
-  no relay; the strict offer schema is unchanged). It prints the link as a
+- **`terminalx-serve pair --phone`** prints a version-2 `terminalx://pair`
+  link. With a live Relay registration it includes a one-time invite, and
+  the phone installs a resume credential after approval. With a direct
+  listener it includes nearby endpoints. It prints the link as a
   half-block QR and as text, then asks "Allow? [y/N]" with the fingerprint the
   phone shows. If hosting is off it asks to turn it on first, since phones use
   the same listener. While a TerminalX window is open (`Status.phones.windowOpen`)
@@ -2052,10 +2055,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   It sends a live heartbeat every 30 seconds while that registration is
   active. The Machines screen uses `headless-phone-pairing.v1` to show a
   server icon and open the QR scanner from that row. Scan the server's
-  `terminalx-serve pair --phone` QR on a network that can reach the server
-  directly, then compare the fingerprint and allow the phone in the terminal.
+  `terminalx-serve pair --phone` QR over Relay or on a network that can reach
+  the server, then compare the fingerprint and allow the phone in the terminal.
   After pairing, the phone lists the server once under its paired machines.
-  Signing out stops heartbeats and attempts to remove the account listing.
+  Signing out refreshes an expiring account session before removing the
+  listing and stops heartbeats.
 
 ## Session feature parity
 

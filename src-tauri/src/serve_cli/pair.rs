@@ -99,7 +99,7 @@ fn pair(args: &[String]) -> Result<i32> {
         eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
         return Ok(1);
     }
-    if !status.enabled {
+    if if phone { !status.hosting() } else { !status.enabled } {
         if phone {
             // Phones reach a server through the same listener computers use.
             println!("This server does not take connections now. Phones you pair can view sessions and respond to agents.");
@@ -117,7 +117,7 @@ fn pair(args: &[String]) -> Result<i32> {
         }
         turn_on(&canonical)?;
     }
-    status = wait_until_listening(&runtime, status)?;
+    status = wait_until_listening(&runtime, status, phone)?;
     let machine_id = status.machine_id.clone().context("the runtime has no machine id")?;
     let attachment = runtime.attach()?;
     if phone {
@@ -213,15 +213,23 @@ fn turn_on(data: &Path) -> Result<()> {
     Ok(())
 }
 
-fn wait_until_listening(runtime: &Runtime, status: Status) -> Result<Status> {
-    wait_for_listener(status, Instant::now() + LISTEN_WAIT, || runtime.status(), || std::thread::sleep(POLL))
+fn wait_until_listening(runtime: &Runtime, status: Status, phone: bool) -> Result<Status> {
+    wait_for_listener(status, phone, Instant::now() + LISTEN_WAIT, || runtime.status(), || std::thread::sleep(POLL))
 }
 
 /// `Needed` also describes a headless runtime before it makes its own key.
 /// Wait for the listener instead of assuming that the window owns the key.
-fn wait_for_listener(mut status: Status, deadline: Instant, mut read: impl FnMut() -> Result<Status>, mut pause: impl FnMut()) -> Result<Status> {
+fn wait_for_listener(mut status: Status, phone: bool, deadline: Instant, mut read: impl FnMut() -> Result<Status>, mut pause: impl FnMut()) -> Result<Status> {
+    let relay_wait = Instant::now() + HOST_START_WAIT;
     loop {
-        if status.enabled && status.listening.is_some() && status.machine_id.is_some() {
+        let direct = status.listening.is_some();
+        let ready = if phone {
+            status.hosting() && (status.relay.is_some()
+                || (direct && (status.relay_state != machine_wire::RelayState::Connecting || Instant::now() >= relay_wait)))
+        } else {
+            status.enabled && direct
+        };
+        if ready && status.machine_id.is_some() {
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -584,13 +592,13 @@ mod tests {
         ready.machine_id = Some("machine".into());
         ready.listening = Some("127.0.0.1:6768".into());
         let mut reads = 0;
-        let result = wait_for_listener(needed.clone(), Instant::now() + Duration::from_secs(1), || {
+        let result = wait_for_listener(needed.clone(), false, Instant::now() + Duration::from_secs(1), || {
             reads += 1;
             Ok(ready.clone())
         }, || {}).unwrap();
         assert_eq!(reads, 1);
         assert_eq!(result, ready);
-        let error = wait_for_listener(needed, Instant::now(), || panic!("deadline must stop polling"), || {}).unwrap_err().to_string();
+        let error = wait_for_listener(needed, false, Instant::now(), || panic!("deadline must stop polling"), || {}).unwrap_err().to_string();
         assert!(error.contains("host key is not ready") && error.contains("Settings → Machines"), "{error}");
     }
 

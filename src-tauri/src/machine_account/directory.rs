@@ -179,24 +179,32 @@ pub(crate) async fn publish(
     }
 }
 
-/// Remove the session before removing its listing, under the lock shared
-/// with the publisher. Logout still takes effect locally if the API fails.
+/// Remove the listing using a fresh session, under the lock shared with the
+/// publisher. Logout still takes effect locally if the API fails.
 pub(crate) fn sign_out(api: &Api, data: &Path) -> Result<Option<(Session, Result<()>)>> {
     locked(data, || {
-        let Some(session) = load(data)? else {
+        let Some(mut session) = load(data)? else {
             return Ok(None);
         };
+        let unbound = (|| {
+            let Some(binding) = crate::store::read_json::<Binding>(&path(data))? else {
+                return Ok(());
+            };
+            if session.expires_at <= chrono::Utc::now().timestamp_millis() + 60_000 {
+                session = api.refresh(&session)?;
+                // A crash before local sign-out must leave the rotated token
+                // for the next attempt, rather than the spent refresh token.
+                super::save(data, &session)?;
+            }
+            unbind(api, &session, data, binding)
+        })();
         remove(data)?;
-        let unbound = unbind(api, &session, data);
         Ok(Some((session, unbound)))
     })
 }
 
-fn unbind(api: &Api, session: &Session, data: &Path) -> Result<()> {
+fn unbind(api: &Api, session: &Session, data: &Path, binding: Binding) -> Result<()> {
     let path = path(data);
-    let Some(binding) = crate::store::read_json::<Binding>(&path)? else {
-        return Ok(());
-    };
     let mut next = Binding {
         host_id: binding.host_id.clone(),
         generation: binding.generation + 2,

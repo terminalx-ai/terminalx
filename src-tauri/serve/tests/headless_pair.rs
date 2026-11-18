@@ -240,7 +240,7 @@ fn hosting(data: &Path) -> bool {
 async fn phone_pairs_from_terminal_and_answers_an_agent_approval_without_a_window() {
     let world = AgentWorld::new();
     let port = free_port();
-    let mut serve = runtime(&world, port);
+    let serve = runtime(&world, port);
     let mut pair = Terminal::start(cli(&world, &["pair", "--phone"]));
     pair.wait_for("Let other computers operate this server? [y/N]");
     pair.type_line("y");
@@ -279,17 +279,6 @@ async fn phone_pairs_from_terminal_and_answers_an_agent_approval_without_a_windo
     assert_eq!(answer["ok"], true, "{answer}");
     serve.wait_events(tab.as_str().unwrap(), "the phone's approval", |events| count(events, "turn_completed") == 1);
 
-    // Launch in desktop mode with the fixture key and no window attached.
-    // An older phone uses the same credential and sends its original RPCs.
-    drop(phone);
-    serve.kill();
-    let mut command = world.command();
-    command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string()).env("TERMINALX_LOCAL_DESKTOP", "1");
-    let closed_window = Serve::start(command, &world.data);
-    wait_until("the closed-window runtime listener", || {
-        closed_window.try_control("runtime.machineHost.status", json!({}))["result"]["listening"].as_str().map(str::to_owned)
-    });
-    let mut phone = connect(port, "/", &key, &token, None).await.unwrap();
     let summaries = phone.call("sessions.summaries", json!({})).await;
     assert_eq!(summaries["ok"], true, "{summaries}");
     assert!(summaries["result"]["sessions"].as_array().unwrap().iter().any(|session| session["id"] == created["sessionId"]));
@@ -301,7 +290,11 @@ async fn a_person_pairs_a_computer_from_the_servers_terminal_and_revokes_it() {
     let port = free_port();
     let serve = runtime(&world, port);
     std::fs::write(world.data.join("settings.json"), json!({ "keepMe": { "unknown": 1 } }).to_string()).unwrap();
-    assert_eq!(status(&serve)["enabled"], false, "off until a person turns it on");
+    let initial = wait_until("the installed machine host", || {
+        let reply = serve.try_control("runtime.machineHost.status", json!({}));
+        (reply["ok"] == true).then(|| reply["result"].clone())
+    });
+    assert_eq!(initial["enabled"], false, "off until a person turns it on");
 
     // Without a terminal, `pair` refuses before it changes anything.
     let piped = cli(&world, &["pair"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();

@@ -1353,12 +1353,15 @@ impl AccountManager {
     // file's lock: the window while it is attached (the runtime asks it,
     // `account.refresh`), the runtime while it is not. Whichever rotated
     // writes the file before releasing the lock; the window takes a rotation
-    // it finds there before it uses or refreshes its own tokens. With the
-    // switch off the file is removed, after any rotation in it is taken.
+    // it finds there before it uses or refreshes its own tokens. With
+    // neither computer hosting nor an approved phone, the file is removed
+    // after any rotation in it is taken.
 
     /// Whether the runtime keeps a copy of the session.
     fn runtime_copy_wanted() -> bool {
-        crate::store::settings::load().machines.allow_operating && !crate::data_privacy::enabled()
+        !crate::data_privacy::enabled()
+            && (crate::store::settings::load().machines.allow_operating
+                || crate::phone::registry::has_paired_phone().unwrap_or(false))
     }
 
     /// Take a rotation the runtime made, when its copy changed since the
@@ -1419,10 +1422,9 @@ impl AccountManager {
         }
     }
 
-    /// Write, keep or remove the copy, holding its lock: written while the
-    /// switch is on, removed when it is off or the session ended, if it is
-    /// this window's session. A session that `terminalx-serve login` saved
-    /// for another account stays.
+    /// Write, keep or remove the copy, holding its lock. Keep this window's
+    /// session while the runtime serves computers or an approved phone.
+    /// A session that `terminalx-serve login` saved for another account stays.
     fn write_runtime_copy(&self, ended: Option<&DesktopSession>) {
         let Ok(root) = crate::store::root() else { return };
         let session = self.inner.lock().unwrap().session.clone();

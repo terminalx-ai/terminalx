@@ -277,6 +277,9 @@ pub struct Status {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneStatus {
+    /// An existing desktop phone pairing keeps this host on independently.
+    #[serde(default)]
+    pub hosting: bool,
     /// Paired phones connected to this runtime now, by device id.
     #[serde(default)]
     pub connected: Vec<String>,
@@ -355,10 +358,14 @@ pub struct CreatedCode {
 }
 
 impl Status {
+    pub fn hosting(&self) -> bool {
+        self.enabled || self.phones.hosting
+    }
+
     /// The window must neither bind 6768 nor open its own listener: the
     /// runtime has it, or is about to take it ([`Status::takes_port`]).
     pub fn runtime_owns_direct(&self) -> bool {
-        self.enabled && self.takes_port
+        self.hosting() && self.takes_port
     }
 }
 

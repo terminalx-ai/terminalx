@@ -31,7 +31,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::control::ControlError;
 use crate::local_runtime::client::{AttachmentIdentity, Build};
 use crate::local_runtime::mobile::model::{
-    AccountMirror, DeviceEntry, DeviceProvenance, DeviceScope, PairingOffer, PairingTransport, APPROVAL_TTL_MS, OFFER_TTL_MS,
+    AccountMirror, DeviceEntry, DeviceProvenance, DeviceScope, PairingOffer, PairingTransport, RelayPairingOffer, APPROVAL_TTL_MS, OFFER_TTL_MS,
 };
 use crate::local_runtime::mobile::Actor;
 use crate::local_runtime::Lifetime;
@@ -45,6 +45,8 @@ use crate::sink::EventSink;
 
 /// How long a phone has for each step of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+// The consent-checked IPC command has a 15-second deadline.
+const INVITE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Reasons a `pairing_refused` message gives the phone, as the window's.
 const REFUSED_NOT_APPROVED: &str = "not-approved";
@@ -114,6 +116,7 @@ struct Pending {
 struct Code {
     device_id: String,
     expires_at: i64,
+    relay: bool,
     pending: Option<Pending>,
 }
 
@@ -256,6 +259,7 @@ impl Phones {
         let mut connected: Vec<String> = state.connections.iter().filter(|(_, open)| !open.is_empty()).map(|(id, _)| id.clone()).collect();
         connected.sort();
         PhoneStatus {
+            hosting: false,
             connected,
             code: state.code.as_ref().map(|code| CodeExpiry { expires_at: code.expires_at }),
             pending: state.code.as_ref().and_then(|code| code.pending.as_ref()).map(|pending| pending.view.clone()),
@@ -336,6 +340,16 @@ impl Phones {
         if let Err(error) = self.registry.discard_unclaimed(&code.device_id) {
             log::warn!("machine host: discard an unused phone code: {error:#}");
         }
+        if code.relay {
+            self.retire_invite(&code.device_id);
+        }
+    }
+
+    fn retire_invite(&self, device_id: &str) {
+        if let Err(error) = self.queue_revocation(device_id) {
+            log::warn!("machine host: retain phone invite cleanup: {error:#}");
+        }
+        self.revoke_relay(device_id);
     }
 
     /// Reconcile all known phone identities, including disconnected phones.
@@ -527,16 +541,22 @@ impl Phones {
 
     /// Make a phone pairing code, ending any made before. `port` is the
     /// direct listener's. Blocking: it writes `devices.json`.
-    pub(crate) fn create_code(&self, keypair: &HostKeypair, port: u16) -> Result<CreatedPhoneCode, ControlError> {
+    pub(crate) fn create_code(&self, keypair: &HostKeypair, port: Option<u16>, epoch: u64) -> Result<CreatedPhoneCode, ControlError> {
         crate::data_privacy::require_network().map_err(|error| ControlError::new("not_enabled", format!("{error:#}"), None::<String>))?;
-        let endpoints = crate::direct_endpoints::machine_endpoints(port, "");
-        let Some(endpoint) = endpoints.first().cloned() else {
-            return Err(ControlError::new("no_address", "This machine has no network address a phone can reach.", None::<String>));
-        };
-        if let Some(previous) = self.state.lock().unwrap().code.take() {
-            self.end_code(previous);
-        }
         let device_id = uuid::Uuid::new_v4().simple().to_string();
+        let relay = match self.invite(&device_id, keypair) {
+            Ok(relay) => relay,
+            Err(error) => {
+                self.retire_invite(&device_id);
+                return Err(ControlError::new("relay_offline", format!("{error:#}"), Some("Try pairing again once Relay responds.".into())));
+            }
+        };
+        if port.is_none() && relay.is_none() {
+            return Err(ControlError::new("no_address", "This machine has no network address a phone can reach.", None::<String>));
+        }
+        let endpoints = phone_endpoints(port);
+        // The v2 wire requires an endpoint even for Relay-only offers.
+        let endpoint = endpoints.first().cloned().unwrap_or_else(|| "ws://127.0.0.1:0".into());
         let token = random_token();
         let entry = DeviceEntry {
             id: device_id.clone(),
@@ -558,9 +578,8 @@ impl Phones {
             connection: None,
             last_seen_transport: None,
         };
-        self.registry.add(entry).map_err(ControlError::internal)?;
-        // Start with a direct pairing. Once authenticated, the phone can
-        // discover the runtime's relay and provision its resume credential.
+        let expires_at = relay.as_ref().map(|invite| invite.invite_expires_at)
+            .unwrap_or(i64::MAX).min(now_ms() + OFFER_TTL_MS);
         let offer = PairingOffer {
             v: 2,
             endpoint,
@@ -570,19 +589,50 @@ impl Phones {
             paired_device_id: device_id.clone(),
             scope: "mobile".into(),
             identity_mode: "inherit".into(),
-            relay: None,
+            relay,
         };
-        let link = match phone::encode_pairing_offer(&offer, crate::machine_name::computer_name().as_deref()) {
-            Ok(link) => link,
-            Err(error) => {
-                let _ = self.registry.discard_unclaimed(&device_id);
-                return Err(ControlError::internal(error));
+        let result = (|| {
+            let link = phone::encode_pairing_offer(&offer, crate::machine_name::computer_name().as_deref())
+                .map_err(ControlError::internal)?;
+            let mut state = self.state.lock().unwrap();
+            if *self.stopped.borrow() != epoch || crate::data_privacy::enabled() {
+                return Err(ControlError::new("not_enabled", "Phone hosting changed. Try pairing again.", None::<String>));
             }
+            self.registry.add(entry).map_err(ControlError::internal)?;
+            let previous = state.code.replace(Code { device_id: device_id.clone(), expires_at, relay: offer.relay.is_some(), pending: None });
+            drop(state);
+            if let Some(previous) = previous {
+                self.end_code(previous);
+            }
+            (self.changed)();
+            Ok(CreatedPhoneCode { link, expires_at, machine_id: keypair.host_id() })
+        })();
+        if result.is_err() && offer.relay.is_some() {
+            self.retire_invite(&device_id);
+        }
+        result
+    }
+
+    fn invite(&self, device_id: &str, keypair: &HostKeypair) -> Result<Option<RelayPairingOffer>> {
+        let relay = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade);
+        let Some((relay, registration)) = relay.and_then(|relay| relay.registration().map(|registration| (relay, registration))) else {
+            return Ok(None);
         };
-        let expires_at = now_ms() + OFFER_TTL_MS;
-        self.state.lock().unwrap().code = Some(Code { device_id, expires_at, pending: None });
-        (self.changed)();
-        Ok(CreatedPhoneCode { link, expires_at, machine_id: keypair.host_id() })
+        anyhow::ensure!(registration.relay_host_id == keypair.host_id(), "Relay registered another host key");
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let reply = relay.forward_control(json!({ "type": "invite-create", "reqId": req_id, "relayDeviceId": device_id }))?
+            .recv_timeout(INVITE_TIMEOUT).context("Relay did not answer the phone invite request")??;
+        anyhow::ensure!(relay.registration().as_ref() == Some(&registration), "Relay registration changed while creating the invite");
+        anyhow::ensure!(reply["type"] == "invite-created" && reply["reqId"] == req_id, "Relay refused the phone invite");
+        let invite_token = reply["inviteToken"].as_str().filter(|token| crate::remote::host::valid_base64url_32(token))
+            .context("Relay sent an invalid phone invite")?;
+        let invite_expires_at = reply["expiresAt"].as_i64().filter(|expiry| *expiry > now_ms())
+            .context("Relay sent an expired phone invite")?;
+        Ok(Some(RelayPairingOffer {
+            v: 1, director_url: registration.director_url, cell_url: registration.cell_url,
+            assignment_epoch: registration.assignment_epoch, relay_host_id: registration.relay_host_id,
+            invite_token: invite_token.into(), invite_expires_at: invite_expires_at.min(now_ms() + OFFER_TTL_MS), e2ee_framing: 2,
+        }))
     }
 
     /// The person allowed the phone waiting with `request_id`: it is pinned
@@ -721,12 +771,12 @@ impl Phones {
             _ = stopped.changed() => Ok(()),
             result = async {
                 let socket = tokio_tungstenite::accept_async_with_config(stream, Some(phone::pairing_websocket_config())).await?;
-                self.serve_socket(keypair, socket, port, PhoneConnection::Direct { auth_id: uuid::Uuid::new_v4().to_string() }, epoch).await
+                self.serve_socket(keypair, socket, Some(port), PhoneConnection::Direct { auth_id: uuid::Uuid::new_v4().to_string() }, epoch).await
             } => result,
         }
     }
 
-    pub(crate) async fn serve_relay(self: Arc<Self>, keypair: HostKeypair, forwarded: crate::machine_wire::Forwarded, port: u16, epoch: u64) -> Result<()> {
+    pub(crate) async fn serve_relay(self: Arc<Self>, keypair: HostKeypair, forwarded: crate::machine_wire::Forwarded, port: Option<u16>, epoch: u64) -> Result<()> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let crate::machine_wire::Forwarded::Relay { cell_url, relay_host_id, generation, connection } = forwarded else {
             bail!("expected a relay connection");
@@ -747,7 +797,7 @@ impl Phones {
         self.serve_socket(keypair, socket, port, context, epoch).await
     }
 
-    async fn serve_socket<S>(self: Arc<Self>, keypair: HostKeypair, mut socket: WebSocketStream<S>, port: u16, context: PhoneConnection, epoch: u64) -> Result<()>
+    async fn serve_socket<S>(self: Arc<Self>, keypair: HostKeypair, mut socket: WebSocketStream<S>, port: Option<u16>, context: PhoneConnection, epoch: u64) -> Result<()>
     where S: AsyncRead + AsyncWrite + Unpin,
     {
         let hello = match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.next()).await.context("no E2EE hello")? {
@@ -909,8 +959,8 @@ impl Phones {
         self.control(context, frame).await
     }
 
-    async fn endpoints(&self, device: &DeviceEntry, context: &PhoneConnection, params: &Value, port: u16) -> Result<Value> {
-        let mut result = json!({"v":1, "directEndpoints":crate::direct_endpoints::machine_endpoints(port, ""), "relay":null});
+    async fn endpoints(&self, device: &DeviceEntry, context: &PhoneConnection, params: &Value, port: Option<u16>) -> Result<Value> {
+        let mut result = json!({"v":1, "directEndpoints":phone_endpoints(port), "relay":null});
         if self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade).is_none_or(|relay| !relay.is_registered()) {
             return Ok(result);
         }
@@ -928,7 +978,7 @@ impl Phones {
     }
 
     /// One request of a phone served here.
-    async fn respond(self: Arc<Self>, request: &Value, device: &DeviceEntry, connection: &Arc<MobileConnection>, port: u16, context: &PhoneConnection, revoke_relay_on_close: &AtomicBool) -> Value {
+    async fn respond(self: Arc<Self>, request: &Value, device: &DeviceEntry, connection: &Arc<MobileConnection>, port: Option<u16>, context: &PhoneConnection, revoke_relay_on_close: &AtomicBool) -> Value {
         let id = phone::request_id(request);
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         if !phone::allowed_method(device.scope, method) {
@@ -979,6 +1029,10 @@ impl Phones {
             Err(error) => phone::error_response(&id, &error),
         }
     }
+}
+
+fn phone_endpoints(port: Option<u16>) -> Vec<String> {
+    port.map(|port| crate::direct_endpoints::machine_endpoints(port, "")).unwrap_or_default()
 }
 
 fn opaque_param<'a>(params: &'a Value, name: &str) -> Result<&'a str> {

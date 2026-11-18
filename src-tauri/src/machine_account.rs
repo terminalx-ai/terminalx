@@ -564,6 +564,34 @@ mod tests {
     }
 
     #[test]
+    fn sign_out_refreshes_an_expired_session_before_unbinding() {
+        let mut renewed = session_body();
+        renewed["accessToken"] = json!("fresh-access");
+        renewed["refreshToken"] = json!("fresh-refresh");
+        let (base, seen, handle) = service(vec![(201, json!({})), (200, renewed), (200, json!({})), (200, json!({}))]);
+        let api = Api::new(&base);
+        let data = tempfile::tempdir().unwrap();
+        let mut session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut None).unwrap();
+        session.expires_at = 1;
+        save(data.path(), &session).unwrap();
+
+        let (signed_out, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
+        unbound.unwrap();
+        assert!(load(data.path()).unwrap().is_none());
+        api.logout(&signed_out).unwrap();
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[1], (REFRESH_PATH.into(), json!({"refreshToken": "refresh-1"}), None));
+        assert_eq!(seen[2].0, format!("/v1/desktop/host-account-bindings/{}", key.host_id()));
+        assert_eq!(seen[2].1["bindingGeneration"], 2);
+        assert_eq!(seen[2].2.as_deref(), Some("Bearer fresh-access"));
+        assert_eq!(seen[3], (LOGOUT_PATH.into(), json!({"refreshToken": "fresh-refresh"}), Some("Bearer fresh-access".into())));
+    }
+
+    #[test]
     fn a_device_code_sign_in_waits_for_approval_and_slows_down_when_told() {
         let (base, seen, handle) = service(vec![
             (200, authorization(5)),

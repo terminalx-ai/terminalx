@@ -177,7 +177,7 @@ function PairingSheet({ visible, server, progress, error, onClearError, onClose,
         <Text style={[styles.modalTitle, { color: palette.ink }]}>Add a machine</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={close} hitSlop={12}><X color={palette.ink} /></Pressable>
       </View>
-      {server && !progress ? <Text style={[styles.detail, { color: palette.muted }]}>{TERMINAL_PAIRING}. Connect your phone to a network that can reach it directly.</Text> : null}
+      {server && !progress ? <Text style={[styles.detail, { color: palette.muted }]}>{TERMINAL_PAIRING}. Scan the QR over Relay or on a network that can reach the server.</Text> : null}
       <View style={[styles.segment, { backgroundColor: palette.raised }]}>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>

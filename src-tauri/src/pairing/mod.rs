@@ -566,6 +566,7 @@ impl PairingManager {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.release_direct_port();
         self.leave_guest();
         self.clear_runtime_sharing();
         if let Some(sessions) = self.sessions.get() {
@@ -683,6 +684,11 @@ impl PairingManager {
     #[cfg(test)]
     pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
         self.phone.set_owner(Some(owner));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_port_for_test(self: &mut Arc<Self>, port: u16) {
+        Arc::get_mut(self).unwrap().direct_port = port;
     }
 
     /// The machine's host key, with which this window proves to the
@@ -1066,14 +1072,14 @@ impl PairingManager {
         let manager = self.clone();
         inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = async {
                         let socket = tokio_tungstenite::accept_async_with_config(
-                            crate::data_privacy::NetworkIo::new(stream),
+                            crate::data_privacy::NetworkIo::new(&mut stream),
                             Some(pairing_websocket_config()),
                         )
                         .await?;
@@ -1089,6 +1095,11 @@ impl PairingManager {
                             .await
                     }
                     .await;
+                    if manager.is_stopped() || manager.runtime_owns_direct() {
+                        // Let the runtime bind this same port when the window
+                        // closes. A normal server-side FIN leaves TIME_WAIT.
+                        let _ = stream.set_zero_linger();
+                    }
                     if let Err(error) = result {
                         log::debug!("direct paired-device connection ended: {error:#}");
                     }
@@ -1223,6 +1234,10 @@ impl PairingManager {
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
+        if device.last_seen_at.is_none() && device.scope != DeviceScope::Session {
+            let manager = self.clone();
+            let _ = tokio::task::spawn_blocking(move || manager.keep_new_phone_available()).await;
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.pending_pairing_device.as_deref() == Some(&device.id) {
