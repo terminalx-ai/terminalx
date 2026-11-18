@@ -175,6 +175,23 @@ it("does not offer a fetching landed check to a read-only cloud viewer", () => {
   expect(source.landed).toBeUndefined();
 });
 
+it.each([
+  { linked: true, reported: true, expected: true },
+  { linked: false, reported: true, expected: false },
+  { linked: undefined, reported: true, expected: true },
+  { linked: undefined, reported: false, expected: true },
+])("uses live machine PR provenance (reported: $reported, linked: $linked)", async ({ linked, reported, expected }) => {
+  const workspaceKey = "machine:mini:project";
+  const cached = { ...reference(b), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } };
+  invoke.mockResolvedValue([cached]);
+  const call = vi.fn(async (method: string) => method === "git.prAssociations"
+    ? { associations: reported ? [{ url: b.url, number: b.number, head: b.head, repo: "app", linked }] : [] }
+    : { prs: [b] });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+
+  const { rows } = await sessionPrs(source, `${workspaceKey}:author`, null);
+  expect(rows).toEqual([{ identity: b.url, pr: b, current: false, association: { ...cached, linked: expected } }]);
+});
 
 it("keeps legacy runtime branch discovery and cached history without adopting branch PRs", async () => {
   const sessionId = "cloud:org:workspace:author";

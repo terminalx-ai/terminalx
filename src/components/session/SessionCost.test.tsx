@@ -50,6 +50,7 @@ const twoModels = () => session([
 ]);
 
 const chip = () => screen.getByTestId("session-cost");
+const machineSession = { name: "Mac mini", sessionId: "rt-1", generation: "1" };
 
 beforeEach(() => {
   resetExperimentalSettingsForTests();
@@ -152,7 +153,7 @@ describe("usage arithmetic", () => {
       loginMethods: { codex: "API key", claude: "API key" },
       windows: [{ agent: "codex" as const, key: "five_hour", label: "5h", usedPercent: 63, resetsAt: Date.now() + 3_600_000, windowMinutes: 300, updatedAt: Date.now(), stale: false }],
     }));
-    render(<SessionCost session={twoModels()} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    render(<SessionCost session={twoModels()} machine={{ ...machineSession, read }} />);
     await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
     fireEvent.click(chip());
     const popover = await screen.findByRole("dialog", { name: "Session usage" });
@@ -170,7 +171,7 @@ describe("usage arithmetic", () => {
   });
 
   it("on a machine session not connected, shows the totals its list carries and reads nothing", async () => {
-    render(<SessionCost session={twoModels()} machine={{ name: "Mac mini", sessionId: "rt-1", read: null }} />);
+    render(<SessionCost session={twoModels()} machine={{ ...machineSession, read: null }} />);
     await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
     fireEvent.click(chip());
     const popover = await screen.findByRole("dialog", { name: "Session usage" });
@@ -186,7 +187,7 @@ describe("usage arithmetic", () => {
       loginMethods: {}, windows: [],
     }));
     const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
-    const machine = { name: "Mac mini", sessionId: "rt-1", read };
+    const machine = { ...machineSession, read };
     const { rerender } = render(<SessionCost session={unread} machine={machine} />);
     // The RPC reply is sufficient even if a session-list update has not arrived.
     expect((await screen.findByTestId("session-cost")).textContent).toBe("≈ $0.13");
@@ -198,12 +199,45 @@ describe("usage arithmetic", () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
+  it.each(["timeout", "reconnect"])("backfills missing machine totals after a failed read and %s", async (recovery) => {
+    vi.useFakeTimers();
+    try {
+      const models = [row("claude-sonnet-5-5", 9_000, 6_000, 88_000, 0.13)];
+      const answer = {
+        usage: { sessionId: machineSession.sessionId, title: "Work", tabs: [{ tabId: "t1", agent: "claude", models, updated: "2026-11-11T10:00:00Z" }], models, estimate: true as const },
+        loginMethods: {},
+        windows: [],
+      };
+      const read = vi.fn(async () => answer).mockRejectedValueOnce(new Error("Usage read failed"));
+      const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
+      const renderCost = (generation: string, connected = true) => (
+        <SessionCost session={unread} machine={{ ...machineSession, generation, read: connected ? () => read() : null }} />
+      );
+      const { rerender } = render(renderCost("1"));
+      await act(async () => {});
+      expect(screen.queryByTestId("session-cost")).toBeNull();
+      expect(read).toHaveBeenCalledOnce();
+
+      rerender(renderCost("1"));
+      expect(read).toHaveBeenCalledOnce();
+      if (recovery === "reconnect") {
+        rerender(renderCost("offline", false));
+        rerender(renderCost("2"));
+      }
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(chip().textContent).toBe("≈ $0.13");
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // PRO-408 review: each read makes the machine re-read every transcript, so a parent render must not ask again.
   it("reads a machine session's usage once per opening, however often its view renders", async () => {
     const answer = { usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] };
     const read = vi.fn(async () => answer);
     // A new `read` on every render, as SessionView builds it.
-    const view = (current: ReturnType<typeof twoModels>) => <SessionCost session={current} machine={{ name: "Mac mini", sessionId: "rt-1", read: () => read() }} />;
+    const view = (current: ReturnType<typeof twoModels>) => <SessionCost session={current} machine={{ ...machineSession, read: () => read() }} />;
     const { rerender } = render(view(twoModels()));
     await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
     fireEvent.click(chip());

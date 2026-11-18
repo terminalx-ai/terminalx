@@ -1015,7 +1015,7 @@ impl WorkspaceGit {
             // Keep unavailable identities too, so missing repositories cannot
             // turn an incomplete history into permission to clean up.
             let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
-            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo })
+            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }
 

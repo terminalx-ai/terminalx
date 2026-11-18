@@ -671,6 +671,7 @@ export function SessionView({
     : machine && cloud ? <SessionCost session={session} className={HEADER_TIGHT} machine={{
       name: machine.name,
       sessionId: cloud.backend.logSessionId,
+      generation: cloud.backend.generation,
       read: cloud.client?.hasCapability("machine/8") ? () => cloud.client!.sessionUsage(cloud.backend.logSessionId) : null,
     }} />
     : null;

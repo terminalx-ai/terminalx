@@ -256,10 +256,22 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         // ownership. Show those transiently, never persist them as associations.
         return { associations: await gh.associations(sessionId), discoveryOnly: true };
       }
-      return { associations: await gh.associations(sessionId, response.associations.map((entry) => ({
+      const fromMachine = !!parseMachineKey(input.workspaceKey);
+      const runtimeRows = response.associations.map((entry) => ({
         url: entry.url, number: entry.number, head: entry.head,
-        scope: { kind: "cloud", workspace: input.workspaceKey, repo: entry.repo ?? "" },
-      }))) };
+        // Older machines omit provenance. Their entries can only be acted
+        // on when discovered on the current branch.
+        linked: entry.linked ?? (fromMachine ? true : undefined),
+        scope: { kind: "cloud" as const, workspace: input.workspaceKey, repo: entry.repo ?? "" },
+      }));
+      const cached = await gh.associations(sessionId, runtimeRows);
+      // The cache may predate the linked bit or still have a PR the machine
+      // unlinked. Use machine provenance to establish ownership off-branch.
+      const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
+      return { associations: cached.map((entry) => {
+        const flag = linked.get(entry.url) ?? (fromMachine ? true : undefined);
+        return flag === undefined ? entry : { ...entry, linked: flag };
+      }) };
     },
     prScope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo },
     prAccess: (association) => {

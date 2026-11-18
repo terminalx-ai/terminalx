@@ -5,7 +5,7 @@ import { actionsRuns } from "./checks";
 import { localGitSource, type GitSource } from "./gitSource";
 import { useShortcut } from "./hotkeys";
 import { usePrefs } from "./prefs";
-import { sessionPrs, type SessionPr } from "./sessionPrs";
+import { prIdentity, sessionPrs, type SessionPr } from "./sessionPrs";
 import type { SendResult } from "./sessionBackend";
 import { dismissErrorKey } from "./errorToasts";
 import { showFixFailed } from "./checkToasts";
@@ -51,8 +51,9 @@ export async function sendFailedChecks(sessionId: string, tabId: string, prUrl: 
  * this session's branch, so its agent cannot fix it. Undefined when none.
  */
 export function failingPr(rows: readonly SessionPr[], url?: string): PullRequest | undefined {
+  const identity = url === undefined ? undefined : prIdentity(url);
   const candidates = rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length
-    && (url === undefined || row.pr.url === url) ? [row.pr] : []);
+    && (identity === undefined || prIdentity(row.pr.url) === identity) ? [row.pr] : []);
   if (candidates.length > 1) throw new Error("Several pull requests have failing checks. Use Fix errors on the pull request you want in the Branch tab.");
   return candidates[0];
 }
@@ -97,19 +98,23 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, mach
     if (!enabled || !tabId || !isCurrent() || locked.current === generation) return;
     locked.current = generation;
     setState({ key, busy: true });
-    let found: PullRequest | undefined = typeof given === "string" ? undefined : given;
+    const url = typeof given === "string" ? given : given?.url;
+    let found: PullRequest | undefined = machine || typeof given === "string" ? undefined : given;
     dismissErrorKey(`fix-errors:${sessionId}`);
     try {
       const lookUp = async (source: GitSource) => {
         const status = await source.workStatus();
-        const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
+        const checkout = status.branch ?? (machine ? null : branch ?? null);
+        const result = await sessionPrs(source, sessionId, checkout === status.defaultBranch ? null : checkout, isCurrent);
         if (result.error) throw new Error(result.error);
-        return failingPr(result.rows, typeof given === "string" ? given : undefined);
+        return failingPr(result.rows, url);
       };
       if (machine) {
         const { source, attach } = machine;
         if (!source || !attach) throw new Error(attach || source ? `Fix check errors works once ${machine.name} is connected.` : `Fix check errors works once ${machine.name} is connected and up to date.`);
-        const pr = typeof given === "string" || !given ? await lookUp(source) : given;
+        // The panel's repository picker can be on another checkout. Use
+        // the selected PR only to narrow discovery from the session checkout.
+        const pr = await lookUp(source);
         if (!isCurrent()) return;
         found = pr;
         if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");

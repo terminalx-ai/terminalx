@@ -9,7 +9,10 @@ vi.mock("./api", () => ({ agent: { send: vi.fn() }, gh: { checkAuthority: vi.fn(
 vi.mock("./agentEvents", () => ({ mergeTabEvents: mocks.merge }));
 vi.mock("./hotkeys", () => ({ useShortcut: mocks.shortcut }));
 vi.mock("./gitSource", () => ({ localGitSource: () => ({ workStatus: mocks.workStatus }) }));
-vi.mock("./sessionPrs", () => ({ sessionPrs: mocks.sessionPrs }));
+vi.mock("./sessionPrs", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./sessionPrs")>(),
+  sessionPrs: mocks.sessionPrs,
+}));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const pr = { url: "https://github.com/owner/repo/pull/1", state: "OPEN", checks: [{ name: "test", state: "failure", url: "https://github.com/owner/repo/actions/runs/12/job/34", actions: { runId: 12, jobId: 34 } }] } as PullRequest;
@@ -148,6 +151,31 @@ it("on a machine that cannot read check logs, says so and sends nothing", async 
   await act(async () => { await expect(hook.result.current.fix(pr)).rejects.toThrow("once Mac mini is connected"); });
   expect(send).not.toHaveBeenCalled();
   expect(hook.result.current.error).toContain("Mac mini");
+});
+
+it("checks a Branch panel selection against the machine session checkout before collecting logs", async () => {
+  const { source, attach, send, input: machine } = machineInput();
+  const linked = { ...pr, url: "https://github.com/owner/repo/pull/9", head: "other" };
+  const association = { url: linked.url, number: 9, head: "other", scope: { kind: "cloud", workspace: "machine:m:p", repo: "." }, linked: true };
+  mocks.sessionPrs.mockResolvedValue({ rows: [{ pr, current: true }, { pr: linked, current: false, association }] });
+  const hook = renderHook(() => useFixCheckErrors(machine));
+
+  await act(async () => { await expect(hook.result.current.fix(linked)).rejects.toThrow("No failing GitHub Actions checks"); });
+  expect(mocks.sessionPrs).toHaveBeenCalledWith(source, machine.sessionId, "feature", expect.any(Function));
+  expect(attach).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+
+  await act(async () => { await hook.result.current.fix(); });
+  expect(attach).toHaveBeenCalledExactlyOnceWith("active-agent", pr.url);
+});
+
+it("uses the machine's live checkout even when its session saved a branch before HEAD was detached", async () => {
+  const { source, attach, input: machine } = machineInput();
+  source.workStatus.mockResolvedValue({ branch: null, defaultBranch: "main" });
+  const hook = renderHook(() => useFixCheckErrors(machine));
+  await act(async () => { await hook.result.current.fix(pr); });
+  expect(mocks.sessionPrs).toHaveBeenCalledWith(source, machine.sessionId, null, expect.any(Function));
+  expect(attach).toHaveBeenCalledOnce();
 });
 
 it.each(["tab change", "reconnect"])("on a machine, discards pending check logs after a %s", async (change) => {

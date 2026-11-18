@@ -321,7 +321,7 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
+  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
   }
 

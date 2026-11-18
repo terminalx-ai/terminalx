@@ -635,12 +635,19 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     })).unwrap();
     crate::issue_pipeline::store::insert(&pipeline).unwrap();
     crate::pr_associations::record_local("unrelated", &repo, "https://github.com/acme/widgets/pull/99", "main").unwrap();
+    let linked_url = "https://github.com/acme/widgets/pull/2";
+    crate::pr_associations::link("author", crate::pr_associations::Association {
+        url: linked_url.into(), number: 2, head: "another-branch".into(),
+        scope: crate::pr_associations::Scope::Local { cwd: repo.to_string_lossy().into_owned() },
+        linked: false,
+    }).unwrap();
     let read = || f.call("git.prAssociations", json!({"sessionId":"author"})).unwrap();
     let first = read();
     let associations = first["associations"].as_array().unwrap();
-    assert_eq!(associations.len(), 2);
-    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/widgets/pull/1" && a["repo"] == "app"));
-    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/other/pull/1" && a["repo"] == "libs/other"));
+    assert_eq!(associations.len(), 3);
+    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/widgets/pull/1" && a["repo"] == "app" && a["linked"] == false));
+    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/other/pull/1" && a["repo"] == "libs/other" && a["linked"] == false));
+    assert!(associations.iter().any(|a| a["url"] == linked_url && a["repo"] == "app" && a["linked"] == true));
     // The registry survives journal/pipeline pruning and a different branch.
     std::fs::remove_file(journal).unwrap();
     crate::store::write_json(&crate::store::root().unwrap().join("issue-pipelines.json"), &json!({"pipelines":[]})).unwrap();
@@ -650,7 +657,7 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     assert_eq!(f.code("git.prAssociations", json!({"sessionId":"missing"})), "not_found");
     std::fs::remove_dir_all(other).unwrap();
     let unavailable = read();
-    assert_eq!(unavailable["associations"].as_array().unwrap().len(), 2);
+    assert_eq!(unavailable["associations"].as_array().unwrap().len(), 3);
     assert!(unavailable["associations"].as_array().unwrap().iter().any(|a| a["repo"].is_null()));
 }
 
