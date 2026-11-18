@@ -2811,25 +2811,16 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             if !matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [std::path::Component::Normal(_)]) {
                 return Err("Cannot verify the source worktree name.".into());
             }
-            let branch = src.branch.as_deref().filter(|branch| git::branch_exists(project_path, branch))
+            src.branch.as_deref().filter(|branch| git::branch_exists(project_path, branch))
                 .ok_or("Cannot verify the source worktree and branch.")?;
             if project_repo.is_none() { return Err("Cannot verify the source repository.".into()); }
             let resolved_cwd = resolve_missing_path(source_cwd)?;
             let mut candidates = git::list_worktrees(project_path).map_err(err)?.into_iter()
-                .filter(|(path, recorded_branch)| (recorded_branch.as_deref() == Some(branch) || Path::new(path).exists())
-                    && Path::new(path).file_name() == Some(std::ffi::OsStr::new(name)))
-                .map(|(path, _)| std::path::PathBuf::from(path)).collect::<Vec<_>>();
-            candidates.push(git::worktree_path(project_path, name));
-            // Git may have pruned the old location. The stored cwd and the
-            // worktree name still identify its root when the name occurs once.
-            let stored_roots = resolved_cwd.ancestors()
-                .filter(|path| path.file_name() == Some(std::ffi::OsStr::new(name)))
-                .collect::<Vec<_>>();
-            if let [root] = stored_roots.as_slice() {
-                candidates.push(root.to_path_buf());
-            }
+                .filter(|(path, _)| Path::new(path).file_name() == Some(std::ffi::OsStr::new(name)))
+                .map(|(path, _)| (std::path::PathBuf::from(path), true)).collect::<Vec<_>>();
+            candidates.push((git::worktree_path(project_path, name), false));
             let mut found = None;
-            for candidate in candidates {
+            for (candidate, recorded) in candidates {
                 let root = resolve_missing_path(&candidate)?;
                 let Ok(relative) = resolved_cwd.strip_prefix(&root) else { continue };
                 if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) { continue; }
@@ -2842,8 +2833,9 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
                         return Err("The source working directory escapes its worktree.".into());
                     }
                 } else {
-                    // A missing root inside another repository is not evidence
-                    // that the stored location belonged to this project.
+                    // A guessed path or matching branch cannot establish who
+                    // owned a missing checkout after its record was pruned.
+                    if !recorded { continue; }
                     let ancestor = root.ancestors().find(|path| path.exists()).ok_or("Missing source ancestor")?;
                     if git::common_dir(ancestor).is_some_and(|repo| Some(repo) != project_repo) {
                         return Err("The source location belongs to a different repository.".into());
@@ -5156,6 +5148,14 @@ mod command_tests {
                 let mut dest = src.clone();
                 dest.worktree_name = None;
                 let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                if state == 2 {
+                    let before = git::list_worktrees(root).unwrap();
+                    assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
+                    assert_eq!(dest.cwd, src.cwd);
+                    assert!(dest.worktree_name.is_none());
+                    assert_eq!(git::list_worktrees(root).unwrap(), before);
+                    continue;
+                }
                 let note = super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).unwrap();
                 assert_ne!(dest.cwd, src.cwd);
                 assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("file")).unwrap(), "committed\n");
@@ -5176,8 +5176,61 @@ mod command_tests {
         let mut dest = src.clone();
         dest.worktree_name = None;
         let mut allocation = crate::fork_allocation::ForkAllocation::default();
-        assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, None, &mut allocation).unwrap_err().contains("different repository"));
+        assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, None, &mut allocation).is_err());
         assert!(!foreign.join("missing-source").exists());
+    }
+
+    #[test]
+    fn fork_rejects_pruned_source_after_project_replacement() {
+        use crate::{git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("source"), "original").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["commit", "-qm", "original"]).unwrap();
+        let wt = git::create_worktree(&project, "missing-source", Some("main")).unwrap();
+        let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+            cwd: Some(wt.path.clone()),
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            ..Default::default()
+        }).unwrap();
+        src.kind = SessionKind::Project;
+        src.project_path = project.to_string_lossy().into_owned();
+        src.worktree_name = Some(wt.name);
+        src.branch = Some(wt.branch.clone());
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        git::run(&project, &["worktree", "prune"]).unwrap();
+        std::fs::rename(&project, temp.path().join("old-project")).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("source"), "replacement").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["commit", "-qm", "replacement"]).unwrap();
+        git::run(&project, &["branch", &wt.branch]).unwrap();
+        // Exercise both a missing ancestor in the replacement and one outside Git.
+        for cwd in [std::path::PathBuf::from(&wt.path), temp.path().join("outside/missing-source/sub")] {
+            src.cwd = cwd.to_string_lossy().into_owned();
+            for at in [None, Some(42)] {
+                let before = git::list_worktrees(&project).unwrap();
+                let mut dest = src.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
+                assert_eq!(dest.cwd, src.cwd);
+                assert!(dest.worktree_name.is_none());
+                assert_eq!(git::list_worktrees(&project).unwrap(), before);
+                assert_eq!(allocation.rollback("failed".into()), "failed");
+            }
+        }
+        assert_eq!(std::fs::read_to_string(project.join("source")).unwrap(), "replacement");
+        assert_eq!(std::fs::read_to_string(temp.path().join("old-project/source")).unwrap(), "original");
     }
 
     #[test]
