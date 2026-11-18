@@ -133,8 +133,9 @@ try {
       checks[`the folded lead's running count ${still ? "stands still" : "turns"}`] = (await moves(count)) !== still;
       checks["the folded lead counts its running workers"] = (await count.getAttribute("aria-label")) === "2 running";
     } else {
-      const face = row("solo").getByTestId("bot-face");
-      checks[`a working chat's face ${still ? "stands still" : "moves"}`] = (await moves(face)) !== still;
+      // One list draws the same one-line rows (PRO-384): a working session's status mark leads it.
+      const working = row("solo").locator('[data-session-status] svg').first();
+      checks[`a working session's mark ${still ? "stands still" : "turns"}`] = (await moves(working)) !== still;
     }
     checks["the sidebar does not scroll sideways"] = await page.getByTestId("conversation-list").evaluate((node) => node.scrollWidth <= node.clientWidth + 1);
     checks["no browser errors"] = errors.length === 0;

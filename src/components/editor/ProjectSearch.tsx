@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, TextSearch as NoHitsIcon, ToggleLeft, WholeWord } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { CaseSensitive, Regex, Replace, ReplaceAll, Search, TextSearch as NoHitsIcon, ToggleLeft, WholeWord, X } from "@/icons";
+import { confirmInApp } from "@/lib/confirm";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { WithTooltip } from "@/components/ui/tooltip";
+import { Kbd, WithTooltip } from "@/components/ui/tooltip";
 import { SearchCheck, SearchToggle } from "@/components/editor/SearchControls";
 import type { ReplaceTarget, TextHit, TextSearch } from "@/lib/api";
 import { liveEditorPathsUnder, liveEditorsFor } from "@/lib/editorViews";
@@ -11,14 +11,15 @@ import { openFile } from "@/lib/editors";
 import { useShortcut } from "@/lib/hotkeys";
 import { hitKey, planReplace, replaceInOpenBuffers, splitTargets, type ReplacePlan, type ReplaceSpec } from "@/lib/replace";
 import { cn } from "@/lib/cn";
-import { joinNames, loadSearchToggles, registerProjectSearch, saveSearchToggles, togglesOn } from "@/lib/projectSearch";
+import { joinNames, loadSearchToggles, nearQueries, nearText, registerProjectSearch, saveSearchToggles, togglesOn } from "@/lib/projectSearch";
+import { keycaps } from "@/lib/shortcuts";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource } from "@/lib/workspaceFiles";
 
 const LIMIT = 500;
 
 /**
- * ⌘⇧F: grep the checkout, grouped by file; a hit opens the editor at its
- * line. ⌘⇧H adds a replacement: every row previews what its matches become,
+ * ⇧⌘F: grep the checkout, grouped by file; a hit opens the editor at its
+ * line. ⇧⌘H adds a replacement: every row previews what its matches become,
  * any line or file can be left out, and a replace goes through open buffers
  * where there are any and to disk everywhere else.
  *
@@ -26,9 +27,15 @@ const LIMIT = 500;
  * `source` names another. Replace is offered only where the source can
  * rewrite files.
  *
+ * It opens under the title bar, where Open file does, and stays there as
+ * the results change. Replace has no control of its own beside the search
+ * field: ⇧⌘H shows its row, and the row closes itself.
+ *
  * Match case, Whole word and Regex stay as they were left, across reopening
  * and restarts. A search that finds nothing names the toggles that are on
- * and offers to turn them off. `openProjectSearch` (lib/projectSearch) opens
+ * and offers to turn them off, and says what the code has that is near it
+ * (`nearQueries`): the same text once the toggles are off, or the same name
+ * written another way. `openProjectSearch` (lib/projectSearch) opens
  * it from elsewhere with a query filled in.
  */
 export function ProjectSearch({ sessionId, root, source }: { sessionId: string; root: string; source?: FileSource }) {
@@ -52,6 +59,8 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const [report, setReport] = useState<string | null>(null);
   // Bumped after a replace so the same query runs again over the new text.
   const [generation, setGeneration] = useState(0);
+  /** What the code has near a query that found nothing, and whether turning the toggles off is what finds it. */
+  const [near, setNear] = useState<{ text: string; byToggles: boolean } | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const focusNext = useRef<"find" | "replace">("find");
@@ -179,12 +188,11 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
       const unsaved = live.filter((t) => liveEditorsFor(abs(t.path)).some((e) => e.isDirty())).length;
       if (opts.confirm) {
         const suffix = opts.everything ? "+" : "";
-        const lines = [
-          `Replace ${target.occurrences}${suffix} ${target.occurrences === 1 && !suffix ? "match" : "matches"} in ${target.files}${suffix} ${target.files === 1 && !suffix ? "file" : "files"} with “${replacement}”?`,
-        ];
+        const title = `Replace ${target.occurrences}${suffix} ${target.occurrences === 1 && !suffix ? "match" : "matches"} in ${target.files}${suffix} ${target.files === 1 && !suffix ? "file" : "files"} with “${replacement}”?`;
+        const lines: string[] = [];
         if (opts.everything) lines.push(`Only the first ${LIMIT} matches are listed; every match in the checkout will be replaced.`);
         if (unsaved) lines.push(`${unsaved} open ${unsaved === 1 ? "file has" : "files have"} unsaved changes. The replacement goes into ${unsaved === 1 ? "its buffer" : "their buffers"} and stays unsaved.`);
-        const ok = await ask(lines.join("\n\n"), { title: "Replace in project", kind: "warning", okLabel: "Replace", cancelLabel: "Cancel" }).catch(() => false);
+        const ok = await confirmInApp({ title, body: lines.join("\n\n") || undefined, action: "Replace" });
         if (!ok) return;
       }
       setReplacing(true);
@@ -229,6 +237,32 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const canReplace = replaceOpen && !!result && !busy;
   const noHits = !!q.trim() && !!result && !result.hits.length && !busy;
   const onNames = togglesOn({ caseSensitive, wholeWord, regex });
+
+  // A search that found nothing is followed by quieter ones for what it was near; the first that finds something is said.
+  useEffect(() => {
+    setNear(null);
+    if (!noHits || !reader.search) return;
+    let live = true;
+    const controller = new AbortController();
+    const search = reader.search.bind(reader);
+    void (async () => {
+      for (const attempt of nearQueries(q, { caseSensitive, wholeWord, regex })) {
+        try {
+          const found = await search({ query: attempt.query, regex: attempt.regex, caseSensitive: false, wholeWord: false, limit: 1 }, controller.signal);
+          const text = found.hits[0] ? nearText(found.hits[0]) : null;
+          if (!live) return;
+          if (text && text !== q.trim()) return setNear({ text, byToggles: attempt.byToggles });
+        } catch {
+          // A hint only: a failed look is no hint.
+          if (!live) return;
+        }
+      }
+    })();
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [noHits, q, caseSensitive, wholeWord, regex, reader]);
   // Exactly the toggles that are on go off, and the query runs again.
   const turnOff = () => {
     setCaseSensitive(false);
@@ -240,27 +274,11 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent showClose={false} width="max-w-[46rem]" className="p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
+      <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-11 gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogTitle className="sr-only">Search in project</DialogTitle>
         <div className="border-b border-hairline">
-          <div className="flex items-center gap-2 px-3">
-            {canRewrite && (
-              <WithTooltip label={replaceOpen ? "Hide replace" : "Replace"} shortcut="files.replace">
-                <button
-                  type="button"
-                  aria-label={replaceOpen ? "Hide replace" : "Show replace"}
-                  aria-expanded={replaceOpen}
-                  onClick={() => {
-                    focusNext.current = replaceOpen ? "find" : "replace";
-                    setReplaceOpen((v) => !v);
-                  }}
-                  className="-ml-1 rounded-md p-0.5 text-faint outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-                >
-                  {replaceOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-                </button>
-              </WithTooltip>
-            )}
-            <Search className="size-4 text-faint" />
+          <div className="flex h-12 items-center gap-2.5 px-4">
+            <Search className="size-4 shrink-0 text-muted-foreground" />
             <input
               ref={input}
               value={q}
@@ -271,13 +289,13 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
               placeholder="Search in project"
               spellCheck={false}
               autoComplete="off"
-              className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-faint"
+              className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
             />
+            <Kbd className="shrink-0 text-xs text-muted-foreground">{keycaps("escape")[0]}</Kbd>
           </div>
           {replaceOpen && (
-            <div className="flex items-center gap-2 px-3 pb-2">
-              <span className="size-4 shrink-0" aria-hidden />
-              <Replace className="size-4 text-faint" />
+            <div className="flex items-center gap-2.5 px-4 pb-2">
+              <Replace className="size-4 shrink-0 text-muted-foreground" />
               <input
                 ref={replaceInput}
                 value={replacement}
@@ -289,12 +307,26 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
                 aria-label="Replace with"
                 spellCheck={false}
                 autoComplete="off"
-                className="h-8 w-full bg-transparent text-sm outline-none placeholder:text-faint"
+                className="h-8 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
               />
               <Button variant="accent" size="xs" disabled={!canReplace || !plan.occurrences || replacing} onClick={replaceSelected}>
                 <ReplaceAll />
                 {replacing ? "Replacing…" : `Replace ${plan.occurrences}${plus}`}
               </Button>
+              <WithTooltip label="Hide replace">
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Hide replace"
+                  className="text-muted-foreground"
+                  onClick={() => {
+                    focusNext.current = "find";
+                    setReplaceOpen(false);
+                  }}
+                >
+                  <X />
+                </Button>
+              </WithTooltip>
             </div>
           )}
           <div className="flex h-9 items-center gap-1 border-t border-hairline px-3">
@@ -318,7 +350,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
             )}
           </div>
         </div>
-        <div className="max-h-[26rem] overflow-auto p-1 scrollbar-thin">
+        <div className="max-h-[min(26rem,calc(100dvh-14rem))] overflow-auto p-1.5 scrollbar-thin">
           {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
           {report && <div className="px-3 py-2 text-xs text-add">{report}</div>}
           {groups.map(([path, hits]) => (
@@ -383,16 +415,30 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
                 <NoHitsIcon className="size-[18px] text-muted-foreground" />
               </div>
               <div className="mt-3 text-sm font-medium text-foreground">No matches for “{q}”</div>
-              {onNames.length > 0 && (
+              {(onNames.length > 0 || near) && (
                 <>
-                  <div className="mx-auto mt-1 max-w-[26rem] text-xs text-muted-foreground">
-                    {joinNames(onNames)} {onNames.length === 1 ? "is" : "are"} on.
+                  <div className="mx-auto mt-1 max-w-[26rem] text-[12.5px] text-muted-foreground" aria-live="polite">
+                    {onNames.length > 0 && `${joinNames(onNames)} ${onNames.length === 1 ? "is" : "are"} on. `}
+                    {near && (
+                      <>
+                        The code uses <span className="font-mono text-xs text-foreground">{near.text}</span>
+                        {near.byToggles ? `; try turning ${onNames.length === 1 ? "it" : "them"} off.` : "."}
+                      </>
+                    )}
                   </div>
-                  <div className="mt-4 flex justify-center">
-                    <Button variant="outline" size="sm" className="text-muted-foreground" onClick={turnOff}>
-                      <ToggleLeft />
-                      Turn off {joinNames(onNames)}
-                    </Button>
+                  <div className="mt-4 flex flex-wrap justify-center gap-2">
+                    {onNames.length > 0 && (
+                      <Button variant="outline" size="sm" className="text-muted-foreground" onClick={turnOff}>
+                        <ToggleLeft />
+                        Turn off {joinNames(onNames)}
+                      </Button>
+                    )}
+                    {near && !near.byToggles && (
+                      <Button variant="outline" size="sm" className="max-w-full text-muted-foreground" onClick={() => { setQ(near.text); input.current?.focus(); }}>
+                        <Search />
+                        <span className="truncate">Search for {near.text}</span>
+                      </Button>
+                    )}
                   </div>
                 </>
               )}
@@ -404,9 +450,9 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
             </div>
           )}
         </div>
-        <div className="flex items-center gap-4 border-t border-hairline px-3 py-2 text-[11px] text-faint">
-          <span>Searches files in this worktree that git does not ignore</span>
-          <span className="ml-auto">Toggles stay on for the next search</span>
+        <div className="flex h-9 items-center gap-4 border-t border-hairline px-4 text-xs text-faint">
+          <span className="truncate">Searches files in this worktree that git does not ignore</span>
+          <span className="ml-auto shrink-0">Toggles stay on for the next search</span>
         </div>
       </DialogContent>
     </Dialog>

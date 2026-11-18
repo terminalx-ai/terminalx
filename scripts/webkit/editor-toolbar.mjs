@@ -124,7 +124,17 @@ try {
         const controls = [...toolbar.querySelectorAll('button')].filter(visible).map(box);
         const save = toolbar.querySelector('[aria-label=Save]');
         return {
-          pathTitle: toolbar.firstElementChild.firstElementChild.title,
+          pathTitle: toolbar.querySelector('[data-testid=file-crumb]').title,
+          // PRO-402: the path is a breadcrumb, a separator after each folder and the name last, in mono.
+          crumb: [...toolbar.querySelectorAll('[data-testid=file-crumb-folders] > span')].map(part => part.textContent).join('/') + '/' + toolbar.querySelector('[data-testid=file-crumb-name]').textContent,
+          separators: toolbar.querySelectorAll('[data-testid=file-crumb-separator]').length,
+          nameMono: (() => {
+            const probe = document.body.appendChild(Object.assign(document.createElement('span'), { className: 'font-mono' }));
+            const mono = getComputedStyle(probe).fontFamily;
+            probe.remove();
+            return getComputedStyle(toolbar.querySelector('[data-testid=file-crumb-name]')).fontFamily === mono && mono !== getComputedStyle(document.body).fontFamily;
+          })(),
+          badge: toolbar.querySelector('[data-testid=file-status]'),
           pathSeparate: box(toolbar.firstElementChild.firstElementChild).right <= box(group.parentElement).left + 0.5,
           statusSeparate: box(toolbar.querySelector('[data-testid=editor-notes]')).right <= box(group).left + 0.5,
           equal: Math.abs(box(radios[0]).width - box(radios[1]).width) < 0.5,
@@ -146,6 +156,11 @@ try {
       });
       assert(result.equal && result.thumb && result.separate && result.pathSeparate && result.statusSeparate && result.fits && result.tabStops, `${width}/${selected}: ${JSON.stringify(result)}`);
       assert.equal(result.pathTitle, '/repos/project/docs/deeply/nested/README.md');
+      assert.equal(result.crumb, 'docs/deeply/nested/README.md');
+      assert.equal(result.separators, 3);
+      assert(result.nameMono, `${width}: the file name is not in mono`);
+      // An unchanged file has no status badge.
+      assert.equal(result.badge, null);
       assert.equal(result.hint, width >= 520);
       assert.equal(result.saveLabel, width >= 440);
       assert.equal(result.labels, width >= 360);
@@ -171,6 +186,32 @@ try {
     }
     console.log(`ok toolbar geometry, responsive order, names and keyboard at ${width}px`);
   }
+  // PRO-402: a changed file's status and line counts sit beside the breadcrumb, clear of the controls.
+  for (const [change, text, status] of [[{ status: 'added', additions: 41, deletions: 0 }, 'A+41', 'added'], [{ status: 'modified', additions: 3, deletions: 2 }, 'M+3−2', 'modified'], [{ status: 'deleted', additions: 0, deletions: 12 }, 'D−12', 'deleted']]) {
+    await page.evaluate(change => window.configureToolbar({ change }), change);
+    for (const width of [700, 440, 360]) {
+      await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);
+      const badge = toolbar.getByTestId('file-status');
+      await badge.waitFor();
+      const result = await toolbar.evaluate(toolbar => {
+        const box = el => el.getBoundingClientRect();
+        const badge = toolbar.querySelector('[data-testid=file-status]');
+        const name = toolbar.querySelector('[data-testid=file-crumb-name]');
+        return {
+          text: badge.textContent, status: badge.dataset.status, label: badge.getAttribute('aria-label'),
+          afterName: box(badge).left >= box(name).right - 0.5,
+          beforeControls: box(badge).right <= box(toolbar.querySelector('[role=radiogroup]')).left + 0.5,
+          inside: toolbar.firstElementChild.scrollWidth <= toolbar.firstElementChild.clientWidth + 1,
+        };
+      });
+      assert.equal(result.text, text);
+      assert.equal(result.status, status);
+      assert(result.afterName && result.beforeControls && result.inside, `${status} at ${width}: ${JSON.stringify(result)}`);
+    }
+    console.log(`ok status badge ${text} beside the breadcrumb`);
+  }
+  await page.evaluate(() => window.configureToolbar({}));
+  await toolbar.getByTestId('file-status').waitFor({ state: 'detached' });
   // View options (PRO-297): the four items in order, inside the window at every width, in Preview and Source.
   for (const width of [700, 399, 260, 220, 219, 180, 120]) {
     await page.locator('#pane').evaluate((pane, width) => { pane.style.width = `${width}px`; }, width);

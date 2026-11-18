@@ -84,7 +84,8 @@ export function NotificationsOffCard() {
       data-notifications-off
       className="pointer-events-auto flex items-start gap-2.5 rounded-xl bg-popover p-3 text-sm shadow-surface hairline animate-fade-in"
     >
-      <BellSlash className="mt-0.5 size-4 shrink-0 text-warning" />
+      {/* Amber, as screen 17.12 draws it. PRO-400's table asked for the muted colour; the owner kept the screen's. */}
+      <BellSlash data-notifications-off-icon className="mt-0.5 size-4 shrink-0 text-warning" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">Notifications are off for TerminalX</div>
         <div className="mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">

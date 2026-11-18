@@ -210,6 +210,38 @@ describe("CloudCreateWorkspace", () => {
     expect(mocked.cloudWorkspaceCreate.mock.calls[0][0].launch.prompt).toBe("Fix the logout");
   });
 
+  it("offers Stop when idle from the provider's windows, quotes with the one chosen, and says Never keeps it running (PRO-410)", async () => {
+    const setup = { defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 15, retentionDays: 30, networkPolicy: "provider-public-network" }, allowedIdleSuspendMinutes: [5, 10, 15, 30, 60, 0], maxIdleSuspendMinutes: null };
+    mocked.cloudWorkspaceSetup.mockResolvedValue(setup);
+    mocked.cloudWorkspaceQuote.mockResolvedValue({ ...QUOTE, configuration: { ...QUOTE.configuration, idleSuspendMinutes: 0 } });
+    await fill();
+    const select = (await screen.findByTestId("cloud-create-idle")) as HTMLSelectElement;
+    // The provider's default first, the windows shortest first, Never last.
+    expect(select.value).toBe("15");
+    expect([...select.options].map((option) => option.textContent)).toEqual(["5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour", "Never"]);
+    expect(screen.queryByTestId("cloud-create-idle-cap")).toBeNull();
+    fireEvent.change(select, { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: /Show price/ }));
+    const price = await screen.findByTestId("cloud-create-quote-price");
+    expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box", idleSuspendMinutes: 0 }), null);
+    expect(price.textContent).toBe("$0.12 an hour while it runs (estimate), about $3.00 a month while stopped. It keeps running until you stop it.");
+  });
+
+  it("leaves Never out and explains the organization's idle cap (PRO-410)", async () => {
+    mocked.cloudWorkspaceSetup.mockResolvedValue({
+      defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 10, retentionDays: 30, networkPolicy: "provider-public-network" },
+      allowedIdleSuspendMinutes: [5, 10],
+      maxIdleSuspendMinutes: 12,
+    });
+    await fill();
+    const select = (await screen.findByTestId("cloud-create-idle")) as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(["5", "10"]);
+    expect(screen.getByTestId("cloud-create-idle-cap").textContent).toBe("Your organization stops idle workspaces after at most 12 minutes, so Never is not offered.");
+    fireEvent.click(screen.getByRole("button", { name: /Show price/ }));
+    await screen.findByTestId("cloud-create-quote-price");
+    expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ idleSuspendMinutes: 10 }), null);
+  });
+
   it("refuses an invalid base branch before anything is quoted", async () => {
     await fill();
     fireEvent.change(screen.getByLabelText("Base branch of acme/app"), { target: { value: "bad..branch" } });

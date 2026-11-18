@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -14,10 +14,8 @@ import { DisclosureMemory, SearchDisclosures, type Disclosures } from "./disclos
 import { useChatFind } from "./ChatFind";
 import { usePrefs } from "@/lib/prefs";
 import { PromptMap } from "./PromptMap";
-import { turnDivider } from "@/lib/turnDivider";
+import { turnFileChanges } from "@/lib/turnChanges";
 import { GoalBanner } from "./GoalBanner";
-import { FirstMessage } from "./FirstMessage";
-import { useHeldFirstMessage } from "@/lib/firstMessage";
 
 const NEAR_BOTTOM_PX = 40;
 /** How many of the newest turns are drawn before the scroller has a size (a tab not on screen). */
@@ -90,6 +88,7 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  */
 export function Chat({
   sessionId,
+  tabId,
   checkpointTabId,
   transcript,
   active = true,
@@ -102,15 +101,28 @@ export function Chat({
   answering,
   answerBlockedReason,
   askDetail = false,
+  askMeta = null,
+  takesKeys = active,
   loading = false,
   footer,
   onSendQueuedNow,
   sending = null,
+  firstMessage,
   onSendAgain,
   onSecondOpinion,
+  secondOpinionAgent,
+  onFork,
+  onSaveSnippet,
+  turnSettings,
   onReset,
+  onRetryInNewChat,
+  onRetry,
+  agent,
+  onGoalCommand,
+  onEditGoal,
 }: {
   sessionId: string;
+  tabId?: string;
   checkpointTabId?: string;
   transcript: Transcript;
   /** A kept chat can be hidden behind another workspace view. */
@@ -126,6 +138,10 @@ export function Chat({
   answerBlockedReason?: string | null;
   /** Quote the command, file or tool a permission request is about (a shared cloud workspace). */
   askDetail?: boolean;
+  /** At the end of a permission card's header: the session's permission mode and project. */
+  askMeta?: string | null;
+  /** This chat's view has the keys (focused and on screen): a permission card's Escape denies. */
+  takesKeys?: boolean;
   /** The conversation is on its way (a cloud tab opened here for the first time): empty is not "nothing yet". */
   loading?: boolean;
   footer: React.ReactNode;
@@ -134,11 +150,40 @@ export function Chat({
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
   /** `files`: the names of the files attached to it (PRO-290), drawn as chips that do not open yet. */
   sending?: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[]; pressedAt: number } | null;
+  /** The local Create prompt and startup progress, until the transcript owns the prompt. */
+  firstMessage?: ReactNode;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
-  onReset?: (endSeq: number) => void;
+  /** Who a second opinion asks, by name ("Codex"). */
+  secondOpinionAgent?: string;
+  /** Fork at a finished turn (PRO-379), where the backend can. */
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  /** Keep a turn's prompt as a snippet. */
+  onSaveSnippet?: (text: string) => void;
+  /** The tab's settings now, for turns whose own record does not say. */
+  turnSettings?: { effort?: string | null; permissionMode?: string | null };
+  /** Reset to the end of a turn: which turn it is, which go, and how many files changed since, for the dialog to say. */
+  onReset?: (endSeq: number, target: ResetTarget) => void;
+  /** Take a failed turn's prompt to a new chat. */
+  onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Send a failed turn's prompt again, as a new message. Not tied to `live`: a turn that failed with no recovery
+   * standing leaves the tab idle, and sending wakes the agent as the composer would.
+   */
+  onRetry?: (seq: number) => void;
+  /** The agent's name, for what a message it took mid-turn says. */
+  agent?: { id: string; name: string };
+  /** Sends Codex's `/goal pause` or `/goal resume` from the goal card. */
+  onGoalCommand?: (command: string) => void;
+  /** Puts the goal in the composer to change. */
+  onEditGoal?: (objective: string) => void;
 }) {
+  // Rebuilt only when a value changes: every turn is memoised on it.
+  const [effort, permissionMode] = [turnSettings?.effort, turnSettings?.permissionMode];
+  const [effortChanged, modeChanged] = [transcript.changedSettings?.effort, transcript.changedSettings?.permissionMode];
+  const turnFallback = useMemo(() => turnSettings ? { effort, permissionMode, changed: { effort: effortChanged, permissionMode: modeChanged } } : undefined,
+    [!!turnSettings, effort, permissionMode, effortChanged, modeChanged]);
   // Guest and workspace chats render requests here, without a TabView banner.
   // A kept, hidden workspace chat must not defer the visible view's notices.
   useNoticeDeferral(active && transcript.pendingAsks.length > 0);
@@ -150,9 +195,6 @@ export function Chat({
   const lastTop = useRef(0);
   const [atBottom, setAtBottom] = useState(true);
   const turns = transcript.turns;
-  // A new session's first message, from Create until its own event is here (PRO-397).
-  const heldFirst = useHeldFirstMessage(sessionId, checkpointTabId);
-  const firstMessage = heldFirst && !turns.some((turn) => turn.prompt) ? heldFirst : null;
   /** Each drawn turn's height as last measured, by key; one never drawn is taken to be `ESTIMATED_TURN_PX`. */
   const heights = useRef(new Map<string, number>());
   /** The turns drawn while the reader is off the bottom, and the scroller's height. */
@@ -429,7 +471,7 @@ export function Chat({
         }
       }}>
       {find.bar}
-      {transcript.goal && <GoalBanner goal={transcript.goal} />}
+      {transcript.goal && <GoalBanner goal={transcript.goal} onCommand={onGoalCommand} onEdit={onEditGoal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
@@ -457,6 +499,7 @@ export function Chat({
                 turn={t}
                 cwd={cwd}
                 sessionId={sessionId}
+                tabId={tabId}
                 checkpointTabId={checkpointTabId}
                 stream={isLast && live ? stream : NO_STREAM}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
@@ -465,13 +508,21 @@ export function Chat({
                 onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
                 onSendAgain={live ? onSendAgain : undefined}
                 onSecondOpinion={onSecondOpinion}
-                onReset={!isLast && !live && !sending ? onReset : undefined}
-                divider={turnDivider(turns[start + i - 1], t)}
+                secondOpinionAgent={secondOpinionAgent}
+                onFork={onFork}
+                onSaveSnippet={onSaveSnippet}
+                turnFallback={turnFallback}
+                onReset={!isLast && !live && !sending && onReset ? (endSeq) => onReset(endSeq, resetTarget(turns, start + i)) : undefined}
+                workingSince={isLast ? transcript.workingSince : undefined}
+                // A failed last turn can go again: its prompt, sent as a new message.
+                onRetry={isLast && !t.live && !sending ? onRetry : undefined}
+                onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
+                agent={agent}
               />
             );
           })}
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
-          {firstMessage && <FirstMessage message={firstMessage} cwd={cwd} />}
+          {firstMessage}
           {sending && <SendingMessage message={sending} cwd={cwd} />}
           {transcript.compacting && (
             <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
@@ -485,7 +536,7 @@ export function Chat({
           {transcript.pendingAsks.map((ask) => (
             <div key={ask.requestId} className="mb-3">
               {ask.kind === "permission" ? (
-                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
+                <PermissionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} showDetail={askDetail} meta={askMeta} takesKeys={takesKeys} onAnswer={(o) => onAnswerPermission(ask.requestId, o)} />
               ) : (
                 <QuestionCard ask={ask} busy={answering} blockedReason={answerBlockedReason} onAnswer={(a) => onAnswerQuestions(ask.requestId, a)} />
               )}
@@ -532,4 +583,17 @@ export function Chat({
       </div>
     </div>
   );
+}
+
+/** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+export interface ResetTarget {
+  turn: number;
+  removed: number[];
+  files: number;
+}
+
+export function resetTarget(turns: Turn[], index: number): ResetTarget {
+  const later = turns.slice(index + 1);
+  const files = new Set(later.flatMap((t) => (t.completed ? turnFileChanges(t).map((change) => change.path) : [])));
+  return { turn: index + 1, removed: later.map((_, i) => index + 2 + i), files: files.size };
 }

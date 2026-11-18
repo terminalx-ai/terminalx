@@ -81,7 +81,7 @@ try {
   await dialog.evaluate((el) => Promise.all(el.getAnimations().map((animation) => animation.finished)));
   const box = await dialog.boundingBox();
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
-  // 580px in the design at 16px text; the app sizes dialogs in rem so they follow Settings › Appearance › Text size.
+  // 580px in the design at 16px text; the app sizes dialogs in rem so they follow Settings › General › Text size.
   assert.ok(box && Math.abs(box.width - 36.25 * rem) <= 1, `the dialog is 36.25rem wide (${box?.width} at ${rem}px)`);
   await capture("01-default");
 
@@ -121,10 +121,10 @@ try {
   assert.equal(await page.locator("textarea[data-new-session-prompt]").count(), 0, "with the checkbox off no new-session view opens");
   console.log("ok create a project: fields, templates, Esc, Cmd+Enter, failure, checkbox off");
 
-  // The link opens Settings › Project templates, where a folder is added as a template.
+  // The link opens Settings › Projects (its Project templates page), where a folder is added as a template.
   await page.evaluate(() => { window.__CREATE__ = null; window.__PW_STUB__.answers["plugin:dialog|open"] = "/Users/demo/templates/house-style"; });
   dialog = await openDialog();
-  await dialog.getByRole("button", { name: "Add your own templates in Settings › Project templates" }).click();
+  await dialog.getByRole("button", { name: "Add your own templates in Settings › Projects" }).click();
   await dialog.waitFor({ state: "detached" });
   await page.getByRole("heading", { name: "Project templates", exact: true, level: 2 }).waitFor();
   const settings = page.locator('[data-setting-id="projects.templates"]');

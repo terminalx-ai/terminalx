@@ -71,8 +71,20 @@ export const DialogContent = React.forwardRef<
     layout?: "page" | "pinned";
     /** Classes for the backdrop, for a dialog that holds the whole window and dims it further. */
     overlayClassName?: string;
+    /**
+     * "center" (the default) floats the dialog in the middle of the window.
+     * "right" is a side sheet: the window's full height at its right edge,
+     * sliding in from there; give it `layout="pinned"` and a `width`.
+     */
+    placement?: "center" | "right";
+    /**
+     * For a centred dialog. "conversation": over the session's centre column (`data-conversation-column`), near its
+     * top, for a dialog about that session (design 05.19). Centred on the window when there is no such column or it
+     * is too narrow.
+     */
+    anchor?: "window" | "conversation";
   }
->(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, ...props }, ref) => {
+>(({ className, children, showClose = true, width = "max-w-[34rem]", layout = "page", overlayClassName, placement = "center", anchor = "window", style, ...props }, ref) => {
   const own = React.useRef<HTMLDivElement | null>(null);
   const setRef = React.useCallback((node: HTMLDivElement | null) => {
     own.current = node;
@@ -81,6 +93,7 @@ export const DialogContent = React.forwardRef<
   }, [ref]);
   // Read as the dialog unmounts, while its node still says how it was drawn.
   React.useLayoutEffect(() => () => leaveGracefully(own.current), []);
+  const placed = useConversationPlacement(placement === "center" && anchor === "conversation");
   return (
   <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay data-dialog-overlay className={cn("fixed inset-0 z-(--z-dialog-overlay) bg-black/35 data-[state=open]:animate-overlay-in data-[state=closed]:animate-overlay-out", overlayClassName)} />
@@ -89,13 +102,16 @@ export const DialogContent = React.forwardRef<
       className={cn(
         // Centred by layout (inset-0, auto margins, as tall as its content), not by translate(-50%): WebKit holds a
         // translated layer where it was while the entrance plays, so a dialog that grew as it opened jumped at the end.
-        "fixed inset-0 z-(--z-dialog) m-auto h-fit w-[calc(100%-2rem)] rounded-xl bg-popover p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
+        placement === "right"
+          ? "fixed inset-y-0 right-0 z-(--z-dialog) h-full w-full border-l border-hairline bg-popover p-5 text-popover-foreground shadow-surface outline-none data-[state=open]:animate-sheet-in data-[state=closed]:animate-sheet-out"
+          : "fixed inset-0 z-(--z-dialog) m-auto h-fit w-[calc(100%-2rem)] rounded-xl bg-popover p-5 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-dialog-in data-[state=closed]:animate-dialog-out",
         // Should the header and footer alone be taller than the window, the dialog still scrolls as a whole.
-        "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin",
+        placement === "right" ? "max-h-dvh overflow-y-auto scrollbar-thin" : "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin",
         layout === "pinned" && "flex flex-col",
         width,
         className,
       )}
+      style={placed ? { ...placed, ...style } : style}
       {...props}
     >
       <DeferDialogNotices />
@@ -117,6 +133,36 @@ export const DialogContent = React.forwardRef<
   );
 });
 DialogContent.displayName = "DialogContent";
+
+/** The column's inset as the dialog's own, kept while the window resizes; null to centre on the window. */
+function useConversationPlacement(on: boolean): React.CSSProperties | null {
+  const read = React.useCallback((): React.CSSProperties | null => {
+    if (!on || typeof document === "undefined") return null;
+    const column = document.querySelector<HTMLElement>("[data-conversation-column]");
+    const rect = column?.getBoundingClientRect();
+    // Too narrow for the dialog and its margins: the window's centre reads better than a squeezed column.
+    if (!rect || rect.width < 480) return null;
+    const top = Math.round(rect.top + 104);
+    return {
+      top,
+      bottom: "auto",
+      left: Math.round(rect.left + 16),
+      right: Math.round(window.innerWidth - rect.right + 16),
+      width: "auto",
+      maxHeight: `calc(100dvh - ${top}px - 1rem)`,
+      marginTop: 0,
+    };
+  }, [on]);
+  const [placed, setPlaced] = React.useState(read);
+  React.useLayoutEffect(() => {
+    if (!on) return;
+    const update = () => setPlaced(read());
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [on, read]);
+  return placed;
+}
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("mb-4 flex shrink-0 flex-col gap-1", className)} {...props} />;

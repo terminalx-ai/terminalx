@@ -56,3 +56,12 @@ export function accountUsageNotice(account: AccountUsage): string | null {
 export function windowIsStale(window: UsageWindow, now: number): boolean {
   return window.stale || now - window.updatedAt >= 30 * 60_000 || (window.resetsAt != null && window.resetsAt <= now);
 }
+
+/**
+ * Whether an account counts as full for automatic switching (#981), as the
+ * popover marks it: any window still running at or past `threshold`. The
+ * runtime's own decision also weighs usage-limit errors and the tab's model.
+ */
+export function accountFull(account: AccountUsage, threshold: number, now: number): boolean {
+  return account.windows.some((window) => window.usedPercent >= threshold && !(window.resetsAt != null && window.resetsAt <= now));
+}

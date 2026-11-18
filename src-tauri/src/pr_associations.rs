@@ -235,6 +235,13 @@ fn refresh(
     transaction(&root.join("session-pr-associations.json"), || refresh_locked(root, sessions, load_cwds, load_pipelines, additions))
 }
 
+/// A session that runs elsewhere (a cloud workspace's, or a paired machine's,
+/// docs/MACHINES.md decision 8): it has no transcript or pipeline on this
+/// computer to find pull requests in, only what its runtime associated.
+fn remote_session(session: &str) -> bool {
+    session.starts_with("cloud:") || session.starts_with("machine:")
+}
+
 fn refresh_locked(
     root: &Path, sessions: &[String],
     load_cwds: impl FnOnce() -> Result<BTreeMap<String, String>>,
@@ -244,7 +251,7 @@ fn refresh_locked(
     let path = root.join("session-pr-associations.json");
     let index_path = root.join("session-pr-journal-index-v1.json");
     let mut all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
-    let local = sessions.iter().any(|session| !session.starts_with("cloud:"));
+    let local = sessions.iter().any(|session| !remote_session(session));
     let mut index: JournalIndex = if local { crate::store::read_json(&index_path)?.unwrap_or_default() } else { BTreeMap::new() };
     let before = serde_json::to_vec(&index)?;
     // As before, missing/unreadable session metadata only prevents journal
@@ -275,7 +282,7 @@ fn refresh_locked(
         // Preserve the caller's live locator ahead of historical backfill,
         // matching the single-session API's original precedence.
         let mut found: Vec<_> = additions.get(session).into_iter().flatten().cloned().collect();
-        if !session.starts_with("cloud:") {
+        if !remote_session(session) {
             if let Some(cwd) = cwds.get(session) {
                 let dir = root.join("sessions").join(session);
                 if dir.is_dir() {
@@ -561,7 +568,7 @@ mod tests {
     #[test]
     fn recovers_creation_from_durable_tools_without_branch_or_panel_state() {
         use crate::events::{AgentEvent, Payload, ToolResult, ToolType};
-        let event = |session: &str, payload| AgentEvent { id: "event".into(), session_id: session.into(), tab_id: "tab".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, subagent: None, payload };
+        let event = |session: &str, payload| AgentEvent { id: "event".into(), session_id: session.into(), tab_id: "tab".into(), harness: "codex".into(), seq: 1, ts: String::new(), message_ts: None, prompt_request_id: None, subagent: None, payload };
         let call = |id: &str, command: &str| Payload::ToolCallStarted { call_id: id.into(), name: "exec_command".into(), tool_type: ToolType::Shell, input: serde_json::json!({ "cmd": command }), title: None };
         let result = |id: &str, text: &str, is_error| Payload::ToolCallCompleted { call_id: id.into(), result: ToolResult { text: text.into(), is_error, exit_code: Some(if is_error { 1 } else { 0 }), ..Default::default() } };
         let url = "https://github.com/acme/widgets/pull/2";

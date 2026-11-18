@@ -7,6 +7,7 @@ import { fs, type MediaFile } from "@/lib/api";
 import type { FileEditorEntry } from "@/lib/editors";
 import { changedSince, fileErrorText, useFileSource, type FileState } from "@/lib/workspaceFiles";
 import { AttachmentToolbar } from "./AttachmentToolbar";
+import { FileCrumb, FileStatusBadge, useFileChange } from "./FileCrumb";
 
 const PdfSurface = lazy(() => import("./PdfSurface"));
 
@@ -44,6 +45,7 @@ function LocalMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: b
   const [revision, setRevision] = useState(0);
   const [changed, setChanged] = useState(false);
   const abs = `${entry.root}/${entry.rel}`;
+  const change = useFileChange(entry.attachment ? undefined : entry.root, entry.rel, visible, revision);
 
   // Match the text editor: opening a file moves keyboard close/save handling into the file pane.
   useEffect(() => {
@@ -97,8 +99,9 @@ function LocalMediaPane({ entry, visible }: { entry: FileEditorEntry; visible: b
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); e.stopPropagation(); }
     }}>
       {entry.attachment ? <AttachmentToolbar path={entry.attachment.path} name={entry.name} sentAt={entry.attachment.sentAt} /> : (
-        <div className="flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
-          <span className="min-w-0 truncate text-muted-foreground" title={abs}>{entry.rel}</span>
+        <div className="@container/editor-toolbar flex min-h-8 shrink-0 items-center gap-2 border-b border-hairline px-3 text-xs">
+          <FileCrumb path={abs} relativePath={entry.rel} />
+          <FileStatusBadge change={change} />
           <span className="ml-auto shrink-0 text-faint">Read-only</span>
           <Button variant="ghost" size="icon-xs" aria-label="Reload media" onClick={reload}><RotateCcw /></Button>
           <Button variant="ghost" size="icon-xs" aria-label="Reveal file" onClick={reveal}><FolderOpen /></Button>

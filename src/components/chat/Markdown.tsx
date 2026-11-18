@@ -50,7 +50,9 @@ const Block = memo(function Block({ text, streaming, mode, linkContext, remoteIm
         parseIncompleteMarkdown={false}
         plugins={{ code: codePlugin }}
         shikiTheme={["github-light", "github-dark"]}
-        controls={{ code: true, table: true, mermaid: false }}
+        // Code reads as the answer gives it: no line numbers, and one labelled Copy rather than download and copy icons.
+        controls={{ code: { copy: true, download: false }, table: true, mermaid: false }}
+        lineNumbers={false}
         components={components}
         remarkPlugins={linkContext ? routedRemarkPlugins : citedRemarkPlugins}
         linkSafety={{ enabled: false }}

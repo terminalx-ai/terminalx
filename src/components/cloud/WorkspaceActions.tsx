@@ -1,11 +1,28 @@
+import { mayReassign, useWorkspacePreferencesAvailable, WorkspaceReassignDialog } from "./WorkspaceFollowing";
+import { useAccount } from "@/lib/account";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "@/icons";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
+import { Archive, ArchiveRestore, CalendarClock, Clock, Loader2, Copy, Info, Lock, RotateCcw, Pause, Play, Trash2, Users } from "@/icons";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { CloudWorkspaceDetailsCard } from "./CloudWorkspaceDetails";
+import { canRestartWorkspace, detailsScope, restartCloudWorkspace, useWorkspaceDetailsAvailable } from "@/lib/cloudWorkspaceDetails";
+import {
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+} from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { openSchedulesDialog } from "@/components/cloud/CloudSchedulesDialog";
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
-import type { CloudWorkspaceListItem } from "@/lib/api";
-import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { api, type CloudWorkspaceIdleSuspend, type CloudWorkspaceListItem } from "@/lib/api";
+import { applyCloudSnapshot, cloudOrgArg, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
+import { idleSuspendCapNote, idleSuspendChoices, idleSuspendLabel } from "@/lib/idleSuspend";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
@@ -17,26 +34,36 @@ import { selectCloudWorkspace } from "@/lib/sessions";
 /**
  * A cloud workspace's actions, used wherever the workspace shows: a
  * project's "…" menu, a VM group row, and a cloud session's location chip.
- * Sharing first (Share… for whoever manages shares, else a read-only list),
+ * Details, copy and restart when the native readiness gate offers them.
+ * Sharing (Share… for whoever manages shares, else a read-only list),
  * then scheduled tasks for the owners and admins the server offers them to,
  * then the lifecycle (Stop, Resume, Archive, Delete) for the owners and
  * admins the server lets run it. Stop, Archive and Delete go through the
  * existing confirmation dialog; Resume is the one explicit wake.
  */
 
-export type LifecycleRequest = { item: CloudWorkspaceListItem; action: LifecycleAction };
+export type LifecycleRequest = { item: CloudWorkspaceListItem; action: LifecycleAction | "restart" | "details" | "copy-machine" | "copy-info" | "reassign" };
 
 export function WorkspaceActionItems({
   item,
   onLifecycle,
   run,
   archived = false,
+  detailsAllowed = true,
 }: {
   item: CloudWorkspaceListItem;
   onLifecycle: (request: LifecycleRequest) => void;
   run: (work: () => Promise<void>) => void;
   archived?: boolean;
+  detailsAllowed?: boolean;
 }) {
+  const detailsAvailable = useWorkspaceDetailsAvailable();
+  const preferencesAvailable = useWorkspacePreferencesAvailable();
+  const { status } = useAccount();
+  const catalog = useCloudCatalog();
+  const org = catalog.orgs[item.workspace.orgId];
+  const current = org?.source === "live" && !org.error ? org.workspaces.find((row) => row.workspace.id === item.workspace.id) : undefined;
+  const reassign = preferencesAvailable && current && mayReassign(current, catalog.viewerUserId, status.organizations?.find((org) => org.id === item.workspace.orgId)?.role);
   const state = deriveCloudActivity(item);
   const actions = actionsFor(item);
   const busy = state.tone === "changing";
@@ -69,6 +96,14 @@ export function WorkspaceActionItems({
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");
   return (
     <>
+      {detailsAvailable && detailsAllowed && present && <>
+        <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "details" })}><Info /> Workspace details…</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-machine" })}><Copy /> Copy machine ID</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "copy-info" })}><Copy /> Copy workspace info</DropdownMenuItem>
+        {canRestartWorkspace(item) && <DropdownMenuItem onSelect={() => onLifecycle({ item, action: "restart" })}><RotateCcw /> Restart workspace…</DropdownMenuItem>}
+        <DropdownMenuSeparator />
+      </>}
+      {present && reassign && current && <DropdownMenuItem onSelect={() => onLifecycle({ item: current, action: "reassign" })}><Users /> Reassign to…</DropdownMenuItem>}
       {shareable && shareBlocked && (
         <DropdownMenuItem disabled title={VISIBILITY_ADMIN_REASON} data-testid="cloud-share-locked">
           <Users />
@@ -99,6 +134,10 @@ export function WorkspaceActionItems({
         <DropdownMenuItem onSelect={() => openSchedulesDialog({ orgId: workspace.orgId, workspaceId: workspace.id, name: workspace.name })}>
           <CalendarClock /> Scheduled tasks…
         </DropdownMenuItem>
+      )}
+      {/* How long it may sit idle (PRO-410): whoever manages it, on a server that reports the window. A preparation workspace keeps its own. */}
+      {lifecycle && present && !workspace.preparation && typeof workspace.idleSuspendMinutes === "number" && (
+        <IdleSuspendItems item={item} run={run} />
       )}
       {lifecycle && workspace.state === "suspended" && !archived && (
         <DropdownMenuItem disabled={busy} onSelect={() => void run(() => resumeCloudWorkspace(item))}>
@@ -139,8 +178,83 @@ export function WorkspaceActionItems({
   );
 }
 
+/**
+ * "Stop when idle" for an existing workspace (PRO-410). The choices are read
+ * when the submenu opens: the server's, under the organization's cap, so
+ * Never is missing exactly when the cap forbids it, and the note says why.
+ * Choosing one changes it at once; the list then shows the new window.
+ */
+function IdleSuspendItems({ item, run }: { item: CloudWorkspaceListItem; run: (work: () => Promise<void>) => void }) {
+  const { workspace } = item;
+  const [view, setView] = useState<CloudWorkspaceIdleSuspend | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = () => {
+    setFailed(null);
+    api
+      .cloudWorkspaceIdleSuspend(workspace.id, cloudOrgArg(workspace.orgId))
+      .then(setView)
+      .catch((e: unknown) => setFailed(lifecycleErrorMessage(errorCode(e))));
+  };
+  const current = view?.idleSuspendMinutes ?? workspace.idleSuspendMinutes ?? null;
+  const choices = idleSuspendChoices(view?.allowedIdleSuspendMinutes ?? []);
+  const note = view ? idleSuspendCapNote(view.maxIdleSuspendMinutes, choices) : null;
+  const change = (minutes: number) =>
+    run(async () => {
+      try {
+        await api.cloudWorkspaceSetIdleSuspend(workspace.id, minutes, cloudOrgArg(workspace.orgId));
+      } finally {
+        // A change with no answer may still have landed: the list is read again either way.
+        void refreshCloudCatalog(workspace.orgId);
+      }
+    });
+  return (
+    <DropdownMenuSub onOpenChange={(open) => open && load()}>
+      <DropdownMenuSubTrigger data-testid="cloud-idle-menu">
+        <Clock /> Stop when idle
+        {current !== null && <span className="ml-auto pl-3 text-[10px] text-faint">{idleSuspendLabel(current)}</span>}
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-w-64">
+        {!view && !failed && (
+          <DropdownMenuItem disabled>
+            <Loader2 className="animate-spin" /> Loading…
+          </DropdownMenuItem>
+        )}
+        {failed && (
+          <DropdownMenuItem disabled className="whitespace-normal text-[11px]">
+            {failed}
+          </DropdownMenuItem>
+        )}
+        {view && (
+          <DropdownMenuRadioGroup value={current === null ? "" : String(current)} onValueChange={(value) => change(Number(value))}>
+            {choices.map((minutes) => (
+              <DropdownMenuRadioItem key={minutes} value={String(minutes)} data-testid={`cloud-idle-choice-${minutes}`}>
+                {idleSuspendLabel(minutes)}
+              </DropdownMenuRadioItem>
+            ))}
+            {/* A window the cap no longer admits (set before the cap): shown as it is, not offered again. */}
+            {current !== null && !choices.includes(current) && (
+              <DropdownMenuRadioItem value={String(current)} disabled>
+                {idleSuspendLabel(current)} (not allowed any more)
+              </DropdownMenuRadioItem>
+            )}
+          </DropdownMenuRadioGroup>
+        )}
+        {note && <DropdownMenuLabel className="whitespace-normal text-[11px] font-normal">{note}</DropdownMenuLabel>}
+        {view && <DropdownMenuLabel className="whitespace-normal text-[11px] font-normal">An agent at work or waiting for an approval counts as activity.</DropdownMenuLabel>}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
 /** The confirmation dialog for a requested action; a deleted workspace's connection is closed after. */
 export function WorkspaceLifecycleDialog({ request, onClose }: { request: LifecycleRequest; onClose: () => void }) {
+  if (request.action === "reassign") return <WorkspaceReassignDialog key={`${request.item.workspace.orgId}:${request.item.workspace.id}`} item={request.item} onClose={onClose} />;
+  if (request.action === "restart") return <WorkspaceRestartDialog item={request.item} onClose={onClose} />;
+  if (request.action === "details" || request.action === "copy-machine" || request.action === "copy-info") return <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <DialogContent><DialogHeader><DialogTitle>Workspace details</DialogTitle><DialogDescription>Original setup and current connected resources.</DialogDescription></DialogHeader>
+      <CloudWorkspaceDetailsCard item={request.item} initialCopy={request.action === "copy-machine" ? "machine" : request.action === "copy-info" ? "info" : undefined} />
+    </DialogContent>
+  </Dialog>;
   return (
     <CloudWorkspaceLifecycleDialog
       item={request.item}
@@ -178,4 +292,28 @@ export function useLifecycleRun(): [string | null, (work: () => Promise<void>) =
     void work().catch((e: unknown) => setError(lifecycleErrorMessage(errorCode(e))));
   };
   return [error, run];
+}
+
+/** Separate from Stop/Archive/Delete: restart is queued and never accepts force. */
+function WorkspaceRestartDialog({ item, onClose }: { item: CloudWorkspaceListItem; onClose: () => void }) {
+  const [confirmed, setConfirmed] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [owner] = useState(detailsScope);
+  const submit = async () => {
+    if (!confirmed || pending || owner !== detailsScope()) return;
+    setPending(true); setError(null);
+    try { await restartCloudWorkspace(item); if (owner === detailsScope()) onClose(); }
+    catch (error) { if (owner === detailsScope()) setError(error instanceof Error ? error.message : lifecycleErrorMessage(errorCode(error))); }
+    finally { setPending(false); }
+  };
+  return <Dialog open onOpenChange={(open) => !open && !pending && onClose()}>
+    <DialogContent showClose={!pending} onEscapeKeyDown={(event) => { if (pending) event.preventDefault(); }} onPointerDownOutside={(event) => { if (pending) event.preventDefault(); }}>
+      <DialogHeader><DialogTitle>Restart {item.workspace.name}?</DialogTitle><DialogDescription>The workspace keeps its disk, pinned setup and saved conversations. Running processes will be interrupted. A checkpoint can time out; unsaved in-memory work may be lost.</DialogDescription></DialogHeader>
+      <label className="my-4 flex gap-2 text-sm"><input type="checkbox" checked={confirmed} disabled={pending} onChange={(event) => setConfirmed(event.target.checked)} />I understand running work may be interrupted</label>
+      {pending && <p role="status">Restart pending… Waiting for the workspace operation.</p>}
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      <DialogFooter><Button variant="outline" disabled={pending} onClick={onClose}>Cancel</Button><Button disabled={!confirmed || pending || !canRestartWorkspace(item) || owner !== detailsScope()} onClick={() => void submit()}>Restart workspace</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }

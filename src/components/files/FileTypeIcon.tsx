@@ -53,5 +53,22 @@ export function FileTypeIcon({
   if (isDir) {
     return <icons.FolderIcon folderName={name} isOpen={isOpen} isRoot={isRoot} size={size} className={className} />;
   }
-  return <icons.FileIcon fileName={name} size={size} className={className} />;
+  const lower = name.toLowerCase();
+  return <icons.FileIcon fileName={lower} fileExtension={knownExtension(lower, (ext) => icons.getFileIcon({ fileExtension: ext }) !== "file")} size={size} className={className} />;
+}
+
+/**
+ * The extension the pack has an icon for: the longest one the name ends
+ * with, so `scripts.test.ts` is a test file and `scripts.ts` TypeScript. The
+ * pack matches a whole file name on its own (`bun.lock`), in lower case, but
+ * an extension only when it is handed one, and it never takes it from the
+ * name; without this every `.tsx`, `.json` or `.md` drew the same blank page.
+ */
+export function knownExtension(name: string, known: (ext: string) => boolean): string | undefined {
+  const parts = name.toLowerCase().split(".");
+  for (let i = 1; i < parts.length; i++) {
+    const ext = parts.slice(i).join(".");
+    if (ext && known(ext)) return ext;
+  }
+  return undefined;
 }

@@ -93,7 +93,7 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
 
   return (
     <Dialog open onOpenChange={(open) => !open && !linking && onClose()}>
-      <DialogContent width="max-w-[600px]" showClose={false} className="p-0" onEscapeKeyDown={(e) => e.stopPropagation()}>
+      <DialogContent width="max-w-[600px]" anchor="conversation" showClose={false} className="p-0" onEscapeKeyDown={(e) => e.stopPropagation()}>
         <div className="flex items-start gap-3 px-5 pt-5">
           <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted">
             <Link className="size-4 text-muted-foreground" />
@@ -202,6 +202,8 @@ export function LinkPrDialog({ session, onClose }: { session: SessionEntry; onCl
           )}
           {linkError && <p role="alert" className="mt-2 text-xs text-destructive">{linkError}</p>}
           <div className="flex items-center justify-end gap-2 pb-4 pt-4">
+            {/* Where this dialog lives, for next time (design 05.19). */}
+            <span className="mr-auto truncate text-[11.5px] text-faint" data-testid="link-pr-where">Session more › Issue and pull request › Link pull request…</span>
             <Button type="button" variant="outline" className="h-8 rounded-md px-3 text-[12.5px] text-muted-foreground" onClick={onClose} disabled={linking}>
               Cancel
             </Button>

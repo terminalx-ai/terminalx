@@ -42,7 +42,7 @@ try {
       await cleanup.getByRole("radio", { name: "Off", exact: true }).click();
       await page.waitForFunction(() => window.__PW_MERGED__.settings.projects["/repos/p0"] === false);
       checks["repository control changes the existing per-project key"] = await page.evaluate(() => window.__PW_MERGED__.settings.enabled && window.__PW_MERGED__.settings.projects["/repos/p1"] === false);
-      checks["the opened repository is current"] = await first.getAttribute("aria-current") === "page";
+      checks["the opened repository is open, its General page current"] = await first.getAttribute("aria-expanded") === "true" && await nav.getByRole("group", { name: /settings$/ }).getByRole("button", { name: "General", exact: true }).getAttribute("aria-current") === "page";
       const layout = await settings.evaluate((root) => {
         const nav = root.querySelector("nav");
         const column = root.querySelector("section[aria-labelledby]");

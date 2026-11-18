@@ -73,10 +73,12 @@ try {
     const dialog = await page.getByRole("dialog").count();
 
     // A comparison branch that is gone.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
-    await page.getByText(/Against origin\/main/).waitFor();
-    await page.getByLabel("Comparison target").fill(GONE);
-    await page.getByRole("button", { name: "Apply", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
+    const target = page.getByRole("button", { name: "Comparison target", exact: true });
+    await target.filter({ hasText: "vs main" }).waitFor();
+    await target.click();
+    await page.getByLabel("Branch to compare against").fill(GONE);
+    await page.getByLabel("Branch to compare against").press("Enter");
     const failedSwitch = alerts.filter({ hasText: `Couldn't switch to ${GONE}` });
     await failedSwitch.waitFor();
     const switchText = (await failedSwitch.textContent()) ?? "";
@@ -84,7 +86,7 @@ try {
     const line = failedSwitch.locator("[data-error-detail]");
     const lineText = await line.textContent();
     const lineFont = await line.evaluate((node) => getComputedStyle(node).fontFamily);
-    const stayed = await page.getByText(/Against origin\/main/).count();
+    const stayed = await target.filter({ hasText: "vs main" }).count();
     const layout = await page.evaluate(() => {
       const cards = [...document.querySelectorAll('[role="alert"][data-error-toast]')];
       const boxes = cards.map((node) => node.getBoundingClientRect());
@@ -124,7 +126,7 @@ try {
       "the comparison stayed on its target": stayed > 0,
       "each toast has its tone's edge, inside the window, not overlapping, clipping nothing": layout.tones.join() === "warning,error" && layout.edges[0] !== layout.edges[1] && layout.inView && !layout.overlap && !layout.clipped,
       "Copy error copies git's error": typeof copied === "string" && copied.includes("fatal: Needed a single revision"),
-      "Choose another branch focuses the comparison target and closes the toast": focused === "Comparison target" && switchClosed,
+      "Choose another branch focuses the comparison target and closes the toast": focused === "Branch to compare against" && switchClosed,
       "Create a branch here makes the branch in this checkout and the header names it": branchHere.length === 1 && branchHere[0].cwd.endsWith("/.raccoon/worktrees/approval-diff") && branchHere[0].name === "Show the diff inside edit approvals" && renameClosed,
       "no browser errors": errors.length === 0,
     }, { renameText, renameButtons, switchText, switchButtons, lineText, lineFont, layout, copied, focused, branchHere, errors });

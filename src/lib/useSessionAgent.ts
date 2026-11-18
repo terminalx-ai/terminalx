@@ -5,9 +5,10 @@ import { usePickerModels } from "@/lib/cloudModels";
 import { chooseMode } from "@/lib/dialogs";
 import { getPrefs, setPrefs, usePrefs, type Prefs } from "@/lib/prefs";
 import { tabAccount, type ModelInfo } from "@/lib/api";
-import { agentAccounts, resolveAccount, showsAccounts, takesAccounts, type AgentAccount, type AgentAccounts } from "@/lib/agentAccounts";
+import { agentAccounts, resolveAccount, showsAccounts, switchesIn, takesAccounts, type AgentAccount, type AgentAccounts, type LaunchAccountChoice } from "@/lib/agentAccounts";
+import { useStatus } from "@/lib/status";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-import type { AgentReadinessMap } from "@/lib/agentReadiness";
+import { startingAgent, type AgentReadinessMap } from "@/lib/agentReadiness";
 
 /** One launch: the agent, its model and effort, and the permission mode it starts in. */
 export interface LaunchSettings {
@@ -157,6 +158,29 @@ export function useAgentAccounts(harness: string | null | undefined, maxAgeMs = 
 }
 
 /**
+ * The account automatic switching (#981) would start a new session of
+ * `harness` on instead of `accountId`, and why, asked of the runtime again
+ * as usage changes. `null` when nothing would move it, or with the setting
+ * off; the runtime decides again when the session starts.
+ */
+export function useLaunchAccountChoice(harness: string | null, view: AgentAccounts | null, projectId: string | null, accountId: string | null): LaunchAccountChoice | null {
+  const [choice, setChoice] = useState<LaunchAccountChoice | null>(null);
+  const { usage } = useStatus();
+  const asks = !!harness && !!accountId && switchesIn(view, projectId);
+  const revision = usage?.revision ?? 0;
+  useEffect(() => {
+    if (!asks || !harness) { setChoice(null); return; }
+    let live = true;
+    Promise.resolve().then(() => agentAccounts.launchChoice(harness, projectId, accountId)).then(
+      (answer) => { if (live) setChoice(answer && view?.accounts.some((account) => account.id === answer.account) ? answer : null); },
+      () => { if (live) setChoice(null); },
+    );
+    return () => { live = false; };
+  }, [asks, harness, projectId, accountId, revision, view]);
+  return asks ? choice : null;
+}
+
+/**
  * The same preferences and valid launch choices for every new-session surface.
  * With `controlled`, the choices are the form's own and preferences are only
  * read, for the saved model and effort of an agent switched to.
@@ -176,14 +200,11 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   // without replacing the saved provider/model preferences during discovery.
   const localDefaults = !chosen && here && readiness !== undefined;
   const eligible = (state: "ready" | "unknown") => harnesses.filter((h) => h.available && readiness?.[h.id]?.state === state);
-  // Known logins win over an unknown probe, including a saved unknown agent.
-  // Unknown can be a working custom route; a failed probe is not a signed-out login.
   const ready = localDefaults ? eligible("ready") : [];
   const unknown = localDefaults ? eligible("unknown") : [];
-  const candidates = ready.length ? ready : unknown;
-  const explicit = [...ready, ...unknown].find((h) => h.id === pickedAgent && h.id === prefs.lastAgent);
+  // Known logins win over an unknown probe, including a saved unknown agent: `startingAgent` is the rule.
   const harness = localDefaults
-    ? explicit ?? candidates.find((h) => h.id === prefs.lastAgent) ?? candidates[0] ?? null
+    ? startingAgent(harnesses, readiness, prefs.lastAgent, pickedAgent)
     : (!chosen && here && !preferred?.available ? harnesses.find((h) => h.available) : preferred) ?? preferred ?? harnesses[0] ?? null;
   const catalog = useModels(controlled?.preserveUnavailableModel ? undefined : harness?.id);
   const listed = controlled?.preserveUnavailableModel ? catalog.filter((m) => m.harness === harness?.id) : catalog;
@@ -207,9 +228,13 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
   const accounts = useAgentAccounts(here && harness ? harness.id : null);
   // The picker shows only with more than one account; with one, nothing is chosen or sent, as before accounts.
   const accountsShown = showsAccounts(accounts);
-  const account: AgentAccount | null = accountsShown && accounts && harness
-    ? resolveAccount(accounts, { accountId: chosen ? chosen.account : pickedAccount[harness.id], projectId })
+  const asked = harness ? (chosen ? chosen.account : pickedAccount[harness.id]) : undefined;
+  const resolved: AgentAccount | null = accountsShown && accounts && harness
+    ? resolveAccount(accounts, { accountId: asked, projectId })
     : null;
+  // Nothing picked by hand, and that account full: automatic switching's choice, and why (#981).
+  const automatic = useLaunchAccountChoice(here && harness && !asked ? harness.id : null, accounts, projectId ?? null, resolved?.id ?? null);
+  const account = (automatic && accounts?.accounts.find((candidate) => candidate.id === automatic.account)) || resolved;
 
   const change = (patch: Partial<LaunchSettings>) => {
     const current = latest.current;
@@ -233,8 +258,16 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     accounts: accountsShown ? accounts : null,
     /** The account the launch starts on, as the picker shows it. */
     account,
-    /** What a launch request carries as `account`: the account shown, or nothing with one account. */
-    accountId: account?.id,
+    /**
+     * What a launch request carries as `account`: the account shown, or
+     * nothing with one account. When the account shown is automatic
+     * switching's choice (#981), the one it moves off: the runtime decides
+     * again as the tab starts, moves it, and says so in the conversation
+     * and the switch log.
+     */
+    accountId: automatic && account?.id === automatic.account ? resolved?.id : account?.id,
+    /** Why automatic switching chose `account` rather than the default (#981), or `null`. */
+    accountReason: automatic && account?.id === automatic.account ? automatic.reason : null,
     selectAccount: (id: string) => {
       if (!harness || !accounts?.accounts.some((candidate) => candidate.id === id)) return;
       if (controlled) change({ account: id });

@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`, invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
+const { copyText } = vi.hoisted(() => ({ copyText: vi.fn(async () => {}) }));
+vi.mock("@/lib/clipboard", () => ({ copyText }));
 
 import { TurnBlock, hasMarkdownTable, splitMarkdownTables } from "./TurnBlock";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -65,7 +67,7 @@ it("keeps link activation separate from expanding reasoning and tool output", ()
   expect(screen.queryByRole("link", { name: "https://example.com/output" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Expand reasoning" }));
   expect(screen.getByText(/More reasoning/)).toBeDefined();
-  fireEvent.click(screen.getByRole("button", { name: "Expand tool output" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Expand Fetched/ }));
   expect(screen.getByRole("link", { name: "https://example.com/output" })).toBeDefined();
   expect(container.querySelector("button a")).toBeNull();
 });
@@ -115,7 +117,11 @@ describe("a message queued behind the running turn", () => {
   it("is the reader's message once the agent has taken it, with nothing left to send now", () => {
     const taken: Turn = { ...turn([]), live: true, work: [{ kind: "message", text: "use the staging config", key: "m9", seq: 9, author: { userId: "sam", displayName: "Sam" } }] };
     render(<TooltipProvider><TurnBlock turn={taken} sessionId="s" stream={[]} working onSendQueuedNow={vi.fn()} /></TooltipProvider>);
-    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual([expect.stringContaining("what is this?"), "Samuse the staging config"]);
+    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual([expect.stringContaining("what is this?"), "Sent mid-turnSamuse the staging config"]);
+    // PRO-380: taken mid-turn, it says so above the bubble, in the agent's words when the chat knows the agent.
+    cleanup();
+    render(<TooltipProvider><TurnBlock turn={taken} sessionId="s" stream={[]} working agent={{ id: "codex", name: "Codex" }} /></TooltipProvider>);
+    expect(screen.getByTestId("steered-note").textContent).toBe("Sent mid-turn · Codex reads it at its next tool call");
     expect(screen.queryByTestId("queued-message")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
@@ -189,7 +195,7 @@ describe("a compaction", () => {
   it("folds its summary under the line, collapsed, and never as a message anybody sent (#524)", () => {
     setPrefs({ foldToolCalls: true });
     const { container } = render(<TurnBlock turn={compacted({ summary })} sessionId="s" stream={[]} working={false} />);
-    const line = screen.getByRole("button", { name: /Context compacted from 220k to 14k tokens/ });
+    const line = screen.getByRole("button", { name: /Chat compacted · 220K → 14K tokens/ });
     expect(line.getAttribute("aria-expanded")).toBe("false");
     expect(line.textContent).toContain("Show summary");
     expect(screen.queryByTestId("compaction-summary")).toBeNull();
@@ -205,15 +211,15 @@ describe("a compaction", () => {
 
   it("is a plain line when there is no summary to show", () => {
     render(<TurnBlock turn={compacted()} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByText(/Context compacted from 220k to 14k tokens/)).toBeDefined();
+    expect(screen.getByText(/Chat compacted · 220K → 14K tokens/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("preserves reported zero and small counts and leaves missing counts absent", () => {
     const view = render(<TurnBlock turn={compacted({ preTokens: 17, postTokens: 0 })} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByText("Context compacted from 17 to 0 tokens")).toBeDefined();
+    expect(screen.getByText("Chat compacted · 17 → 0 tokens")).toBeDefined();
     view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined })} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByText("Context compacted")).toBeDefined();
+    expect(screen.getByText("Chat compacted")).toBeDefined();
   });
 
   it("renders stopped and uncertain work without claiming successful compaction", () => {
@@ -222,7 +228,7 @@ describe("a compaction", () => {
     expect(screen.getByText("Compaction stopped: turn interrupted")).toBeDefined();
     view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle: { ...lifecycle, state: "unknown" }, uncertain: true })} sessionId="s" stream={[]} working={false} />);
     expect(screen.getByText("Compaction status unknown: could not save status")).toBeDefined();
-    expect(screen.queryByText(/Context compacted/)).toBeNull();
+    expect(screen.queryByText(/Chat compacted/)).toBeNull();
   });
 });
 
@@ -311,54 +317,200 @@ describe("a settled turn's header and footer", () => {
       ],
     }) as unknown as Turn;
 
-  it("says how the work went above the answer, and keeps the footer to the time and a copy", () => {
+  it("leads the folded header with its chevron and the kinds of tools, and puts duration · time in the footer (PRO-378)", () => {
     setPrefs({ foldToolCalls: true });
-    render(<TurnBlock turn={worked("ok")} sessionId="s" stream={[]} working={false} />);
-    const header = screen.getByRole("button", { name: /Worked for 14s/ });
-    expect(header.textContent).toBe("Worked for 14s · 2 tool calls");
+    render(<TurnBlock turn={{ ...worked("ok"), usage: { inputTokens: 66, cacheReadTokens: 720, cacheWriteTokens: 214, outputTokens: 574 } }} sessionId="s" stream={[]} working={false} onSecondOpinion={vi.fn()} />);
+    const header = screen.getByTestId("turn-fold");
+    expect(header.textContent).toBe("2 tool calls");
+    expect(header.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+    expect(header.querySelectorAll("[data-testid=tool-kinds] svg")).toHaveLength(1);
     expect(header.getAttribute("aria-expanded")).toBe("false");
     const footer = screen.getByTestId("turn-footer");
-    expect(footer.textContent).not.toContain("Worked");
-    expect(footer.querySelector("time")?.dateTime).toBe("2026-10-03T00:01:00.000Z");
-    expect(screen.getByRole("button", { name: "Copy answer" })).toBeDefined();
+    expect(footer.textContent).toMatch(/^14s · \d{1,2}:\d{2}/);
+    // The chip is what opens the turn's details (PRO-379), named after what it says.
+    expect(within(footer).getByRole("button", { name: /^Turn details: 14s · \d{1,2}:\d{2}/ })).toBeDefined();
+    expect(footer.textContent).toContain("cache hit 72%");
+    expect(footer.textContent).toContain("41 tok/s");
+    expect(screen.getByRole("button", { name: "Copy answer" }).className).not.toContain("opacity-0");
+    expect(screen.getByRole("button", { name: "Second opinion" }).querySelector("svg")).not.toBeNull();
   });
 
-  it("says a stopped or failed turn plainly in the header", () => {
+  it("says a stopped or failed turn plainly in the footer", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={worked("aborted")} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { name: /Stopped after 14s/ })).toBeDefined();
+    expect(screen.getByTestId("turn-footer").textContent).toContain("Stopped after 14s");
     cleanup();
     render(<TurnBlock turn={worked("failed")} sessionId="s" stream={[]} working={false} />);
-    expect(screen.getByRole("button", { name: /Failed after 14s/ })).toBeDefined();
+    expect(screen.getByTestId("turn-footer").textContent).toContain("Failed after 14s");
   });
 
   it("puts how long it took in the footer when there is no work to fold", () => {
     setPrefs({ foldToolCalls: true });
     render(<TurnBlock turn={worked("ok", false)} sessionId="s" stream={[]} working={false} />);
-    expect(screen.queryByRole("button", { name: /Worked/ })).toBeNull();
-    expect(screen.getByTestId("turn-footer").textContent).toContain("Worked");
-    expect(screen.getByTestId("turn-footer").textContent).toContain("for 14s");
+    expect(screen.queryByTestId("turn-fold")).toBeNull();
+    expect(screen.getByTestId("turn-footer").textContent).toContain("14s · ");
   });
 
-  it("keeps the reader's time out of the bubble, under it on hover", () => {
+  it("puts the reader's time inside their bubble, at its bottom right (PRO-378)", () => {
     const value = turn([]);
     value.prompt!.messageTs = "2026-10-03T00:00:00Z";
     render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
-    const bubble = screen.getByTestId("reader-message");
-    expect(bubble.firstElementChild?.querySelector("time")).toBeNull();
-    expect(bubble.querySelector(":scope > time")?.getAttribute("dateTime")).toBe("2026-10-03T00:00:00.000Z");
+    const bubble = screen.getByTestId("reader-message").firstElementChild!;
+    expect(bubble.className).toContain("border-hairline");
+    expect(bubble.querySelector("time")?.getAttribute("dateTime")).toBe("2026-10-03T00:00:00.000Z");
+    expect(screen.getByTestId("message-time").className).toContain("text-xs");
   });
 });
 
-it("resets only a completed successful turn using its completion sequence", () => {
+// PRO-378: opened, a fold reads in the order the agent wrote it; a failed turn says why once, with Retry.
+describe("a turn's order and its failure", () => {
+  const ordered = (): Turn =>
+    ({
+      ...turn([]),
+      completed: { status: "ok", ts: "2026-10-03T00:01:00Z" },
+      toolCount: 2,
+      work: [
+        { kind: "text", key: "a2", seq: 2, text: "I'll read the card list first." },
+        { kind: "tool", key: "ca", call: { callId: "a", name: "Read", toolType: "file_read", input: { file_path: "cards.ts" }, seq: 3, result: { text: "     1→one\n     2→two", isError: false } } },
+        { kind: "reasoning", key: "r4", seq: 4, text: "Key them by id.", durationMs: 9000 },
+        { kind: "tool", key: "cb", call: { callId: "b", name: "Bash", toolType: "shell", input: { command: "bun test" }, seq: 5, result: { text: "14 pass", isError: false } } },
+        { kind: "text", key: "a6", seq: 6, text: "Done, all pass." },
+      ],
+    }) as unknown as Turn;
+
+  it("lists the intro, then the steps, inside the opened fold, and the answer after it", () => {
+    setPrefs({ foldToolCalls: true });
+    const { container } = render(<TurnBlock turn={ordered()} sessionId="s" stream={[]} working={false} />);
+    fireEvent.click(screen.getByTestId("turn-fold"));
+    const body = screen.getByTestId("turn-fold-body");
+    const inside = body.textContent ?? "";
+    expect(inside.indexOf("I'll read the card list first.")).toBeLessThan(inside.indexOf("Read"));
+    expect(inside.indexOf("Thought for 9s")).toBeLessThan(inside.indexOf("Ran"));
+    expect(inside).not.toContain("Done, all pass.");
+    const all = container.textContent ?? "";
+    expect(all.indexOf("bun test")).toBeLessThan(all.indexOf("Done, all pass."));
+  });
+
+  it("shows one error card with its time, Retry and Retry in a new chat", () => {
+    const onRetry = vi.fn();
+    const onRetryInNewChat = vi.fn();
+    const value = { ...turn([]), toolCount: 0, editedFiles: 0, completed: { seq: 9, status: "error", ts: "2026-10-03T00:01:00Z", durationMs: 9000 }, finalText: "Anthropic error: overloaded (529)", work: [{ kind: "error", key: "e8", seq: 8, text: "Anthropic error: overloaded (529)" }] } as unknown as Turn;
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onRetry={onRetry} onRetryInNewChat={onRetryInNewChat} />);
+    expect(screen.getAllByText("Anthropic error: overloaded (529)")).toHaveLength(1);
+    const card = screen.getByTestId("turn-failure");
+    expect(card.querySelector("time")?.getAttribute("dateTime")).toBe("2026-10-03T00:01:00.000Z");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledWith(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry in a new chat" }));
+    expect(onRetryInNewChat).toHaveBeenCalledWith(value);
+  });
+
+  it("keeps an earlier error that said something else as its own row", () => {
+    const value = { ...turn([]), toolCount: 0, editedFiles: 0, completed: { seq: 9, status: "error", ts: "2026-10-03T00:01:00Z" }, finalText: "Gave up", work: [{ kind: "error", key: "e8", seq: 8, text: "Hook failed" }] } as unknown as Turn;
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Hook failed")).toBeDefined();
+    expect(screen.getByTestId("turn-failure").textContent).toContain("Gave up");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("counts up the working line in amber", () => {
+    render(<TurnBlock turn={{ ...turn([]), live: true } as Turn} sessionId="s" stream={[]} working workingSince={Date.now() - 18_000} />);
+    const line = screen.getByTestId("working-line");
+    expect(line.textContent).toBe("Working · 18s");
+    expect(line.className).toContain("text-warning");
+  });
+});
+
+const openMenu = (element: HTMLElement) => fireEvent.pointerDown(element, { button: 0, ctrlKey: false, pointerType: "mouse" });
+
+it("resets only a completed successful turn using its completion sequence, from the turn's menu", () => {
   const onReset = vi.fn();
   const value = turn([]);
   value.completed = { seq: 19, status: "ok", ts: "2026-11-07T00:00:00Z" };
   const view = render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onReset={onReset} />);
-  fireEvent.click(screen.getByRole("button", { name: "Reset to here" }));
+  expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+  openMenu(screen.getByRole("button", { name: "Turn actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /Reset chat to here…/ }));
   expect(onReset).toHaveBeenCalledWith(19);
   view.rerender(<TurnBlock turn={{ ...value, completed: { ...value.completed, status: "aborted" } }} sessionId="s" stream={[]} working={false} onReset={onReset} />);
-  expect(screen.queryByRole("button", { name: "Reset to here" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Turn actions" })).toBeNull();
+});
+
+describe("the turn's menu (PRO-379)", () => {
+  const answered = (): Turn => ({
+    ...turn([]),
+    completed: { seq: 9, status: "ok", ts: "2026-11-07T00:00:00Z" },
+    work: [{ kind: "text", key: "a5", seq: 5, text: "**Done.**", messageTs: "2026-11-07T00:00:00Z" }],
+  }) as unknown as Turn;
+
+  it("forks to a tab or a session, copies the answer, keeps the prompt and asks the other agent", () => {
+    const onFork = vi.fn();
+    const onSaveSnippet = vi.fn();
+    const onSecondOpinion = vi.fn();
+    render(<TurnBlock turn={answered()} sessionId="s" stream={[]} working={false} onFork={onFork} onSaveSnippet={onSaveSnippet} onSecondOpinion={onSecondOpinion} secondOpinionAgent="Codex" />);
+    const pick = (name: RegExp) => { openMenu(screen.getByRole("button", { name: "Turn actions" })); fireEvent.click(screen.getByRole("menuitem", { name })); };
+    pick(/^Fork to new tab/);
+    expect(onFork).toHaveBeenLastCalledWith(9, "tab");
+    pick(/^Fork to new session/);
+    expect(onFork).toHaveBeenLastCalledWith(9, "session");
+    pick(/^Save the prompt as a snippet/);
+    expect(onSaveSnippet).toHaveBeenCalledWith("what is this?");
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    expect(screen.getByRole("menuitem", { name: /^Second opinion from Codex/ }).textContent).toContain("Opens a Codex tab with this turn's diff");
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Copy answer as Markdown/ }));
+    expect(copyText).toHaveBeenCalledWith("**Done.**");
+    pick(/^Second opinion from Codex/);
+    expect(onSecondOpinion).toHaveBeenCalledOnce();
+  });
+
+  it("offers nothing for a turn that did not finish well but its second opinion", () => {
+    render(<TurnBlock turn={{ ...answered(), completed: { status: "aborted", ts: "2026-11-07T00:00:00Z" } } as Turn} sessionId="s" stream={[]} working={false} onFork={vi.fn()} onReset={vi.fn()} />);
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    expect(screen.queryByRole("menuitem", { name: /Fork|Reset/ })).toBeNull();
+    expect(screen.getByRole("menuitem", { name: /Copy answer as Markdown/ })).toBeDefined();
+  });
+});
+
+it("tracks read aloud by session, tab and turn across switches and late events", () => {
+  const utterances: SpeechSynthesisUtterance[] = [];
+  class Utterance {
+    onend: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(public text: string) {}
+  }
+  const cancel = vi.fn();
+  vi.stubGlobal("SpeechSynthesisUtterance", Utterance);
+  vi.stubGlobal("speechSynthesis", { cancel, speak: (utterance: SpeechSynthesisUtterance) => utterances.push(utterance) });
+  try {
+    const value = { ...turn([]), work: [{ kind: "text", key: "answer", seq: 5, text: "Done" }] } as Turn;
+    const view = render(<TooltipProvider>
+      <div data-testid="first"><TurnBlock turn={value} sessionId="s1" tabId="t1" stream={[]} working={false} /></div>
+      <div data-testid="second"><TurnBlock turn={value} sessionId="s1" tabId="t2" stream={[]} working={false} /></div>
+      <div data-testid="third"><TurnBlock turn={value} sessionId="s2" tabId="t1" stream={[]} working={false} /></div>
+    </TooltipProvider>);
+    const button = (id: string, name: string) => within(screen.getByTestId(id)).getByRole("button", { name });
+    fireEvent.click(button("first", "Read aloud"));
+    expect(button("first", "Stop reading aloud")).toBeDefined();
+    expect(button("second", "Read aloud")).toBeDefined();
+    expect(button("third", "Read aloud")).toBeDefined();
+    fireEvent.click(button("second", "Read aloud"));
+    act(() => utterances[0].onend?.(new Event("end") as SpeechSynthesisEvent));
+    expect(button("first", "Read aloud")).toBeDefined();
+    expect(button("second", "Stop reading aloud")).toBeDefined();
+    fireEvent.click(button("second", "Stop reading aloud"));
+    fireEvent.click(button("second", "Read aloud"));
+    act(() => utterances[1].onerror?.(new Event("error") as SpeechSynthesisErrorEvent));
+    expect(button("second", "Stop reading aloud")).toBeDefined();
+    fireEvent.click(button("third", "Read aloud"));
+    expect(button("second", "Read aloud")).toBeDefined();
+    expect(button("third", "Stop reading aloud")).toBeDefined();
+    act(() => utterances[3].onend?.(new Event("end") as SpeechSynthesisEvent));
+    expect(button("third", "Read aloud")).toBeDefined();
+    expect(cancel).toHaveBeenCalledTimes(5);
+    view.unmount();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 describe("a pasted Markdown table in a message", () => {

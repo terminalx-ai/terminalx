@@ -24,6 +24,9 @@ use crate::agent_accounts::{AgentAccountUsage, Kind, LOCAL};
 
 /// How long an account with no running tab reuses its last answer.
 const IDLE_REFRESH_MS: i64 = BACKGROUND_REFRESH_MS;
+/// How long an account near its switching threshold reuses its last answer
+/// (#981): every minute, less the slack the timer is given.
+pub(super) const HOT_REFRESH_MS: i64 = 60_000 - super::REFRESH_SLACK_MS;
 
 /// One listed account of one agent, as the index names it.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +130,8 @@ struct State {
 pub(super) struct Accounts {
     listed: HashMap<&'static str, Vec<Listed>>,
     state: HashMap<(&'static str, String), State>,
+    /// Accounts automatic switching watches closely (#981), by agent.
+    hot: HashMap<&'static str, HashSet<String>>,
 }
 
 /// One account's request, decided under the store's lock and made outside it.
@@ -145,6 +150,16 @@ impl Accounts {
         self.listed.insert(agent, listed);
     }
 
+    /// The accounts of `agent` polled every minute, near their switching threshold (#981).
+    pub(super) fn set_hot(&mut self, agent: &'static str, hot: HashSet<String>) {
+        self.hot.insert(agent, hot);
+    }
+
+    /// Whether `agent`'s account `id` is polled every minute.
+    pub(super) fn is_hot(&self, agent: &str, id: &str) -> bool {
+        self.hot.get(agent).is_some_and(|hot| hot.contains(id))
+    }
+
     /// The requests due for `agent`'s accounts now, each marked in flight.
     pub(super) fn begin(&mut self, agent: &'static str, running: &HashSet<String>, now: i64, manual: bool, cadence: Option<i64>) -> Vec<Job> {
         let Some(listed) = self.listed.get(agent) else { return Vec::new() };
@@ -155,7 +170,13 @@ impl Accounts {
                 state.poll.error = Some("Sign in again: this account's folder is gone".into());
                 continue;
             }
-            let floor = if running.contains(&account.id) { background_floor(cadence) } else { background_floor(cadence).max(IDLE_REFRESH_MS) };
+            let floor = if self.hot.get(agent).is_some_and(|hot| hot.contains(&account.id)) {
+                background_floor(cadence).min(HOT_REFRESH_MS)
+            } else if running.contains(&account.id) {
+                background_floor(cadence)
+            } else {
+                background_floor(cadence).max(IDLE_REFRESH_MS)
+            };
             let poll = &mut state.poll;
             if manual && poll.local_failure && !poll.in_flight {
                 poll.retry_at = None;

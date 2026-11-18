@@ -9,6 +9,7 @@ import { openFile, useEditors } from "@/lib/editors";
 import type { TextHit, TextSearch } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { cloudFileSource, fileErrorText, registerFileSource, StaleRequestError, type FileSource } from "@/lib/workspaceFiles";
+import { useMachinePlace } from "./workspacePlace";
 
 /** The display root of a cloud workspace's files; never a path on this computer. */
 export function cloudRoot(workspaceKey: string): string {
@@ -36,6 +37,7 @@ export function CloudFilesView({
   active: boolean;
 }) {
   const connected = state.state === "connected";
+  const machine = useMachinePlace();
   // Read-only until the runtime says this attachment may manage it.
   const authority = useRef<"manage" | "participate">("participate");
   if (connected) authority.current = state.authority;
@@ -75,7 +77,7 @@ export function CloudFilesView({
       <div className="@container/editor-host relative flex min-h-0 min-w-0 flex-1">
         {!open && (
           <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-            {connected ? "Open a file from the tree." : "Files appear once the workspace is connected."}
+            {connected ? "Open a file from the tree." : machine ? `Files appear once ${machine.name} is connected.` : "Files appear once the workspace is connected."}
           </div>
         )}
         <EditorSplit sessionId={workspaceKey} active={active} fill />
@@ -89,6 +91,7 @@ export function CloudFilesView({
  * the runtime, and only the latest query's answer is ever shown.
  */
 export function CloudSearch({ source, sessionId, root, active }: { source: FileSource; sessionId: string; root: string; active: boolean }) {
+  const machine = useMachinePlace();
   const [query, setQuery] = useState("");
   const [regex, setRegex] = useState(false);
   const [caseSensitive, setCaseSensitive] = useState(false);
@@ -137,7 +140,7 @@ export function CloudSearch({ source, sessionId, root, active }: { source: FileS
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-search">
       <div className="flex shrink-0 items-center gap-1 border-b border-hairline px-2 py-1">
         <input
-          aria-label="Search the workspace"
+          aria-label={machine ? `Search ${machine.name}` : "Search the workspace"}
           className="min-w-0 flex-1 rounded-md border border-hairline bg-transparent px-2 py-1 text-xs"
           placeholder="Search"
           value={query}

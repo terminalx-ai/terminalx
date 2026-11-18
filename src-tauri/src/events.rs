@@ -25,6 +25,9 @@ pub struct AgentEvent {
     /// may be an import time, so consumers must not use it as a message time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ts: Option<String>,
+    /// Request identity for a desktop Create prompt, persisted for history reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_request_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentRef>,
     pub payload: Payload,
@@ -191,6 +194,13 @@ pub struct Usage {
     /// says: what a family alias actually ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The reasoning effort the turn's requests ran at, when the agent's
+    /// records say (Claude Code per request, Codex per turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Whether the turn ran in the agent's fast mode, when its records say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

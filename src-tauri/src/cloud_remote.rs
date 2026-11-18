@@ -29,13 +29,32 @@ use tokio::sync::mpsc;
 use crate::account::{AccountManager, CloudScope};
 use crate::cloud_agent_client::CloudAgentClient;
 use crate::cloud_diagnostics::ConnectionCloseLog;
-use crate::cloud_ports::{Forward, PortForwarder};
+use crate::cloud_ports::{Forward, ForwardsChanged, PortForwarder, PortSettings};
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
 use crate::remote::client::{open_outcome, AttachSource, ClientEvent, ClientState, OpenOutcome, Supervisor};
 use crate::remote::machine_client::{MachineEnv, MachineSupervisor, NetDialer, OnState};
 use crate::remote::protocol::Activation;
 
 pub const EVENT: &str = "cloud_remote_event";
+/// A connection's forwards or switches changed (`CloudPortForwardsChanged`, PRO-355).
+pub const PORTS_EVENT: &str = "cloud_port_forwards_changed";
+
+/// `cloud_port_forwards_changed`'s payload, as `CloudPortForwardsChanged`
+/// in src/lib/api.ts reads it.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PortForwardsChanged {
+    connection_id: String,
+    forwards: Vec<Forward>,
+    settings: PortSettings,
+    opened: Vec<Forward>,
+}
+
+impl PortForwardsChanged {
+    fn new(connection_id: &str, changed: ForwardsChanged) -> Self {
+        Self { connection_id: connection_id.to_string(), forwards: changed.forwards, settings: changed.settings, opened: changed.opened }
+    }
+}
 
 /// The web view's `NativeWorkspaceTransport` reads `kind`, `connectionId`,
 /// `state`, `message` and `connectionIds`: `rename_all` only renames the
@@ -186,7 +205,7 @@ impl CloudRemote {
     /// A window closed: it lets go of every machine connection it held, and
     /// those nobody else holds end. A closed window runs no cleanup of its
     /// own, so without this its hold would keep a machine connecting after
-    /// Experimental → Machines is off.
+    /// the last window that wanted it has gone.
     pub fn release_holder(&self, holder: &str) {
         let ended: Vec<Attached> = {
             let mut connections = self.connections.lock().unwrap();
@@ -294,8 +313,16 @@ impl CloudRemote {
             // Under the same rule as every frame the web view sends: nothing
             // goes out for an identity that is no longer current, a pending
             // sign-out included.
-            let (supervisor, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
-            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && supervisor.send(frame))
+            let (sender, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
+            let send = move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && sender.send(frame);
+            // A machine's forwards wait through a dropped link and return
+            // with it; a cloud workspace's end with the connection (PRO-355).
+            let ports = if matches!(supervisor, Handle::Machine(_)) { PortForwarder::for_machine(send) } else { PortForwarder::new(send) };
+            let (app, id) = (app.clone(), connection_id.clone());
+            ports.on_change(move |changed| {
+                let _ = app.emit(PORTS_EVENT, PortForwardsChanged::new(&id, changed));
+            });
+            ports
         };
         self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
         let app = app.clone();
@@ -328,7 +355,8 @@ impl CloudRemote {
                         if keys_granted {
                             fetch_keys(&mut keys_request);
                         }
-                        // Port streams live and end with the connection.
+                        // Port streams live and end with the connection; a
+                        // machine's forwards wait for it to return.
                         ports.set_connected(match &state {
                             ClientState::Connected { capabilities, .. } => Some(capabilities.as_slice()),
                             _ => None,
@@ -366,6 +394,7 @@ impl CloudRemote {
                 };
                 let _ = app.emit(EVENT, payload);
             }
+            // Detached for good: everything is forgotten, a machine's waiting forwards too.
             ports.shutdown();
         });
     }
@@ -555,9 +584,27 @@ pub async fn cloud_port_unforward(remote: tauri::State<'_, Arc<CloudRemote>>, co
     Ok(remote.ports(&connection_id)?.unforward(port))
 }
 
+/// The connection's forwards, each `open` or `waiting`, and whether
+/// auto-forward opened it.
 #[tauri::command]
 pub async fn cloud_port_forwards(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<Vec<Forward>, String> {
     Ok(remote.ports(&connection_id)?.forwards())
+}
+
+/// The connection's forwarding switches (PRO-355).
+#[tauri::command]
+pub async fn cloud_port_settings(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<PortSettings, String> {
+    Ok(remote.ports(&connection_id)?.settings())
+}
+
+/// Change either switch; answers the switches as they now are. Forwarding
+/// off closes every listener and keeps the forwards waiting; auto-forward on
+/// forwards ports that start listening from now on. Neither wakes the
+/// workspace.
+#[tauri::command]
+pub async fn cloud_port_set_settings(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, enabled: Option<bool>, auto: Option<bool>) -> Result<PortSettings, String> {
+    let scope = remote.scope().map(|scope| scope.active_org_id);
+    Ok(remote.ports(&connection_id)?.set_settings(enabled, auto, scope))
 }
 
 /// Keep what `keys.get` answered, for the identity the connection was made for.
@@ -863,5 +910,31 @@ mod intercept_tests {
         assert_eq!(message, json!({ "kind": "message", "connectionId": "cloud-1", "message": { "id": "r1" } }));
         let changed = serde_json::to_value(RemoteEvent::IdentityChanged { connection_ids: vec!["cloud-1".into()] }).unwrap();
         assert_eq!(changed, json!({ "kind": "identityChanged", "connectionIds": ["cloud-1"] }));
+    }
+
+    /// `CloudPortForwardsChanged`, `CloudPortForward` and `CloudPortSettings`
+    /// in src/lib/api.ts, field for field.
+    #[test]
+    fn port_changes_reach_the_web_view_in_its_field_names() {
+        use crate::cloud_ports::ForwardState;
+        let returned = Forward { port: 5173, local_port: 5173, reassigned: false, state: ForwardState::Open, auto: true };
+        let waiting = Forward { port: 3000, local_port: 51234, reassigned: true, state: ForwardState::Waiting, auto: false };
+        let changed = PortForwardsChanged::new(
+            "machine-1",
+            ForwardsChanged { forwards: vec![waiting, returned.clone()], settings: PortSettings { enabled: true, auto: true }, opened: vec![returned] },
+        );
+        assert_eq!(
+            serde_json::to_value(changed).unwrap(),
+            json!({
+                "connectionId": "machine-1",
+                "forwards": [
+                    { "port": 3000, "localPort": 51234, "reassigned": true, "state": "waiting", "auto": false },
+                    { "port": 5173, "localPort": 5173, "reassigned": false, "state": "open", "auto": true },
+                ],
+                "settings": { "enabled": true, "auto": true },
+                "opened": [{ "port": 5173, "localPort": 5173, "reassigned": false, "state": "open", "auto": true }],
+            })
+        );
+        assert_eq!(PORTS_EVENT, "cloud_port_forwards_changed");
     }
 }

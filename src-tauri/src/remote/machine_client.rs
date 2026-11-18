@@ -11,7 +11,10 @@
 //! `rpc.hello` and `machine.describe`.
 //!
 //! The supervisor reconnects with `protocol::backoff`, ends in
-//! `accessRemoved` or `needsUpdate` until "Try again", and moves from the
+//! `accessRemoved` or `needsUpdate` until "Try again" (PRO-354: `side` says
+//! whether the machine or this computer is the older one), shows `updating`
+//! instead of `reconnecting` while the machine hands its runtime over to a new
+//! version (`machine.updateChanged`, at most [`UPDATING_FOR`]), and moves from the
 //! relay back to a direct route without the web view reloading: the new
 //! link takes the frames, the web view is told `connected` with a new
 //! `link`, and the relay link drains answers for ten seconds.
@@ -60,6 +63,10 @@ pub const OFFLINE_AFTER: Duration = Duration::from_secs(30);
 const OWN_REQUEST_PREFIX: &str = "machine-supervisor-";
 /// The close code of a refused credential.
 const CREDENTIAL_REFUSED: u16 = 4401;
+/// A link lost while the machine hands over to a new version is `updating`, not `reconnecting`, for at most this long.
+pub const UPDATING_FOR: Duration = Duration::from_secs(180);
+/// This desktop's TerminalX version, compared with a machine's to say which side updates.
+pub const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ------------------------------------------------------------------ shapes
 
@@ -155,8 +162,70 @@ pub enum MachineConnectionState {
     },
     NeedsUpdate {
         version: Option<String>,
+        side: MachineUpdateSide,
+    },
+    /// The machine is handing its runtime over to `version` (PRO-354); the lost link is expected.
+    Updating {
+        version: String,
+        since: i64,
     },
     AccessRemoved,
+    /// The person on the machine pressed Disconnect (PRO-357): refused until
+    /// they let this computer back. Nothing retries until "Try again".
+    Disconnected,
+}
+
+/// Which computer must update for the two to work together (`MachineUpdateSide`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MachineUpdateSide {
+    /// The machine is older, or its version is unknown.
+    Machine,
+    /// The machine is newer than this desktop.
+    ThisMac,
+}
+
+fn parse_version(version: &str) -> Option<semver::Version> {
+    semver::Version::parse(version.trim().trim_start_matches('v')).ok()
+}
+
+/// Which side updates (docs/MACHINES.md "Which side updates"): this Mac when
+/// the machine's version is above this desktop's `ours`, or, with no version
+/// known, when the machine offers a namespace this desktop does not know (it
+/// is the newer one). Otherwise the machine.
+pub fn update_side(machine_version: Option<&str>, offered: &[String], ours: &str) -> MachineUpdateSide {
+    if let (Some(theirs), Some(ours)) = (machine_version.and_then(parse_version), parse_version(ours)) {
+        return if theirs > ours { MachineUpdateSide::ThisMac } else { MachineUpdateSide::Machine };
+    }
+    let known = wanted_capabilities();
+    if machine_version.is_none() && !offered.is_empty() && offered.iter().any(|name| !known.contains(&name.as_str())) {
+        return MachineUpdateSide::ThisMac;
+    }
+    MachineUpdateSide::Machine
+}
+
+/// `rpc.hello` refused with `update_required`: the runtime's version and what
+/// it offers, from `data: { runtimeVersion, offered }` (an older runtime sends none).
+pub fn update_required_failure(error: &Value) -> DialFailure {
+    let data = &error["data"];
+    let version = data["runtimeVersion"].as_str().map(str::to_string);
+    let offered = data["offered"].as_array().map(|names| names.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    DialFailure::NeedsUpdate { version, offered }
+}
+
+/// What a `machine.updateChanged` notification says about a handover: the
+/// version and since when while `handingOver`, `Some(None)` for any other
+/// phase, `None` when it is not that notification.
+pub fn handing_over(message: &Value) -> Option<Option<(String, i64)>> {
+    if message["event"] != "machine.updateChanged" {
+        return None;
+    }
+    let progress = &message["params"]["status"]["progress"];
+    if progress["phase"] != "handingOver" {
+        return Some(None);
+    }
+    let version = progress["version"].as_str()?.to_string();
+    Some(Some((version, progress["since"].as_i64().unwrap_or_else(now_ms))))
 }
 
 impl MachineConnectionState {
@@ -376,8 +445,17 @@ pub trait MachineEnv: Send + Sync + 'static {
     /// `directEndpoints`, `lastSeenAt` and `lastRoute`.
     fn described(&self, described: &Value, route: &RouteUsed);
     fn save_relay(&self, credential: &RelayCredential) -> Result<()>;
+    /// Keep a rotated device token in place of the current one (PRO-357).
+    fn save_token(&self, _token: &str) -> Result<()> {
+        Ok(())
+    }
     /// The relay refused the credential: forget it.
     fn drop_relay(&self);
+    /// The machine's TerminalX version as the record last saw it, for which
+    /// side updates when the runtime does not say (PRO-354).
+    fn recorded_version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Why a route did not connect.
@@ -385,8 +463,11 @@ pub trait MachineEnv: Send + Sync + 'static {
 pub enum DialFailure {
     /// `pairing_refused`, or `4401` once the device token was offered.
     AccessRemoved,
-    /// The runtime does not grant `machine/1`.
-    NeedsUpdate { version: Option<String> },
+    /// `pairing_refused` `disconnected`: held off by the person on the machine.
+    Disconnected,
+    /// The runtime does not grant `machine/1`, or refused `rpc.hello` with
+    /// `update_required`: its version and the namespaces it offers, when it said.
+    NeedsUpdate { version: Option<String>, offered: Vec<String> },
     /// The relay refused the resume credential (`4401`; `4404` is the machine offline).
     RelayCredentialRefused,
     Unreachable { local_network_denied: bool, reason: String },
@@ -428,6 +509,9 @@ pub struct Established {
     pub frames: mpsc::UnboundedSender<Value>,
     /// Relay access, when it was asked for and the machine has a relay.
     pub relay_access: Option<RelayAccess>,
+    /// A fresh device token (`machine/5`, PRO-357), which the supervisor
+    /// keeps in place of the one it connected with.
+    pub rotated_token: Option<Zeroizing<String>>,
 }
 
 /// What a link sends its supervisor.
@@ -483,6 +567,9 @@ async fn prove(connection: &mut Connection, target: &Target, deadline: tokio::ti
         Ok(Authenticated::Yes) => Ok(()),
         Ok(Authenticated::Refused(reason)) => {
             log::info!("machines: machine {} refused this computer ({reason})", target.machine_id);
+            if reason == crate::machine_wire::REFUSED_DISCONNECTED {
+                return Err(DialFailure::Disconnected);
+            }
             Err(DialFailure::AccessRemoved)
         }
         Err(Closed { code: Some(CREDENTIAL_REFUSED), .. }) => Err(DialFailure::AccessRemoved),
@@ -577,7 +664,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.
@@ -585,12 +672,13 @@ async fn establish(connection: &mut Connection, target: &Target, want_relay_acce
     let hello = json!({ "protocol": PROTOCOL, "client": { "app": "terminalx-desktop", "version": env!("CARGO_PKG_VERSION") }, "want": wanted_capabilities() });
     let hello = match request(connection, "rpc.hello", hello).await? {
         Ok(hello) => hello,
-        Err(error) if error["code"] == "update_required" => return Err(DialFailure::NeedsUpdate { version: None }),
+        Err(error) if error["code"] == "update_required" => return Err(update_required_failure(&error)),
         Err(error) => return Err(DialFailure::unreachable(format!("rpc.hello refused: {}", error["code"]))),
     };
     let granted = |capability: &str| hello["capabilities"].as_array().is_some_and(|granted| granted.iter().any(|name| name == capability));
     if !granted(super::machine::MACHINE) {
-        return Err(DialFailure::NeedsUpdate { version: hello["runtime"]["version"].as_str().map(str::to_string) });
+        let offered = hello["capabilities"].as_array().map(|names| names.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        return Err(DialFailure::NeedsUpdate { version: hello["runtime"]["version"].as_str().map(str::to_string), offered });
     }
     let started = Instant::now();
     let described = request(connection, "machine.describe", json!({})).await?.map_err(|error| DialFailure::unreachable(format!("machine.describe refused: {}", error["code"])))?;
@@ -616,8 +704,22 @@ async fn establish(connection: &mut Connection, target: &Target, want_relay_acce
     } else {
         None
     };
+    // A fresh credential on every connection (PRO-357). The machine keeps the
+    // old one working until this computer connects with the new one, so a
+    // lost answer or a token that could not be saved locks nothing out.
+    let rotated_token = if granted(super::machine::MACHINE_5) {
+        match request(connection, "machine.rotateCredential", json!({})).await? {
+            Ok(answer) => answer["deviceToken"].as_str().filter(|token| (16..=256).contains(&token.len())).map(|token| Zeroizing::new(token.to_string())),
+            Err(error) => {
+                log::debug!("machines: machine.rotateCredential refused: {}", error["code"]);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let (frames, _) = mpsc::unbounded_channel();
-    Ok(Established { hello, described, rtt_ms, frames, relay_access })
+    Ok(Established { hello, described, rtt_ms, frames, relay_access, rotated_token })
 }
 
 /// Frames both ways on `connection`, as link `link`, until it ends.
@@ -869,7 +971,8 @@ enum RoundEnd {
     Connected(Route, u64, Box<Established>),
     Failed,
     AccessRemoved,
-    NeedsUpdate(Option<String>),
+    Disconnected,
+    NeedsUpdate(Option<String>, Vec<String>),
     Stopped,
 }
 
@@ -895,6 +998,9 @@ struct Run {
     own_requests: u64,
     /// The route kinds of the last round, for the waiting states.
     trying: Vec<RouteKind>,
+    /// The machine said it is handing over to this version, since then
+    /// (`machine.updateChanged`), and when this computer heard it.
+    updating: Option<(String, i64, Instant)>,
 }
 
 impl Run {
@@ -920,6 +1026,7 @@ impl Run {
             background: None,
             own_requests: 0,
             trying: Vec::new(),
+            updating: None,
         }
     }
 
@@ -978,11 +1085,24 @@ impl Run {
                         break;
                     }
                 }
-                RoundEnd::AccessRemoved | RoundEnd::NeedsUpdate(_) => {
+                RoundEnd::AccessRemoved | RoundEnd::Disconnected | RoundEnd::NeedsUpdate(..) => {
+                    self.updating = None;
                     let state = match end {
-                        RoundEnd::NeedsUpdate(version) => {
+                        RoundEnd::NeedsUpdate(version, offered) => {
                             self.emit(ClientState::UpdateRequired);
-                            MachineConnectionState::NeedsUpdate { version }
+                            let version = match version {
+                                Some(version) => Some(version),
+                                None => {
+                                    let env = self.env.clone();
+                                    tokio::task::spawn_blocking(move || env.recorded_version()).await.ok().flatten()
+                                }
+                            };
+                            let side = update_side(version.as_deref(), &offered, THIS_VERSION);
+                            MachineConnectionState::NeedsUpdate { version, side }
+                        }
+                        RoundEnd::Disconnected => {
+                            self.emit(ClientState::Stopped);
+                            MachineConnectionState::Disconnected
                         }
                         _ => {
                             self.emit(ClientState::Stopped);
@@ -1043,11 +1163,25 @@ impl Run {
     }
 
     /// `reconnecting` (or `offline` past 30 s, or `connecting` before the
-    /// first link) while it waits `retry` before the next round.
-    fn waiting(&self, retry: Duration, trying: Vec<RouteKind>) {
+    /// first link, or `updating` while the machine hands over to a new
+    /// version, for at most [`UPDATING_FOR`]) while it waits `retry` before
+    /// the next round.
+    fn waiting(&mut self, retry: Duration, trying: Vec<RouteKind>) {
         let retry_in_ms = retry.as_millis() as u64;
         let since = self.lost_instant.unwrap_or(self.started);
-        let state = if since.elapsed() >= OFFLINE_AFTER {
+        if self.updating.as_ref().is_some_and(|(_, _, heard)| heard.elapsed() >= UPDATING_FOR) {
+            self.updating = None;
+        }
+        let updating = self.updating.as_ref().filter(|_| self.lost_at.is_some()).cloned();
+        // A round starting (`retry` zero) past the offline mark has no next
+        // try to name yet: the state already shown stays, with its real
+        // retry time, rather than an `offline` that says it retries in 0 ms.
+        if retry.is_zero() && updating.is_none() && since.elapsed() >= OFFLINE_AFTER {
+            return;
+        }
+        let state = if let Some((version, since, _)) = updating.as_ref() {
+            MachineConnectionState::Updating { version: version.clone(), since: *since }
+        } else if since.elapsed() >= OFFLINE_AFTER {
             MachineConnectionState::Offline { last_seen_at: self.last_seen_at, retry_in_ms, local_network_denied: self.local_network_denied }
         } else if let Some(lost_at) = self.lost_at {
             MachineConnectionState::Reconnecting { lost_at, attempt: self.attempt, retry_in_ms, trying, local_network_denied: self.local_network_denied }
@@ -1090,7 +1224,8 @@ impl Run {
             match dialed {
                 Ok(established) => return RoundEnd::Connected(route, link, Box::new(established)),
                 Err(DialFailure::AccessRemoved) => return RoundEnd::AccessRemoved,
-                Err(DialFailure::NeedsUpdate { version }) => return RoundEnd::NeedsUpdate(version),
+                Err(DialFailure::Disconnected) => return RoundEnd::Disconnected,
+                Err(DialFailure::NeedsUpdate { version, offered }) => return RoundEnd::NeedsUpdate(version, offered),
                 Err(DialFailure::RelayCredentialRefused) => {
                     log::info!("machines: the relay refused this computer's credential for machine {}", self.shared.machine_id);
                     let env = self.env.clone();
@@ -1126,6 +1261,17 @@ impl Run {
             you: None,
             link: Some(link),
         };
+        // The rotated credential first, so every later connection (the relay
+        // credential's too) proves the new one. Not saved: the old one is
+        // used again, and the machine drops the new one then.
+        if let Some(token) = established.rotated_token.clone() {
+            let env = self.env.clone();
+            match tokio::task::spawn_blocking(move || env.save_token(&token)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("machines: keep machine {}'s fresh credential: {error:#}", self.shared.machine_id),
+                Err(error) => log::warn!("machines: keep machine {}'s fresh credential: {error}", self.shared.machine_id),
+            }
+        }
         // The record first: whoever hears `connected` reads the route it names.
         self.record(&established.described, &route).await;
         *self.shared.outbound.lock().unwrap() = Some(established.frames.clone());
@@ -1133,6 +1279,8 @@ impl Run {
         self.attempt = 0;
         self.lost_at = None;
         self.lost_instant = None;
+        // The machine answers again: an update it was handing over is done.
+        self.updating = None;
         self.last_seen_at = Some(live.since);
         self.emit(live.connected.clone());
         self.set_state(self.connected_state(&live));
@@ -1237,6 +1385,11 @@ impl Run {
                         match event {
                             LinkEvent::Message(message) => {
                                 let own = message.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(OWN_REQUEST_PREFIX));
+                                match handing_over(&message) {
+                                    Some(Some((version, since))) => self.updating = Some((version, since, Instant::now())),
+                                    Some(None) => self.updating = None,
+                                    None => {}
+                                }
                                 if !own {
                                     let _ = self.events.send(ClientEvent::Message(message));
                                 } else if check.as_ref().is_some_and(|(wanted, _, _)| message["id"] == wanted.as_str()) {
@@ -1389,6 +1542,14 @@ impl Owners {
     /// Forget the owner attached as `connection_id` (it was detached).
     pub fn forget(&self, connection_id: &str) {
         self.owners.lock().unwrap().retain(|_, (id, _)| id != connection_id);
+    }
+
+    /// Stop and forget the machine's owner: it was removed.
+    pub fn remove(&self, machine_id: &str) {
+        let removed = self.owners.lock().unwrap().remove(machine_id);
+        if let Some((_, supervisor)) = removed {
+            supervisor.stop();
+        }
     }
 
     /// Nudge every owner: a wake or a network change.

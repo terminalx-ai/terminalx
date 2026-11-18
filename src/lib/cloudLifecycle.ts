@@ -226,6 +226,9 @@ const MESSAGES: Record<string, string> = {
   // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
   // thought this person was one of them: the role, or the list, changed since.
   cloud_workspace_manager_required: managerRefusedMessage("stop, resume, archive or delete it"),
+  // PRO-410: a change of the idle window the organization's cap does not admit, or one on a preparation workspace.
+  cloud_workspace_policy_denied: "Your organization's compute policy does not allow that. Settings → Organizations, under Cloud compute, shows its limits.",
+  cloud_preparation_workspace_restricted: "A preparation workspace keeps the settings it was created with.",
   cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
   // A server from before PRO-73 keeps these for owners and admins.
   organization_admin_required: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),

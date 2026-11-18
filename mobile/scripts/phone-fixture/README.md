@@ -1,4 +1,4 @@
-# Phone fixture (22.01–22.06)
+# Phone fixture (22.01–22.07)
 
 The production app (its root layout, native tab bar and every screen) with
 only `src/state/AppProvider.tsx` swapped for `fixture-app.tsx` and
@@ -38,6 +38,17 @@ opens a workspace at launch, as a tap on its row does.
 
 `fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
 the session screen (working, a question, a table, done).
+
+Notifications (22.07) run the app's own path: the fixture saves 22.07's choices
+through the notification store and its machines into the hosts list, and the
+Mac answers `notifications.missedSince`. `fixtureLockScreen: everything` (or
+`sessionName`, `nothing`) turns that lock-screen level on and has the Mac send
+three notifications from while the phone was away; the app filters, words and
+schedules them, and `flow-22.07.yaml` shoots the lock screen. iOS asks before
+anything reaches the phone, so the flow asks it from the page's switch.
+`flow-22.07-off.yaml` turns notifications off in iOS Settings (Maestro's launch
+`permissions` cannot deny them on a simulator) and back on afterwards. The
+notifications are headed "Phone fixture", the copy's own app name.
 
 1. Build the simulator app once, as `pnpm ios:simulator` does, but without installing it:
 

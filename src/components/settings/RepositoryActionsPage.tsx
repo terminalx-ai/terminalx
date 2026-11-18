@@ -19,7 +19,7 @@ export function useRepository(projectPath: string) {
  * only after a save succeeds, so a failed save leaves the stored list on screen with the error.
  *
  * `readRepositoryFile` is optional. Pass it where a repository file can supply actions: it
- * returns them, or null/[] when there is none. "Reset to terminalx.json" is shown only while it
+ * returns them, or null/[] when there is none. "Reset all actions to terminalx.json" is shown only while it
  * has returned some, and saving them replaces the local list. Keep the function stable (module
  * level or memoised): a new one each render reads the file again.
  */
@@ -48,8 +48,12 @@ export function RepositoryActionsPage({ projectPath, readRepositoryFile }: {
       throw new Error(errorMessage(cause));
     }
   };
-  return <div className="space-y-3">
-    <p className="break-all font-mono text-xs text-faint">{project.path}</p>
+  // Design 11.06: the page title and what it holds, then the Run actions card. Action prompts are not built yet.
+  return <div className="flex flex-col gap-6">
+    <header className="min-w-0">
+      <h3 className="text-xl font-semibold tracking-tight">Actions</h3>
+      <p className="mt-1 text-[13px] text-muted-foreground">Commands for this project's Run menu.</p>
+    </header>
     <RepositoryActionsSettings
       key={project.path}
       actions={project.actions ?? NO_ACTIONS}

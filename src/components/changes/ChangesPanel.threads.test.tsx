@@ -5,9 +5,9 @@ import { saveChangesChoice } from "@/lib/changesScope";
 import { reviewSnapshot as snapshot, reviewThread as thread } from "@/test/reviewThreads";
 import { requestThreadJump, type ReviewThreadAccess } from "@/lib/reviewThreads";
 
-const { invoke, openDiff } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => { throw new Error(`unexpected ${command}`); }), openDiff: vi.fn() }));
+const { invoke, openReviewStack } = vi.hoisted(() => ({ invoke: vi.fn(async (command: string) => { throw new Error(`unexpected ${command}`); }), openReviewStack: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@/lib/editors", async (original) => ({ ...(await original<typeof import("@/lib/editors")>()), openDiff }));
+vi.mock("@/lib/editors", async (original) => ({ ...(await original<typeof import("@/lib/editors")>()), openReviewStack }));
 vi.mock("@/lib/sessions", async (original) => ({ ...(await original<typeof import("@/lib/sessions")>()), useSessionStore: () => ({ sessions: [{ id: "s", activeTab: "tab" }] }) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 const { ChangesPanel } = await import("./ChangesPanel");
@@ -36,7 +36,7 @@ function fakeSource(key: string, cloud: boolean, files = [{ path: "src/other.ts"
   } as unknown as GitSource;
 }
 
-beforeEach(() => { openDiff.mockClear(); });
+beforeEach(() => { openReviewStack.mockClear(); });
 afterEach(() => { cleanup(); localStorage.clear(); });
 
 it("finds the session's PR itself and shows its threads inline and in the footer, with no PR panel", async () => {
@@ -85,7 +85,7 @@ it("loads All changes first when the list shown does not have the thread's file,
   await screen.findByTestId("changes-review-threads");
   await screen.findByText(/No turn snapshots are available/);
   expect(await requestThreadJump(source.key, thread)).toBe(true);
-  await waitFor(() => expect((screen.getByRole("combobox", { name: "Changes scope" }) as HTMLSelectElement).value).toBe("all"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Changes scope" }).textContent).toBe("All changes"));
   await waitFor(() => expect(document.querySelector('.diff-pane article[data-review-thread="thread-1"]')).not.toBeNull());
 });
 
@@ -97,5 +97,5 @@ it("opens a local checkout's thread in its centre diff tab, even before its list
   await screen.findByTestId("changes-review-threads");
   await screen.findByText(/No turn snapshots are available/);
   expect(await requestThreadJump(source.key, thread)).toBe(true);
-  expect(openDiff).toHaveBeenCalledWith("s", root, thread.path, expect.objectContaining({ scope: "all", range: { base: "merge-base", head: "snapshot" }, uncommitted: false }));
+  expect(openReviewStack).toHaveBeenCalledWith("s", root, thread.path, expect.objectContaining({ scope: "all", range: { base: "merge-base", head: "snapshot" }, uncommitted: false }));
 });

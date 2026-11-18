@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
-import { Archive, ArrowUp, ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Pin, Terminal, TriangleAlert, X } from "@/icons";
+import { Archive, ArrowUp, ChevronDown, FileDiff, GitPullRequest, Globe, Lock, Pin, ScrollText, Terminal, TriangleAlert, X } from "@/icons";
 import { fileChipIcon } from "@/components/chat/FileChip";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
@@ -160,11 +160,11 @@ export function DiffStats({ additions, deletions, unpushed, coloured = true }: {
 }
 
 /** Relative age of a row's last activity, up to six days, which gives way to the row's toolbar. Older rows show none. */
-export function RowTime({ at }: { at: string }) {
+export function RowTime({ at, className = "text-[10px]" }: { at: string; className?: string }) {
   const age = recentTime(at);
   if (!age) return null;
   return (
-    <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>
+    <span className={cn("shrink-0", className, "tabular-nums text-faint", yieldsToRowActions)}>
       {age}
     </span>
   );
@@ -392,8 +392,8 @@ export function BrowserTabRow({ label, url, agentTarget, ...row }: TabRowBase & 
 }
 
 /** A full-width diff, pull request or merge conflict, sharing selection with the workspace strip. */
-export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr" | "conflict" | "attachment"; dirty: boolean }) {
-  const Icon = kind === "diff" ? FileDiff : kind === "conflict" ? TriangleAlert : kind === "attachment" ? fileChipIcon(label) : GitPullRequest;
+export function ReviewTabRow({ label, kind, dirty, ...row }: TabRowBase & { label: string; kind: "diff" | "pr" | "conflict" | "attachment" | "checkLog"; dirty: boolean }) {
+  const Icon = kind === "diff" ? FileDiff : kind === "conflict" ? TriangleAlert : kind === "attachment" ? fileChipIcon(label) : kind === "checkLog" ? ScrollText : GitPullRequest;
   return <TabRow {...row} tone="peer" label={label} title={label} closeLabel={`Close ${label}`}>
     <Icon className={kind === "conflict" ? "size-3.5 shrink-0 text-warning" : "size-3.5 shrink-0"} />
     <span className="min-w-0 flex-1 truncate">{label}</span>

@@ -10,7 +10,7 @@ export const SESSION_CHOICES: Choice<SessionOverride>[] = [
   { value: "default", label: "Use my settings" },
   { value: "needsMe", label: "Only when it needs me" },
   { value: "everything", label: "Everything from this session" },
-  { value: "mute", label: "Mute this session" },
+  { value: "mute", label: "Mute this session", icon: (color) => <BellOff size={18} color={color} /> },
 ];
 
 /** This session's own choice on this phone; "default" while the settings are first read. */

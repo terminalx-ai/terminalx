@@ -69,7 +69,9 @@ fn note_waiting(pipelines: &[Pipeline]) {
 /// bounds the wait, whether or not GitHub can be read meanwhile.
 pub fn waiting_since(pipeline: &Pipeline) -> Option<DateTime<Utc>> {
     let request = pipeline.merge_requested.as_ref().map(|request| request.at.as_str());
-    [pipeline.waiting_since.as_deref(), request, pipeline.review_requested_at.as_deref(), Some(pipeline.modified.as_str())]
+    // A branch that moved during a review is waited on from when it moved (#1018).
+    let moved = pipeline.head_wait.as_ref().map(|wait| wait.since.as_str());
+    [moved, pipeline.waiting_since.as_deref(), request, pipeline.review_requested_at.as_deref(), Some(pipeline.modified.as_str())]
         .into_iter()
         .flatten()
         .find_map(|at| DateTime::parse_from_rfc3339(at).ok())

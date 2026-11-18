@@ -222,8 +222,11 @@ it("keeps an error until it is closed, stacked under the notices, and copies its
   const alerts = screen.getAllByRole("alert");
   expect(alerts).toHaveLength(2);
   expect(alerts[0].textContent).toContain("Something went wrong");
-  expect(alerts[0].textContent).toContain("Couldn't move “Notarize release builds” to Release: database is locked (SQLITE_BUSY)");
-  expect(within(alerts[0]).getByText("database is locked (SQLITE_BUSY)").className).toContain("font-mono");
+  // The cause on a line of its own, in mono, apart from the sentence (17.09).
+  expect(within(alerts[0]).getByText("Couldn't move “Notarize release builds” to Release:")).toBeTruthy();
+  const cause = within(alerts[0]).getByText("database is locked (SQLITE_BUSY)");
+  expect(cause.tagName).toBe("DIV");
+  expect(cause.className).toContain("font-mono");
 
   invoke.mockClear();
   await act(async () => fireEvent.click(within(alerts[0]).getByRole("button", { name: "Copy error" })));

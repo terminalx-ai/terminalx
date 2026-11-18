@@ -699,7 +699,7 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             if !*active { bail!("The mobile driver lease was released."); }
             permit.check_mode(session,tab)?;
             if manager.pane_of(session,tab).is_none_or(|current| current.pane_id != pane) { bail!("The terminal instance changed."); }
-            manager.terminals().write_for_process(&pane,pid,text.as_bytes())
+            manager.with_raw_terminal_input(&pane, || manager.terminals().write_for_process(&pane,pid,text.as_bytes()))
         })();
         if result.is_err() { *driver.active.lock().unwrap() = false; }
         manager.mobile.publish_drivers(manager);
@@ -872,7 +872,7 @@ fn controls(manager: &crate::session::SessionManager, actor: &Actor, grant: &Gra
                 let permit = manager.mobile.permit(actor, string("connection")?, session, tab)?;
                 phone_send(manager, actor, grant, (session, tab), permit, text.clone(), &text, images, None)?
             }
-            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab))?)?,
+            "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab), false)?)?,
             // "Continue in new session": a new tab in this session with the
             // chosen agent and settings, handed the prompt the phone built from
             // `prepareContinuation`. It goes as any phone message (the sender

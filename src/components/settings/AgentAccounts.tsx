@@ -7,6 +7,7 @@ import type { AgentReadiness } from "@/lib/agentReadiness";
 import { errorMessage } from "@/lib/api";
 import { AgentAccountAdd, MCP_NOTE } from "./AgentAccountAdd";
 import { AgentAccountRow } from "./AgentAccountRow";
+import { AgentAutoSwitch } from "./AgentAutoSwitch";
 
 /**
  * One agent's accounts (#980), read again whenever `revision` changes.
@@ -96,6 +97,8 @@ export function AgentAccountsSection({ harness, agentName, accounts, localReadin
     </ul>
     <p className="mt-1.5 text-[12px] text-faint">The default is what new tabs use; choose another one when you start a session.{harness === "claude" ? ` ${MCP_NOTE}` : ""}</p>
     {adding && add}
+    {/* With two or more subscription accounts only (#981). */}
+    <AgentAutoSwitch harness={harness} agentName={agentName} view={view!} onView={accounts.take} />
     {error && <p role="alert" className="mt-2 text-[12px] text-destructive">{error}</p>}
   </section>;
 }

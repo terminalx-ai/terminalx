@@ -13,6 +13,11 @@ import { cloudAgentApi } from "@/lib/cloudAgentApi";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { refreshHarnesses } from "@/lib/sessions";
 import { setPrefs } from "@/lib/prefs";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// Provider names come from the descriptors the server publishes (PRO-415);
+// the app has read its provider list, as it has by the time a workspace opens.
+learnDescriptors();
 
 /** Input handlers of every xterm made, so a test can type into one. */
 const typed: ((data: string) => void)[] = [];
@@ -208,6 +213,35 @@ describe("the cloud workspace view", () => {
   it("shows the connection's state in words", async () => {
     await openReady();
     await waitFor(() => expect(screen.getByTestId("cloud-connection-state").textContent).toBe("Connecting…"));
+  });
+
+  it("in a paired machine's view, names the machine and says what the machine's own state is (PRO-398)", async () => {
+    const record = {
+      machineId: "m1", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: "0.2.33", publicKeyB64: "a2V5",
+      directEndpoints: [], route: "relayAndNearby" as const, pairedAt: 1, lastSeenAt: 1,
+    };
+    const status = "Mac mini isn’t reachable. Sessions there keep running.";
+    const opened = { connection: fakeConnection("m1"), name: "Mac mini", provider: null, workspaceState: null, machine: { record, status, label: "Offline" } };
+    integration.realAgents = true;
+    // Offline reaches the transport as a reconnect with attempt 0.
+    const { rerender } = render(<WorkspaceView opened={opened} state={{ state: "reconnecting", attempt: 0, reason: "offline", retryInMs: 10_000 } as never} />);
+    expect(screen.getByTestId("workspace-connection-status").textContent).toBe(status);
+    expect(document.body.textContent).toContain("Terminals appear once Mac mini is connected.");
+    // Every tab speaks from the machine's state and names the machine: the Agent and Ports tabs as well (Files and Git need the real api module here; WebKit covers them).
+    fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toBe("Connection: Offline");
+    fireEvent.click(screen.getByRole("tab", { name: "Ports" }));
+    expect(screen.getByTestId("cloud-ports-restarting").textContent).toContain(status);
+    expect(screen.queryByTestId("cloud-agent-provisioning")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Reconnecting|\(attempt|workspace/i);
+
+    listed = [];
+    rerender(<WorkspaceView opened={opened} state={connectedState() as never} />);
+    expect(screen.queryByTestId("workspace-connection-status")).toBeNull();
+    const tab = await screen.findByTestId("cloud-terminal-tab");
+    expect(tab.querySelector("button")!.getAttribute("title")).toBe("Terminal 1 runs on Mac mini");
+    expect(tab.querySelector("[data-icon]")!.getAttribute("data-icon")).toBe("monitor");
+    expect(screen.getByRole("button", { name: "New terminal on Mac mini" })).toBeTruthy();
   });
 
   it("labels the workspace, its provider and that commands run in the cloud", async () => {

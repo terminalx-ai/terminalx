@@ -13,11 +13,11 @@ vi.mock("@/lib/models", async (original) => ({
 const HARNESSES = [{ id: "claude", name: "Claude Code", available: true }] as HarnessInfo[];
 
 /** New Session's chip as it draws from the saved preferences, with the modules as a fresh start loads them. */
-async function renderChip() {
+async function renderChip(split = false) {
   const { AgentMenu } = await import("./AgentMenu");
   const { useSessionAgent } = await import("@/lib/useSessionAgent");
   function Chip() {
-    return <AgentMenu selection={useSessionAgent(HARNESSES)} />;
+    return <AgentMenu split={split} selection={useSessionAgent(HARNESSES)} />;
   }
   render(<Chip />);
   return screen.getByTestId("agent-menu");
@@ -62,6 +62,36 @@ describe("the new-session chip shows the permission mode (PRO-162)", () => {
     expect(shown.querySelector("[data-icon]")).not.toBeNull();
     expect(shown.getAttribute("title")).toBe("The agent runs commands and edits files without asking");
     expect(chip.getAttribute("aria-label")).toBe("Opus High, Bypass permissions");
+  });
+});
+
+describe("split in two chips, as the new-session box shows them (PRO-396)", () => {
+  it("puts the model and effort on one chip and the permission mode on its own, each with its own menu", async () => {
+    const chip = await renderChip(true);
+    expect(chip.textContent).toBe("OpusHigh");
+    expect(chip.getAttribute("aria-label")).toBe("Opus High");
+    const mode = screen.getByTestId("agent-mode");
+    expect(mode.tagName).toBe("BUTTON");
+    expect(mode.textContent).toBe("Ask every time");
+    expect(mode.getAttribute("aria-label")).toBe("Permissions: Ask every time");
+
+    fireEvent.click(chip);
+    expect(within(await screen.findByRole("menu")).queryByText("Permissions")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+    fireEvent.click(mode);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitemradio", { name: /^Plan/ }));
+    expect(screen.getByTestId("agent-mode").textContent).toBe("Plan");
+    expect(screen.getByTestId("agent-mode").className).toContain("text-info");
+  });
+
+  it("still marks Bypass as a warning on its chip", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ lastMode: "bypassPermissions" }));
+    await renderChip(true);
+    const mode = screen.getByTestId("agent-mode");
+    expect(mode.textContent).toBe("Bypass");
+    expect(mode.className).toContain("text-warning");
+    expect(mode.getAttribute("title")).toBe("The agent runs commands and edits files without asking");
   });
 });
 

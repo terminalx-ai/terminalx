@@ -47,9 +47,9 @@ impl SessionObserver for RuntimeObserver {
         }
     }
 
-    fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>) {
+    fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>, generation: u64) {
         if let Some(host) = self.local_automations.get() {
-            crate::automations::complete_from_hook(host, session_id, tab_id, final_message.clone());
+            crate::automations::complete_from_turn(host, session_id, tab_id, final_message.clone(), generation);
         }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         if !store::takes_part(session_id, tab_id) {
@@ -69,6 +69,18 @@ impl SessionObserver for RuntimeObserver {
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         let detail = message.to_string();
         self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, &detail));
+    }
+
+    fn automation_execution_lost(&self, session_id: &str, tab_id: &str, message: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::fail_from_hook(host, session_id, tab_id, message);
+        }
+    }
+
+    fn automation_cancelled(&self, session_id: &str, tab_id: &str, message: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::cancel_from_hook(host, session_id, tab_id, message);
+        }
     }
 
     /// Off the sender's thread, which may hold the checkout's admission or a
@@ -129,6 +141,7 @@ mod tests {
             resolution: None,
             interrupted_resolution: None,
             preserve_resolution_edits: false,
+            author_followed: false,
             resolutions: 0,
             resolve_conflicts: false,
             auto_merge: false,
@@ -148,6 +161,8 @@ mod tests {
             merge_check: None,
             review_pending_since: None,
             findings_sent_round: 0,
+            moved_reviews: 0,
+            head_wait: None,
             verdict: None,
             failed_local_checks: Vec::new(),
         local_check: None,
@@ -184,7 +199,7 @@ mod tests {
         let blocked = "Stuck.\n\n```terminalx-status\n{\"status\": \"blocked\", \"checks\": \"none\", \"reason\": \"Which database?\"}\n```";
         let observer = RuntimeObserver::default();
         // Before the agent tabs are served there is no host: a turn ending moves nothing.
-        observer.automation_completed("author", "t1", Some(blocked.into()));
+        observer.automation_completed("author", "t1", Some(blocked.into()), 1);
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(store::get("p1").unwrap().state, State::Working);
 
@@ -193,9 +208,9 @@ mod tests {
         sink.listen(crate::issue_pipeline::host::CHANGED, Box::new(move |_| *counted.lock().unwrap() += 1));
         observer.attach(std::sync::Arc::new(LocalHost::cloud_workspace(sink.clone() as std::sync::Arc<dyn EventSink>, manager, std::sync::Arc::new(|_: &str| {}))));
         // A tab that takes no part is not looked at.
-        observer.automation_completed("someone", "else", Some(blocked.into()));
+        observer.automation_completed("someone", "else", Some(blocked.into()), 1);
         // The author's is: off the hook's thread, and announced to whoever shows it.
-        observer.automation_completed("author", "t1", Some(blocked.into()));
+        observer.automation_completed("author", "t1", Some(blocked.into()), 1);
         let deadline = Instant::now() + Duration::from_secs(10);
         // Written, then announced: both are waited for.
         while (store::get("p1").unwrap().state != State::NeedsYou || *announced.lock().unwrap() == 0) && Instant::now() < deadline {

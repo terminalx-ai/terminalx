@@ -16,11 +16,13 @@ import {
   toggleViewMode,
   useEditors,
   isReviewEditor,
-  type ReviewEditorEntry,
+  isTabEditor,
+  type TabEditorEntry,
   type AttachmentEditorEntry,
   attachmentFile,
 } from "@/lib/editors";
 import { DiffEditorPane } from "./DiffEditorPane";
+import { CheckLogTab } from "@/components/changes/CheckLogTab";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { ConflictView } from "@/components/changes/ConflictView";
 import { MediaPane } from "./MediaPane";
@@ -32,19 +34,39 @@ import { tabPanelId } from "@/lib/sessionTabIds";
 const MIN_W = 320;
 
 /**
- * The editor pane: open files as tabs beside the transcript. The chat keeps
- * its height and its composer; the pane takes width from the right, drags on
- * its left edge, and collapses to a thin strip so a long read never has to
- * be closed to see the conversation again. In narrow columns, the editor
- * fills the column until hidden or closed, keeping both surfaces usable.
+ * The file shortcuts of a session whose files are tabs: Toggle Preview acts
+ * on the file tab on screen (`shown`), Close All Files closes the session's
+ * file tabs and leaves its chats, diffs and pull requests.
  */
-export function EditorSplit({ sessionId, active, fill = false, selectedTab, reviewsInPanes = false }: {
+export function useFileTabShortcuts(sessionId: string, shown: string | null, enabled: boolean) {
+  useShortcut(
+    "files.togglePreview",
+    () => {
+      if (shown) toggleViewMode(shown);
+    },
+    { enabled: enabled && !!shown },
+  );
+  useShortcut("files.closeAll", () => void closeAllEditors(sessionId, true), { enabled });
+}
+
+/**
+ * The editor pane, where files are not tabs of a session: a cloud
+ * workspace's files, and a checkout's with no session. Its open files are
+ * tabs of its own; beside a transcript the pane takes width from the right,
+ * drags on its left edge, and collapses to a thin strip so a long read never
+ * has to be closed to see the conversation again. In narrow columns, the
+ * editor fills the column until hidden or closed, keeping both surfaces usable.
+ *
+ * A local session's files are tabs in its tab strip, beside the chat
+ * (PRO-402): the session's panes draw them, and this pane draws none of
+ * them. Where a session has no panes (the floating window), its file and
+ * review tabs are drawn here, one at a time, as the tab strip selects them.
+ */
+export function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
   sessionId: string;
   active: boolean;
   fill?: boolean;
   selectedTab?: SelectedSessionTab | null;
-  /** The workspace panes draw review tabs in their own pane (PRO-263); this split still steps aside for one. */
-  reviewsInPanes?: boolean;
 }) {
   const prefs = usePrefs();
   const ed = useEditors();
@@ -53,12 +75,13 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
   const all = ed.editors.filter((e) => e.sessionId === sessionId);
   // A checkout without a session has no workspace tab strip.
   const standalone = sessionId.startsWith("checkout:");
-  const reviews = standalone ? [] : all.filter(isReviewEditor);
-  const editors = standalone ? all : all.filter((e) => !isReviewEditor(e));
+  const reviews = standalone ? [] : all.filter(isTabEditor);
+  const editors = standalone ? all : all.filter((e) => !isTabEditor(e));
   const activeId = editors.find((e) => e.id === ed.active[sessionId])?.id ?? editors[editors.length - 1]?.id ?? null;
   const reviewActive = editors.some((e) => e.id === activeId && isReviewEditor(e));
   const fullWidth = fill || reviewActive;
-  const reviewShown = reviews.some((e) => selected?.kind === "review" && selected.id === e.id);
+  const shownTab = reviews.find((e) => selected?.kind === "review" && selected.id === e.id);
+  const reviewShown = !!shownTab;
   const collapsed = !!ed.collapsed[sessionId];
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; max: number } | null>(null);
@@ -97,16 +120,18 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
     document.documentElement.style.setProperty("--editor-w", `${prefs.editorPaneWidth}px`);
   }, [prefs.editorPaneWidth]);
 
+  // The file on screen: a tab of the session when one is shown, else this pane's.
+  const previewTarget = shownTab ? shownTab.id : activeId;
   useShortcut(
     "files.togglePreview",
     () => {
-      if (activeId) toggleViewMode(activeId);
+      if (previewTarget) toggleViewMode(previewTarget);
     },
-    { enabled: active && !!activeId },
+    { enabled: active && !!previewTarget },
   );
   useShortcut("files.closeAll", () => void closeAllEditors(sessionId, !standalone), { enabled: active });
 
-  const reviewPanes = reviewsInPanes ? null : reviews.map((entry) => <ReviewTab key={entry.id} entry={entry} visible={active && selected?.kind === "review" && selected.id === entry.id} />);
+  const reviewPanes = reviews.map((entry) => <ReviewTab key={entry.id} entry={entry} visible={active && selected?.kind === "review" && selected.id === entry.id} />);
 
   return <>
     {reviewPanes}
@@ -120,15 +145,16 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
         <span className="mt-2 rounded-full bg-veil-raised px-1.5 text-[10px] tabular-nums text-faint">{editors.length}</span>
       </div>
     )}
-    <div
+    {/* A session whose files are all tabs of its own has no pane here, and no strip of open files. */}
+    {editors.length > 0 && <div
       ref={root}
       tabIndex={-1}
       role="region"
-      aria-hidden={!editors.length || collapsed || reviewShown}
+      aria-hidden={collapsed || reviewShown}
       aria-label={editors.find((e) => e.id === activeId)?.name ?? "Open files"}
       className={cn(
         "absolute inset-0 z-10 flex h-full w-full min-w-0 shrink-0 flex-col border-l border-hairline bg-background outline-none",
-        (!editors.length || collapsed || reviewShown) && "hidden",
+        (collapsed || reviewShown) && "hidden",
         // Beside a transcript it takes a resizable share; alone (a cloud workspace's files) it fills.
         !fullWidth && "@min-[768px]/editor-host:relative @min-[768px]/editor-host:w-(--editor-w) @min-[768px]/editor-host:max-w-[calc(100%-360px)]",
       )}
@@ -195,20 +221,21 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab, revi
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "attachment" ? <AttachmentPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} embedded={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
+            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "attachment" ? <AttachmentPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} embedded={false} /> : e.kind === "checkLog" ? <CheckLogTab entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
           </div>
         ))}
       </div>
-    </div>
+    </div>}
   </>;
 }
 
 /**
- * Review surfaces share the workspace selection and retain their buffers while hidden.
+ * A session tab an editor fills: a review, or a file the session opened.
+ * They share the workspace selection and retain their buffers while hidden.
  * In a workspace pane (`embedded`) the pane's cell is the tab panel, and two panes can
  * both show a tab: only the focused pane's takes the keyboard focus.
  */
-export function ReviewTab({ entry, visible, focused = visible, embedded = false }: { entry: ReviewEditorEntry; visible: boolean; focused?: boolean; embedded?: boolean }) {
+export function ReviewTab({ entry, visible, focused = visible, embedded = false }: { entry: TabEditorEntry; visible: boolean; focused?: boolean; embedded?: boolean }) {
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (visible && focused) root.current?.focus({ preventScroll: true });
@@ -220,7 +247,10 @@ export function ReviewTab({ entry, visible, focused = visible, embedded = false 
     {entry.kind === "diff" ? <DiffEditorPane entry={entry} visible={visible} />
       : entry.kind === "conflict" ? <ConflictView entry={entry} visible={visible} />
       : entry.kind === "attachment" ? <AttachmentPane entry={entry} visible={visible} embedded={embedded} />
-      : <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />}
+      : entry.kind === "pr" ? <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />
+      : entry.kind === "checkLog" ? <CheckLogTab entry={entry} visible={visible} />
+      : entry.kind === "text" ? <EditorPane entry={entry} visible={visible} />
+      : <MediaPane entry={entry} visible={visible} />}
   </div>;
 }
 

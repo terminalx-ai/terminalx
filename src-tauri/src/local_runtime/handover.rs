@@ -264,6 +264,16 @@ pub(crate) fn plan(lifetime: &super::Lifetime, params: &Value) -> Result<Value, 
     Ok(json!({ "format": FORMAT, "unadoptable": unadoptable }))
 }
 
+/// What `runtime.handover.plan` names now, without a binary to check:
+/// `machine/3`'s blockers (PRO-354). Empty in a process that cannot be
+/// handed over.
+pub(crate) fn unadoptable() -> Vec<Value> {
+    let Some(runtime) = RUNTIME.get() else { return Vec::new() };
+    let mut unadoptable = runtime.manager.unadoptable();
+    unadoptable.extend(local_vm_asks());
+    unadoptable.iter().filter_map(|work| serde_json::to_value(work).ok()).collect()
+}
+
 fn pinned(lifetime: &super::Lifetime, params: &Value) -> Result<(), ControlError> {
     if params["epoch"].as_str() != Some(lifetime.epoch.as_str()) {
         return Err(refused("runtime_restarted", "Refresh runtime status before handing the runtime over."));

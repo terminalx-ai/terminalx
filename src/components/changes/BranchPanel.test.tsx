@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BranchOverview, ProjectForge } from "@/lib/api";
 import { getDraft } from "@/lib/drafts";
+import { noteDraftPushes } from "@/lib/panelMarks";
 
 // The panel reads the branch, then its pull request: two answers in turn, slow on a busy machine.
 const WAIT = { timeout: 5000 };
@@ -99,6 +100,18 @@ describe("the Branch tab", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "branch_overview")).toHaveLength(reads);
   });
 
+  it("keeps Push unless the PR draft above can push and create itself (PRO-394)", async () => {
+    // No PR found: GitHub unread, signed out or no PR yet look the same here, so Push stays.
+    answer(overview({ nextStep: "push", unpulled: 0, incoming: [], unpushed: 2, dirty: false, behind: 0, merge: { state: "clean", conflicted: [] } }));
+    render(<BranchPanel cwd="/repo/wt" active sessionId="s1" />);
+    await waitFor(() => expect(screen.getByTestId("next-step").textContent).toContain("Push 2 commits"), WAIT);
+    // Only while the draft shows its own "Push and create pull request" is the step left to it.
+    act(() => noteDraftPushes("/repo/wt", true));
+    expect(screen.queryByTestId("next-step")).toBeNull();
+    act(() => noteDraftPushes("/repo/wt", false));
+    expect(screen.getByTestId("next-step").textContent).toContain("Push 2 commits");
+  });
+
   it("does not offer to merge from the main checkout reached through a different path", async () => {
     forge.value = "localOnly";
     answer(overview({ base: "main", mainCheckout: "/private/repo/main", inMainCheckout: true }));
@@ -120,8 +133,8 @@ describe("the Branch tab", () => {
     expect(screen.getByTestId("branch-you").textContent).toBe("You · 2 commits");
     const rows = screen.getAllByTestId("branch-commit").map((row) => [row.dataset.lane, row.querySelector("span[title]")?.textContent]);
     expect(rows).toEqual([
-      ["branch", "#ddddddd Fix header"],
-      ["base", "#eeeeeee Bump deps"],
+      ["branch", "ddddddd Fix header"],
+      ["base", "eeeeeee Bump deps"],
     ]);
     // Where main is now: its newest commit, named.
     expect(screen.getByTestId("branch-base-now").textContent).toBe("main now");

@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
-import { AlertCircle, Check, CheckCircle2, CircleX, Copy, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, TriangleAlert, X } from "@/icons";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { AlertCircle, Bot, Check, CheckCircle2, CircleX, Copy, ExternalLink, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, Target, TriangleAlert, X } from "@/icons";
+import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";
@@ -8,7 +9,6 @@ import { WorkspaceSetupToasts } from "@/components/terminal/WorkspaceSetupNotice
 import { AgentLoginToasts } from "@/components/settings/AgentLoginToasts";
 import { SettingsLinkToasts } from "@/components/settings/SettingsLinkToasts";
 import { copyText } from "@/lib/clipboard";
-import { liftClearOf } from "@/components/cleanup/CleanupIndicator";
 import { dismissAttachmentNotice, useAttachmentNotices, type AttachmentNotice } from "@/lib/attachmentNotices";
 import { dismissError, errorToastText, runErrorAction, useErrorToasts, type ErrorToast, type ErrorToastAction } from "@/lib/errorToasts";
 
@@ -18,14 +18,14 @@ export function Toasts() {
   const errors = useErrorToasts();
   const attachmentNotices = useAttachmentNotices();
   const store = useSessionStore();
-  const root = useRef<HTMLDivElement>(null);
-  const lift = useLiftOffComposer(root, attachmentNotices.length);
   return (
-    <div ref={root} className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto" style={lift ? { transform: `translateY(-${lift}px)` } : undefined}>
+    <div className="pointer-events-none flex max-h-[50dvh] shrink-0 flex-col gap-2 overflow-y-auto">
       <WorkspaceSetupToasts />
       <AgentLoginToasts />
       <SettingsLinkToasts />
+      <MachineToasts />
       {notices.map((n) => {
+        if (n.action === "open") return <MachineNoticeCard key={n.id} notice={n} />;
         const tab = store.sessions.find((s) => s.id === n.sessionId)?.tabs.find((t) => t.id === n.tabId);
         const Icon = n.kind === "started" ? Play : n.kind === "waiting" ? MessageCircleQuestion : n.kind === "failed" ? AlertCircle : CheckCircle2;
         return (
@@ -110,6 +110,9 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
         <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-add" />
       ) : toast.icon === "branch" ? (
         <GitBranch aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      ) : toast.icon === "target" ? (
+        // Not a failure: a goal sent where goals do not work, said in the colour of a warning.
+        <Target aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
       ) : (
         <CircleX aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
       )}
@@ -126,7 +129,13 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
                 <div className="mt-1.5 truncate rounded-md bg-raised px-2 py-1 font-mono text-[11.5px] hairline" title={toast.cause} data-error-detail="">{toast.cause}</div>
               ) : toast.cause ? <div className="font-mono text-foreground" data-error-detail="">{toast.cause}</div> : null}
             </>
-          ) : toast.cause ? <>{toast.action}: <span className="font-mono text-foreground">{toast.cause}</span></> : `${toast.action}.`}
+          ) : toast.cause ? (
+            // The cause on a line of its own (17.09), never run on inside the sentence where it wraps mid-phrase.
+            <>
+              <div>{toast.action}:</div>
+              <div className="mt-0.5 font-mono text-foreground" data-error-detail="">{toast.cause}</div>
+            </>
+          ) : `${toast.action}.`}
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
         {toast.actions?.map((action) => (
@@ -145,6 +154,8 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.icon === "retry" ? <RotateCw className={cn("size-3.5", running === action.label && "animate-spin")} /> : null}
             {action.icon === "branch" ? <GitBranch className="size-3.5" /> : null}
             {action.icon === "branch-plus" ? <GitBranchPlus className="size-3.5" /> : null}
+            {action.icon === "external" ? <ExternalLink className="size-3.5" /> : null}
+            {action.icon === "bot" ? <Bot className="size-3.5" /> : null}
             {action.label}
           </button>
         ))}
@@ -169,51 +180,6 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
       </button>
     </div>
   );
-}
-
-/** Kept from the window's top edge however tall the composer is. */
-const TOP_MARGIN = 8;
-
-/**
- * While a notice about the files just offered to a composer is up (PRO-290),
- * the stack rises clear of that composer (`data-composer-box`), as the
- * clean-up indicator does: in a narrow window it would otherwise sit on the
- * chips, the draft and Send. It never rises past the top of the window.
- * Composers grow as files are read in (followed as they resize) and move
- * with the panels (read again twice a second while such a notice shows).
- */
-function useLiftOffComposer(element: RefObject<HTMLElement | null>, notices: number): number {
-  const [lift, setLift] = useState(0);
-  const applied = useRef(0);
-  applied.current = lift;
-  useLayoutEffect(() => {
-    if (!notices) {
-      setLift(0);
-      return;
-    }
-    const measure = () => {
-      const node = element.current;
-      if (!node) return;
-      const now = node.getBoundingClientRect();
-      if (now.height === 0) return;
-      // Where it rests: what is measured already includes the lift in force.
-      const rest = { left: now.left, right: now.right, top: now.top + applied.current, bottom: now.bottom + applied.current };
-      const composers = [...document.querySelectorAll<HTMLElement>("[data-composer-box]")].map((box) => box.getBoundingClientRect()).filter((rect) => rect.width > 0 && rect.height > 0);
-      setLift(Math.max(0, Math.round(Math.min(liftClearOf(rest, composers), rest.top - TOP_MARGIN))));
-    };
-    measure();
-    // A composer grows as the files offered to it are read in: follow it at once.
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    for (const box of document.querySelectorAll("[data-composer-box]")) observer?.observe(box);
-    const timer = window.setInterval(measure, 500);
-    window.addEventListener("resize", measure);
-    return () => {
-      observer?.disconnect();
-      window.clearInterval(timer);
-      window.removeEventListener("resize", measure);
-    };
-  }, [element, notices]);
-  return lift;
 }
 
 /**

@@ -140,10 +140,22 @@ SSH. After that,
 start a session on the server from TerminalX as you would locally. (A later
 version signs the agents in from the machine's page in TerminalX.)
 
-## Paired computers
+## Pair your phone
 
 ```sh
-terminalx-serve devices               # the computers that may operate this one
+terminalx-serve pair --phone
+```
+
+It shows a QR code. In TerminalX on your phone, open Machines → Add and scan
+it, or paste the link printed under it. The phone shows a fingerprint: check
+that it matches the one in your terminal, then answer `y`. The server then
+appears in the phone's Machines list with a server icon. The phone reaches it
+on the addresses shown, so it must be on the same network or Tailscale.
+
+## Paired computers and phones
+
+```sh
+terminalx-serve devices               # the computers and phones that may operate this one
 terminalx-serve devices revoke <id>   # remove one; it must pair again
 ```
 
@@ -154,14 +166,31 @@ terminalx-serve update
 ```
 
 (or `terminalx-serve update --check` to only look) installs the newest signed
-runtime release, checked the same way as the
-installer checks it, into a new `~/.terminalx/versions/<version>`, switches
-`~/.terminalx/current` to it, and hands the running runtime over to it in place:
-its agents and terminals keep running, and nothing is restarted. If the runtime
-runs something an update cannot carry over, it says what and keeps the old
-version running; run `terminalx-serve update` again once that is done. The
-previous version's folder stays, so you can switch back. Running the install
-command again does the same.
+runtime release, checked the same way as the installer checks it, into a new
+`~/.terminalx/versions/<version>`, and then:
+
+1. starts it on its own, on a scratch data directory, to check that it runs
+   (up to a minute). One that does not start is removed and nothing changes;
+2. hands the running runtime over to it in place: its agents and terminals
+   keep running, and nothing is restarted;
+3. waits for the runtime to answer as the new version (up to 90 seconds), and
+   only then switches `~/.terminalx/current` to it. If it does not come up,
+   `current` stays on the old version and the service is restarted on it; the
+   update says so, and that its agents and terminals restarted;
+4. keeps `current` and the two versions before it, and removes older ones (in
+   `~/.terminalx/versions` and the runtime copies in the data directory). No
+   more than three versions stay on disk, and never the one running.
+
+If the runtime runs something an update cannot carry over, it says what and
+keeps the old version running; run `terminalx-serve update` again once that is
+done. Running the install command again does the same.
+
+A computer that operates this server can update it too: its machine page
+offers "Update" when a newer runtime is out (once both sides run a TerminalX
+that can). It names the work an update would stop and the other computers
+connected, and asks first. Progress goes to
+`~/.terminalx/data/run/machine-update.json`, and the helper that does the work
+logs to `~/.terminalx/data/run/machine-update.log`.
 
 ## Remove
 

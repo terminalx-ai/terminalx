@@ -2,6 +2,7 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PairingStatus } from "@/types/pairing";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { device, emptyStatus, relayReady } from "./pairingFixtures.test-utils";
 
 const mocks = vi.hoisted(() => ({
@@ -11,15 +12,17 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (_name: string, listener: (event: { payload: PairingStatus }) => void) => {
-    mocks.statusListener = listener;
+  listen: vi.fn(async (name: string, listener: (event: { payload: PairingStatus }) => void) => {
+    if (name === "pairing_status") mocks.statusListener = listener;
     return () => {};
   }),
 }));
 
 let pairing: typeof import("@/lib/pairing");
 let PairedDeviceList: typeof import("./PairedDevices")["PairedDeviceList"];
-let ConnectedBar: typeof import("./ConnectedBar")["ConnectedBar"];
+let TerminalDock: typeof import("@/components/terminal/TerminalDock")["TerminalDock"];
+let setPrefs: typeof import("@/lib/prefs")["setPrefs"];
+let refreshDataPrivacy: typeof import("@/lib/dataPrivacy")["refreshDataPrivacy"];
 
 const viaRelay = device({ connection: { transport: "relay", since: "2026-11-12T09:00:00Z" }, lastSeenTransport: "relay", lastSeenAt: "2026-11-12T09:00:00Z" });
 const viaLan = device({ id: "phone-2", label: "Kitchen iPhone", fingerprint: "AB12·CD34", connection: { transport: "direct", since: "2026-11-12T09:00:00Z" } });
@@ -37,7 +40,6 @@ beforeEach(async () => {
   mocks.invoke.mockReset();
   pairing = await import("@/lib/pairing");
   ({ PairedDeviceList } = await import("./PairedDevices"));
-  ({ ConnectedBar } = await import("./ConnectedBar"));
 }, 60_000);
 afterEach(cleanup);
 
@@ -92,31 +94,82 @@ describe("paired device rows", () => {
   });
 });
 
-describe("connected bar", () => {
-  it("appears while a device has a live connection and goes when it leaves", async () => {
+describe("Device dock tab", () => {
+  beforeEach(async () => {
+    ({ TerminalDock } = await import("@/components/terminal/TerminalDock"));
+    ({ setPrefs } = await import("@/lib/prefs"));
+    ({ refreshDataPrivacy } = await import("@/lib/dataPrivacy"));
+    setPrefs({ panelTerminalOpen: false });
+  }, 60_000);
+
+  const dock = (sessionId: string) => <TooltipProvider><TerminalDock key={sessionId} sessionId={sessionId} cwd="/repo" /></TooltipProvider>;
+  const tab = () => screen.getByRole("tab", { name: /^Device/ });
+
+  it("counts only live connections through session switches and reconnects without changing selection or focus", async () => {
     await boot({ ...emptyStatus, devices: [lastSeenLan] });
-    render(<ConnectedBar />);
-    expect(screen.queryByTestId("phone-connected-bar")).toBeNull();
+    const app = render(dock("session-1"));
+    expect(tab().textContent).toBe("Device");
+    const run = screen.getByRole("tab", { name: /^Run/ });
+    fireEvent.click(run);
+    run.focus();
 
     push({ ...emptyStatus, devices: [viaRelay, lastSeenLan] });
-    const bar = screen.getByTestId("phone-connected-bar");
-    expect(bar.textContent).toBe("Priya's iPhone is connected · it can see and drive your sessionsDisconnect");
+    expect(tab().textContent).toBe("Device · 1");
+    expect(tab().getAttribute("aria-selected")).toBe("false");
+    expect(run.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(run);
+    expect(screen.queryByTestId("phone-connected-bar")).toBeNull();
 
-    push({ ...emptyStatus, devices: [viaRelay, viaLan] });
-    expect(screen.getByTestId("phone-connected-bar").textContent).toContain("2 phones are connected · they can see and drive your sessions");
+    push({ ...emptyStatus, devices: [viaRelay, viaLan, lastSeenLan, { ...viaLan, id: "revoked-phone", revokedAt: "2026-11-12T09:00:00Z" }] });
+    app.rerender(dock("session-2"));
+    expect(tab().textContent).toBe("Device · 2");
+    fireEvent.click(tab());
+    const panel = screen.getByRole("tabpanel", { name: "Device · 2" });
+    expect(within(panel).getByText(/can see and drive sessions on this Mac/)).toBeTruthy();
+    expect(within(panel).getByText("Priya's iPhone")).toBeTruthy();
+    expect(within(panel).getByText("Kitchen iPhone")).toBeTruthy();
+    expect(within(panel).queryByText("Studio iPad")).toBeNull();
 
     push({ ...emptyStatus, devices: [{ ...viaRelay, connection: undefined }, lastSeenLan] });
-    expect(screen.queryByTestId("phone-connected-bar")).toBeNull();
+    expect(tab().textContent).toBe("Device");
+    expect(within(panel).getByText("No devices connected")).toBeTruthy();
+
+    tab().focus();
+    push({ ...emptyStatus, devices: [viaRelay] });
+    expect(tab().textContent).toBe("Device · 1");
+    expect(tab().getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tab());
   });
 
-  it("Disconnect ends the connection on the Mac", async () => {
-    await boot({ ...emptyStatus, devices: [viaRelay] }, (command) => {
-      if (command === "pairing_disconnect") return { ...emptyStatus, devices: [{ ...viaRelay, connection: undefined }] };
+  it("opens Device from the collapsed indicator and disconnects just the selected phone", async () => {
+    await boot({ ...emptyStatus, devices: [viaRelay, viaLan] }, (command) => {
+      if (command === "pairing_disconnect") return { ...emptyStatus, devices: [{ ...viaRelay, connection: undefined }, viaLan] };
       throw new Error(command);
     });
-    render(<ConnectedBar />);
-    fireEvent.click(within(screen.getByTestId("phone-connected-bar")).getByRole("button", { name: "Disconnect" }));
+    render(dock("session-1"));
+    const toggle = screen.getByRole("button", { name: "Show Device tab (2 connected phones)" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    const panel = screen.getByRole("tabpanel");
+    fireEvent.click(within(panel).getByRole("button", { name: "Disconnect Priya's iPhone" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("pairing_disconnect", { deviceId: "phone-1" }));
-    await waitFor(() => expect(screen.queryByTestId("phone-connected-bar")).toBeNull());
+    await waitFor(() => expect(tab().textContent).toBe("Device · 1"));
+    expect(within(panel).queryByText("Priya's iPhone")).toBeNull();
+    expect(within(panel).getByText("Kitchen iPhone")).toBeTruthy();
+    expect(pairing.getPairing().status.devices.map((device) => device.id)).toEqual(["phone-1", "phone-2"]);
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pairing_revoke", expect.anything());
+    expect(mocks.invoke).not.toHaveBeenCalledWith("pty_spawn", expect.anything());
+  });
+
+  it("hides identifying labels and disconnect button names in privacy mode", async () => {
+    await boot({ ...emptyStatus, devices: [viaRelay, viaLan] });
+    render(dock("session-1"));
+    fireEvent.click(tab());
+    mocks.invoke.mockResolvedValueOnce({ enabled: true, managed: false });
+    await act(() => refreshDataPrivacy());
+    expect(screen.queryByText("Priya's iPhone")).toBeNull();
+    expect(screen.queryByTitle("Kitchen iPhone")).toBeNull();
+    expect(screen.getByRole("button", { name: "Disconnect Phone 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect Phone 2" })).toBeTruthy();
   });
 });

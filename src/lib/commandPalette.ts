@@ -467,7 +467,8 @@ export function paletteTabOf(scope: PaletteScope): PaletteTab {
 
 /**
  * The result groups a narrowed scope keeps; "all" keeps every group. A
- * workspace is a project's branch, so it is listed under Projects. Files and
+ * workspace is a project's branch, so it is listed under Projects. Actions are
+ * the open session's ("session-actions") and the app's ("commands"). Files and
  * smart input (an issue, a pull request, a path) are only searched in All.
  * Settings is its rows when typed for; with nothing typed, its pages and each
  * project's own settings.
@@ -476,7 +477,7 @@ export const PALETTE_SCOPE_GROUPS: Record<Exclude<PaletteScope, "all">, readonly
   sessions: ["sessions"],
   cloud: ["sessions"],
   projects: ["projects", "workspaces"],
-  actions: ["commands"],
+  actions: ["session-actions", "commands"],
   settings: ["settings", "settings-pages", "settings-projects"],
 };
 
@@ -492,9 +493,69 @@ export function palettePlaceholder(scope: PaletteScope): string {
     case "cloud": return "Search cloud sessions…";
     case "sessions": return "Search sessions…";
     case "projects": return "Search projects and workspaces…";
-    case "actions": return "Search views and commands…";
+    case "actions": return "Search actions…";
     case "all": return "Search sessions, workspaces, projects, files, settings and commands…";
   }
+}
+
+/** The tab Tab moves to from `tab` (Shift+Tab goes the other way), round the strip. */
+export function stepPaletteTab(tab: PaletteTab, by: 1 | -1): PaletteTab {
+  const at = PALETTE_TABS.findIndex((item) => item.id === tab);
+  return PALETTE_TABS[(at + by + PALETTE_TABS.length) % PALETTE_TABS.length].id;
+}
+
+/**
+ * Items in the order `first` names them by id, then the rest as they were. The
+ * Actions list with nothing typed is in this order (design 07.04: the most
+ * used first), and it breaks ties between equal matches when searched.
+ */
+export function orderPaletteItems<T extends { id: string; recentAt: number }>(items: T[], first: readonly string[]): T[] {
+  const rank = new Map(first.map((id, index) => [id, index]));
+  const ordered = items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => (rank.get(a.item.id) ?? first.length) - (rank.get(b.item.id) ?? first.length) || a.index - b.index);
+  return ordered.map(({ item }, index) => ({ ...item, recentAt: ordered.length - index }));
+}
+
+/** What the palette needs of a sidebar section to offer it as a destination. */
+export interface PaletteSection {
+  id: string;
+  name: string;
+  emoji?: string | null;
+  sessions: string[];
+}
+
+export interface SectionChoice {
+  section: PaletteSection;
+  /** Its sessions that are still listed (not archived, not deleted). */
+  count: number;
+  /** Every session being moved is already in it. */
+  current: boolean;
+  nameRanges: MatchRange[];
+}
+
+/**
+ * The Move to section view (design 07.13, 07.14): the sections whose name has
+ * what is typed, each with its count and whether the sessions are already
+ * there, and the name a new section would be created with: what is typed,
+ * unless a section is already called that.
+ */
+export function sectionChoices(
+  sections: readonly PaletteSection[],
+  sessionIds: readonly string[],
+  query: string,
+  listed: (sessionId: string) => boolean,
+): { choices: SectionChoice[]; current: PaletteSection | null; createName: string | null } {
+  const wanted = normalize(query).trim();
+  const inAll = (section: PaletteSection) => sessionIds.length > 0 && sessionIds.every((id) => section.sessions.includes(id));
+  const choices = sections.flatMap((section): SectionChoice[] => {
+    const at = wanted ? normalize(section.name).indexOf(wanted) : 0;
+    if (at < 0) return [];
+    return [{ section, count: section.sessions.filter(listed).length, current: inAll(section), nameRanges: wanted ? [{ start: at, end: at + wanted.length }] : [] }];
+  });
+  const name = query.trim().replace(/\s+/g, " ");
+  const taken = sections.some((section) => normalize(section.name).trim() === wanted);
+  return { choices, current: sections.find(inAll) ?? null, createName: name && !taken ? name : null };
 }
 
 export type PaletteNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
-import { Check, Circle, CircleAlert, CircleCheck, Link, Loader2, PartyPopper, X } from "@/icons";
+import { Check, Circle, CircleAlert, CircleCheck, Link, Loader2, LoaderCircle, PartyPopper, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type CloudWorkspaceProviderId } from "@/lib/api";
 import { listedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderIsPlatform } from "@/lib/cloudProviders";
 import { providerLabel } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
-import { isBuilding, organizationEnvironment, stageLabel } from "@/lib/organizationEnvironment";
+import { buildTimeLeft, isBuilding, organizationEnvironment } from "@/lib/organizationEnvironment";
+import { initials } from "@/lib/cloudPeople";
+import { COMPUTER_COLORS } from "@/lib/computerIdentity";
 import {
   isInvitableEmail,
   isTransientMembersError,
@@ -20,7 +23,6 @@ import { agentLoginUsable } from "@/components/settings/OrganizationAgentLogins"
 import { cn } from "@/lib/cn";
 import { FieldLabel, StepError, StepPage } from "./FlowLayout";
 import { FinishActions } from "./FinishActions";
-import { initials } from "./OrganizationStep";
 import type { StepProps } from "./stepProps";
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
@@ -72,6 +74,23 @@ interface Area {
 
 const UNKNOWN: Area = { mark: "unknown", detail: "Couldn't check" };
 
+/** "ana.kim@example.com" → "Ana Kim": an invitation carries only the address. */
+export function inviteeName(email: string): string {
+  const local = email.replace(/@.*/, "").replace(/\+.*/, "");
+  const words = local.split(/[._-]+/).filter(Boolean);
+  return words.length ? words.map((word) => word[0]!.toUpperCase() + word.slice(1)).join(" ") : email;
+}
+
+/** One colour per person, the same every time for the same address (12.06). */
+export function personColor(email: string): string {
+  const palette = COMPUTER_COLORS.filter((item) => item.id !== "gray");
+  let hash = 0;
+  for (const char of email.toLowerCase()) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length]!.css;
+}
+
+const tint = (css: string) => ({ background: `color-mix(in oklab, ${css} 15%, transparent)`, color: css });
+
 function AreaRow({ title, area }: { title: string; area: Area | null }) {
   const mark = area?.mark;
   return (
@@ -82,7 +101,7 @@ function AreaRow({ title, area }: { title: string; area: Area | null }) {
         ) : mark === "done" ? (
           <CircleCheck className="size-4 text-add" aria-label="done" />
         ) : mark === "working" ? (
-          <Loader2 className="size-4 animate-spin text-warning" aria-label="in progress" />
+          <LoaderCircle className="size-4 animate-spin text-warning" aria-label="in progress" />
         ) : mark === "unknown" ? (
           <CircleAlert className="size-4 text-faint" aria-label="unknown" />
         ) : (
@@ -91,7 +110,7 @@ function AreaRow({ title, area }: { title: string; area: Area | null }) {
       </span>
       <div className="min-w-0">
         <div className="text-[13px] font-medium">{title}</div>
-        <div className={cn("text-[12px] leading-[18px]", mark === "unknown" ? "text-faint" : "text-muted-foreground")}>{area ? area.detail : "Checking…"}</div>
+        <div className={cn("truncate text-[12px] leading-[18px]", mark === "unknown" ? "text-faint" : "text-muted-foreground")}>{area ? area.detail : "Checking…"}</div>
       </div>
     </li>
   );
@@ -157,10 +176,11 @@ function AlmostSet({
       .cloudProviders()
       .then(async (response) => {
         if (!alive.current) return;
-        const listed = listedProviders(response.providers, organizationId);
+        const listed = listedProviders(response.providers);
         const chosen = wanted.current?.provider;
-        const summary = (chosen ? listed.find((option) => option.id === chosen) : undefined) ?? listed.find((option) => option.connection !== null);
-        if (!summary || !summary.connection) {
+        // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
+        const summary = (chosen ? listed.find((option) => option.id === chosen) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
+        if (!summary || (!summary.connection && !cloudProviderIsPlatform(summary))) {
           setProvider(chosen ? { id: chosen, name: providerLabel(chosen) } : null);
           setCompute({ mark: "todo", detail: "No provider connected" });
           if (!chosen) setEnvironment({ mark: "todo", detail: "Needs a compute provider" });
@@ -173,7 +193,9 @@ function AlmostSet({
             : summary.availability === "disabled-for-create"
               ? "new machines paused"
               : summary.availability === "attention-required"
-                ? "connection needs attention"
+                ? cloudProviderIsPlatform(summary)
+                  ? "not available right now"
+                  : "connection needs attention"
                 : "not connected";
         const parts = [summary.displayName];
         try {
@@ -208,7 +230,7 @@ function AlmostSet({
       else if (building)
         setEnvironment({
           mark: "working",
-          detail: `Version ${building.number} ${building.state === "queued" ? "waiting to build" : `building · ${stageLabel(building.stage).toLowerCase()}`}`,
+          detail: `Version ${building.number} ${building.state === "queued" ? "waiting to build" : `building · ${buildTimeLeft(building, status.versions, Date.now())}`}`,
         });
       else if (active) setEnvironment({ mark: "done", detail: `Version ${active.number} active${status.rebuildRequired ? " · unbuilt changes" : ""}` });
       else {
@@ -274,6 +296,12 @@ interface Chip {
  * sent from here, since the server gives no link for older ones.
  */
 export function InviteStep(props: StepProps & { onDone: () => void }) {
+  // Discard recipient tokens and pending clipboard feedback on any context change,
+  // including when this step is mounted outside CloudSetupFlow.
+  return <InviteStepContent key={JSON.stringify([props.organization.id, props.contextRevision, props.accountEmail])} {...props} />;
+}
+
+function InviteStepContent(props: StepProps & { onDone: () => void }) {
   const { organization, record, contextRevision } = props;
   const [roster, setRoster] = useState<OrganizationRoster | null>(null);
   const [rosterState, setRosterState] = useState<{ loading: boolean; error: string | null }>({ loading: true, error: null });
@@ -326,7 +354,11 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
       setRosterState({ loading: false, error: null });
       if (!keepError) setError(null);
     } catch (failure) {
-      if (fresh()) setRosterState({ loading: false, error: membersErrorMessage(failure) });
+      if (fresh()) {
+        setRoster(null);
+        setIssued({});
+        setRosterState({ loading: false, error: membersErrorMessage(failure) });
+      }
     }
   }, []);
   useEffect(() => {
@@ -447,7 +479,18 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
     }
   };
 
-  const copyLink = (email: string, url: string) => void navigator.clipboard?.writeText(url).then(() => alive.current && setCopied(email), () => undefined);
+  const copyLink = async (email: string, url: string) => {
+    if (!canInvite || busy || rosterState.loading) return;
+    setCopied(null);
+    setError(null);
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(url);
+      if (alive.current) setCopied(email);
+    } catch {
+      if (alive.current) setError("Couldn't copy the invitation link. Try again.");
+    }
+  };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
@@ -525,8 +568,11 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                           problem ? "border-destructive/50 bg-destructive/10 text-destructive" : "border-hairline bg-raised",
                         )}
                       >
-                        <span className={cn("grid size-[18px] shrink-0 place-items-center rounded-full text-[9px] font-semibold", problem ? "bg-destructive/15" : "bg-accent/15 text-accent")}>
-                          {initials(null, chip.email)}
+                        <span
+                          className={cn("grid size-[22px] shrink-0 place-items-center rounded-full text-[12px] leading-none font-semibold tracking-[-0.04em]", problem && "bg-destructive/15")}
+                          style={problem ? undefined : tint(personColor(chip.email))}
+                        >
+                          {initials(chip.email)}
                         </span>
                         <span className="truncate">{chip.email}</span>
                         {problem && <span className="sr-only">: {problem}</span>}
@@ -576,7 +622,7 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 </div>
                 <select
                   aria-label="Role for these invites"
-                  className="h-9 rounded-md border border-hairline bg-card px-2 text-[12.5px] disabled:opacity-60"
+                  className="h-9 w-[150px] shrink-0 rounded-md border border-hairline bg-card px-2 text-[12.5px] disabled:opacity-60"
                   value={role}
                   disabled={busy === "send"}
                   onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "member")}
@@ -598,6 +644,12 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 </ul>
               )}
               <p className="mt-2 text-[12px] text-faint">Press Enter, a comma or a space after each address. Invitees get no access until they accept.</p>
+              {/* #1114: no domain-join policy exists in the accepted member contract.
+                  Keep this unavailable until the dependency in docs/ACCOUNTS.md ships. */}
+              <p className="mt-2 flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                <Link className="size-3.5 shrink-0" aria-hidden />
+                Shared invite link unavailable. Invite each person by email.
+              </p>
               {outcome && (
                 <p role="status" className="mt-2 text-[12px] text-muted-foreground">
                   {outcome}
@@ -616,17 +668,22 @@ export function InviteStep(props: StepProps & { onDone: () => void }) {
                 const key = lower(invite.email);
                 const own = issued[key];
                 const expired = invite.status === "expired" || (invite.expiresAt !== undefined && invite.expiresAt <= now);
+                const copyable = canInvite && own?.inviteUrl && own.role === invite.role && !expired;
                 return (
                   <li key={invite.email} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5" aria-label={invite.email}>
-                    <span className="grid size-7 shrink-0 place-items-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">{initials(null, invite.email)}</span>
+                    <span className="grid size-7 shrink-0 place-items-center rounded-full text-[12px] font-semibold" style={tint(personColor(invite.email))} aria-hidden>
+                      {initials(invite.email)}
+                    </span>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px]">{invite.email}</div>
-                      {own && !own.emailSent && <div className="text-[12px] text-warning">The email could not be sent. Copy the link and share it with them.</div>}
+                      <div className="truncate text-[13px]">{inviteeName(invite.email)}</div>
+                      <div className="truncate text-[12px] text-muted-foreground">{invite.email}</div>
+                      {copyable && <div className="text-[12px] text-muted-foreground">Only {invite.email} can accept this link, joining as {roleLabel(invite.role)}.</div>}
+                      {copyable && !own.emailSent && <div className="text-[12px] text-warning">The email could not be sent. Copy the link and share it with them.</div>}
                     </div>
                     <span className="text-[12.5px] text-muted-foreground">{roleLabel(invite.role)}</span>
                     <span className={cn("text-[12px]", expired ? "text-warning" : "text-faint")}>{expired ? "Expired" : sentLabel(invite.createdAt, now)}</span>
-                    {own?.inviteUrl && !expired && (
-                      <Button size="xs" variant="ghost" className="text-[12px]" onClick={() => copyLink(key, own.inviteUrl!)}>
+                    {copyable && (
+                      <Button size="xs" variant="ghost" className="text-[12px]" disabled={Boolean(busy) || rosterState.loading} aria-label={`Copy invitation link for ${invite.email}`} onClick={() => void copyLink(key, own.inviteUrl!)}>
                         {copied === key ? <Check /> : <Link />}
                         {copied === key ? "Copied" : "Copy link"}
                       </Button>

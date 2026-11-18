@@ -56,12 +56,15 @@ const HELP: &str = r#"terminalx — control a running TerminalX app
 Usage:
   terminalx status [--json]
   terminalx projects list [--json]
+  terminalx projects add FOLDER [--json]
+  terminalx projects remove PROJECT [--json]
   terminalx config show [--project PROJECT] [--json]
   terminalx sessions list [--project PROJECT|--quick] [--archived] [--json]
   terminalx sessions list --worktree WORKTREE [--project PROJECT] [--json]
   terminalx sessions list --children-of SESSION [--json]
   terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
+  terminalx sessions pin|unpin SESSION [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--account ACCOUNT] [--json]
@@ -111,6 +114,25 @@ Usage:
   terminalx cloud status [--json]
   terminalx cloud stop CLOUD_WORKSPACE --yes [--json]
   terminalx cloud resume CLOUD_WORKSPACE [--json]
+  terminalx machines list [--json]
+  terminalx machines status MACHINE [--json]
+  terminalx machines add --code CODE [--fingerprint FINGERPRINT] [--this-network] [--json]
+  terminalx machines remove MACHINE --yes [--json]
+  terminalx projects list --machine MACHINE [--json]
+  terminalx sessions list --machine MACHINE [--project PROJECT] [--archived] [--json]
+  terminalx sessions list --all-machines [--archived] [--json]
+  terminalx sessions create --machine MACHINE --project PROJECT --prompt TEXT [--agent AGENT]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--title TEXT] [--name NAME]
+      [--base BRANCH] [--worktree|--on-main] [--idempotency-key KEY] [--json]
+  terminalx sessions rename MACHINE_SESSION --title TEXT [--json]
+  terminalx sessions archive|unarchive MACHINE_SESSION... [--json]
+  terminalx tabs list MACHINE_SESSION [--json]
+  terminalx send MACHINE_SESSION TEXT [--tab TAB] [--idempotency-key KEY] [--json]
+  terminalx read MACHINE_SESSION [--tab TAB] [--since SEQ] [--tail COUNT] [--json]
+  terminalx wait MACHINE_SESSION [--tab TAB] [--timeout SECONDS] [--json]
+  terminalx permissions list|allow|deny ... --machine MACHINE [--json]
+  terminalx worktrees list|delete ... --machine MACHINE [--json]
+      (MACHINE_SESSION is a machine:… key, or a session id with --machine MACHINE)
   terminalx worktrees list [--project PROJECT] [--json]
   terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
   terminalx worktrees delete WORKTREE [--project PROJECT] --dry-run [--sessions ID,ID] [--json]
@@ -309,7 +331,7 @@ fn execute(args: &[String], out: &mut Output) -> (i32, io::Result<()>) {
             command,
             params,
             timeout,
-        } => match if command == "cloud.wait" { cloud_wait(&params, timeout, &mut |command, params, timeout| control::call(command, params, timeout)) } else { control::call(&command, params.clone(), timeout) } {
+        } => match if command == "cloud.wait" || command == "machine.wait" { chunked_wait(&command, &params, timeout, &mut |command, params, timeout| control::call(command, params, timeout)) } else { control::call(&command, params.clone(), timeout) } {
             Ok(response) => {
                 let ok = response.ok;
                 let readable = (!parsed.json && ok)
@@ -341,6 +363,9 @@ fn wait_many(first: String, tokens: &mut Tokens, all: bool, tab: &Option<String>
     if targets.iter().any(|target| is_cloud_key(target)) {
         return Err(invalid("Waiting on several sessions takes local sessions. Wait on a cloud session by itself."));
     }
+    if targets.iter().any(|target| is_machine_key(target)) {
+        return Err(invalid("Waiting on several sessions takes local sessions. Wait on a machine session by itself."));
+    }
     local_only(tab, "--tab")?;
     Ok(Action::Rpc {
         command: "wait".into(),
@@ -356,7 +381,7 @@ fn wait_named(tokens: &mut Tokens, (any, all): (bool, bool), tab: &Option<String
     if any || all || !tokens.values.is_empty() {
         wait_many(target, tokens, all, tab, seconds)
     } else if is_cloud_key(&target) {
-        // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
+        // Asked in short calls until the timeout (see `chunked_wait`), so nothing outlives this process in the app.
         Ok(Action::Rpc {
             command: "cloud.wait".into(),
             params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
@@ -372,11 +397,12 @@ fn wait_named(tokens: &mut Tokens, (any, all): (bool, bool), tab: &Option<String
     }
 }
 
-/// `wait` on a cloud session: the app waits at most
+/// `wait` on a cloud or machine session (`command`): the app waits at most
 /// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
 /// for again until the tab settles or the caller's timeout passes. When this
 /// process is interrupted, at most one short wait is left behind in the app.
-fn cloud_wait(
+fn chunked_wait(
+    command: &str,
     params: &Value,
     timeout: Duration,
     call: &mut dyn FnMut(&str, Value, Duration) -> Result<ControlResponse, ControlError>,
@@ -386,7 +412,7 @@ fn cloud_wait(
         let chunk = left.min(crate::cloud_control::WAIT_CHUNK_SECONDS);
         let mut asked = params.clone();
         asked["timeoutSeconds"] = json!(chunk);
-        let response = call("cloud.wait", asked, timeout)?;
+        let response = call(command, asked, timeout)?;
         left -= chunk;
         let timed_out = response.ok && response.result.as_ref().and_then(|result| result.get("reason")).and_then(Value::as_str) == Some("timeout");
         if !timed_out || left == 0 {
@@ -460,24 +486,56 @@ fn parse_with_stdin(
             })
         }
     };
+    // `--machine NAME` (PRO-356): the command runs on that paired machine,
+    // carried by the app over its connection to it.
+    let machine = if MACHINE_GROUPS.contains(&group.as_str()) && !(group == "wait" && crate::browser::cli::is_browser_wait(&tokens.values)) {
+        match tokens.option("--machine")? {
+            Some(machine) if machine.trim().is_empty() => return Err(invalid("--machine needs a machine's name or id.")),
+            machine => machine,
+        }
+    } else {
+        None
+    };
     let action = match group.as_str() {
         "status" => rpc("status", json!({}), &mut tokens),
-        "projects" => {
-            expect_word(&mut tokens, "list", "projects")?;
-            let org = tokens.option("--org")?;
-            if tokens.flag("--cloud")? || org.is_some() {
-                cloud_rpc("projects.list", json!({"org": org}), &mut tokens)
-            } else {
-                rpc("projects.list", json!({}), &mut tokens)
+        "machines" => parse_machines(&mut tokens),
+        "projects" => match tokens.required_front("projects command")?.as_str() {
+            "list" if machine.is_some() => {
+                if tokens.flag("--cloud")? || tokens.option("--org")?.is_some() {
+                    return Err(invalid("--machine lists a machine's projects; it cannot be combined with --cloud or --org."));
+                }
+                machine_rpc("projects.list", &machine, None, json!({}), &mut tokens)
             }
-        }
+            "add" | "remove" if machine.is_some() => Err(invalid("projects add and remove work on this computer's projects; --machine applies to projects list.")),
+            "list" => {
+                let org = tokens.option("--org")?;
+                if tokens.flag("--cloud")? || org.is_some() {
+                    cloud_rpc("projects.list", json!({"org": org}), &mut tokens)
+                } else {
+                    rpc("projects.list", json!({}), &mut tokens)
+                }
+            }
+            "add" => {
+                let folder = tokens.required_front("folder")?;
+                // The runtime has a working directory of its own: a relative
+                // path means this shell's folder, so it is resolved here.
+                let path = std::path::absolute(&folder)
+                    .map_err(|error| invalid(format!("Cannot resolve {folder}: {error}")))?;
+                rpc("projects.add", json!({"path": path, "refuseExisting": true}), &mut tokens)
+            }
+            "remove" => {
+                let project = tokens.required_front("project")?;
+                rpc("projects.remove", json!({"project": project}), &mut tokens)
+            }
+            other => Err(invalid(format!("Unknown projects command {other}. Use list, add or remove."))),
+        },
         "config" => {
             expect_word(&mut tokens, "show", "config")?;
             let project = tokens.option("--project")?;
             rpc("config.show", json!({"project": project}), &mut tokens)
         }
         "cloud" => parse_cloud(&mut tokens),
-        "sessions" => parse_sessions(&mut tokens),
+        "sessions" => parse_sessions(&mut tokens, &machine),
         "floating" => {
             let action = tokens.required_front("floating command")?;
             if !matches!(action.as_str(), "show" | "hide" | "toggle") {
@@ -490,14 +548,20 @@ fn parse_with_stdin(
         "tabs" => {
             expect_word(&mut tokens, "list", "tabs")?;
             let session = tokens.required_front("session")?;
-            rpc("tabs.list", json!({"session": session}), &mut tokens)
+            if machine.is_some() || is_machine_key(&session) {
+                machine_rpc("tabs.list", &machine, Some(&session), json!({"session": session}), &mut tokens)
+            } else {
+                rpc("tabs.list", json!({"session": session}), &mut tokens)
+            }
         }
         "send" => {
             let tab = tokens.option("--tab")?;
             let idempotency_key = tokens.option("--idempotency-key")?;
             let target = tokens.required_front("session or tab")?;
             let text = tokens.required_front("text")?;
-            if is_cloud_key(&target) {
+            if machine.is_some() || is_machine_key(&target) {
+                machine_rpc("send", &machine, Some(&target), json!({"target": target, "text": text, "tab": tab, "idempotencyKey": idempotency_key}), &mut tokens)
+            } else if is_cloud_key(&target) {
                 cloud_rpc("send", json!({"target": target, "text": text, "tab": tab, "idempotencyKey": idempotency_key}), &mut tokens)
             } else {
                 local_only(&tab, "--tab")?;
@@ -510,7 +574,9 @@ fn parse_with_stdin(
             let tail = tokens.option_u64("--tail")?;
             let tab = tokens.option("--tab")?;
             let target = tokens.required_front("session or tab")?;
-            if is_cloud_key(&target) {
+            if machine.is_some() || is_machine_key(&target) {
+                machine_rpc("read", &machine, Some(&target), json!({"target": target, "since": since, "tail": tail, "tab": tab}), &mut tokens)
+            } else if is_cloud_key(&target) {
                 cloud_rpc("read", json!({"target": target, "since": since, "tail": tail, "tab": tab}), &mut tokens)
             } else {
                 local_only(&tab, "--tab")?;
@@ -531,6 +597,9 @@ fn parse_with_stdin(
             if any && all {
                 return Err(invalid("Pass --any or --all, not both."));
             }
+            if machine.is_some() || tokens.values.first().is_some_and(|target| is_machine_key(target)) {
+                return Ok(Parsed { json, action: machine_wait(&mut tokens, &machine, (any, all), &tab, seconds)? });
+            }
             // Every session a lead started, found once when the call begins (PRO-328).
             if let Some(lead) = children_of(&mut tokens)? {
                 if let Some(extra) = tokens.take_front() {
@@ -546,8 +615,8 @@ fn parse_with_stdin(
                 wait_named(&mut tokens, (any, all), &tab, seconds)
             }
         }
-        "permissions" => parse_permissions(&mut tokens),
-        "worktrees" => parse_worktrees(&mut tokens),
+        "permissions" => parse_permissions(&mut tokens, &machine),
+        "worktrees" => parse_worktrees(&mut tokens, &machine),
         "issues" => parse_issues(&mut tokens, stdin),
         "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
@@ -636,8 +705,12 @@ fn parse_share(tokens: &mut Tokens) -> Result<Action, ControlError> {
     rpc(&format!("share.{action}"), params, tokens)
 }
 
-fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    match tokens.required_front("sessions command")?.as_str() {
+fn parse_sessions(tokens: &mut Tokens, machine: &Option<String>) -> Result<Action, ControlError> {
+    let command = tokens.required_front("sessions command")?;
+    if machine.is_some() && !matches!(command.as_str(), "list" | "create" | "rename" | "archive" | "unarchive") {
+        return Err(invalid(format!("sessions {command} works on this computer's sessions; --machine applies to sessions list, create, rename, archive and unarchive.")));
+    }
+    match command.as_str() {
         "list" => {
             let project = tokens.option("--project")?;
             let org = tokens.option("--org")?;
@@ -645,6 +718,23 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let quick = tokens.flag("--quick")?;
             let archived = tokens.flag("--archived")?;
             let worktree = tokens.option("--worktree")?;
+            let all_machines = tokens.flag("--all-machines")?;
+            if machine.is_some() || all_machines {
+                let local_only_options = cloud || org.is_some() || quick || worktree.is_some() || tokens.peek_option("--children-of").is_some();
+                if machine.is_some() && all_machines {
+                    return Err(invalid("--machine lists one machine's sessions and --all-machines every computer's; pass one."));
+                }
+                if local_only_options {
+                    return Err(invalid("--machine and --all-machines cannot be combined with --cloud, --org, --quick, --worktree or --children-of."));
+                }
+                if all_machines {
+                    if project.is_some() {
+                        return Err(invalid("--all-machines lists every project's sessions on every computer; name one machine's project with --machine MACHINE --project PROJECT."));
+                    }
+                    return rpc("sessions.list", json!({"project": null, "quick": false, "archived": archived, "worktree": null, "allMachines": true}), tokens);
+                }
+                return machine_rpc("sessions.list", machine, project.as_deref(), json!({"project": project, "archived": archived}), tokens);
+            }
             let in_cloud = cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key);
             // The sessions a lead started (PRO-270), wherever they are.
             if let Some(lead) = children_of(tokens)? {
@@ -680,7 +770,19 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             if sessions.is_empty() {
                 return Err(invalid(format!("Missing session: name one or more to {command}.")));
             }
+            let keyed = sessions.iter().filter(|session| is_machine_key(session)).count();
+            if machine.is_some() || keyed > 0 {
+                if machine.is_none() && keyed < sessions.len() {
+                    return Err(invalid(format!("sessions {command} takes this computer's sessions or one machine's, not both at once.")));
+                }
+                let first = sessions[0].clone();
+                return machine_rpc("sessions.archive", machine, Some(&first), json!({"sessions": sessions, "archived": command == "archive"}), tokens);
+            }
             rpc(&format!("sessions.{command}"), json!({"sessions": sessions}), tokens)
+        }
+        command @ ("pin" | "unpin") => {
+            let session = tokens.required_front("session")?;
+            rpc(&format!("sessions.{command}"), json!({"session": session}), tokens)
         }
         "show" => {
             let session = tokens.required_front("session")?;
@@ -718,10 +820,14 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let lead = children_of(tokens)?.ok_or_else(|| invalid("sessions stop needs --children-of SESSION: it stops the running agents of the sessions that session started."))?;
             rpc("sessions.stop", json!({"childrenOf": lead}), tokens)
         }
+        "create" if machine.is_some() || tokens.peek_option("--project").is_some_and(|project| is_machine_key(&project)) => parse_machine_session_create(tokens, machine),
         "create" if tokens.peek_option("--project").is_some_and(|project| is_cloud_key(&project)) => parse_cloud_session_create(tokens),
         "rename" => {
             let title = tokens.required_option("--title")?;
             let session = tokens.required_front("session")?;
+            if machine.is_some() || is_machine_key(&session) {
+                return machine_rpc("sessions.rename", machine, Some(&session), json!({"session": session, "title": title}), tokens);
+            }
             rpc("sessions.rename", json!({"session": session, "title": title}), tokens)
         }
         "status" => {
@@ -893,6 +999,155 @@ fn is_cloud_key(value: &str) -> bool {
     value.starts_with("cloud:")
 }
 
+/// A paired machine, or a project or session on one, is named by its key (`machine:…`).
+fn is_machine_key(value: &str) -> bool {
+    value.starts_with("machine:")
+}
+
+/// The command groups that take `--machine` (PRO-356).
+const MACHINE_GROUPS: [&str; 8] = ["projects", "sessions", "tabs", "send", "read", "wait", "permissions", "worktrees"];
+
+/// How long the CLI waits on the socket for `machine.<action>`: a little
+/// longer than the app waits for its window, so the app's answer is printed.
+fn machine_timeout(action: &str, params: &Value) -> Duration {
+    crate::machine_control::timeout_for(action, params) + Duration::from_secs(25)
+}
+
+/// `machine.<action>` on the machine `--machine` names, or else the one the
+/// `machine:` key `keyed` names. The app resolves the name and refuses an
+/// unknown or unreachable machine.
+fn machine_rpc(action: &str, machine: &Option<String>, keyed: Option<&str>, mut params: Value, tokens: &mut Tokens) -> Result<Action, ControlError> {
+    tokens.finish()?;
+    let named = match machine {
+        Some(machine) => machine.clone(),
+        None => keyed
+            .and_then(crate::machine_control::key_machine)
+            .map(str::to_string)
+            .ok_or_else(|| invalid("Name the machine with --machine MACHINE, or use a machine:… key."))?,
+    };
+    params["machine"] = json!(named);
+    // Who asks: a run's worker may not pair machines or start sessions on them.
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    let timeout = machine_timeout(action, &params);
+    Ok(Action::Rpc { command: format!("machine.{action}"), params, timeout })
+}
+
+/// `wait` on one session or tab on a machine, asked in short calls until the
+/// timeout (see `chunked_wait`).
+fn machine_wait(tokens: &mut Tokens, machine: &Option<String>, (any, all): (bool, bool), tab: &Option<String>, seconds: u64) -> Result<Action, ControlError> {
+    if tokens.peek_option("--children-of").is_some() {
+        return Err(invalid("--children-of waits on sessions of this computer; it cannot be combined with --machine."));
+    }
+    let target = tokens.required_front("session or tab")?;
+    if any || all || !tokens.values.is_empty() {
+        return Err(invalid("Wait on one machine session at a time; --any, --all and several targets take this computer's sessions."));
+    }
+    machine_rpc("wait", machine, Some(&target), json!({"target": target, "timeoutSeconds": seconds, "tab": tab}), tokens)
+}
+
+/// `terminalx machines …`: the machines this computer operates (PRO-356).
+fn parse_machines(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let native = |action: &str, mut params: Value, tokens: &mut Tokens| -> Result<Action, ControlError> {
+        tokens.finish()?;
+        if let Some(caller) = calling_session() {
+            params["caller"] = caller;
+        }
+        let timeout = machine_timeout(action, &params);
+        Ok(Action::Rpc { command: format!("machine.{action}"), params, timeout })
+    };
+    match tokens.required_front("machines command")?.as_str() {
+        "list" => native("list", json!({}), tokens),
+        "status" => {
+            let machine = tokens.required_front("machine")?;
+            native("status", json!({"machine": machine}), tokens)
+        }
+        "add" => {
+            let code = tokens.required_option("--code")?;
+            if code.trim().is_empty() {
+                return Err(invalid("--code needs the pairing code the machine shows."));
+            }
+            let this_network = tokens.flag("--this-network")?;
+            let mut params = json!({"code": code.trim(), "route": if this_network { "thisNetwork" } else { "relayAndNearby" }});
+            if let Some(fingerprint) = tokens.option("--fingerprint")? {
+                params["fingerprint"] = json!(fingerprint);
+            }
+            native("add", params, tokens)
+        }
+        "remove" => {
+            let confirmed = tokens.flag("--yes")?;
+            let machine = tokens.required_front("machine")?;
+            native("remove", json!({"machine": machine, "confirmed": confirmed}), tokens)
+        }
+        other => Err(invalid(format!("Unknown machines command {other}. Use list, status, add or remove."))),
+    }
+}
+
+/// A new session on a paired machine (`session.create` there): it runs in a
+/// worktree the machine cuts beside the project, unless `--on-main`.
+fn parse_machine_session_create(tokens: &mut Tokens, machine: &Option<String>) -> Result<Action, ControlError> {
+    let project = tokens.required_option("--project")?;
+    let prompt = tokens.required_option("--prompt")?;
+    if prompt.trim().is_empty() {
+        return Err(invalid("--prompt cannot be empty."));
+    }
+    for (refused, why) in [
+        ("--issue", "Start an issue on a machine from its issue page in TerminalX (Start on …); from here, give its text as --prompt."),
+        ("--provider", "--provider applies to an issue start on this computer."),
+        ("--parent", "A machine session records no parent on this computer."),
+        ("--account", "A machine's agents sign in on the machine, not with this computer's accounts."),
+        ("--cwd", "--cwd applies to a quick chat on this computer."),
+    ] {
+        if tokens.option(refused)?.is_some() {
+            return Err(invalid(why));
+        }
+    }
+    for (refused, why) in [
+        ("--quick", "A quick chat runs on this computer; a machine session belongs to one of the machine's projects."),
+        ("--auto-merge", "Issue pipelines are started from the issue page on a machine."),
+        ("--no-auto-merge", "Issue pipelines are started from the issue page on a machine."),
+        ("--resolve-conflicts", "Issue pipelines are started from the issue page on a machine."),
+        ("--no-resolve-conflicts", "Issue pipelines are started from the issue page on a machine."),
+        ("--no-pipeline", "Issue pipelines are started from the issue page on a machine."),
+        ("--report", "--report applies to a session on this computer."),
+        ("--wake", "--wake applies to a cloud workspace; a machine is on or away."),
+        ("--confirm-spend", "--confirm-spend applies to a cloud workspace."),
+    ] {
+        if tokens.flag(refused)? {
+            return Err(invalid(why));
+        }
+    }
+    let _no_parent = tokens.flag("--no-parent")?;
+    let worktree = tokens.flag("--worktree")?;
+    let on_main = tokens.flag("--on-main")?;
+    if worktree && on_main {
+        return Err(invalid("--worktree and --on-main are mutually exclusive."));
+    }
+    let name = tokens.option("--name")?;
+    let base = tokens.option("--base")?;
+    if on_main && (name.is_some() || base.is_some()) {
+        return Err(invalid("--name and --base name a new worktree and cannot be used with --on-main."));
+    }
+    let mut params = json!({
+        "project": project,
+        "prompt": prompt,
+        "agent": tokens.option("--agent")?,
+        "model": tokens.option("--model")?,
+        "effort": tokens.option("--effort")?,
+        "mode": tokens.option("--mode")?,
+        "title": tokens.option("--title")?,
+        "name": name,
+        "base": base,
+        "useWorktree": !on_main,
+        "idempotencyKey": tokens.option("--idempotency-key")?,
+    });
+    if tokens.flag("--experimental-codex-stdio")? {
+        params["nativeCodex"] = json!(true);
+    }
+    machine_rpc("sessions.create", machine, Some(&project), params, tokens)
+}
+
 /// An option that only a cloud target takes.
 fn local_only(option: &Option<String>, name: &str) -> Result<(), ControlError> {
     match option {
@@ -1004,7 +1259,18 @@ fn parse_cloud(tokens: &mut Tokens) -> Result<Action, ControlError> {
     }
 }
 
-fn parse_permissions(tokens: &mut Tokens) -> Result<Action, ControlError> {
+fn parse_permissions(tokens: &mut Tokens, machine: &Option<String>) -> Result<Action, ControlError> {
+    if machine.is_some() {
+        return match tokens.required_front("permissions command")?.as_str() {
+            "list" => machine_rpc("permissions.list", machine, None, json!({}), tokens),
+            decision @ ("allow" | "deny") => {
+                let option = if decision == "allow" { tokens.option("--option")? } else { None };
+                let request = tokens.required_front("request id")?;
+                machine_rpc(&format!("permissions.{decision}"), machine, None, json!({"request": request, "option": option}), tokens)
+            }
+            other => Err(invalid(format!("Unknown permissions command {other}."))),
+        };
+    }
     match tokens.required_front("permissions command")?.as_str() {
         "list" => rpc("permissions.list", json!({}), tokens),
         "allow" => {
@@ -1024,12 +1290,17 @@ fn parse_permissions(tokens: &mut Tokens) -> Result<Action, ControlError> {
     }
 }
 
-fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
+fn parse_worktrees(tokens: &mut Tokens, machine: &Option<String>) -> Result<Action, ControlError> {
     match tokens.required_front("worktrees command")?.as_str() {
+        "list" if machine.is_some() => {
+            let project = tokens.option("--project")?;
+            machine_rpc("worktrees.list", machine, project.as_deref(), json!({"project": project}), tokens)
+        }
         "list" => {
             let project = tokens.option("--project")?;
             rpc("worktrees.list", json!({"project": project}), tokens)
         }
+        "rename" if machine.is_some() => Err(invalid("worktrees rename renames this computer's worktrees; a machine's connection does not serve renaming one.")),
         "rename" => {
             let project = tokens.option("--project")?;
             let name = tokens.required_option("--name")?;
@@ -1049,6 +1320,18 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 list.split(',').map(str::trim).filter(|id| !id.is_empty()).map(String::from).collect::<Vec<_>>()
             });
             let worktree = tokens.required_front("worktree")?;
+            if machine.is_some() {
+                if !confirmed && !dry_run {
+                    return Err(invalid("Pass --dry-run to see what deleting it would remove, or --yes to delete it."));
+                }
+                return machine_rpc(
+                    "worktrees.delete",
+                    machine,
+                    project.as_deref(),
+                    json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force, "dryRun": dry_run, "sessions": sessions}),
+                    tokens,
+                );
+            }
             rpc(
                 "worktrees.delete",
                 json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force, "dryRun": dry_run, "sessions": sessions}),
@@ -1863,6 +2146,20 @@ mod tests {
     }
 
     #[test]
+    fn session_pinning_commands_accept_one_selector() {
+        for command in ["pin", "unpin"] {
+            let (method, params, _) = rpc_of(&["sessions", command, "0198a", "--json"]);
+            assert_eq!(method, format!("sessions.{command}"));
+            assert_eq!(params, json!({"session": "0198a"}));
+            assert_eq!(parse(&args(&["sessions", command])).unwrap_err().code, "invalid_arguments");
+            assert_eq!(parse(&args(&["sessions", command, "a", "b"])).unwrap_err().code, "invalid_arguments");
+        }
+        assert!(help_text().contains("sessions pin|unpin SESSION"));
+        assert!(GUIDE.contains("sessions pin <session>"));
+        assert!(GUIDE.contains("sessions unpin <session>"));
+    }
+
+    #[test]
     fn manual_session_status_accepts_only_the_five_workflow_values() {
         for status in ["backlog", "in_progress", "in_review", "done", "canceled"] {
             let (command, params, _) = rpc_of(&["sessions", "status", "s1", "--status", status, "--json"]);
@@ -1974,7 +2271,7 @@ mod tests {
 
         // Still working for the whole 70 s: 30 + 30 + 10, then the timeout is reported.
         let mut asked = Vec::new();
-        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |command, params, _| {
+        let response = chunked_wait("cloud.wait", &params, CLOUD_TIMEOUT, &mut |command, params, _| {
             assert_eq!(command, "cloud.wait");
             asked.push(params["timeoutSeconds"].as_u64().unwrap());
             Ok(answer("timeout"))
@@ -1985,7 +2282,7 @@ mod tests {
 
         // It settles during the second call: nothing more is asked.
         let mut calls = 0;
-        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+        let response = chunked_wait("cloud.wait", &params, CLOUD_TIMEOUT, &mut |_, _, _| {
             calls += 1;
             Ok(answer(if calls == 2 { "permission" } else { "timeout" }))
         })
@@ -1995,7 +2292,7 @@ mod tests {
 
         // A refusal ends it at once.
         let mut calls = 0;
-        let refused = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+        let refused = chunked_wait("cloud.wait", &params, CLOUD_TIMEOUT, &mut |_, _, _| {
             calls += 1;
             Err(ControlError::new("forbidden", "no", None::<String>))
         });
@@ -2021,7 +2318,7 @@ mod tests {
         assert!(refused(&["wait", "--all"]).contains("Missing session or tab"));
         assert!(refused(&["wait", "s1", "s2", "--bogus"]).contains("Unexpected argument --bogus"));
         assert!(refused(&["wait", "s1", "--bogus"]).contains("Unexpected argument --bogus"));
-        // A cloud session is waited on in short calls of its own (`cloud_wait`).
+        // A cloud session is waited on in short calls of its own (`chunked_wait`).
         assert!(refused(&["wait", "s1", "cloud:org-a:ws-1:s1"]).contains("cloud session by itself"));
         assert!(refused(&["wait", "s1", "s2", "--tab", "t1"]).contains("cloud session"));
 
@@ -2042,6 +2339,14 @@ mod tests {
     #[test]
     fn local_targets_keep_their_commands_and_refuse_cloud_only_options() {
         assert_eq!(rpc_of(&["projects", "list"]).0, "projects.list");
+        assert_eq!(rpc_of(&["projects", "add", "/code/api", "--json"]), ("projects.add".into(), json!({"path": "/code/api", "refuseExisting": true}), Duration::from_secs(30)));
+        // A relative folder is this shell's, not the runtime's.
+        let relative = rpc_of(&["projects", "add", "api"]).1;
+        assert_eq!(relative["path"], json!(std::env::current_dir().unwrap().join("api")));
+        assert_eq!(rpc_of(&["projects", "remove", "api"]), ("projects.remove".into(), json!({"project": "api"}), Duration::from_secs(30)));
+        for refused in [&["projects"][..], &["projects", "add"], &["projects", "remove"], &["projects", "add", "a", "b"], &["projects", "rename", "a"]] {
+            assert!(parse(&args(refused)).is_err(), "{refused:?}");
+        }
         assert_eq!(rpc_of(&["sessions", "list", "--project", "raccoon"]).0, "sessions.list");
         assert_eq!(rpc_of(&["send", "raccoon-session", "hello"]).0, "send");
         assert_eq!(rpc_of(&["read", "raccoon-session"]).0, "read");
@@ -2733,5 +3038,142 @@ mod tests {
         for model in ["opus", "sonnet", "haiku", "fable", "gpt", "gemini"] {
             assert!(!lower.contains(model), "the guide names a model: {model}");
         }
+    }
+
+    /// `machines …`, `--machine` and `machine:` keys (PRO-356).
+    #[test]
+    fn machine_commands_go_to_the_app_as_machine_calls() {
+        let err = |values: &[&str]| parse(&args(values)).unwrap_err();
+        // The machines this computer operates.
+        assert_eq!(rpc_of(&["machines", "list", "--json"]).0, "machine.list");
+        assert_eq!(rpc_of(&["machines", "status", "Mac mini"]), ("machine.status".into(), json!({"machine": "Mac mini"}), Duration::from_secs(75)));
+        let (command, params, timeout) = rpc_of(&["machines", "add", "--code", " txm2.abc "]);
+        assert_eq!((command.as_str(), params), ("machine.add", json!({"code": "txm2.abc", "route": "relayAndNearby"})));
+        // Pairing waits for Allow on the machine (two minutes).
+        assert!(timeout > Duration::from_secs(150));
+        assert_eq!(rpc_of(&["machines", "add", "--code", "txm2.abc", "--this-network"]).1["route"], "thisNetwork");
+        // The first call carries no fingerprint, so the app shows it and pairs nothing.
+        assert!(rpc_of(&["machines", "add", "--code", "txm2.abc"]).1.get("fingerprint").is_none());
+        assert_eq!(rpc_of(&["machines", "add", "--code", "txm2.abc", "--fingerprint", "CEF4 2468 FE26 9E4B"]).1["fingerprint"], "CEF4 2468 FE26 9E4B");
+        assert_eq!(rpc_of(&["machines", "remove", "m1", "--yes"]).1, json!({"machine": "m1", "confirmed": true}));
+        assert_eq!(rpc_of(&["machines", "remove", "m1"]).1["confirmed"], false);
+        for refused in [&["machines"][..], &["machines", "add"], &["machines", "add", "--code", " "], &["machines", "status"], &["machines", "rename", "m1"], &["machines", "list", "extra"]] {
+            assert_eq!(err(refused).code, "invalid_arguments", "{refused:?}");
+        }
+
+        // A new session on a machine prints its key; send, read and wait take it from here.
+        let (command, params, timeout) = rpc_of(&["sessions", "create", "--machine", "Mac mini", "--project", "api", "--prompt", "go"]);
+        assert_eq!(command, "machine.sessions.create");
+        assert_eq!(params, json!({"machine": "Mac mini", "project": "api", "prompt": "go", "agent": null, "model": null, "effort": null, "mode": null, "title": null, "name": null, "base": null, "useWorktree": true, "idempotencyKey": null}));
+        assert!(timeout > Duration::from_secs(120));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "machine:m1:p1", "--prompt", "go", "--agent", "codex", "--on-main", "--idempotency-key", "k1", "--experimental-codex-stdio"]);
+        assert_eq!((params["machine"].clone(), params["useWorktree"].clone(), params["agent"].clone(), params["nativeCodex"].clone()), (json!("m1"), json!(false), json!("codex"), json!(true)));
+        assert_eq!(rpc_of(&["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--base", "release", "--name", "fix"]).1["base"], "release");
+        for refused in [
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--issue", "42"][..],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--parent", "s1"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--account", "a"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--quick"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--auto-merge"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--on-main", "--base", "x"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", "go", "--on-main", "--worktree"],
+            &["sessions", "create", "--machine", "m1", "--project", "api", "--prompt", " "],
+            &["sessions", "create", "--machine", "m1", "--project", "api"],
+            &["sessions", "create", "--machine", "", "--project", "api", "--prompt", "go"],
+        ] {
+            assert_eq!(err(refused).code, "invalid_arguments", "{refused:?}");
+        }
+
+        let key = "machine:m1:p1:0198c";
+        assert_eq!(rpc_of(&["send", key, "hello"]), ("machine.send".into(), json!({"machine": "m1", "target": key, "text": "hello", "tab": null, "idempotencyKey": null}), Duration::from_secs(75)));
+        assert_eq!(rpc_of(&["send", "0198c", "hi", "--machine", "Mac mini", "--tab", "t1", "--idempotency-key", "k"]).1, json!({"machine": "Mac mini", "target": "0198c", "text": "hi", "tab": "t1", "idempotencyKey": "k"}));
+        // The text is never a target: a message that starts with machine: goes to this computer's session.
+        assert_eq!(rpc_of(&["send", "0198c", "machine: check the logs"]).0, "send");
+        assert_eq!(rpc_of(&["read", key, "--tail", "5"]).1, json!({"machine": "m1", "target": key, "since": null, "tail": 5, "tab": null}));
+        assert_eq!(rpc_of(&["read", "0198c", "--machine", "m1", "--tab", "t1"]).0, "machine.read");
+        let (command, params, timeout) = rpc_of(&["wait", key, "--timeout", "600"]);
+        assert_eq!((command.as_str(), params), ("machine.wait", json!({"machine": "m1", "target": key, "timeoutSeconds": 600, "tab": null})));
+        assert_eq!(timeout, Duration::from_secs(75));
+        assert_eq!(rpc_of(&["wait", "0198c", "--machine", "m1"]).0, "machine.wait");
+        for refused in [&["wait", key, "s2"][..], &["wait", key, "--any"], &["wait", "--machine", "m1", "--children-of", "s1"], &["wait", "s1", key]] {
+            assert_eq!(err(refused).code, "invalid_arguments", "{refused:?}");
+        }
+        assert_eq!(rpc_of(&["tabs", "list", key]), ("machine.tabs.list".into(), json!({"machine": "m1", "session": key}), Duration::from_secs(75)));
+        assert_eq!(rpc_of(&["sessions", "rename", key, "--title", "T"]).1, json!({"machine": "m1", "session": key, "title": "T"}));
+        assert_eq!(rpc_of(&["sessions", "archive", key, "machine:m1:p1:0198d"]).1, json!({"machine": "m1", "sessions": [key, "machine:m1:p1:0198d"], "archived": true}));
+        assert_eq!(rpc_of(&["sessions", "unarchive", "0198c", "--machine", "m1"]).1, json!({"machine": "m1", "sessions": ["0198c"], "archived": false}));
+        assert_eq!(err(&["sessions", "archive", key, "0198d"]).code, "invalid_arguments");
+        for refused in [&["sessions", "show", "s1", "--machine", "m1"][..], &["sessions", "usage", "s1", "--machine", "m1"], &["sessions", "status", "s1", "--status", "done", "--machine", "m1"]] {
+            assert!(err(refused).message.contains("--machine applies to"), "{refused:?}");
+        }
+
+        // Lists: one machine's, or every computer's.
+        assert_eq!(rpc_of(&["projects", "list", "--machine", "m1"]), ("machine.projects.list".into(), json!({"machine": "m1"}), Duration::from_secs(75)));
+        assert_eq!(err(&["projects", "list", "--machine", "m1", "--cloud"]).code, "invalid_arguments");
+        assert_eq!(rpc_of(&["sessions", "list", "--machine", "m1", "--project", "api", "--archived"]).1, json!({"machine": "m1", "project": "api", "archived": true}));
+        assert_eq!(rpc_of(&["sessions", "list", "--all-machines"]), ("sessions.list".into(), json!({"project": null, "quick": false, "archived": false, "worktree": null, "allMachines": true}), Duration::from_secs(30)));
+        for refused in [
+            &["sessions", "list", "--all-machines", "--machine", "m1"][..],
+            &["sessions", "list", "--all-machines", "--project", "p"],
+            &["sessions", "list", "--machine", "m1", "--quick"],
+            &["sessions", "list", "--machine", "m1", "--cloud"],
+            &["sessions", "list", "--machine", "m1", "--worktree", "w"],
+            &["sessions", "list", "--machine", "m1", "--children-of", "s1"],
+        ] {
+            assert_eq!(err(refused).code, "invalid_arguments", "{refused:?}");
+        }
+
+        // Permissions and worktrees of a machine.
+        assert_eq!(rpc_of(&["permissions", "list", "--machine", "m1"]).0, "machine.permissions.list");
+        assert_eq!(rpc_of(&["permissions", "allow", "r1", "--option", "allow_always", "--machine", "m1"]).1, json!({"machine": "m1", "request": "r1", "option": "allow_always"}));
+        assert_eq!(rpc_of(&["permissions", "deny", "r1", "--machine", "m1"]).1, json!({"machine": "m1", "request": "r1", "option": null}));
+        assert_eq!(rpc_of(&["worktrees", "list", "--machine", "m1"]).1, json!({"machine": "m1", "project": null}));
+        let (command, params, timeout) = rpc_of(&["worktrees", "delete", "fix", "--machine", "m1", "--project", "api", "--yes"]);
+        assert_eq!((command.as_str(), params["worktree"].clone(), params["confirmed"].clone()), ("machine.worktrees.delete", json!("fix"), json!(true)));
+        assert!(timeout > Duration::from_secs(300));
+        assert_eq!(err(&["worktrees", "delete", "fix", "--machine", "m1"]).code, "invalid_arguments");
+        assert!(err(&["worktrees", "rename", "fix", "--name", "x", "--machine", "m1"]).message.contains("does not serve"));
+
+        // --machine is refused where it means nothing.
+        for refused in [&["status", "--machine", "m1"][..], &["issues", "list", "--project", "p", "--machine", "m1"], &["runs", "list", "--machine", "m1"]] {
+            assert_eq!(err(refused).code, "invalid_arguments", "{refused:?}");
+        }
+    }
+
+    /// Without `--machine`, `--all-machines` or a `machine:` key, every request is word for word what it was.
+    #[test]
+    fn without_a_machine_every_command_is_unchanged() {
+        assert_eq!(rpc_of(&["projects", "list"]), ("projects.list".into(), json!({}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["sessions", "list"]), ("sessions.list".into(), json!({"project": null, "quick": false, "archived": false, "worktree": null}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["tabs", "list", "s1"]), ("tabs.list".into(), json!({"session": "s1"}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["send", "s1", "hi"]), ("send".into(), json!({"target": "s1", "text": "hi"}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["read", "s1"]), ("read".into(), json!({"target": "s1", "since": null, "tail": null}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["sessions", "rename", "s1", "--title", "T"]).0, "sessions.rename");
+        assert_eq!(rpc_of(&["sessions", "archive", "s1"]).1, json!({"sessions": ["s1"]}));
+        assert_eq!(rpc_of(&["permissions", "allow", "r1"]), ("permissions.allow".into(), json!({"request": "r1", "option": null}), Duration::from_secs(30)));
+        assert_eq!(rpc_of(&["worktrees", "list"]).0, "worktrees.list");
+        assert_eq!(rpc_of(&["sessions", "create", "--project", "p", "--agent", "claude", "--prompt", "go"]).0, "sessions.create");
+        assert_eq!(rpc_of(&["wait", "s1"]).0, "wait");
+    }
+
+    #[test]
+    fn a_machine_wait_is_asked_in_short_calls() {
+        let params = json!({"machine": "m1", "target": "machine:m1:p:s", "timeoutSeconds": 45, "tab": null});
+        let mut asked = Vec::new();
+        let response = chunked_wait("machine.wait", &params, Duration::from_secs(75), &mut |command, params, _| {
+            assert_eq!(command, "machine.wait");
+            asked.push(params["timeoutSeconds"].as_u64().unwrap());
+            Ok(ControlResponse::success("1", json!({"reason": "timeout"})))
+        })
+        .unwrap();
+        assert_eq!(asked, vec![30, 15]);
+        assert_eq!(response.result.unwrap()["reason"], "timeout");
+        // An offline machine is answered at once, with its own code, and not asked again.
+        let mut calls = 0;
+        let offline = chunked_wait("machine.wait", &params, Duration::from_secs(75), &mut |_, _, _| {
+            calls += 1;
+            Err(ControlError::new(crate::machine_control::OFFLINE, "Mac mini is offline: no route to it answers.", None::<String>))
+        });
+        assert_eq!((calls, offline.unwrap_err().code.as_str()), (1, "machine_offline"));
     }
 }

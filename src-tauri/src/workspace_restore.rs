@@ -178,12 +178,14 @@ pub(crate) fn restore(
     session_id: &str,
     expected: &Preview,
     new_branch: Option<&str>,
+    detached: bool,
     stop: &dyn Fn(&SessionEntry) -> Result<()>,
 ) -> Result<Vec<SessionEntry>> {
-    restore_with(sink, session_id, expected, new_branch, stop, &restore_sessions)
+    restore_with(sink, session_id, expected, new_branch, detached, stop, &restore_sessions)
 }
 
-fn restore_sessions(expected: &Preview, removed: &RemovedWorkspace, branch: &str) -> Result<Vec<SessionEntry>> {
+/// `branch` is None for a checkout restored with a detached HEAD.
+fn restore_sessions(expected: &Preview, removed: &RemovedWorkspace, branch: Option<&str>) -> Result<Vec<SessionEntry>> {
     index::update(|sessions| {
         let mut moved = Vec::new();
         for id in &expected.session_ids {
@@ -193,7 +195,7 @@ fn restore_sessions(expected: &Preview, removed: &RemovedWorkspace, branch: &str
             }
             session.cwd = expected.path.clone();
             session.worktree_name = Some(removed.name.clone());
-            session.branch = Some(branch.into());
+            session.branch = branch.map(Into::into);
             session.worktree_removed = false;
             session.removed_workspace = None;
             session.base_ref = None;
@@ -209,13 +211,14 @@ fn restore_sessions(expected: &Preview, removed: &RemovedWorkspace, branch: &str
     })
 }
 
-type CommitSessions<'a> = &'a dyn Fn(&Preview, &RemovedWorkspace, &str) -> Result<Vec<SessionEntry>>;
+type CommitSessions<'a> = &'a dyn Fn(&Preview, &RemovedWorkspace, Option<&str>) -> Result<Vec<SessionEntry>>;
 
 fn restore_with(
     sink: &dyn EventSink,
     session_id: &str,
     expected: &Preview,
     new_branch: Option<&str>,
+    detached: bool,
     stop: &dyn Fn(&SessionEntry) -> Result<()>,
     commit_sessions: CommitSessions<'_>,
 ) -> Result<Vec<SessionEntry>> {
@@ -231,16 +234,20 @@ fn restore_with(
         let session = index::get(session_id)?;
         let removed = source(&session)?.clone();
         let project = Path::new(&expected.project_path);
+        // A detached restore checks out the recorded commit itself and creates
+        // no branch, so any requested new branch is ignored.
+        let new_branch = new_branch.filter(|_| !detached);
         let branch = match new_branch {
+            _ if detached => None,
             Some(branch) => {
                 valid_branch(project, branch)?;
                 if !branch_available(project, branch)? {
                     bail!("The new branch name is already taken. Choose another name.");
                 }
-                branch
+                Some(branch)
             }
             None if expected.needs_branch.is_some() => bail!("Choose a new branch to restore the recorded commit."),
-            None => expected.branch.as_deref().context("Choose a new branch.")?,
+            None => Some(expected.branch.as_deref().context("Choose a new branch.")?),
         };
         for id in &expected.session_ids {
             stop(&index::get(id)?)?;
@@ -251,7 +258,7 @@ fn restore_with(
         let mut checkout = Checkout { project: project.to_owned(), path: expected.path.clone().into(), created_branch: None, commit: expected.commit.clone() };
         std::fs::create_dir(&checkout.path).context("The workspace path could not be reserved. Nothing was restored.")?;
         let result = (|| {
-            if new_branch.is_some() {
+            if let Some(branch) = new_branch {
                 // Empty old value means the ref must not exist. Do not delete a
                 // branch that another process won the race to create.
                 git::run(project, &["update-ref", &format!("refs/heads/{branch}"), &expected.commit, ""])?;
@@ -259,8 +266,12 @@ fn restore_with(
             }
             // Restoring files must not execute a repository's checkout hook. A
             // sparse workspace comes back with the folders it had, not everything.
-            git::worktree_add(project, &["--", &expected.path, branch], &checkout.path, removed.sparse_checkout.as_deref(), None, false)?;
-            if git::head_commit(&checkout.path).as_deref() != Some(&expected.commit) || git::current_branch(&checkout.path).as_deref() != Some(branch) {
+            let args = match branch {
+                Some(branch) => vec!["--", &expected.path, branch],
+                None => vec!["--detach", "--", &expected.path, &expected.commit],
+            };
+            git::worktree_add(project, &args, &checkout.path, removed.sparse_checkout.as_deref(), None, false)?;
+            if git::head_commit(&checkout.path).as_deref() != Some(&expected.commit) || git::current_branch(&checkout.path).as_deref() != branch {
                 bail!("The branch moved during restoration. Nothing was restored; review it again.");
             }
             commit_sessions(expected, &removed, branch)

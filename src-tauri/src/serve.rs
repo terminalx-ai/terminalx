@@ -396,7 +396,14 @@ fn run(options: Options) -> Result<()> {
     // A local runtime hosts operating computers while the switch is on
     // (PRO-341): it opens nothing until then.
     if options.runtime_kind == RuntimeKind::Local && !options.self_test {
-        let parts = crate::machine_host::Parts { sink: runtime.sink.clone(), terminals: runtime.terminals.clone(), sessions: runtime.manager.clone() };
+        let parts = crate::machine_host::Parts {
+            sink: runtime.sink.clone(),
+            terminals: runtime.terminals.clone(),
+            sessions: runtime.manager.clone(),
+            // With a relay link the agent tabs are the relay route's
+            // (`start_cloud_agents`, below): one per state directory.
+            agents: link.is_none().then(|| machine_agents(&runtime, &data_dir)),
+        };
         let link_secret = link.as_ref().filter(|_| options.serves_machine()).map(|link| link.host_secret());
         let machine = crate::machine_host::MachineHost::start(&data_dir, parts, runtime.lifetime.clone(), options.serves_machine(), link_secret);
         // One key answers on every route of a machine.
@@ -659,6 +666,10 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         if let Err(error) = crate::startup::start(manager.clone(), sink.clone(), handed_over) { log::error!("start local startup monitor: {error:#}"); }
     }
     manager.follow_pane_exits();
+    // Automatic account switching (#981) goes on with the desktop window closed.
+    if options.runtime_kind == RuntimeKind::Local && !options.self_test {
+        manager.start_account_switching();
+    }
     #[cfg(unix)]
     let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     // Terminals first, then the tabs whose CLIs run in them; the hooks those
@@ -874,7 +885,7 @@ fn start_cloud_agents(
     cloud: Option<&(Arc<crate::cloud_bootstrap::Bootstrapped>, String)>,
     relay_link: Option<&std::path::Path>,
 ) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
-    use crate::cloud_agents::{api::HttpMailboxApi, CloudAgents, Identity, ManagerOps};
+    use crate::cloud_agents::{api::HttpMailboxApi, Identity, ManagerOps};
     let ops = Arc::new(ManagerOps { manager: runtime.manager.clone(), root: root.map(str::to_string) });
     let mut generation = 0;
     let api: Option<(Arc<HttpMailboxApi>, Identity)> = match (cloud, relay_link) {
@@ -897,9 +908,7 @@ fn start_cloud_agents(
     };
     let http = api.as_ref().map(|(http, _)| http.clone());
     let api = api.map(|(http, identity)| (http as Arc<dyn crate::cloud_agents::api::MailboxApi>, identity));
-    let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
-    agents.mark_interrupted_turns(&runtime.interrupted);
-    agents.start();
+    let agents = open_agents(ops, runtime.sink.clone(), &runtime.interrupted, data_dir, api, generation)?;
     // A machine's pipelines already run as its own (`runs_local_work`).
     if root.is_some() {
         start_issue_pipelines(runtime, &agents);
@@ -920,6 +929,36 @@ fn start_cloud_agents(
         start_scheduled_runs(runtime, root, data_dir, http, &agents);
     }
     Ok(agents)
+}
+
+/// The agent tabs in `data_dir`, open and started: through `api`'s mailbox
+/// when there is one, otherwise as live calls with receipts kept here.
+fn open_agents(
+    ops: Arc<crate::cloud_agents::ManagerOps>,
+    sink: Arc<BroadcastSink>,
+    interrupted: &[(String, String)],
+    data_dir: &std::path::Path,
+    api: Option<(Arc<dyn crate::cloud_agents::api::MailboxApi>, crate::cloud_agents::Identity)>,
+    generation: u64,
+) -> Result<Arc<crate::cloud_agents::CloudAgents>> {
+    use crate::cloud_agents::CloudAgents;
+    let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(sink), api, generation)?;
+    agents.mark_interrupted_turns(interrupted);
+    agents.start();
+    Ok(agents)
+}
+
+/// What a machine's direct listener opens its agent tabs with when it builds
+/// its own RPC (no relay link): every project of the machine, no mailbox.
+/// They open when hosting is first on, maybe hours after this runtime
+/// started, so they mark no turn interrupted: `Runtime::interrupted` is what
+/// was mid-turn at startup, and those tabs may have run again since.
+fn machine_agents(runtime: &Runtime, data_dir: &std::path::Path) -> crate::machine_host::OpenAgents {
+    let (manager, sink, data_dir) = (runtime.manager.clone(), runtime.sink.clone(), data_dir.to_path_buf());
+    Arc::new(move || {
+        let ops = Arc::new(crate::cloud_agents::ManagerOps { manager: manager.clone(), root: None });
+        open_agents(ops, sink.clone(), &[], &data_dir, None, 0)
+    })
 }
 
 /// Carry a session started from an issue on to a pull request and a review

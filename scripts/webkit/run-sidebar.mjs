@@ -205,6 +205,10 @@ try {
     const through = await throughPanel(page, card);
     await shot(page, "folded-hover");
     checks["hovering it lists the pieces not done, which needs the person, and how many are done"] = hover.includes("Move CLI code to the store") && hover.includes("needs you") && hover.includes("Update the docs and the CLI guide") && hover.includes("4 pieces") && !hover.includes("Map every settings read");
+    // PRO-386 (18.07): 300px wide, the run's title in full, and the designed footer.
+    const fits = await card.evaluate((node) => ({ width: Math.round(node.getBoundingClientRect().width), clipped: [...node.querySelectorAll("span")].filter((span) => span.scrollWidth > span.clientWidth + 0.5 && !span.classList.contains("truncate")).length, title: node.querySelector("span.font-medium").scrollWidth <= node.querySelector("span.font-medium").clientWidth + 0.5 }));
+    checks["the card is 300px wide with its title in full and the footer 'Click to open the run · › to unfold'"] = fits.width === 300 && fits.title && fits.clipped === 0 && /Click to open the run · \s*to unfold/.test(hover);
+    if (!checks["the card is 300px wide with its title in full and the footer 'Click to open the run · › to unfold'"]) console.log(JSON.stringify({ fits, hover }));
     checks["the card sits outside the sidebar, level with the row, inside the window"] = placed.left >= placed.railRight && Math.abs(placed.top - placed.rowTop) <= 8 && placed.inWindow;
     checks["the hovered row keeps its title's width"] = Math.abs(hoveredTitle - restingTitle) < 0.5;
     checks["in glass mode nothing behind the card shows through, and its quiet text reads at 4.5:1"] = through.showsThrough === 0 && through.backdrop === "none" && through.contrast >= 4.5;
@@ -231,7 +235,7 @@ try {
     // The Run view's side panel, as on a Mac (glass on, PRO-336).
     await page.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
     await view.locator('[role="row"][data-piece="cli"]').first().click();
-    await view.getByTestId("piece-detail").waitFor();
+    await page.getByTestId("piece-detail").waitFor();
     await page.mouse.move(size.width - 4, size.height - 4);
     await shot(page, "run-view-panel");
     checks["no browser errors"] = errors.length === 0;

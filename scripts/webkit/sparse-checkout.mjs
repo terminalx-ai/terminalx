@@ -129,7 +129,7 @@ try {
       const repositories = page.getByRole("group", { name: "Projects", exact: true });
       await repositories.waitFor();
       await repositories.getByRole("button", { name: "local-0", exact: true }).click();
-      await page.getByRole("navigation", { name: "Project settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
+      await page.getByRole("group", { name: "local-0 settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
       const row = page.locator('[data-setting-id="repositories.sparseCheckout"]');
       await row.waitFor();
       await page.waitForFunction(() => document.querySelector("[data-sparse-choice]")?.textContent === "2 of 19 folders");

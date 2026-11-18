@@ -185,6 +185,27 @@ impl Sessions {
         crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
+    /// The account a new session of `harness` in `project` starts on when
+    /// automatic switching moves it off `account` (#981). `None` with the
+    /// setting off, the account not full, or a runtime from before it.
+    pub fn launch_account_choice(&self, harness: &str, project: Option<&str>, account: Option<&str>) -> Result<Option<crate::session::account_switch::LaunchChoice>> {
+        match self.quick::<Value>("runtime.session.accountChoice", json!({"harness": harness, "project": project, "account": account})) {
+            Ok(Value::Null) => Ok(None),
+            Ok(value) => Ok(Some(serde_json::from_value(value)?)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The person is typing in a tab's composer (#981). Older runtimes have no use for it.
+    pub fn note_typing(&self, session: &str, tab: &str) -> Result<()> {
+        match self.quick_tab::<Value>("noteTyping", session, tab, json!({})) {
+            Ok(_) => Ok(()),
+            Err(error) if unsupported(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
         crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }
@@ -279,15 +300,18 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.send_pressed(session, tab, text, images, None, Vec::new())
+        self.send_pressed(session, tab, text, images, None, Vec::new(), None)
     }
 
     /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
     /// `files`: stored attachments (PRO-290), sent only when there are any,
     /// so an older runtime is never handed a parameter it does not know.
-    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>) -> Result<SendOutcome> {
+    /// `prompt_request_id`: the Create preview's identity, when there is one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>, prompt_request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let mut params = json!({"text":text,"images":images,"pressedAt":pressed_at});
         if !files.is_empty() { params["files"] = json!(files); }
+        if let Some(id) = prompt_request_id { params["promptRequestId"] = json!(id); }
         self.tab("send", session, tab, params)
     }
 
@@ -322,8 +346,9 @@ impl Sessions {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
 
-    pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
-        self.tab("prepareContinuation", session, tab, json!({}))
+    /// `portable`: for another computer (PRO-348), with no path of this one in it.
+    pub fn prepare_continuation(&self, session: &str, tab: &str, portable: bool) -> Result<crate::continuation::Context> {
+        self.tab("prepareContinuation", session, tab, if portable { json!({ "portable": true }) } else { json!({}) })
     }
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {

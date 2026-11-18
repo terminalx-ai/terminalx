@@ -118,8 +118,9 @@ describe("lock-screen levels", () => {
   const question = event({ kind: "question", question: { requestId: "r-1", options: [{ label: "Merge now" }, { label: "Wait for it" }] } });
 
   it("everything: title, body and the machine, with the answer for the actions", () => {
+    // iOS heads it with the app's name; the machine's is the line under the title, not "TerminalX" twice (22.07).
     expect(present(on(), "mac", "Studio MacBook", question)).toEqual({
-      title: "Review and merge needs your answer", body: "Merge now, or wait for the macOS job?", subtitle: "TerminalX · Studio MacBook", sound: true,
+      title: "Review and merge needs your answer", body: "Merge now, or wait for the macOS job?", subtitle: "Studio MacBook", thread: "mac:s-1", sound: true,
       data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "question", detailsHidden: false, requestId: "r-1", options: [{ label: "Merge now" }, { label: "Wait for it" }] },
     });
   });
@@ -134,9 +135,19 @@ describe("lock-screen levels", () => {
   it("nothing: generic text per kind, no machine or session, no answer; a tap still opens the session", () => {
     const settings = on({ lockScreen: { show: "nothing", sound: false } });
     const shown = present(settings, "mac", "Studio MacBook", question);
-    expect(shown).toEqual({ title: "An agent needs your answer", body: "Open TerminalX to see the question.", sound: false, data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "question", detailsHidden: true } });
+    expect(shown).toEqual({ title: "An agent needs your answer", body: "Open TerminalX to see the question.", thread: "mac:s-1", sound: false, data: { hostId: "mac", sessionId: "s-1", tabId: "t-1", kind: "question", detailsHidden: true } });
     expect(present(settings, "mac", "x", event({ kind: "approval", approval: { requestId: "r-2" } }))).toMatchObject({ title: "An agent needs approval", body: "Open TerminalX to see the request.", data: { detailsHidden: true } });
     expect(present(settings, "mac", "x", event({ kind: "finished" }))).toMatchObject({ title: "An agent finished", body: "Open TerminalX to see the result." });
     expect(present(settings, "mac", "x", event())).toMatchObject({ title: "TerminalX", body: "Open TerminalX to see what happened." });
+  });
+
+  it("groups each session's notifications on their own, at every level, and a Mac's sessionless ones together (22.07)", () => {
+    for (const show of ["everything", "sessionName", "nothing"] as const) {
+      const settings = on({ lockScreen: { show, sound: true } });
+      expect(present(settings, "mac", "Studio MacBook", event({ sessionId: "s-1" })).thread, show).toBe("mac:s-1");
+      expect(present(settings, "mac", "Studio MacBook", event({ sessionId: "s-2" })).thread, show).toBe("mac:s-2");
+      expect(present(settings, "other", "Mac mini", event({ sessionId: "s-1" })).thread, show).toBe("other:s-1");
+      expect(present(settings, "mac", "Studio MacBook", event({ kind: "usage_limit", sessionId: undefined })).thread, show).toBe("mac");
+    }
   });
 });

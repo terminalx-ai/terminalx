@@ -4,8 +4,15 @@
 //!
 //! The server side is terminalx-saas `apps/api/docs/machine-relay-access.md`,
 //! "Device-code sign-in for a headless machine". The grant ends in the same
-//! desktop Cloud Session the desktop's browser sign-in issues; the relay
-//! registration that uses it is PRO-368.
+//! desktop Cloud Session the desktop's browser sign-in issues; the runtime
+//! registers with the relay from it (PRO-368, `remote::account_link`).
+//!
+//! On a desktop the window keeps the same file while "Let other computers
+//! operate this Mac" is on (`account.rs`, "The runtime's copy"), so its
+//! runtime registers with the window closed too. Refresh tokens rotate, and
+//! the account service ends the whole session when a superseded one is
+//! presented again, so whoever refreshes does it under [`locked`] and writes
+//! the result here before anyone else can read the file.
 //!
 //! Nothing here prints or logs the device code, the access token or the
 //! refresh token. The user code is meant for the person and is shown.
@@ -25,6 +32,13 @@ const DEV_API_BASE_URL_ENV: &str = "TERMINALX_DEV_API_BASE_URL";
 const DEVICE_CODE_PATH: &str = "/v1/desktop/auth/device/code";
 const DEVICE_TOKEN_PATH: &str = "/v1/desktop/auth/device/token";
 const LOGOUT_PATH: &str = "/v1/desktop/auth/logout";
+const REFRESH_PATH: &str = "/v1/desktop/auth/refresh";
+const RELAY_SESSION_PATH: &str = "/v1/desktop/machine-host/relay-session";
+/// The cross-process lock beside the session file.
+const LOCK: &str = "session.lock";
+/// A refresh holds the lock across one request, which may take
+/// [`REQUEST_TIMEOUT`].
+const LOCK_WAIT: Duration = Duration::from_secs(45);
 const CLIENT_ID: &str = "terminalx-desktop";
 const LOCAL_PROFILE_ID: &str = "local-default";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -117,6 +131,28 @@ impl Session {
     }
 }
 
+/// Run `work` holding the session lock, which every reader that may refresh
+/// and every writer takes, in the window and the runtime alike. Blocking.
+pub fn locked<T>(data_dir: &Path, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let dir = data_dir.join("account");
+    crate::machine_host::private_dir(&dir)?;
+    crate::store::transaction::run(&dir.join(LOCK), LOCK_WAIT, work)
+}
+
+/// The session family a refresh token belongs to: the account service mints
+/// them as `drt_<family>.<secret>`, and a rotation keeps the family.
+pub fn family(refresh_token: &str) -> Option<&str> {
+    refresh_token.split_once('.').map(|(family, _)| family).filter(|family| family.len() > 4)
+}
+
+/// Whether a session whose refresh token is `held` and that expires at
+/// `held_expires_at` was rotated since into `other`: same family, another
+/// token, a later expiry. Only then may `other` replace it; an older copy
+/// put back would present a superseded token and end the session.
+pub fn rotated(held: &str, held_expires_at: i64, other: &Session) -> bool {
+    family(held).is_some() && family(held) == family(&other.refresh_token) && other.refresh_token != held && other.expires_at > held_expires_at
+}
+
 /// The saved session, if this machine is signed in.
 pub fn load(data_dir: &Path) -> Result<Option<Session>> {
     let path = session_path(data_dir);
@@ -152,6 +188,18 @@ pub fn save(data_dir: &Path, session: &Session) -> Result<()> {
         let _ = std::fs::remove_file(&temporary);
     })
     .with_context(|| format!("save {}", path.display()))
+}
+
+/// Forget the saved session if it is still the one whose refresh token is
+/// `refresh_token`: one that a rotation or a new sign-in replaced stays.
+/// Call it holding [`locked`]. Whether it removed one.
+pub fn remove_if_current(data_dir: &Path, refresh_token: &str) -> Result<bool> {
+    match load(data_dir) {
+        Ok(Some(session)) if session.refresh_token == refresh_token => remove(data_dir),
+        Ok(_) => Ok(false),
+        // Unreadable: nothing anyone can use, so nothing to keep.
+        Err(_) => remove(data_dir),
+    }
 }
 
 /// Forget the saved session. Whether there was one.
@@ -203,6 +251,59 @@ impl std::fmt::Display for Refused {
 }
 
 impl std::error::Error for Refused {}
+
+/// The account service ended the session (a refresh was refused): someone
+/// must sign in again.
+#[derive(Debug)]
+pub struct SessionEnded;
+
+impl std::fmt::Display for SessionEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the account session ended; sign in again")
+    }
+}
+
+impl std::error::Error for SessionEnded {}
+
+/// How the account service refused a machine relay session.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelaySessionRefused {
+    /// `409 machine_runtime_superseded`: a newer runtime process started for
+    /// this machine, so this one must stop serving.
+    Superseded,
+    /// `401`: the access token is not (or no longer) current.
+    Unauthorized,
+    /// `409 host_binding_owner_conflict`: another account binds this machine.
+    OwnerConflict,
+}
+
+impl std::fmt::Display for RelaySessionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RelaySessionRefused::Superseded => "a newer runtime process serves this machine",
+            RelaySessionRefused::Unauthorized => "the account service did not accept the access token",
+            RelaySessionRefused::OwnerConflict => "another account has bound this machine",
+        })
+    }
+}
+
+impl std::error::Error for RelaySessionRefused {}
+
+/// What `POST /v1/desktop/machine-host/relay-session` answers.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelaySessionGrant {
+    pub relay_token: String,
+    pub expires_at: i64,
+    pub runtime_generation: u64,
+    pub director_url: String,
+}
+
+impl std::fmt::Debug for RelaySessionGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySessionGrant").field("expires_at", &self.expires_at).field("runtime_generation", &self.runtime_generation).finish_non_exhaustive()
+    }
+}
 
 /// The account service at one origin.
 pub struct Api {
@@ -281,6 +382,45 @@ impl Api {
                 // A network blip while someone approves: ask again until the code expires.
                 Err(error) => log::warn!("device sign-in: {error:#}; asking again"),
             }
+        }
+    }
+
+    /// Rotate `session`'s tokens. [`SessionEnded`] when the account service
+    /// refuses the refresh token. Call it holding [`locked`], and save the
+    /// answer before releasing it.
+    pub fn refresh(&self, session: &Session) -> Result<Session> {
+        match self.post(REFRESH_PATH, json!({ "refreshToken": session.refresh_token }), None)? {
+            Ok(value) => {
+                let refreshed: Session = serde_json::from_value(value).map_err(|_| anyhow!("the account service sent an unreadable session"))?;
+                refreshed.validated()
+            }
+            Err(Answered { status: 400 | 401 | 403, .. }) => Err(SessionEnded.into()),
+            Err(Answered { status, code }) => bail!("the account service refused to refresh the session ({status} {code})"),
+        }
+    }
+
+    /// A relay token for this machine's host key (terminalx-saas
+    /// `machine-relay-access.md`, "Machine relay session"). With no
+    /// `runtime_generation` the server starts a new one; with one, it
+    /// refreshes it. Refusals that change what the runtime does are
+    /// [`RelaySessionRefused`].
+    pub fn relay_session(&self, access_token: &str, relay_host_id: &str, host_public_key_b64: &str, runtime_generation: Option<u64>) -> Result<RelaySessionGrant> {
+        let mut body = json!({ "relayHostId": relay_host_id, "hostPublicKeyB64": host_public_key_b64 });
+        if let Some(generation) = runtime_generation {
+            body["runtimeGeneration"] = json!(generation);
+        }
+        match self.post(RELAY_SESSION_PATH, body, Some(access_token))? {
+            Ok(value) => {
+                let grant: RelaySessionGrant = serde_json::from_value(value).map_err(|_| anyhow!("the account service sent an unreadable relay session"))?;
+                if grant.relay_token.is_empty() || grant.runtime_generation == 0 || grant.director_url.is_empty() {
+                    bail!("the account service sent an incomplete relay session");
+                }
+                Ok(grant)
+            }
+            Err(Answered { status: 409, code }) if code == "machine_runtime_superseded" => Err(RelaySessionRefused::Superseded.into()),
+            Err(Answered { status: 409, code }) if code == "host_binding_owner_conflict" => Err(RelaySessionRefused::OwnerConflict.into()),
+            Err(Answered { status: 401, .. }) => Err(RelaySessionRefused::Unauthorized.into()),
+            Err(Answered { status, code }) => bail!("the account service refused a relay session ({status} {code})"),
         }
     }
 
@@ -438,6 +578,84 @@ mod tests {
         assert_eq!(seen[0].0, LOGOUT_PATH);
         assert_eq!(seen[0].1, json!({ "refreshToken": "refresh-1" }));
         assert_eq!(seen[0].2.as_deref(), Some("Bearer access-1"));
+    }
+
+    #[test]
+    fn a_refresh_rotates_the_session_and_a_refused_one_ends_it() {
+        let mut rotated = session_body();
+        rotated["accessToken"] = json!("access-2");
+        rotated["refreshToken"] = json!("refresh-2");
+        let (base, seen, handle) = service(vec![(200, rotated), (401, json!({ "error": "invalid_refresh_token" }))]);
+        let api = Api::new(&base);
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        assert_eq!(api.refresh(&session).unwrap().refresh_token, "refresh-2");
+        assert!(api.refresh(&session).unwrap_err().is::<SessionEnded>());
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, REFRESH_PATH);
+        assert_eq!(seen[0].1, json!({ "refreshToken": "refresh-1" }));
+        assert_eq!(seen[0].2, None, "a refresh sends no access token");
+    }
+
+    #[test]
+    fn a_relay_session_starts_a_generation_then_refreshes_it_and_stops_when_superseded() {
+        let grant = json!({ "relayToken": "relay-jwt", "expiresAt": 1_900_000_000_000_i64, "runtimeGeneration": 5, "directorUrl": "https://relay.example" });
+        let (base, seen, handle) = service(vec![
+            (200, grant.clone()),
+            (200, grant),
+            (409, json!({ "error": "machine_runtime_superseded" })),
+            (409, json!({ "error": "host_binding_owner_conflict" })),
+            (401, json!({ "error": "unauthorized" })),
+        ]);
+        let api = Api::new(&base);
+        let started = api.relay_session("access-1", "host-id", "key", None).unwrap();
+        assert_eq!(started.runtime_generation, 5);
+        assert!(!format!("{started:?}").contains("relay-jwt"), "the relay token is never printed");
+        api.relay_session("access-1", "host-id", "key", Some(5)).unwrap();
+        let refused = |result: Result<RelaySessionGrant>| result.unwrap_err().downcast::<RelaySessionRefused>().unwrap();
+        assert_eq!(refused(api.relay_session("access-1", "host-id", "key", Some(5))), RelaySessionRefused::Superseded);
+        assert_eq!(refused(api.relay_session("access-1", "host-id", "key", Some(5))), RelaySessionRefused::OwnerConflict);
+        assert_eq!(refused(api.relay_session("access-1", "host-id", "key", Some(5))), RelaySessionRefused::Unauthorized);
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, RELAY_SESSION_PATH);
+        assert_eq!(seen[0].1, json!({ "relayHostId": "host-id", "hostPublicKeyB64": "key" }), "a process starts without a generation");
+        assert_eq!(seen[1].1, json!({ "relayHostId": "host-id", "hostPublicKeyB64": "key", "runtimeGeneration": 5 }), "and refreshes with its own");
+        assert_eq!(seen[0].2.as_deref(), Some("Bearer access-1"));
+    }
+
+    #[test]
+    fn only_a_later_rotation_of_the_same_session_replaces_it() {
+        let held: Session = serde_json::from_value(json!({
+            "accessToken": "dat_family-a.one", "refreshToken": "drt_family-a.one", "expiresAt": 100,
+            "cloud": { "cloudProfileId": "cp1", "userId": "u1", "email": "person@example.com" },
+        }))
+        .unwrap();
+        let with = |refresh: &str, expires_at: i64| {
+            let mut other = held.clone();
+            other.refresh_token = refresh.into();
+            other.expires_at = expires_at;
+            other
+        };
+        assert!(rotated(&held.refresh_token, held.expires_at, &with("drt_family-a.two", 200)));
+        assert!(!rotated(&held.refresh_token, held.expires_at, &with("drt_family-a.two", 50)), "an older copy never goes back");
+        assert!(!rotated(&held.refresh_token, held.expires_at, &with("drt_family-b.two", 200)), "another sign-in is not a rotation");
+        assert!(!rotated(&held.refresh_token, held.expires_at, &held), "the same token is not a rotation");
+        assert!(!rotated("opaque", 1, &with("opaque2", 200)), "tokens with no family are never matched");
+    }
+
+    #[test]
+    fn a_session_is_removed_only_while_it_is_still_the_saved_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        save(dir.path(), &session).unwrap();
+        locked(dir.path(), || {
+            assert!(!remove_if_current(dir.path(), "refresh-0")?, "a replaced session stays");
+            assert!(remove_if_current(dir.path(), "refresh-1")?);
+            Ok(())
+        })
+        .unwrap();
+        assert!(load(dir.path()).unwrap().is_none());
     }
 
     #[test]

@@ -9,7 +9,6 @@ import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { registerShortcut } from "@/lib/hotkeys";
 import { setPrefs } from "@/lib/prefs";
-import { failFirstMessage, holdFirstMessage, releaseFirstMessage, resetFirstMessages } from "@/lib/firstMessage";
 
 // jsdom lays nothing out, so this models the one box that matters: a scroller
 // of fixed height over content whose children stack at known heights. Like a
@@ -501,7 +500,7 @@ describe("chat scroll follow", () => {
     fireEvent.keyDown(field, { key: "g", ctrlKey: true });
     expect(screen.getByRole("status").textContent).toBe("2 of 2");
     expect(screen.getByText("x".repeat(21000) + "hidden clue")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Include tool output" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Tool output" }));
     expect(screen.getByRole("status").textContent).toBe("1 of 1");
     expect(screen.queryByText("x".repeat(21000) + "hidden clue")).toBeNull();
     fireEvent.keyDown(field, { key: "Escape" });
@@ -648,8 +647,8 @@ describe("a message sent while the agent worked", () => {
       </TooltipProvider>
     );
     const { rerender } = render(view(events));
-    expect(screen.getByText("Stopped")).toBeTruthy();
-    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getByText(/^Stopped(?: · |$)/)).toBeTruthy();
+    expect(screen.getByTestId("working-line").textContent).toMatch(/^Working/);
     expect(screen.getAllByTestId("queued-message")).toHaveLength(1);
     expect(screen.getByTestId("queued-message").textContent).toContain("Then list the remaining steps.");
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
@@ -659,7 +658,7 @@ describe("a message sent while the agent worked", () => {
     expect(screen.queryByTestId("queued-message")).toBeNull();
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
     expect(screen.getAllByTestId("reader-message")).toHaveLength(3);
-    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getByTestId("working-line").textContent).toMatch(/^Working/);
   });
 
   it("offers no Send now once the turn it waited behind is over: the agent sends it itself", () => {
@@ -708,66 +707,25 @@ describe("an empty chat", () => {
   });
 });
 
-// PRO-397: a new session's first message is in the chat from Create on, not only once its send returns.
-describe("a new session's first message", () => {
+// PRO-378 review: a turn that failed with no recovery standing leaves the tab idle, not live; Retry is still offered.
+describe("a failed last turn", () => {
   const base = { sessionId: "s", tabId: "t", harness: "claude" };
-  const shot = { mediaType: "image/png", data: "iVBORw0KGgo=", name: "duplicate-cards.png" };
-  const prompt = "Dedupe the permission cards by tool_use_id.";
-  const chat = (events: AgentEvent[], loading = false) => (
-    <Chat sessionId="s" checkpointTabId="t" cwd="/tmp/repo" transcript={buildTranscript(events, false)} stream={[]} live={false} loading={loading} answering={false}
-      onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />
-  );
-  const sent: AgentEvent = { ...base, id: "e1", seq: 1, ts: new Date(1_700_000_000_000).toISOString(), payload: { type: "user_message", text: prompt, queued: false, images: [{ url: "data:image/png;base64,iVBORw0KGgo=", name: "duplicate-cards.png" }] } as never };
+  const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
+  const events: AgentEvent[] = [
+    { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "first", queued: false } },
+    { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "turn_completed", status: "error", finalText: "Anthropic error: overloaded (529)", authFailed: false } },
+    { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "user_message", text: "second", queued: false } },
+    { ...base, id: "e4", seq: 4, ts: at(4), payload: { type: "error", message: "Anthropic error: overloaded (529)", fatal: false } },
+    { ...base, id: "e5", seq: 5, ts: at(5), payload: { type: "turn_completed", status: "error", finalText: "Anthropic error: overloaded (529)", authFailed: false } },
+  ] as AgentEvent[];
 
-  beforeEach(() => {
-    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
-    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduced-motion"), addEventListener() {}, removeEventListener() {} }));
-    holdFirstMessage("s", "t", prompt, [shot], [{ name: "notes.md", path: "/Users/me/notes.md" }]);
-  });
-
-  afterEach(() => {
-    cleanup();
-    resetFirstMessages();
-    vi.unstubAllGlobals();
-  });
-
-  it("shows the prompt and its attachments at once while the send is pending, and never the empty-chat line", () => {
-    render(chat([], true), { wrapper: TooltipProvider });
-    const held = screen.getByTestId("first-message");
-    expect(held.textContent).toContain(prompt);
-    expect(within(held).getByRole("button", { name: "View duplicate-cards.png" })).toBeTruthy();
-    expect(held.textContent).toContain("notes.md");
-    expect(screen.getByTestId("start-progress").textContent).toContain("Starting the session");
-    expect(held.textContent).toContain("Your first message is held and sent as soon as");
-    expect(screen.queryByText(/Nothing here yet/)).toBeNull();
-    expect(screen.queryByText(/Loading the conversation/)).toBeNull();
-  });
-
-  it("draws the message once when the send's events arrive, before or with its release", () => {
-    const view = render(chat([]), { wrapper: TooltipProvider });
-    // The runtime's broadcast can come before the send's reply: the held copy steps aside for it.
-    view.rerender(chat([sent]));
-    expect(screen.queryByTestId("first-message")).toBeNull();
-    expect(view.container.textContent!.match(/Dedupe the permission cards/g)).toHaveLength(1);
-    act(() => releaseFirstMessage("s", "t"));
-    view.rerender(chat([sent]));
-    expect(view.container.textContent!.match(/Dedupe the permission cards/g)).toHaveLength(1);
-    expect(screen.queryByText(/is held and sent/)).toBeNull();
-  });
-
-  it("keeps the message on screen with the error when the send fails", () => {
-    render(chat([]), { wrapper: TooltipProvider });
-    act(() => failFirstMessage("s", "t", new Error("the agent exited")));
-    expect(screen.getByTestId("first-message").textContent).toContain(prompt);
-    expect(screen.getByRole("alert").textContent).toContain("the agent exited");
-    expect(screen.queryByText(/is held and sent/)).toBeNull();
-    expect(screen.queryByText(/Nothing here yet/)).toBeNull();
-  });
-
-  it("is not drawn in another tab of the session", () => {
-    render(<Chat sessionId="s" checkpointTabId="other" transcript={buildTranscript([], false)} stream={[]} live={false} answering={false}
-      onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />, { wrapper: TooltipProvider });
-    expect(screen.queryByTestId("first-message")).toBeNull();
-    expect(screen.getByText("Nothing here yet. Ask for something below.")).toBeTruthy();
+  it("offers Retry on an idle tab, for the last turn only, and sends that turn's prompt again", () => {
+    const onRetry = vi.fn();
+    render(<TooltipProvider><Chat sessionId="s" transcript={buildTranscript(events, false)} stream={[]} live={false} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onRetry={onRetry} /></TooltipProvider>);
+    const cards = screen.getAllByTestId("turn-failure");
+    expect(cards).toHaveLength(2);
+    expect(within(cards[0]).queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.click(within(cards[1]).getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledWith(3);
   });
 });

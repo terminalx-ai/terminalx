@@ -885,7 +885,7 @@ fn restoring_from_a_retained_session_holds_the_merged_workspace_and_rolls_back_f
     assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_none());
     let plan = crate::workspace_restore::preview(&session.id).unwrap();
     assert_eq!(plan.commit, record.commit);
-    crate::workspace_restore::restore(&*f.events, &session.id, &plan, Some(&record.branch), &|_| Ok(())).unwrap();
+    crate::workspace_restore::restore(&*f.events, &session.id, &plan, Some(&record.branch), false, &|_| Ok(())).unwrap();
     assert_eq!(reason(of(&f.sweep(600), &wt)), (Phase::Held, ""));
     assert!(wt.exists());
     assert!(Ledger::load().unwrap().removed.iter().find(|item| item.id == record.id).unwrap().restored_at.is_some());

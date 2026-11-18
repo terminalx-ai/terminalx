@@ -7,15 +7,16 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 afterEach(() => { cleanup(); openUrl.mockClear(); });
 
 it("renders change counts, dates and missing values, and opens PR links without opening a session", () => {
-  const row: SessionTableRow = { id: "one", status: "Done", name: "Feature", project: "API", branch: null, agent: "Codex", owner: "Amy", changes: 12, additions: 10, deletions: 2, pr: 9, prs: [
+  const row: SessionTableRow = { id: "one", status: "Merged", name: "Feature", project: "API", where: "Local", locationCell: "Local", branch: null, agent: "Codex", owner: "Amy", changes: 12, additions: 10, deletions: 2, pr: 9, prs: [
     { number: 9, url: "https://github.com/acme/api/pull/9", head: "feature", scope: { kind: "local", cwd: "/repo" } },
     { number: 10, url: "file:///tmp/example", head: "other", scope: { kind: "local", cwd: "/repo" } },
   ], updated: "2026-11-01T12:00:00Z", created: null };
   const onOpen = vi.fn();
-  render(<SessionTable containerRef={createRef()} rows={[row]} hiddenColumns={[]} sort={{ column: "updated", direction: "desc" }} onSort={() => undefined} selectedId={null} onFocus={() => undefined} onOpen={onOpen} loading={false} />);
+  render(<SessionTable containerRef={createRef()} rows={[row]} hiddenColumns={[]} sort={{ column: "updated", direction: "desc" }} onSort={() => undefined} selectedId={null} onFocus={() => undefined} onOpen={onOpen} loading={false} where />);
   expect(screen.getByText("+10")).toBeTruthy();
   expect(screen.getByText("−2")).toBeTruthy();
   expect(screen.getAllByText("—")).toHaveLength(2);
+  expect(screen.getByRole("cell", { name: "Local" })).toBeTruthy();
   expect(document.querySelector("time")?.dateTime).toBe("2026-11-01T12:00:00Z");
   fireEvent.click(screen.getByRole("button", { name: "Open PR #9" }));
   expect(openUrl).toHaveBeenCalledWith("https://github.com/acme/api/pull/9");
@@ -28,7 +29,7 @@ it("renders change counts, dates and missing values, and opens PR links without 
 
 it("windows large tables and moves keyboard focus across window edges with one active row", () => {
   const rows: SessionTableRow[] = Array.from({ length: 1000 }, (_, index) => ({
-    id: String(index), name: `Task ${index}`, status: "Working", project: "API", branch: "feature", agent: "Codex", owner: "Amy",
+    id: String(index), name: `Task ${index}`, status: "Working", project: "API", where: "Local", branch: "feature", agent: "Codex", owner: "Amy",
     changes: null, additions: null, deletions: null, pr: null, prs: [], updated: null, created: null,
   }));
   const containerRef = createRef<HTMLDivElement>();

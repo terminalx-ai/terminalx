@@ -35,8 +35,9 @@ describe("the title bar's run pill (18.01, 18.03)", () => {
     expect(runPillOf(run("needsYou", [piece("a", "queued")], { pause: { kind: "window", message: "Past 85%.", resumeAt } }))?.kind).toBe("needs");
   });
 
-  it("says nothing of a run with nothing to say, or one that has ended", () => {
-    expect(runPillOf(null)).toBeNull();
+  it("says Idle for a session with no run (18.08), nothing while the run is read, and nothing of a run with nothing to say, or one that has ended", () => {
+    expect(runPillOf(null)).toMatchObject({ kind: "idle", text: "Idle" });
+    expect(runPillOf(undefined)).toBeNull();
     expect(runPillOf(run("running", [piece("a", "done"), piece("b", "queued")], { inTurn: 0 }))).toBeNull();
     expect(runPillOf(run("stopped", [piece("a", "blocked")]))).toBeNull();
     expect(runPillOf(run("done", [piece("a", "done")]))).toBeNull();

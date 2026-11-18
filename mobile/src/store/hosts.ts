@@ -4,7 +4,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { z } from "zod";
 
-const HOSTS_KEY = "terminalx:mobile:hosts:v1";
+/** Where the paired machines are kept (no credentials: those are in the keychain). */
+export const HOSTS_KEY = "terminalx:mobile:hosts:v1";
 const OPTIONS: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 
 const relaySchema = z.object({
@@ -22,6 +23,9 @@ const hostSchema = z.object({
   // PRO-87 (see host-name.ts): the computer's own name, and a name typed on this phone. Both optional: entries saved before them still load.
   hostName: z.string().min(1).max(256).optional(),
   customName: z.string().min(1).max(256).optional(),
+  // PRO-359: what the computer said of itself on the last connection. `headless`: no TerminalX window runs there (a server). Optional: older computers do not say.
+  headless: z.boolean().optional(),
+  platform: z.string().regex(/^[a-z0-9_-]{1,32}$/).optional(),
   publicKeyB64: z.string().min(1),
   directEndpoints: DirectEndpointsSchema.optional(),
   endpoint: z.string().min(1),
@@ -79,9 +83,22 @@ export async function writeHostCredential(hostId: string, credential: HostCreden
  * Names change only through [`setHostNames`].
  */
 export async function updateStoredHost(host: StoredHost): Promise<void> {
-  const { hostName: _hostName, customName: _customName, ...validated } = hostSchema.parse(host);
+  const { hostName: _hostName, customName: _customName, headless: _headless, platform: _platform, ...validated } = hostSchema.parse(host);
   const hosts = await readHosts();
-  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === host.id ? { ...validated, ...(item.hostName ? { hostName: item.hostName } : {}), ...(item.customName ? { customName: item.customName } : {}) } : item)));
+  // What the computer says of itself is kept as last stored: the connection's copy may predate it.
+  const kept = (item: StoredHost) => ({ ...(item.hostName ? { hostName: item.hostName } : {}), ...(item.customName ? { customName: item.customName } : {}), ...(item.headless !== undefined ? { headless: item.headless } : {}), ...(item.platform ? { platform: item.platform } : {}) });
+  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === host.id ? { ...validated, ...kept(item) } : item)));
+}
+
+/** Keep what the computer said of itself (PRO-359). Returns the stored host, or null when it is no longer paired. */
+export async function setHostKind(hostId: string, kind: { headless: boolean; platform: string | null }): Promise<StoredHost | null> {
+  const hosts = await readHosts();
+  const current = hosts.find((item) => item.id === hostId);
+  if (!current) return null;
+  const { platform: _platform, ...rest } = current;
+  const next = hostSchema.parse({ ...rest, headless: kind.headless, ...(kind.platform ? { platform: kind.platform } : {}) });
+  await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.map((item) => item.id === hostId ? next : item)));
+  return next;
 }
 
 /**

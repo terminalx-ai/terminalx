@@ -45,11 +45,20 @@ let page;
 try {
   page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 860 }, { extra });
   await openConversation(page, "Local long session");
-  const branch = page.getByRole("button", { name: "Branch", exact: true });
+  const branch = page.getByRole("button", { name: "Checks", exact: true });
   await branch.click();
-  await page.getByText("Activity · 200", { exact: true }).waitFor();
   const conversation = page.getByLabel("Conversation for PR #214", { exact: true });
+  await conversation.getByRole("heading", { name: "Activity", exact: true }).waitFor();
+  assert.equal(await conversation.getByTestId("pr-activity-item").count(), 200);
   await conversation.getByRole("heading", { name: "Description", exact: true }).waitFor();
+  // PRO-395: the description and activity read at the panel's size, not the chat's 15px.
+  const sizes = await conversation.evaluate((element) => ({
+    description: parseFloat(getComputedStyle(element.querySelector('[data-testid="pr-description"] .prose-chat')).fontSize),
+    activity: parseFloat(getComputedStyle(element.querySelector('[data-testid="pr-activity-item"]')).fontSize),
+  }));
+  assert(sizes.description >= 12 && sizes.description <= 13, JSON.stringify(sizes));
+  assert(sizes.activity >= 12 && sizes.activity <= 13, JSON.stringify(sizes));
+  await conversation.getByRole("button", { name: "Request", exact: true }).click();
   assert.equal(await conversation.locator('[data-streamdown="strong"]').filter({ hasText: "rendered" }).count(), 1);
   await conversation.getByLabel("Search reviewers").fill("carol");
   const listsBefore = await page.evaluate(() => window.__PR_TEST__.lists);
@@ -71,6 +80,9 @@ try {
   await conversation.getByRole("heading", { name: "Summary", exact: true }).waitFor();
   const feed = conversation.getByLabel("Pull request activity", { exact: true });
   await feed.scrollIntoViewIfNeeded();
+  const long = feed.getByTestId("pr-activity-item").filter({ hasText: "reviewer-199 commented" });
+  await long.scrollIntoViewIfNeeded();
+  await long.getByRole("button", { expanded: false }).click();
   await feed.getByRole("button", { name: "Show more", exact: true }).click();
   await feed.getByRole("button", { name: "Show less", exact: true }).click();
   const scroll = await feed.evaluate(async (element) => {
@@ -84,16 +96,17 @@ try {
     samples.sort((a, b) => a - b);
     return { p95: samples[Math.floor(samples.length * .95)], max: samples.at(-1), top: element.scrollTop, height: element.scrollHeight, viewport: element.clientHeight };
   });
-  assert(scroll.top > 5000, JSON.stringify(scroll));
+  // One line a row (PRO-395): 200 rows are about 5,600px.
+  assert(scroll.top > 3000, JSON.stringify(scroll));
   // A generous guard catches second-long stalls on a shared 4-core guest.
   assert(scroll.p95 < 150, JSON.stringify(scroll));
-  await conversation.getByLabel("Activity order").selectOption("oldest");
+  await conversation.getByRole("button", { name: "Activity order" }).click();
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")).prActivityOrder), "oldest");
   await feed.evaluate((element) => { element.scrollTop = 0; });
   assert((await feed.locator('[data-testid="pr-activity-item"]').first().textContent()).includes("reviewer-0"));
   for (const width of [1100, 760]) {
     await page.setViewportSize({ width, height: 860 });
-    await conversation.getByRole("heading", { name: "Reviewers · 2" }).scrollIntoViewIfNeeded();
+    await conversation.getByRole("heading", { name: "Review", exact: true }).scrollIntoViewIfNeeded();
     const overflow = await conversation.evaluate((element) => element.scrollWidth - element.clientWidth);
     assert(overflow <= 1, `overflow ${overflow} at ${width}`);
     if (shots) for (const colorScheme of ["light", "dark"]) {

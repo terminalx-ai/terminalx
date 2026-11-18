@@ -94,6 +94,8 @@ pub(super) fn installation() -> Result<PathBuf> {
 }
 
 pub(super) fn installed_identity() -> Result<(PathBuf, Identity)> {
+    #[cfg(target_os = "linux")]
+    super::guest_account::check_linux_owner()?;
     let base = installation()?;
     let identity = Identity::load(&base)?;
     #[cfg(target_os = "macos")]
@@ -104,6 +106,11 @@ pub(super) fn installed_identity() -> Result<(PathBuf, Identity)> {
 fn installation_present_at(base: &Path) -> Result<bool> {
     match fs::symlink_metadata(base) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        // The installation is the guest account's own, which can always
+        // reach it: an account the path is closed to is not that guest. A
+        // cloud workspace's runtime runs with `ProtectHome=true`, where every
+        // path under /home is closed, and refusing here stopped it starting.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
         Err(error) => return Err(error.into()),
         Ok(metadata) if !metadata.is_dir() => bail!("Guest installation cannot be a symlink or file"),
         Ok(_) => (),
@@ -301,15 +308,9 @@ pub struct Guest {
     _lock: File,
 }
 
-/// A Linux guest process that receives the host key, `local-vm-rpc` or the
-/// activated owner, runs as the same account as the workers it supervises.
-/// Marked non-dumpable first thing, its /proc entries (the stdin pipe at
-/// fd/0, mem, environ) become root's and same-account ptrace is refused, so a
-/// worker cannot read the key out of it (#978 review). Known residual,
-/// tracked in #1000: `local-vm-rpc` forwards the key to the owner's control
-/// socket and token under the account's own runtime directory, which a
-/// worker as that account can replace; and one can race exec-to-prctl.
-/// Closing both needs the owner under its own account.
+/// A Linux key holder must enter under its own OS account before reading
+/// input. Keep the #978 non-dumpable protection as defense in depth; it is
+/// not a substitute for separating the owner from worker UIDs.
 #[cfg(target_os = "linux")]
 pub fn seal_key_holder() {
     let rpc = std::env::args().nth(1).as_deref() == Some("local-vm-rpc");
@@ -322,6 +323,16 @@ pub fn seal_key_holder() {
         eprintln!("terminalx-serve: cannot protect the host key from same-account processes");
         std::process::exit(70);
     }
+    if let Err(error) = super::guest_account::check_linux_owner().and_then(|_| {
+        // An explicit activation must not fall back to a generic runtime if
+        // installation lookup says absent/inaccessible (e.g. ProtectHome).
+        // Reject before any generic session/provider initialization; the RPC
+        // helper still validates its private identity before forwarding input.
+        if rpc { Ok(()) } else { require_linux_worker_runtime() }
+    }) {
+        eprintln!("terminalx-serve: {error:#}");
+        std::process::exit(70);
+    }
 }
 
 fn linux_activation_identity() -> Option<Value> {
@@ -329,6 +340,15 @@ fn linux_activation_identity() -> Option<Value> {
     let instance = std::env::var("TERMINALX_LINUX_INSTANCE").ok()?;
     if validate_id(&id).is_err() || validate_id(&instance).is_err() { return None }
     Some(json!({"id":id,"instance":instance}))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn require_linux_worker_runtime() -> Result<()> {
+    // The shared SessionManager still executes provider discovery, hooks
+    // and workspace effects as its own UID. A private owner account alone
+    // cannot enable it safely. Replace this gate with the separate cua
+    // execution runtime's authenticated startup check.
+    bail!("Linux guest execution requires the isolated cua worker runtime; shared-account execution is disabled");
 }
 
 impl Guest {
@@ -347,15 +367,7 @@ impl Guest {
             bail!("Unsupported local guest platform");
         }
         #[cfg(target_os = "linux")]
-        {
-            // Linux host runtimes cannot become guests via a home override.
-            // Identity ownership and the pinned installation/root are checked
-            // independently; a root-owned default account is never accepted.
-            // SAFETY: geteuid has no arguments or memory preconditions.
-            if unsafe { libc::geteuid() } == 0 || dirs::home_dir().as_deref() != Some(Path::new("/home/cua")) {
-                bail!("Linux task runtime requires the dedicated non-root cua account");
-            }
-        }
+        require_linux_worker_runtime()?;
         if fs::canonicalize(root)? != fs::canonicalize(base.join("runtime"))? {
             bail!("Guest runtime must use the installed private runtime directory");
         }
@@ -2752,6 +2764,8 @@ fn authorize_desktop(state: &State, target: &TaskTarget) -> Result<()> {
 /// lifetime and reads no host socket/token environment passed through Cua.
 pub fn run_rpc_cli(args: &[String]) -> i32 {
     let result = (|| -> Result<crate::control::ControlResponse> {
+        #[cfg(target_os = "linux")]
+        super::guest_account::check_linux_owner()?;
         if args.len() != 1 {
             bail!("Usage: terminalx-serve local-vm-rpc -|<base64 JSON>");
         }
@@ -2813,6 +2827,14 @@ pub fn run_rpc_cli(args: &[String]) -> i32 {
 mod tests {
     use super::super::journal::{new_id, Journal, TaskInput};
     use super::*;
+
+    #[test]
+    fn linux_owner_cannot_start_shared_uid_task_execution() {
+        // Account provisioning must not accidentally activate the old
+        // SessionManager path before the cua runtime is fully integrated.
+        let error = require_linux_worker_runtime().unwrap_err().to_string();
+        assert!(error.contains("isolated cua worker runtime"));
+    }
 
     /// The key the test host installed its guest with.
     pub(super) const HOST_KEY: &str = "5f3c0e7a9b1d2f4e6a8c0b2d4f6e8a1c3b5d7f9e1a3c5e7b9d1f3a5c7e9b1d3f";
@@ -5085,6 +5107,27 @@ mod tests {
         let link = root.path().join("substitute");
         std::os::unix::fs::symlink(&base, &link).unwrap();
         assert!(installation_present_at(&link).is_err());
+    }
+
+    /// A cloud workspace's runtime runs with `ProtectHome=true`, so the guest
+    /// installation's path under /home is closed to it: that is no guest, and
+    /// the runtime starts as before rather than exit with "Permission denied".
+    #[test]
+    fn an_installation_path_closed_to_this_account_is_no_guest() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root reads through any mode; the closed home cannot be shown there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let base = home.join("cua/.terminalx-local");
+        private_directory(&base).unwrap();
+        atomic_private_write(&base.join("identity.json"), b"{}").unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let present = installation_present_at(&base);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!present.unwrap());
     }
 
     #[test]

@@ -360,7 +360,7 @@ try {
       // A dialog opened from a menu must hand the page back when it closes.
       const released = await page.evaluate(() => getComputedStyle(document.body).pointerEvents !== "none");
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 15 && dialogLayout.switches["Agents comment and change status without asking"] === "false",
+        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 14,
         // Saved, and shown as saved: the switch that was turned on is on, and the default it overrides is held off.
         "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.defaults["Merge automatically by default"] === "Off disabled",
         "conflicts are still resolved for sessions from issues": dialogLayout.defaults["Resolve conflicts automatically by default"] === "From issues",

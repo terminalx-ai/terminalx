@@ -1,5 +1,5 @@
 import { useReviewComments } from "./ReviewComments";
-import { DiscardDialog, DiscardButton } from "./DiscardDialog";
+import { DiscardDialog, DiscardButton, workingDiscardTarget, type DiscardTarget } from "./DiscardDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, TriangleAlert } from "@/icons";
 import { commitRange } from "@/lib/changesScope";
@@ -7,12 +7,11 @@ import { useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Segmented } from "@/components/ui/controls";
+import { Segmented, Checkbox } from "@/components/ui/controls";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { ChangedFile, CommitInfo } from "@/types/session";
 import { FileDiff } from "./FileDiff";
-import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
 import { ReviewFileList } from "./ReviewFileList";
 import { AddRemote, GitError } from "./GitRecovery";
@@ -26,7 +25,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff }: {
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff, openFileAction }: {
+  openFileAction?: (path: string) => (() => void) | undefined;
   onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
@@ -44,11 +44,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
   const selectedSource = useRef({ source, generation: 0 });
   if (selectedSource.current.source !== source) selectedSource.current = { source, generation: selectedSource.current.generation + 1 };
   const generation = selectedSource.current.generation;
-  const [discarding, setDiscarding] = useState<{ path: string; oldPath?: string } | null>(null);
+  const [discarding, setDiscarding] = useState<DiscardTarget | null>(null);
   const { hideWhitespace } = useDiffOptions();
   const [tick, setTick] = useState(0);
   const refresh = () => setTick((t) => t + 1);
   const { head, index, files, staged, unstaged, loading, error: readError } = useGitWorkingChanges(source, active && sub === "uncommitted", tick + revision, hideWhitespace);
+  // Asked about the file as a whole, staged and unstaged: that is what a discard takes back.
+  const askDiscard = (file: DiscardTarget) => setDiscarding(workingDiscardTarget(file.path, staged, unstaged) ?? file);
   const [status, setStatus] = useState<SourceStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -165,7 +167,6 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           {status && status.behind > 0 && <span className="text-faint">↓{status.behind}</span>}
         </div>
       </div>}
-      {!embedded && <DiffOptions />}
       {needsRemote && source.addRemote && <AddRemote key={source.key} source={source} onDone={() => { setNeedsRemote(false); setError(null); setNotice("Remote added. Push when you’re ready."); refresh(); }} />}
       {error && (source.cloud ? <div role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} operation={operation} />)}
       {!error && readError != null && (
@@ -212,7 +213,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
                 className="w-full resize-none bg-transparent px-1 text-[13px] outline-none placeholder:text-faint"
               />
               {source.generateCommitMessage && <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px]">
-                <label className="flex items-center gap-1"><input type="checkbox" checked={prefs.writeCommitMessagesWithAgent} onChange={(event) => setPrefs({ writeCommitMessagesWithAgent: event.target.checked })} />Write commit messages with the agent</label>
+                <Checkbox className="text-[11px] text-foreground" label="Write commit messages with the agent" checked={prefs.writeCommitMessagesWithAgent} onChange={(on) => setPrefs({ writeCommitMessagesWithAgent: on })}>Write commit messages with the agent</Checkbox>
                 <span className="text-faint">Uses your own quota.</span>
                 {prefs.writeCommitMessagesWithAgent && <><select aria-label="Commit message agent" value={commitAgent} onChange={(event) => setCommitAgent(event.target.value as "claude" | "codex")} className="rounded bg-background px-1 py-0.5"><option value="claude">Claude</option><option value="codex">Codex</option></select><Button size="xs" variant="secondary" disabled={!staged.length || !!busy} onClick={generateMessage}>{busy === "generate message" ? <Loader2 className="animate-spin" /> : null}Generate message</Button></>}
               </div>}
@@ -271,12 +272,13 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
               }}
               empty="Working tree is clean."
               trailing={(f) => source.discard && writable && (
-                <DiscardButton path={f.path} onClick={() => setDiscarding(f)} />
+                <DiscardButton path={f.path} onClick={() => askDiscard(f)} />
               )}
             />}
           </div>
           {current && head && <div className="min-h-0 flex-1">
-            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => setDiscarding(current) : undefined}
+            <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => askDiscard(current) : undefined}
+              onOpenFile={current.status !== "deleted" ? openFileAction?.(current.path) : undefined}
               staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}
         </>

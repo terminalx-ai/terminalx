@@ -88,11 +88,36 @@ export function machineSectionKey(machineId: string): MachineKey {
   return `machine:${machineId}`;
 }
 
+/** A project on a machine: `machine:<machineId>:<projectId>`. */
+export function machineProjectKey(machineId: string, projectId: string): MachineKey {
+  return `machine:${machineId}:${projectId}`;
+}
+
+/** A session on a machine: `machine:<machineId>:<projectId>:<sessionId>`. */
+export function machineSessionKey(machineId: string, projectId: string, sessionId: string): MachineKey {
+  return `machine:${machineId}:${projectId}:${sessionId}`;
+}
+
+/** The display root of a machine project's files (decision 8): not a key, and refused by `assertLocal`. */
+export function machineProjectRoot(machineId: string, projectId: string): RemotePath {
+  return `machine://${machineId}:${projectId}` as RemotePath;
+}
+
+/** Which row a machine key names, by its part count (2, 3 or 4); null for anything else. */
+export function machineKeyKind(key: string | null | undefined): "machine" | "project" | "session" | null {
+  if (typeof key !== "string") return null;
+  const parsed = parseMachineKey(key);
+  if (!parsed) return null;
+  return parsed.sessionId ? "session" : parsed.projectId ? "project" : "machine";
+}
+
 /** The machine a machine key belongs to; null for a display root (`machine://…`) or any other key. */
 export function parseMachineKey(key: string): { machineId: string; projectId: string | null; sessionId: string | null } | null {
   if (!isMachineKey(key) || key.startsWith("machine://")) return null;
   const [machineId, projectId, sessionId, ...extra] = key.slice("machine:".length).split(":");
   if (!machineId || machineId.includes("/") || extra.length) return null;
+  // Every part present is filled: `machine:m::s` (a session with no project) is no key.
+  if (projectId === "" || sessionId === "" || projectId?.includes("/") || sessionId?.includes("/")) return null;
   return { machineId, projectId: projectId || null, sessionId: sessionId || null };
 }
 

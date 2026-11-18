@@ -25,6 +25,7 @@ import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue
 import { AgentMenu } from "@/components/session/AgentMenu";
 import { ConnectLinear } from "@/components/session/ConnectLinear";
 import { SessionOptions } from "@/components/session/SessionOptions";
+import { StartOnMachineMenu, openMachineDraft } from "@/components/session/MachineNewSession";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { cloudStartError, useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useSessionAgent } from "@/lib/useSessionAgent";
@@ -1056,6 +1057,15 @@ export function IssuesView({
                       {starting && !orchestrating ? <Loader2 className="animate-spin" /> : null}
                       Start session
                     </Button>
+                    {/* Or on a paired machine (PRO-348): the new-session form opens there with this issue in it. */}
+                    {!cloud && (
+                      <StartOnMachineMenu
+                        wantedProject={project?.name ?? null}
+                        disabled={starting || detailLoading}
+                        label="Start this issue on a machine"
+                        onPick={(machineId) => openMachineDraft(machineId, { issue: detail ?? selected, issueProjectPath: projectPath ?? null })}
+                      />
+                    )}
                   </div>
                 </div>
                 {(() => {

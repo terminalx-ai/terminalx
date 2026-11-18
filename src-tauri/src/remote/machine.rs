@@ -30,6 +30,36 @@ pub const MACHINE: &str = "machine/1";
 /// (docs/MACHINES.md, "As built (PRO-345)").
 pub const MACHINE_2: &str = "machine/2";
 
+/// `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
+/// `machine.updateChanged` notification (docs/MACHINES.md, "Versions and
+/// updates (PRO-354)"; `machine_update.rs`).
+pub const MACHINE_3: &str = "machine/3";
+
+/// `machine/4` (PRO-350): `machine.agentSetup` and
+/// `machine.agentSetupRunning`, an agent's install or sign-in in a terminal
+/// on the machine (docs/MACHINES.md, "As built (PRO-350): the machine page").
+pub const MACHINE_4: &str = "machine/4";
+
+/// `machine/5` (PRO-357): `machine.rotateCredential`, a fresh device token
+/// each time a computer connects (docs/MACHINES.md, "Trust model").
+pub const MACHINE_5: &str = "machine/5";
+/// `machine/6` (PRO-351): `machine.browse`, `machine.addProject`,
+/// `machine.removeProject` and the clone calls, a machine's projects from
+/// another computer (docs/MACHINES.md, "As built (PRO-351)";
+/// `machine_projects.rs`).
+pub const MACHINE_6: &str = "machine/6";
+
+/// `machine/7` (PRO-403): `machine.sessionActions`, `machine.runAction`,
+/// `machine.setupRerun` and `machine.setupStop`, a machine session's Setup
+/// and Run from another computer (docs/MACHINES.md, "As built (PRO-403)").
+pub const MACHINE_7: &str = "machine/7";
+
+/// `machine/8` (PRO-408): `session.usage`, `session.prepareContinuation` and
+/// `session.checkFailures`, a machine session's cost chip, Continue in a new
+/// tab and Fix check errors read and done on the machine (docs/MACHINES.md
+/// "Session feature parity"; `machine_session.rs`).
+pub const MACHINE_8: &str = "machine/8";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -99,6 +129,23 @@ pub trait MachineAccess: Send + Sync + 'static {
     /// relay): `{ relay: {…} }` with a fresh single-use invite, or
     /// `{ relay: null }` with no relay registration.
     fn relay_access(&self, device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>>;
+    /// The paired computers connected now, other than the one connected as
+    /// `caller` (a paired computer's id on the direct route, its relay
+    /// device id on the relay); every one when `caller` is `None`
+    /// (`machine/3` `otherComputers`).
+    fn other_computers(&self, caller: Option<&str>) -> Vec<super::machine_update::OtherComputer>;
+    /// A desktop window is attached to this runtime now, so the app on this
+    /// machine can run its updater (`machine/3`, `method: "app"`).
+    fn window_available(&self) -> bool;
+    /// Put what the connection of `device_id` did in the machine's activity
+    /// log (PRO-357): `method` succeeded in `project_id`, with `detail` (a
+    /// version). Never a prompt, a command or a file's contents.
+    fn note(&self, _device_id: &str, _method: &str, _project_id: Option<&str>, _detail: Option<&str>) {}
+    /// `machine.rotateCredential` for the connection of `device_id`:
+    /// `{ deviceToken }`, a fresh token the computer keeps in place of its own.
+    fn rotate_credential(&self, _device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
+        Box::pin(async { Err(RpcError::new("method_not_found", "this runtime does not rotate credentials")) })
+    }
 }
 
 /// `macos` or `linux`, as Rust names them.
@@ -121,28 +168,29 @@ fn os_version() -> Option<String> {
     }
 }
 
-fn registered() -> Result<Vec<Project>, RpcError> {
+pub(super) fn registered() -> Result<Vec<Project>, RpcError> {
     crate::store::projects::list().map(|(projects, _)| projects).map_err(RpcError::internal)
 }
 
 /// `machine.projects`: every project the machine knows, archived ones too
 /// (they say so), in the store's order.
 pub fn projects() -> Result<Value, RpcError> {
-    let listed: Vec<Value> = registered()?
-        .into_iter()
-        .map(|project| {
-            let git = project.kind == ProjectKind::Git;
-            json!({
-                "projectId": project_id(&project.path),
-                "name": project.name,
-                "path": project.path,
-                "kind": if git { "git" } else { "folder" },
-                "defaultBranch": if git { crate::git::default_branch(Path::new(&project.path)) } else { None },
-                "archived": project.archived,
-            })
-        })
-        .collect();
+    let listed: Vec<Value> = registered()?.iter().map(project_row).collect();
     Ok(json!({ "projects": listed }))
+}
+
+/// One project as `machine.projects` lists it, and as `machine/6` returns
+/// the one it added.
+pub fn project_row(project: &Project) -> Value {
+    let git = project.kind == ProjectKind::Git;
+    json!({
+        "projectId": project_id(&project.path),
+        "name": project.name,
+        "path": project.path,
+        "kind": if git { "git" } else { "folder" },
+        "defaultBranch": if git { crate::git::default_branch(Path::new(&project.path)) } else { None },
+        "archived": project.archived,
+    })
 }
 
 /// What `machine.changed` compares: the name and the project set.

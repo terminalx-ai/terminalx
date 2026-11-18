@@ -403,6 +403,11 @@ describe("cloud agent tabs", () => {
     const followUp = await screen.findByTestId("cloud-agent-followup");
     expect(followUp.textContent).toContain("then run the linter");
     expect(followUp.textContent).toContain("sends when the agent finishes");
+    // A /goal is never steered past the composer's check (PRO-380): no Steer now for it.
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal ship it" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use pnpm instead" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
     await waitFor(() => expect(enqueued[0]).toMatchObject({ kind: "steer", payload: { text: "use pnpm instead" } }));
@@ -904,5 +909,102 @@ describe("a new agent tab's launch settings (#554)", () => {
     await waitFor(() => expect(pill("Permissions")).toBe("Bypass permissions"));
     expect((await started()).mode).toBe("bypassPermissions");
     expect(getPrefs().lastMode).toBe("manual");
+  });
+});
+
+describe("a machine's new agent tab is created in one of its projects (PRO-346)", () => {
+  const PROJECTS = [
+    { projectId: "p-terminalx", name: "terminalx" },
+    { projectId: "p-server", name: "terminalx-server" },
+  ];
+  const machineView = (projects: Partial<import("./CloudAgents").AgentProjects>) => (
+    <TooltipProvider>
+      <CloudAgentsView
+        scope={{ organizationId: "", workspaceId: "machine:m1" }}
+        client={client as unknown as WorkspaceRpcClient}
+        state={connected()}
+        workspaceState={null}
+        projects={{ projects: PROJECTS, preferred: null, request: null, onRequestTaken: vi.fn(), onCreated: vi.fn(), ...projects }}
+      />
+    </TooltipProvider>
+  );
+
+  it("opens the form on the project the sidebar's + chose, sends it with the create, and hands back the new session", async () => {
+    client.connection = connected();
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    const onRequestTaken = vi.fn();
+    const onCreated = vi.fn();
+    render(machineView({ request: { projectId: "p-server", nonce: 1 }, onRequestTaken, onCreated }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect(onRequestTaken).toHaveBeenCalledTimes(1);
+    expect(form.getAttribute("data-project")).toBe("p-server");
+    expect(within(form).getByTestId("agent-project").textContent).toBe("terminalx-server");
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
+    expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", projectId: "p-server" });
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith("s-9", "p-server"));
+  });
+
+  it("+ Agent starts on the focused session's project, and with none chosen it cannot start", async () => {
+    client.connection = connected();
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    const { unmount } = render(machineView({ preferred: "p-terminalx" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    expect((await screen.findByTestId("cloud-agent-new")).getAttribute("data-project")).toBe("p-terminalx");
+    unmount();
+
+    render(machineView({ preferred: null }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect(within(form).getByTestId("agent-project").textContent).toBe("Choose a project");
+    expect((within(form).getByRole("button", { name: "Start agent" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(form);
+    expect(client.createAgentTab).not.toHaveBeenCalled();
+    await choose("Project", "terminalx");
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ projectId: "p-terminalx" })));
+  });
+
+  it("names an agent not signed in on the machine, and opens the machine's page (PRO-350)", async () => {
+    client.connection = connected({ capabilities: ["session/1", "keys/1", "agents/1"] });
+    client.listRuntimeAgents.mockResolvedValue([
+      { ...RUNTIME_AGENTS[0]!, signIn: "signedIn" },
+      { ...RUNTIME_AGENTS[1]!, signIn: "signedOut" },
+    ] as never);
+    const openPage = vi.fn();
+    render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage } }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    await waitFor(() => expect(client.listRuntimeAgents).toHaveBeenCalled());
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
+    // Claude Code is signed in there: nothing to say.
+    expect(within(form).queryByTestId("agent-sign-in-reason")).toBeNull();
+    await choose("Agent", "Codex", "menuitem");
+    const reason = await within(form).findByTestId("agent-sign-in-reason");
+    expect(reason.textContent).toContain("Codex is not signed in on dev-server. Sign in from its machine page.");
+    fireEvent.click(within(reason).getByRole("button", { name: "Open machine page" }));
+    expect(openPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about sign-in when the machine's runtime does not report it", async () => {
+    client.connection = connected({ capabilities: ["session/1", "keys/1", "agents/1"] });
+    client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS as never);
+    render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage: vi.fn() } }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
+    await choose("Agent", "Codex", "menuitem");
+    expect(within(form).queryByTestId("agent-sign-in-reason")).toBeNull();
+  });
+
+  it("a cloud workspace's form has no project picker and sends no project", async () => {
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    render(view(connected()));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect(within(form).queryByTestId("agent-project")).toBeNull();
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
+    expect(client.createAgentTab.mock.calls[0][0]).not.toHaveProperty("projectId");
   });
 });

@@ -144,6 +144,71 @@ describe("usage arithmetic", () => {
     expect(totals([]).costUsd).toBe(0);
   });
 
+  // PRO-408: a machine session's agents ran on the machine.
+  it("on a machine session, reads usage, billing and windows on the machine, never this computer's", async () => {
+    mocks.windows = [{ agent: "claude", key: "five_hour", label: "5h", usedPercent: 99, resetsAt: null, windowMinutes: 300, updatedAt: Date.now(), stale: false, source: "" }];
+    const read = vi.fn(async () => ({
+      usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const },
+      loginMethods: { codex: "API key", claude: "API key" },
+      windows: [{ agent: "codex" as const, key: "five_hour", label: "5h", usedPercent: 63, resetsAt: Date.now() + 3_600_000, windowMinutes: 300, updatedAt: Date.now(), stale: false }],
+    }));
+    render(<SessionCost session={twoModels()} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    const popover = await screen.findByRole("dialog", { name: "Session usage" });
+    await waitFor(() => expect(within(popover).getByTestId("session-usage-billing").textContent).toBe("API key · billed per token"));
+    expect(read).toHaveBeenCalled();
+    // Nothing of this computer: not its logins, its transcripts or its windows.
+    expect(mocks.readiness).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    const windows = within(popover).getAllByTestId("session-usage-window").map((w) => w.textContent ?? "");
+    expect(windows.map((w) => w.split("resets")[0])).toEqual(["Codex · 5h63%"]);
+    // The command names the session as the machine knows it; Stats is this computer's.
+    expect(within(popover).getByRole("button", { name: "Copy terminalx sessions usage rt-1 --json, to run on Mac mini" })).toBeTruthy();
+    expect(within(popover).getByTestId("session-usage-where").textContent).toBe("on Mac mini");
+    expect(within(popover).queryByRole("button", { name: /Open Stats/ })).toBeNull();
+  });
+
+  it("on a machine session not connected, shows the totals its list carries and reads nothing", async () => {
+    render(<SessionCost session={twoModels()} machine={{ name: "Mac mini", sessionId: "rt-1", read: null }} />);
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    const popover = await screen.findByRole("dialog", { name: "Session usage" });
+    expect(within(popover).getByTestId("session-usage-billing").textContent).toBe("at API list prices");
+    expect(mocks.readiness).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("reads a machine session's totals once when its tabs have messages and none yet", async () => {
+    const read = vi.fn(async () => ({ usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] }));
+    const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
+    const { rerender } = render(<SessionCost session={unread} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    rerender(<SessionCost session={{ ...unread }} machine={{ name: "Mac mini", sessionId: "rt-1", read }} />);
+    expect(read).toHaveBeenCalledOnce();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  // PRO-408 review: each read makes the machine re-read every transcript, so a parent render must not ask again.
+  it("reads a machine session's usage once per opening, however often its view renders", async () => {
+    const answer = { usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] };
+    const read = vi.fn(async () => answer);
+    // A new `read` on every render, as SessionView builds it.
+    const view = (current: ReturnType<typeof twoModels>) => <SessionCost session={current} machine={{ name: "Mac mini", sessionId: "rt-1", read: () => read() }} />;
+    const { rerender } = render(view(twoModels()));
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    await screen.findByRole("dialog", { name: "Session usage" });
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    for (let i = 0; i < 3; i++) rerender(view({ ...twoModels() }));
+    await act(async () => {});
+    expect(read).toHaveBeenCalledOnce();
+    // Closing and opening again reads again.
+    fireEvent.click(chip());
+    fireEvent.click(chip());
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+
   it("formats tokens and dollars as the design does", () => {
     expect([formatTokens(412_000), formatTokens(999), formatTokens(1_250_000), formatTokens(12_400_000)]).toEqual(["412k", "999", "1.3M", "12M"]);
     expect([formatCost(0.84), formatCost(0.004), formatCost(0), formatCost(null), formatCost(123.4)]).toEqual(["$0.84", "< $0.01", "$0.00", "—", "$123"]);

@@ -67,6 +67,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
+    pub turn_generation: u64,
+    #[serde(default)]
     pub turn_opener: Option<(String, String)>,
     #[serde(default)]
     pub turn_by_command: bool,
@@ -144,6 +146,8 @@ pub(crate) struct CliRecord {
     #[serde(default)]
     pub recorded: bool,
     pub tail: TailRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<claude::background::WatchRecord>,
     #[serde(default)]
     pub echoed: Vec<EchoRecord>,
     #[serde(default)]
@@ -207,6 +211,8 @@ pub(crate) struct TailRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EchoRecord {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collaboration_required: bool,
     pub text: String,
     pub image_count: usize,
     pub sent_ms: u64,
@@ -456,7 +462,7 @@ impl SessionManager {
         if rt.held_queue.sending.is_some() {
             return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
         }
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || rt.automation_completions_in_flight != 0 {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
         }
         if !rt.compaction.is_idle() {
@@ -478,6 +484,7 @@ impl SessionManager {
             queued: rt.queued.clone(),
             held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
+            turn_generation: rt.turn_generation,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
             signed_out_in_turn: rt.signed_out_in_turn,
@@ -524,8 +531,12 @@ impl SessionManager {
             ready_ms: p.ready.since().map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
             recorded: p.recorded,
             tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
+            background: match &rt.background {
+                Some(watch) => Some(watch.try_lock().map_err(|_| Unsettled("Background work is being read".into()))?.handover()),
+                None => None,
+            },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
-                text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
+                collaboration_required: echo.collaboration_required, text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
             held: p.held.clone(),
@@ -561,6 +572,10 @@ impl SessionManager {
     pub(crate) fn adopt_tab(&self, record: TabRecord) -> Result<Vec<Wait>> {
         let rt_arc = self.runtime(&record.session_id, &record.tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        rt.collaboration_prompts.clear();
+        rt.collaboration_settings.clear();
+        rt.collaboration_stance = None;
+        rt.stdio_launch_permit = None;
         rt.seq = rt.seq.max(record.seq);
         rt.status = record.status;
         rt.pending = record.pending.iter().map(|ask| (ask.request_id.clone(), PendingAsk {
@@ -569,6 +584,7 @@ impl SessionManager {
         rt.queued = record.queued;
         rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
+        rt.turn_generation = record.turn_generation;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;
         rt.signed_out_in_turn = record.signed_out_in_turn;
@@ -589,13 +605,19 @@ impl SessionManager {
         anyhow::ensure!(self.terminals.is_live(&cli.pane_id), "its terminal {} was not handed over", cli.pane_id);
         let (decode, marker) = follow::decoders(kind);
         let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).with_usage(cli.tail.usage).marking(marker));
-        // Read on from where its CLI began: what the CLI started in the
-        // background since is found again (#696).
-        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        // Preserve acknowledgments and partial records with the cursor. An
+        // older owner has no snapshot, so keep its conservative replay path.
+        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(match cli.background {
+            Some(background) => claude::background::Watch::from_handover(tail.clone(), background),
+            None => claude::background::Watch::new(tail.clone()),
+        })));
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pane = cli.pane_id.clone();
         let asks: HashMap<String, AskRecord> = record.pending.into_iter().map(|ask| (ask.request_id.clone(), ask)).collect();
         let decisions: Vec<(AskRecord, String)> = cli.decisions.iter().filter_map(|(id, gate)| Some((asks.get(id)?.clone(), gate.clone()))).collect();
+        // A transferred live launch has no fresh native stance witness and
+        // cannot clear a prior raw-terminal taint by producing a late report.
+        rt.collaboration_raw = Some(tail.clone());
         rt.engine = Engine::Cli(CliTab {
             usage_account: (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten(),
             harness: kind,
@@ -612,7 +634,7 @@ impl SessionManager {
             recorded: cli.recorded,
             tail: tail.clone(),
             echoed: cli.echoed.into_iter().map(|echo| ComposerEcho {
-                text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
+                collaboration_required: echo.collaboration_required, text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
             held: cli.held,

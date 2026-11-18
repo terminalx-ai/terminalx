@@ -166,7 +166,7 @@ it("recovers runtime agent and pipeline PRs on a fresh desktop, retaining each c
     ]);
   }
   const requests = call.mock.calls.length;
-  await expect(sessionPrs(source(), "cloud:other:workspace:author", null)).rejects.toThrow("different cloud workspace");
+  await expect(sessionPrs(source(), "cloud:other:workspace:author", null)).rejects.toThrow("This session belongs to a different workspace.");
   expect(call.mock.calls).toHaveLength(requests);
 });
 

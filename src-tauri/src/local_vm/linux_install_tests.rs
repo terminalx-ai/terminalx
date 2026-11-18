@@ -18,10 +18,10 @@ impl Fixture {
             id: "a".repeat(64),
         };
         let account = Account {
-            name: "cua".into(),
-            uid: 1000,
-            gid: 1000,
-            home: "/home/cua".into(),
+            name: "terminalx-owner".into(),
+            uid: 991,
+            gid: 992,
+            home: "/var/lib/terminalx-owner".into(),
             home_device: 1,
             home_inode: 2,
             architecture: Architecture::Arm64,
@@ -40,7 +40,7 @@ args=sys.argv[1:]
 if args[0]=='inspect':
  assert args==['inspect','--format','{{json .}}','a'*64]
  print((root/'inspection.json').read_text());sys.exit(0)
-if args[:4]==['exec','-i','--user','0:0']:
+if len(args)==12 and args[:4]==['exec','-i','--user','0:0']:
  # The root sealed-runtime program, with a disposable root it owns.
  assert args[4:10]==['--workdir','/','a'*64,'/usr/bin/python3','-I','-c'] and len(args)==12
  module=types.ModuleType('disposable_sealed_runtime')
@@ -55,7 +55,7 @@ if args[:4]==['exec','-i','--user','0:0']:
  except Exception as error: print(json.dumps({'ok':False,'error':str(error)}));sys.exit(0)
  result['path']='/opt/terminalx-local/bin/terminalx-serve'
  print(json.dumps({'ok':True,'result':result}));sys.exit(0)
-assert args[:10]==['exec','-i','--user','cua','--workdir','/home/cua','a'*64,'/usr/bin/python3','-I','-c']
+assert args[:10]==['exec','-i','--user','0:0','--workdir','/','a'*64,'/usr/bin/python3','-I','-c']
 assert len(args)==11
 module=types.ModuleType('disposable_guest_installer')
 exec(compile(args[10],'<installer-source>','exec'),module.__dict__)

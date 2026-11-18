@@ -1,0 +1,59 @@
+# 22.07 frame 4: the page when iOS has notifications off for the app, turned off in iOS Settings
+# (Apps, the app, Notifications) as a person would. Maestro's launch `permissions` cannot deny
+# notifications on a simulator without applesimutils.
+appId: com.terminalx.phone.fixture
+name: Notification settings, iOS off (22.07)
+---
+# First allowed from the app's page, as a person would, so iOS lists the app's notifications in Settings:
+# its switch off, then on, which asks iOS (Maestro allows). The row's words share its name, so by position.
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /settings }
+- tapOn: "Notifications, .*"
+- tapOn: { point: "84%,17%" }
+- waitForAnimationToEnd
+- tapOn: { point: "84%,17%" }
+- waitForAnimationToEnd
+- tapOn:
+    text: "Allow"
+    optional: true
+- launchApp:
+    appId: com.apple.Preferences
+    stopApp: true
+- scrollUntilVisible:
+    element: "Apps"
+- tapOn: "Apps"
+- scrollUntilVisible:
+    element: "Phone fixture"
+- tapOn: "Phone fixture"
+- scrollUntilVisible:
+    element: "Notifications.*"
+- tapOn: "Notifications.*"
+# Its switch (the row's words do nothing). On before this: Maestro grants notifications at each launch.
+- tapOn: { point: "84%,18%" }
+# Left as iOS Settings now has it (Maestro grants every permission at launch unless told otherwise),
+# and opened on its Settings tab: coming from iOS Settings, a "Settings" link back sits in the status bar.
+- launchApp:
+    stopApp: true
+    permissions: { notifications: unset }
+    arguments: { fixtureScenario: connected, openRoute: /settings }
+- tapOn: "Notifications, .*"
+- assertVisible: "Notifications are off for TerminalX"
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-4-off-in-ios
+# Back on for the flows after this one, in the same place.
+- launchApp:
+    appId: com.apple.Preferences
+    stopApp: true
+- scrollUntilVisible:
+    element: "Apps"
+- tapOn: "Apps"
+- scrollUntilVisible:
+    element: "Phone fixture"
+- tapOn: "Phone fixture"
+- scrollUntilVisible:
+    element: "Notifications.*"
+- tapOn: "Notifications.*"
+- tapOn: { point: "84%,18%" }
+# Out to the home screen, so the next flow's launch has no "Settings" link back in its status bar.
+- pressKey: home

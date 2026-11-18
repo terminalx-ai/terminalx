@@ -14,6 +14,7 @@ import { bootTabLayouts } from "@/lib/tabLayouts";
 import { isCompactWindow } from "@/lib/appWindow";
 import { listenForChatWindowDrafts } from "@/lib/chatWindowHandoff";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
+import { isLocalKey } from "@/types/target";
 import type {
   ProjectPatch,
   Workspace, WorkspaceRestorePreview, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
@@ -74,6 +75,14 @@ interface State {
    * `newSessionPreset`, and by any local preset.
    */
   cloudSessionPreset: { projectKey: string } | null;
+  /**
+   * A new-session form that runs on a paired machine (PRO-348): its "Where it
+   * runs" menu chose the machine, and the project there when one is chosen
+   * (`projectId` from `machine.projects`). Cleared by the same navigation that
+   * clears `cloudSessionPreset`, and by any local or cloud preset: choosing
+   * This Mac again leaves no machine state behind.
+   */
+  machineSessionPreset: { machineId: string; projectId: string | null } | null;
   /** The cloud project the reader last clicked (`cloud:<orgId>:<identity>`); any local project focus clears it. */
   selectedCloudProject: string | null;
   /** Pre-normalized command-palette documents, rebuilt only when source data changes. */
@@ -105,6 +114,7 @@ let state: State = {
   startFromRequest: 0,
   newSessionSectionId: null,
   cloudSessionPreset: null,
+  machineSessionPreset: null,
   selectedCloudProject: null,
   paletteIndex: buildPaletteIndex([], [], {}, []),
 };
@@ -126,8 +136,8 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
-  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch) next.newSessionChat = patch.newSessionChat ?? false;
-  if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset) next.newSessionSectionId = null;
+  if (next.view !== "new" || next.selectedSessionId || "newSessionPreset" in patch || "cloudSessionPreset" in patch || "machineSessionPreset" in patch) next.newSessionChat = patch.newSessionChat ?? false;
+  if (next.view !== "new" || next.selectedSessionId || patch.cloudSessionPreset || patch.machineSessionPreset) next.newSessionSectionId = null;
   // Opened from a session, the form remembers it; any other way out forgets it.
   // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
   if (next.view !== "new" || next.selectedSessionId) {
@@ -135,7 +145,9 @@ function set(patch: Partial<State>) {
     next.startFromRequest = 0;
   }
   // A cloud draft goes the same way, and gives way to any local one.
-  if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
+  if ((patch.view && patch.view !== "new") || patch.selectedSessionId || (("newSessionPreset" in patch || "machineSessionPreset" in patch) && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
+  // A machine draft too; a local or cloud one gives it up (PRO-348).
+  if ((patch.view && patch.view !== "new") || patch.selectedSessionId || (("newSessionPreset" in patch || "cloudSessionPreset" in patch) && !("machineSessionPreset" in patch))) next.machineSessionPreset = null;
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
   // Selecting a session or another view leaves the cloud workspace.
   if (!("selectedCloudWorkspace" in patch) && ("selectedSessionId" in patch || "view" in patch)) next.selectedCloudWorkspace = null;
@@ -356,7 +368,10 @@ export function openTarget(target: OpenTarget) {
 async function refreshProjects() {
   try {
     const projects = await api.listProjects();
-    set({ projects: projects.projects });
+    // A project removed outside this window (`terminalx projects remove`) is
+    // no longer the one New Session starts in: take the store's choice.
+    const gone = state.lastProject !== null && !projects.projects.some((project) => project.path === state.lastProject);
+    set(gone ? { projects: projects.projects, lastProject: projects.lastSelected ?? projects.projects[0]?.path ?? null } : { projects: projects.projects });
   } catch {
     /* keep what is listed; the next change tries again */
   }
@@ -424,6 +439,11 @@ export function selectCloudWorkspace(key: string | null) {
   set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "welcome", newSessionPreset: null, selectedAutomationId: null });
 }
 
+/** Open a workspace's view from elsewhere (a machine's card in Settings → Machines): selects it and leaves Settings. */
+export function openCloudWorkspace(key: string) {
+  set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "welcome", newSessionPreset: null, selectedAutomationId: null, navigationVersion: state.navigationVersion + 1 });
+}
+
 /** Open the new-session form for a cloud project, as the project row's `+` does. */
 export function startCloudSessionIn(projectKey: string) {
   // Every way into the cloud new-session form passes here. A member (or an
@@ -445,6 +465,27 @@ export function startCloudSessionIn(projectKey: string) {
   });
 }
 
+/**
+ * Run the new-session form on a paired machine (PRO-348), from its "Where it
+ * runs" menu, an issue or a handoff: the same form, with the project, branch
+ * and agents of that machine. `projectId` null lets the form choose.
+ */
+export function startMachineSessionIn(machineId: string, projectId: string | null) {
+  set({
+    newSessionReturn: returnHere(),
+    selectedSessionId: null,
+    view: "new",
+    machineSessionPreset: { machineId, projectId },
+    navigationVersion: state.navigationVersion + 1,
+    selectedAutomationId: null,
+  });
+}
+
+/** Back to This Mac in the new-session form: no machine or cloud draft is left (PRO-348). */
+export function runNewSessionHere() {
+  if (state.machineSessionPreset || state.cloudSessionPreset) set({ machineSessionPreset: null, cloudSessionPreset: null });
+}
+
 export function selectProjectInSidebar(path: string | null) {
   focusProject(path, { navigationVersion: state.navigationVersion + 1, ...(!state.selectedSessionId && state.view === "new" ? { newSessionPreset: null } : {}) });
 }
@@ -452,6 +493,12 @@ export function selectProjectInSidebar(path: string | null) {
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null, fromBranch?: string) {
   focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionSectionId: null, newSessionPreset: { projectPath, cwd, ...(fromBranch ? { fromBranch } : {}) }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+}
+
+/** New session in a project, opened on Start from a branch, issue or PR (the project menu's ⇧⌘N item). */
+export function startFromIn(projectPath: string) {
+  startSessionIn(projectPath, null);
+  set({ startFromRequest: state.startFromRequest + 1 });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -585,8 +632,9 @@ export async function removeWorkspace(projectPath: string, path: string, options
 }
 
 /** Reopen the retained tabs after the owner has restored their checkout. */
-export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null) {
-  const restored = await api.restoreWorkspace(sessionId, expected, newBranch);
+/** Restore a removed workspace: on its branch, a new branch (`newBranch`), or detached at its recorded commit. */
+export async function restoreWorkspace(sessionId: string, expected: WorkspaceRestorePreview, newBranch: string | null, detached = false) {
+  const restored = await api.restoreWorkspace(sessionId, expected, newBranch, detached);
   for (const session of restored) upsertSession(session);
   await refreshWorkspaces(expected.projectPath);
   selectSession(sessionId);
@@ -675,11 +723,11 @@ let reportedShown: string | null = null;
 
 /**
  * Tell the backend which local session this window shows, so the idle sweep leaves it in the list. Only a change of
- * local session is said: a cloud session (`cloud:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
+ * local session is said: a cloud or machine session (`cloud:…`, `machine:…`) is not the sweep's, and showing one asks nothing local (PRO-23).
  * Best effort: a window that cannot say is still covered by `runIdleArchive`'s `keep`.
  */
 function reportShownSession(id: string | null) {
-  const local = id && !id.startsWith("cloud:") ? id : null;
+  const local = id && isLocalKey(id) ? id : null;
   if (local === reportedShown) return;
   reportedShown = local;
   void Promise.resolve()
@@ -698,7 +746,7 @@ let idleArchiveStarted = false;
  * each session's tabs; this window adds the session it shows. What it archives reaches every window as an update.
  */
 export async function runIdleArchive(): Promise<string[]> {
-  const shown = state.selectedSessionId && !state.selectedSessionId.startsWith("cloud:") ? [state.selectedSessionId] : [];
+  const shown = state.selectedSessionId && isLocalKey(state.selectedSessionId) ? [state.selectedSessionId] : [];
   try {
     return await api.archiveIdleSessions(shown);
   } catch {
@@ -842,6 +890,15 @@ export async function forkSession(id: string, tabId: string) {
   upsertSession(s);
   selectSession(s.id);
   return s;
+}
+
+/** Fork at a turn (PRO-379) and open the fork; the result's `note` says what went differently, such as files left as they were. */
+export async function forkTurn(id: string, tabId: string, endSeq: number, into: "tab" | "session") {
+  const forked = await api.forkTurn(id, tabId, endSeq, into);
+  upsertSession(forked.session);
+  selectSession(forked.session.id);
+  setSelectedAgent(forked.session.id, forked.tabId);
+  return forked;
 }
 
 export async function addTab(sessionId: string, harness: string, model: string, effort: string | null, permissionMode: string) {

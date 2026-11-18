@@ -1,11 +1,12 @@
-import { useRef, useState } from "react";
-import { CheckCircle2, Check, Loader2, Monitor, X } from "@/icons";
+import { useLayoutEffect, useRef, useState } from "react";
+import { CheckCircle2, Check, LoaderCircle, Monitor, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { minutesSeconds } from "@/components/pairing/pairingText";
 import { cn } from "@/lib/cn";
 import { MACHINE_CODE_PREFIX, type MachineRoute, type PairedMachine } from "@/types/machines";
+import { AccountTab } from "./AccountTab";
 import { HeadlessServerTab } from "./HeadlessServerTab";
 import { FingerprintBox, PlatformIcon, machineSummary, sectionLabel, soft } from "./machineText";
 import { failureCopy, useMachinePairing, type MachinePairing } from "./useMachinePairing";
@@ -24,28 +25,31 @@ export function routeHint(route: MachineRoute, name: string): string {
     : `Reaches ${name} only on this network or through Tailscale. The connection is end-to-end encrypted.`;
 }
 
-/** Screen 21.04 (Pairing code) and 21.06 (Headless server); On your account comes with its own ticket. */
+/** Screens 21.03 (On your account), 21.04 (Pairing code) and 21.06 (Headless server). */
 export function AddMachineDialog({ open, onOpenChange, onPaired }: { open: boolean; onOpenChange: (open: boolean) => void; onPaired?: (machine: PairedMachine) => void }) {
   if (!open) return null;
   return <AddMachine onClose={() => onOpenChange(false)} onPaired={onPaired} />;
 }
 
-type AddTab = "pairingCode" | "headless";
+type AddTab = "account" | "pairingCode" | "headless";
 const TABS: { value: AddTab; label: string }[] = [
+  { value: "account", label: "On your account" },
   { value: "pairingCode", label: "Pairing code" },
   { value: "headless", label: "Headless server" },
 ];
 
 function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (machine: PairedMachine) => void }) {
-  const [tab, setTab] = useState<AddTab>("pairingCode");
+  const [tab, setTab] = useState<AddTab>("account");
   // Each tab keeps its own code; leaving a tab cancels a pairing it is waiting on.
+  const byAccount = useMachinePairing({ askOnRead: true, onPaired });
   const byCode = useMachinePairing({ askOnRead: true, onPaired });
   const headless = useMachinePairing({ askOnRead: false, onPaired });
-  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ pairingCode: null, headless: null });
+  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({ account: null, pairingCode: null, headless: null });
+  const pairingOf = (which: AddTab) => (which === "account" ? byAccount : which === "pairingCode" ? byCode : headless);
 
   const choose = (next: AddTab) => {
     if (next === tab) return;
-    (tab === "pairingCode" ? byCode : headless).cancel();
+    pairingOf(tab).cancel();
     setTab(next);
   };
   const onTabKey = (event: React.KeyboardEvent) => {
@@ -58,6 +62,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
   };
 
   const close = () => {
+    byAccount.cancel();
     byCode.cancel();
     headless.cancel();
     onClose();
@@ -65,7 +70,7 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
 
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width={tab === "headless" ? "max-w-[820px]" : "max-w-[720px]"} showClose={false} className="gap-0 p-0" data-testid="add-machine">
+      <DialogContent width={tab === "headless" ? "max-w-[820px]" : tab === "account" ? "max-w-[640px]" : "max-w-[720px]"} showClose={false} className="gap-0 p-0" data-testid="add-machine">
         <header className="flex h-14 items-center gap-2.5 border-b border-hairline px-5">
           <Monitor className="size-[17px] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 leading-4">
@@ -104,7 +109,13 @@ function AddMachine({ onClose, onPaired }: { onClose: () => void; onPaired?: (ma
           </div>
         </div>
         <div role="tabpanel" id={`add-machine-panel-${tab}`}>
-          {tab === "pairingCode" ? <PairingCodeTab pairing={byCode} onClose={close} onDone={onClose} /> : <HeadlessServerTab pairing={headless} onClose={close} onDone={onClose} />}
+          {tab === "account" ? (
+            <AccountTab pairing={byAccount} onClose={close} onDone={onClose} onUseCode={() => choose("pairingCode")} />
+          ) : tab === "pairingCode" ? (
+            <PairingCodeTab pairing={byCode} onClose={close} onDone={onClose} />
+          ) : (
+            <HeadlessServerTab pairing={headless} onClose={close} onDone={onClose} />
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -119,6 +130,19 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
   const failure = step.kind === "failed" ? failureCopy(step.reason, name) : null;
   // A code that was refused for good is spent: paste a new one. One that may work again stays.
   const codeLocked = waiting || step.kind === "inspecting" || step.kind === "paired";
+  // The field grows to show the whole code: a pasted one wraps past the three rows it starts with.
+  const codeField = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    const fit = () => {
+      const field = codeField.current;
+      if (!field) return;
+      field.style.height = "auto";
+      if (field.scrollHeight > 0) field.style.height = `${field.scrollHeight + field.offsetHeight - field.clientHeight}px`;
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [code]);
 
   return (
     <>
@@ -129,6 +153,7 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
               <p className={soft}>On the other computer, open Settings → Machines and choose Create pairing code.</p>
             </div>
             <textarea
+              ref={codeField}
               id="machine-code"
               value={code}
               readOnly={codeLocked}
@@ -139,8 +164,9 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
               aria-invalid={step.kind === "invalid" || (step.kind === "failed" && step.reason === "invalid-code") ? true : undefined}
               onChange={(event) => void changeCode(event.target.value)}
               className={cn(
-                "w-full resize-none break-all rounded-lg border border-hairline-strong bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring",
-                codeLocked && "text-muted-foreground",
+                "w-full resize-none overflow-hidden break-all rounded-lg border bg-well px-3 py-2 font-mono text-[12.5px] leading-[19px] outline-none placeholder:text-faint",
+                // Read-only while it waits: a plain hairline, and no focus ring on a field that takes no typing.
+                codeLocked ? "border-hairline text-muted-foreground" : "border-hairline-strong focus-visible:ring-2 focus-visible:ring-ring",
               )}
             />
             {step.kind === "invalid" && (
@@ -150,7 +176,7 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
               </div>
             )}
             {step.kind === "inspecting" && (
-              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden /> Reading the code…</div>
+              <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><LoaderCircle className="size-4 animate-spin" aria-hidden /> Reading the code…</div>
             )}
             {inspected && (
               <div className="flex items-center gap-3 rounded-lg border border-hairline px-3 py-2.5" data-testid="machine-card">
@@ -193,7 +219,7 @@ function PairingCodeTab({ pairing, onClose, onDone }: { pairing: MachinePairing;
                 )}
                 {waiting && (
                   <div className="flex items-center gap-2 text-[12.5px] text-info" role="status">
-                    <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
+                    <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
                   </div>
                 )}
                 {failure && (

@@ -186,6 +186,29 @@ other GitHub work. A first read can return agent status while the cache warms;
 read again to see the result. The existing tab `status` remains the agent's
 lifecycle state.
 
+### Adding and removing projects
+
+```text
+terminalx projects add <folder> --json
+terminalx projects remove <project> --json
+```
+
+`projects add` adds a local folder as a project, as the app's Add project does: the folder must
+exist and be a directory, a Git repository is added as one (`"kind": "git"`, else `"folder"`),
+and the sidebar lists it at once. A relative folder is resolved against the shell's working
+directory. The result is `{"project": {...}}` with the canonical `path`, which `sessions create
+--project` then accepts. The person's selected project is left as it is. Refusals:
+`not_found` (no such folder), `not_a_directory` (a file), `already_added` (it is a project
+already; nothing changed, use it as it is) and `invalid_project` (a local mirror of a cloud
+workspace, which is read-only). Create the folder or clone the repository first; add only a
+folder the person asked for or one you created for the task.
+
+`projects remove` takes the project's exact name or its path (part of a name is refused with
+`ambiguous_selector`) and does what the sidebar's Remove project does: the project's open
+conversations are archived (`"archivedSessions"` lists their ids; Show archived and `sessions
+unarchive` bring them back), the project leaves the list, and its folder on disk is not
+touched. Remove a project only when the person asked for it.
+
 ### Layered configuration
 
 ```text
@@ -241,6 +264,18 @@ an agent a person started by hand in one is left running. The result lists `stop
 with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the rest are still
 stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
 you are, or were asked to manage.
+
+### Pin sessions
+
+```text
+terminalx sessions pin <session> --json
+terminalx sessions unpin <session> --json
+```
+
+These set the sidebar pin on a local session, using its exact id or an unambiguous id prefix.
+The result contains `sessionId` and the resulting `pinned` boolean. Repeating either command
+is safe; an invalid or ambiguous selector changes nothing. The pin persists across restarts,
+and neither command starts or stops the session. `sessions show` reports the same state.
 
 ### Archive sessions
 
@@ -1392,7 +1427,10 @@ The project's main checkout and externally managed worktrees cannot be renamed h
 
 `worktrees list` gives each worktree's `sessionCount` and, except for the main checkout, its
 `sessions`: the ones deleting it would delete. Each has `id`, `title`, `project` (null for a
-quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`.
+quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`. If the checkout
+identity of an overlapping session cannot be verified, that worktree has `sessionCount: null`
+and a `sessionError` explaining why; its `sessions` is also null when present. Other worktrees
+remain listed with their verified counts. Removal still refuses uncertain session accounting.
 
 Deletion refuses a project's main checkout. It stops every tab running in the worktree and
 deletes every session whose folder is in it, whatever project it belongs to and archived or
@@ -1497,24 +1535,21 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
-Reading and creating issues need no confirmation. When the person asks to file an issue,
-`issues create --provider github|linear` validates and submits it using the configured provider
-credentials, then returns the created issue, including its identifier and URL. Creation needs
-no app dialog or desktop window, and does not wait for confirmation or its timeout. Provider
-failures are reported without automatically retrying creation; check the provider before
-retrying an uncertain result to avoid duplicates.
+GitHub and Linear issue operations require additional TerminalX approval only for
+issue deletion. Reading, creating, commenting, editing supported fields, assigning or
+unassigning, adding or removing labels, closing/reopening and workflow status transitions
+(including completed/canceled) execute directly using the configured provider credentials.
+They need no project setting or desktop window and never enter the confirmation queue,
+even while a deletion request is pending or after one expires. Authentication, repository/team
+access checks, validation and provider errors still apply. Failed writes are not automatically
+retried; check the provider before retrying an uncertain result to avoid duplicate issues or
+comments. The existing limit of 4000 characters or 40 lines for a comment, new issue title or
+description still applies; link to the details instead.
 
-Other issue writes show a pending request in the main window, whoever runs the command.
-The person chooses Review to see the reported session,
-project, target, action and complete text in a bounded, scrollable dialog. Background requests
-do not open the dialog or switch conversations. Only the explicit action button approves;
-Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
-40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
-`declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. The existing limit of 4000 characters or 40 lines for a comment,
-new issue title or description still applies; link to the details instead. A project can let comments and
-status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
-the project menu); assigning, labels and edits to existing Linear issues always ask.
+There is currently no issue-deletion command. Any future issue deletion must require an
+explicit human approval naming the provider and issue, regardless of agent permission mode.
+Refusal, timeout or an unavailable confirmation window must leave the issue intact.
+Closing an issue or moving it to a completed/canceled state is not deletion.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -1757,6 +1792,105 @@ own terminal), `stop` (the turn ended), `stopped` (nothing is running) or `timeo
 report the state from before the message. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
 deleting a workspace are done in the app.
 
+### Paired machines
+
+A machine is another computer running TerminalX that this computer paired with (Settings →
+Machines). The same verbs work on it with
+`--machine <machine>`, where `<machine>` is its name (any case) or its id from `machines list`.
+The CLI never connects to the machine itself: the app carries each command over the one
+connection it already holds to it, directly or through the relay.
+
+```text
+terminalx machines list --json
+terminalx machines status <machine> --json
+terminalx machines add --code <code> [--fingerprint <fingerprint>] [--this-network] --json
+terminalx machines remove <machine> --yes --json
+terminalx projects list --machine <machine> --json
+terminalx sessions list --machine <machine> [--project <project>] [--archived] --json
+terminalx sessions list --all-machines [--archived] --json
+terminalx sessions create --machine <machine> --project <project> --prompt <text> [--agent <agent>] \
+  [--model <model>] [--effort <effort>] [--mode <mode>] [--title <text>] [--name <worktree>] \
+  [--base <branch>] [--worktree|--on-main] [--idempotency-key <key>] --json
+terminalx sessions rename <machine-session> --title <text> --json
+terminalx sessions archive|unarchive <machine-session>... --json
+terminalx tabs list <machine-session> --json
+terminalx send <machine-session> <text> [--tab <tab>] [--idempotency-key <key>] --json
+terminalx read <machine-session> [--tab <tab>] [--since <seq>] [--tail <count>] --json
+terminalx wait <machine-session> [--tab <tab>] [--timeout <seconds>] --json
+terminalx permissions list --machine <machine> --json
+terminalx permissions allow <request> [--option <option>] --machine <machine> --json
+terminalx permissions deny <request> --machine <machine> --json
+terminalx worktrees list --machine <machine> [--project <project>] --json
+terminalx worktrees delete <worktree> --machine <machine> [--project <project>] --dry-run|--yes \
+  [--sessions <id,id>] [--force] --json
+```
+
+**Keys.** `sessions create` answers with the session's key, `machine:<machine>:<project>:<session>`.
+Every command that names a session takes that key without `--machine`: the key says which
+machine. A session id (or a unique start of it), or one of its agent tab ids, works with
+`--machine`. A project is named by its key from `projects list --machine`, its id, its name or
+its path on the machine. Never build a key by hand.
+
+**A typical lead on another machine:**
+
+```text
+terminalx sessions create --machine "Mac mini" --project api --prompt "Fix the flaky test" --json
+terminalx wait machine:<m>:<p>:<s> --timeout 1800 --json
+terminalx read machine:<m>:<p>:<s> --tail 20 --json
+terminalx send machine:<m>:<p>:<s> "Also add a regression test" --json
+```
+
+**What each command does there.**
+
+- `machines list` and `machines status` show each machine's name, version, operating system,
+  route setting and connection `state` (`direct`, `relay`, `connecting`, `reconnecting`,
+  `offline`, `needsUpdate`, `updating`, `accessRemoved`, `disconnected`, or `idle` when this
+  window holds no connection). `status` adds `problem`: the error any command would get now.
+- `machines add --code` pairs in two steps, as the Add a machine dialog does. Without
+  `--fingerprint` it contacts nothing and answers `fingerprint_confirmation_required`, with the
+  machine's name and the `fingerprint` in `details`. Show that fingerprint to the person. Then
+  run the same command with `--fingerprint <fingerprint>`: the machine asks its person to
+  Allow this computer, and they should allow it only if the machine shows the same
+  fingerprint. The command waits (up to two minutes) for Allow, then answers with the machine.
+  A fingerprint that does not match the code is `pairing_fingerprint_mismatch`. `--this-network`
+  never uses the relay. A code for a machine already paired answers `alreadyPaired: true` and
+  pairs nothing.
+- `machines remove --yes` forgets the machine here: its connection, record and credentials. Its
+  sessions keep running there; pairing again needs a new code from it.
+- `sessions list --machine` lists that machine's sessions; `--all-machines` lists this
+  computer's sessions (`machine: null`) and then every paired machine's (each with `machine`:
+  its id and name), and `machines` says how each machine stands. A machine that is away is
+  listed from what it last said, with `fresh: false`. Without either flag, `sessions list` is
+  this computer's only, exactly as before.
+- `sessions create` runs in a new worktree the machine cuts beside its project (`--base` names
+  the branch it starts from), or in the project itself with `--on-main`, and sends the first
+  prompt there. `startError` says when the session was made but its prompt did not start. Pass
+  the same `--idempotency-key` when retrying after a timeout: the machine answers with the
+  session it already made. An issue start (`--issue`) is not offered here: start it from the
+  issue page in the app (Start on …), or give its text as `--prompt`.
+- `send` reaches the agent live: typed now, or queued there behind the running turn. Nothing is
+  queued on this computer while the machine is away; the command is refused instead. Pass
+  `--idempotency-key` so a repeat after a timeout returns the first answer.
+- `read` replays the tab's transcript from the machine. `wait` follows it and returns the same
+  `reason`s as for a local tab. Neither starts anything.
+- `permissions allow` without `--option` chooses the request's Allow; `--option` takes one of
+  the ids `permissions list --machine` prints.
+- `worktrees list` and `worktrees delete` are Settings → Storage on the machine: each worktree
+  has a `verdict`, and the machine checks a removal again before it removes anything.
+  `--dry-run` shows the worktree, its verdict and `wouldRemove`, whatever the verdict; `--force`
+  removes one whose verdict is not `eligible`.
+  Renaming a machine's worktree is not offered.
+
+**Out of scope.** Orchestration runs stay on this computer: a run's workers cannot run on a
+machine, and a worker of a run may not pair a machine or start a session on one (`forbidden`).
+The built-in browser, computer use, the Local VM, `sessions report`, `sessions usage`,
+`sessions status` and the issue and pipeline commands work on this computer only.
+
+**What gates it.** Pairing: any agent in a local session can operate the machines the person
+paired, through these commands, with the full rights pairing gave this computer there. With
+none paired there is nothing to reach. Every machine command answers `machines_disabled` while
+data privacy mode is on.
+
 ### This guide
 
 ```text
@@ -1946,10 +2080,33 @@ JSON failures have this shape:
 - `unsupported`: this app does not know the command; see `cloud status`.
 - Other `cloud_…` codes are the service's own answers (for example
   `cloud_workspace_concurrency_exceeded`: the organization is at its running limit).
+- `machine_unknown`: no paired machine has that name or id; see `machines list`.
+- `machine_offline`: the machine is not connected (no route answers, or its link was just lost
+  and TerminalX is reconnecting). It is answered at once, never as a timeout, and nothing was
+  sent. Check `machines status`, then run the command again once it is connected.
+- `machine_needs_update`, `machine_updating`: one of the two computers must update first, or
+  the machine is updating now (back in under a minute).
+- `machine_unsupported`: the machine is connected, but its TerminalX version does not serve
+  this command. Update TerminalX there; do not retry.
+- `machine_access_removed`, `machine_disconnected`: the machine no longer lets this computer
+  in, or the person at it disconnected this computer. Ask the person; do not retry.
+- `machines_disabled`: data privacy mode is on, so this computer operates no machine. Tell the
+  person; do not retry.
+- `fingerprint_confirmation_required`: `machines add` sent nothing yet. Show `details.fingerprint`
+  to the person, then repeat the command with `--fingerprint`.
+- `pairing_fingerprint_mismatch`: the fingerprint passed is not this code's; nothing was sent.
+- `pairing_not_approved`, `pairing_code_inactive`, `pairing_another_computer`,
+  `pairing_pairing_paused`, `pairing_unreachable`, `pairing_invalid_code`: `machines add`
+  did not pair; `recovery` says what to do (`details.reason` is the reason).
+- `worktree_not_safe`, `worktree_not_removed`, `sessions_changed`: a machine's worktree was not
+  removed; the message says why.
+- `window_unavailable`: the app's window did not answer a machine command. Check the session
+  with `read` before repeating a `send`.
 - `internal`: report the message and stop rather than guessing at app state.
 
 All mutating commands act only through the running app. Version 1 exposes no arbitrary
 filesystem or git-write command; worktree deletion and browser profile deletion are the only
 destructive operations outside the browser page itself. Cloud commands use the app's signed-in
 account over this same local socket: there is no hosted endpoint, and the organization's
-cloud-provider key is never involved.
+cloud-provider key is never involved. Machine commands likewise go through the app's own
+connection to the machine; the CLI opens none.

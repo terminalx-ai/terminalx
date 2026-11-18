@@ -143,6 +143,8 @@ pub(crate) mod testing {
         /// How many calls are waiting inside the store right now.
         waiting: usize,
         fail_writes: bool,
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        fail_reads: bool,
     }
 
     type Check = Box<dyn Fn() + Send>;
@@ -162,6 +164,11 @@ pub(crate) mod testing {
         pub fn release(&self) {
             self.state.0.lock().unwrap().blocked = false;
             self.state.1.notify_all();
+        }
+
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        pub fn fail_reads(&self, fail: bool) {
+            self.state.0.lock().unwrap().fail_reads = fail;
         }
 
         pub fn fail_writes(&self, fail: bool) {
@@ -210,7 +217,12 @@ pub(crate) mod testing {
 
     impl SecretStore for MemorySecrets {
         fn get(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.enter(Call::Get, false).secrets.get(&(service.to_string(), account.to_string())).cloned())
+            let state = self.enter(Call::Get, false);
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if state.fail_reads {
+                anyhow::bail!("the store refused the read");
+            }
+            Ok(state.secrets.get(&(service.to_string(), account.to_string())).cloned())
         }
 
         fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {

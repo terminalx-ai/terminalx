@@ -11,6 +11,7 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { Toasts } from "@/components/ui/Toasts";
 import { CloseUndoNotices } from "@/components/ui/CloseUndoNotices";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { DeviceStatus } from "@/components/pairing/DeviceStatus";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { NewSessionView } from "@/components/session/NewSessionView";
@@ -26,6 +27,7 @@ import { bootFloating, hideFloatingWindow, saveFloatingSettings, setFloatingSess
 import { hasEscapeOverlay, inTerminal, useShortcut } from "@/lib/hotkeys";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
+import { bootPairing } from "@/lib/pairing";
 import { isQuickChat, quickChatsOf } from "@/lib/quickChats";
 import { bootSessions, openTarget, selectSession, useSessionStore } from "@/lib/sessions";
 import { subscribeTabPty } from "@/lib/tabViews";
@@ -71,6 +73,7 @@ export function FloatingShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    void bootPairing();
     void loadModels();
     startNotifications();
     void bootFloating((target) => setAsked(target));
@@ -103,7 +106,6 @@ export function FloatingShell() {
   // The first prompt of a new chat is sent once its session exists, as in the main window.
   const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
     // Files attached on the new-session screen are stored now that the session exists (PRO-290).
-    // It is in the chat at once, held, with the start progress, until the send returns (PRO-397).
     void sendHeldFirstMessage(sessionId, tabId, text, images, files)
       .catch((e) => console.error("first send failed", e));
   }, []);
@@ -182,6 +184,7 @@ export function FloatingShell() {
           </div>
         </main>
       )}
+      {visible && <DeviceStatus />}
     </div>
   );
 }

@@ -4,12 +4,10 @@
 //   - the row: model chip and permission chip at the left; context ring with its percentage, @ mention,
 //     paperclip, mic and Send at the right; no "More options" menu;
 //   - the open picker: Agent, Model and Effort rows, each opening a submenu beside it;
-//   - a model picked mid-chat: the amber card (nothing switched yet), then "Switching to … after this turn · Undo";
+//   - a model picked mid-chat: confirmation and Undo;
 //   - an agent that lists no models: the button keeps the session's model, the Model row says "None found"
 //     in red, and the "No models from Codex" card stands beside the Model row;
-//   - the new-session and issue picker (AgentMenu): the same Agent, Model and Effort rows, each opening its
-//     choices beside it, by pointer and by keyboard.
-// pnpm build && node scripts/webkit/composer-controls.mjs
+// node scripts/webkit/composer-controls.mjs
 // WEBKIT_LAYOUT_SCREENSHOTS=~/shots node scripts/webkit/composer-controls.mjs
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
@@ -22,14 +20,6 @@ import { createRoot } from 'react-dom/client';
 import '/src/styles/app.css';
 import { Composer } from '/src/components/chat/Composer.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
-import { AgentMenu } from '/src/components/session/AgentMenu.tsx';
-import { useSessionAgent } from '/src/lib/useSessionAgent.ts';
-const which = new URLSearchParams(location.search).get('case');
-const HARNESSES = [{ id: 'claude', name: 'Claude Code', available: true, installHint: '', caps: {} }, { id: 'codex', name: 'Codex', available: true, installHint: '', caps: {} }];
-function NewSession() {
-  const selection = useSessionAgent(HARNESSES);
-  return <div className="flex h-dvh items-center justify-center bg-background text-foreground"><AgentMenu selection={selection} /></div>;
-}
 const empty = new URLSearchParams(location.search).get('case') === 'empty';
 const tab = empty
   ? { id: 'tab-empty', harness: 'codex', model: 'gpt-6.1-sol', effort: 'high', permissionMode: 'manual', status: 'idle', created: '', modified: '' }
@@ -38,17 +28,18 @@ const noop = () => {};
 window.__models = [];
 function App() {
   const [draft, setDraft] = useState('');
+  const [shownTab, setShownTab] = useState(tab);
   return <TooltipProvider>
     <div className="flex h-dvh flex-col justify-end bg-background text-foreground">
-      <Composer tab={tab} busy={false} hasConversation={!empty} draft={draft} onDraftChange={setDraft}
+      <Composer tab={shownTab} busy={false} hasConversation={!empty} draft={draft} onDraftChange={setDraft}
         files={{ key: 'repo', search: async () => [] }}
         contextUsed={12000} contextMax={100000}
         agentHandoff={empty ? { id: 'claude', name: 'Claude Code', run: noop } : { id: 'codex', name: 'Codex', run: noop }}
-        onSend={noop} onStop={noop} onSetModel={(id) => window.__models.push(id)} onSetEffort={noop} onSetMode={noop}/>
+        onSend={noop} onStop={noop} onSetModel={(id) => { window.__models.push(id); setShownTab((current) => ({ ...current, requestedModel: id })); }} onSetEffort={noop} onSetMode={noop}/>
     </div>
   </TooltipProvider>;
 }
-createRoot(document.getElementById('root')).render(which === 'new' ? <NewSession/> : <App/>);
+createRoot(document.getElementById('root')).render(<App/>);
 `;
 
 const claude = (id, label, isDefault = false) => ({ id, label, harness: "claude", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high", acceptsImages: true, isDefault, upgrade: null, description: null });
@@ -104,7 +95,7 @@ try {
         + `window.__PW_STUB__.answers.list_models = ${JSON.stringify(models)};\n`
         + `document.addEventListener('DOMContentLoaded', () => { document.documentElement.setAttribute('data-theme', 'den'); document.documentElement.setAttribute('data-mode', ${JSON.stringify(scheme)}); });`);
       await page.goto(`http://127.0.0.1:${port}/controls-page?case=${which}`);
-      await page.locator(which === "new" ? '[data-testid="agent-menu"]' : "[data-composer-box]").waitFor();
+      await page.locator("[data-composer-box]").waitFor();
       await page.evaluate(() => document.fonts.ready);
       return { page, errors };
     };
@@ -181,15 +172,15 @@ try {
       });
       assert.equal(confirm.title, "Mid-chat model change", `${scheme}: card title`);
       assert.ok(confirm.text.includes("Switching to Sonnet 5.5 mid-chat rebuilds the prompt cache."), `${scheme}: card body`);
-      assert.deepEqual(confirm.buttons.map((b) => b.text), ["Cancel", "Switch after this turn"], `${scheme}: card buttons`);
+      assert.deepEqual(confirm.buttons.map((b) => b.text), ["Cancel", "Switch model"], `${scheme}: card buttons`);
       assert.ok(confirm.buttons.every((b) => b.inside && b.hit), `${scheme}: card buttons inside and clickable`);
       assert.ok(confirm.rect.bottom <= confirm.box.top + 0.5 && confirm.rect.left >= confirm.box.left - 0.5 && confirm.rect.right <= confirm.box.right + 0.5, `${scheme}: card sits above the composer, as wide as it`);
       assert.equal(confirm.color, await token(page, "--warning"), `${scheme}: amber card`);
       await shot(page, "confirm");
-      await card.getByRole("button", { name: "Switch after this turn" }).click();
+      await card.getByRole("button", { name: "Switch model" }).click();
       const notice = page.getByTestId("model-switch-notice");
       await notice.waitFor();
-      assert.equal(await notice.textContent(), "Switching to Sonnet 5.5 after this turn·Undo", `${scheme}: notice`);
+      assert.equal(await notice.textContent(), "Switch requested for Sonnet 5.5·Undo", `${scheme}: notice`);
       assert.deepEqual(await page.evaluate(() => window.__models), ["claude-sonnet-5-5"], `${scheme}: switched once agreed`);
       const noticeBox = await notice.boundingBox();
       assert.ok(noticeBox.y + noticeBox.height <= 900, `${scheme}: notice on screen`);
@@ -206,7 +197,7 @@ try {
       const { page, errors } = await open("empty");
       const button = page.getByTestId("model-picker");
       await button.waitFor();
-      assert.equal(await button.textContent(), "GPT-6.1 Sol", `${scheme}: the button keeps the session's model`);
+      assert.equal(await button.textContent(), "GPT-6.1 SolHigh", `${scheme}: the button keeps the session's model`);
       await button.click();
       const menu = page.getByRole("menu").first();
       await menu.waitFor();
@@ -236,63 +227,7 @@ try {
       await page.close();
     }
 
-    // ── The new-session picker: the same three rows, then Permissions.
-    {
-      const { page, errors } = await open("new");
-      const button = page.getByTestId("agent-menu");
-      await button.filter({ hasText: "Opus 5.5" }).waitFor();
-      await button.click();
-      const menu = page.getByRole("menu").first();
-      await menu.waitFor();
-      const settled = () => page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => {}))));
-      await settled();
-      const rows = await menu.evaluate((el) => [...el.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]')].map((item) => ({ text: item.textContent, rect: item.getBoundingClientRect().toJSON(), shown: item.checkVisibility() })));
-      assert.deepEqual(rows.map((r) => r.text), ["AgentClaude Code", "ModelOpus 5.5", "EffortHigh", "PermissionsAsk every time"], `${scheme}: new-session picker rows`);
-      const menuBox = await menu.boundingBox();
-      assert.ok(rows.every((r) => r.shown && r.rect.height >= 24 && r.rect.height <= 36 && r.rect.left >= menuBox.x && r.rect.right <= menuBox.x + menuBox.width + 0.5), `${scheme}: one line each, inside the menu ${JSON.stringify(rows)}`);
-      // Nothing of a closed row's choices is drawn.
-      assert.equal(await menu.getByRole("menuitemradio").evaluateAll((items) => items.filter((i) => i.checkVisibility()).length), 0, `${scheme}: efforts are not listed until their row opens`);
-      const beside = async (name, expected) => {
-        const list = page.getByRole("menu", { name });
-        await list.waitFor({ state: "visible" });
-        await settled();
-        const box = await list.boundingBox();
-        assert.ok(box.x >= menuBox.x + menuBox.width - 8 && box.x + box.width <= 1440 && box.y >= 0 && box.y + box.height <= 900, `${scheme}: ${name} choices open beside the menu ${JSON.stringify({ menuBox, box })}`);
-        const items = await list.locator('[role^="menuitem"]').evaluateAll((items) => items.map((item) => {
-          const r = item.getBoundingClientRect();
-          return { text: item.textContent, hit: item.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
-        }));
-        assert.deepEqual(items.map((i) => i.text), expected, `${scheme}: ${name} choices`);
-        assert.ok(items.every((i) => i.hit), `${scheme}: ${name} choices are drawn on top and clickable ${JSON.stringify(items)}`);
-        return list;
-      };
-      await page.getByRole("menuitem", { name: /^Agent/ }).hover();
-      await beside(/^Agent/, ["Claude Codecurrent", "Codex"]);
-      await page.getByRole("menuitem", { name: /^Effort/ }).hover();
-      const efforts = await beside(/^Effort/, ["Low", "Medium", "High", "Extra high", "Max"]);
-      assert.equal(await page.getByRole("menu", { name: /^Agent/ }).count(), 0, `${scheme}: one list at a time`);
-      await shot(page, "new-session");
-      await efforts.getByRole("menuitemradio", { name: "Max" }).click();
-      await menu.waitFor({ state: "detached" });
-      assert.equal(await page.getByTestId("agent-effort").textContent(), "Max", `${scheme}: the effort picked is the one on the button`);
-      // By keyboard: down to Effort, in with the right arrow, out with the left, away with Escape.
-      await button.focus();
-      await page.keyboard.press("Enter");
-      await menu.waitFor();
-      for (let i = 0; i < 4 && !(await page.evaluate(() => document.activeElement?.textContent?.startsWith("Effort"))); i++) await page.keyboard.press("ArrowDown");
-      assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: the arrows reach the Effort row`);
-      await page.keyboard.press("ArrowRight");
-      await page.getByRole("menu", { name: /^Effort/ }).waitFor({ state: "visible" });
-      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("role")), "menuitemradio", `${scheme}: the arrow key moves into the efforts`);
-      await page.keyboard.press("ArrowLeft");
-      await page.getByRole("menu", { name: /^Effort/ }).waitFor({ state: "hidden" });
-      assert.equal(await page.evaluate(() => document.activeElement?.textContent), "EffortMax", `${scheme}: and back to the Effort row`);
-      await page.keyboard.press("Escape");
-      await menu.waitFor({ state: "detached" });
-      assert.deepEqual(errors, [], `${scheme}: no page errors`);
-      await page.close();
-    }
-    console.log(`ok 1440px ${scheme}: composer row, picker rows and submenu, mid-chat confirm and Undo, no-models card, new-session picker rows`);
+    console.log(`ok 1440px ${scheme}: composer row, picker rows and submenu, mid-chat confirm and Undo, no-models card`);
   }
 } finally {
   await browser?.close();

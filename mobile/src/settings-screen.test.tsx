@@ -76,6 +76,22 @@ it("puts the machine's own options under its name, with one line on what they do
   expect(container.textContent).toContain("Native CodexExperimental. A more reliable chat for new Codex sessions.");
 });
 
+it("clears the previous machine settings while reconnecting and loads them again", async () => {
+  await show(<SettingsScreen />);
+  expect(container.querySelector("[aria-label='Native Codex']")).not.toBeNull();
+  mocks.app.connectionStage = "disconnected";
+  await show(<SettingsScreen />);
+  expect(container.textContent).toContain("Connect to this machine to change its settings.");
+  let resolve!: (value: { nativeCodex: boolean }) => void;
+  mocks.app.api.macSettings.mockImplementation(() => new Promise((done) => { resolve = done; }));
+  mocks.app.connectionStage = "connected";
+  await show(<SettingsScreen />);
+  expect(container.textContent).toContain("Reading this machine’s settings…");
+  expect(container.querySelector("[aria-label='Native Codex']")).toBeNull();
+  await act(async () => resolve({ nativeCodex: true }));
+  expect((container.querySelector("[aria-label='Native Codex']") as HTMLInputElement).checked).toBe(true);
+});
+
 it("shows each theme's page and accent colours, with a tick on the current one", async () => {
   await show(<SettingsScreen />);
   const { themePalette } = await vi.importActual<typeof import("@mobile/ui/theme")>("@mobile/ui/theme");

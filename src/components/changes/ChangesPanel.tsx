@@ -1,21 +1,22 @@
+import { noteChangesCount } from "@/lib/panelMarks";
 import { ReviewCommentsProvider, useReviewComments } from "./ReviewComments";
 import { DiscardDialog, DiscardButton } from "./DiscardDialog";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { openConflict, openDiff, useEditors } from "@/lib/editors";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { openConflict, openDiff, openFile, openReviewStack, useEditors } from "@/lib/editors";
 import { useTerminals } from "@/lib/terminal";
 import { changeRange, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
+import { ArrowLeft, CircleDot, GitCommitHorizontal, Layers, MessageSquare } from "@/icons";
 import type { AgentEvent } from "@/types/events";
 import type { BranchInfo, ChangedFile, UnfinishedMerge } from "@/types/session";
 import { FileDiff } from "./FileDiff";
-import { DiffOptions } from "./DiffOptions";
 import { useDiffOptions } from "@/lib/diffOptions";
-import { sumChanges } from "./FileList";
 import { ReviewFileList } from "./ReviewFileList";
-import { CommitPicker } from "./CommitPicker";
-import { checkpointChoices, commitRange, readChangesChoice, saveChangesChoice, type ChangesChoice, type ChangesScope } from "@/lib/changesScope";
+import { ScopePicker, TargetPicker } from "./ScopePicker";
+import { EmptyState } from "./EmptyState";
+import { checkpointChoices, commitRange, readChangesChoice, saveChangesChoice, type ChangesChoice } from "@/lib/changesScope";
 import { MergeInProgress } from "./MergeInProgress";
 import { RepoPanel } from "./RepoPanel";
 import { showCompareSwitchFailed } from "@/lib/branchToasts";
@@ -29,6 +30,8 @@ import { useSessionThreads } from "./ReviewThreads";
  */
 export function ChangesPanel(props: {
   reviewTabId?: string | null;
+  /** Supplied by the workspace host only when file access is available. */
+  openFileAction?: (path: string) => (() => void) | undefined;
   cwd?: string;
   sessionId?: string;
   source?: GitSource;
@@ -45,7 +48,8 @@ export function ChangesPanel(props: {
   return props.reviewTabId ? <ReviewCommentsProvider key={source.key} source={source} active={props.active} tabId={props.reviewTabId}>{panel}</ReviewCommentsProvider> : panel;
 }
 
-function ScopedChanges({ source, events, version, active, live, workingTree, editor, sessionId }: {
+function ScopedChanges({ openFileAction: hostOpenFileAction, source, events, version, active, live, workingTree, editor, sessionId }: {
+  openFileAction?: (path: string) => (() => void) | undefined;
   editor?: { root: string; sessionId: string };
   /** The session whose agent tab the merge card asks; none for a checkout without one. */
   sessionId?: string;
@@ -56,10 +60,10 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   live: boolean;
   workingTree?: boolean;
 }) {
+  const openFileAction = hostOpenFileAction ?? (editor ? (path: string) => () => openFile(editor.sessionId, editor.root, path) : undefined);
   const review = useReviewComments();
   // The session's PR and its threads are read here too: the PR panel need never have been opened (PRO-234).
   const threads = useSessionThreads(source, sessionId, active);
-  const targetId = useId();
   const { hideWhitespace } = useDiffOptions();
   const [choice, setChoice] = useState(() => readChangesChoice(source.key));
   const turnRange = useMemo(() => {
@@ -73,7 +77,8 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   const checkpoint = checkpoints.find((entry) => entry.id === choice.checkpoint);
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [branchError, setBranchError] = useState<string | null>(null);
-  const [draft, setDraft] = useState(choice.target ?? "");
+  const [targetOpen, setTargetOpen] = useState(false);
+  const [scopeOpen, setScopeOpen] = useState(false);
   const targetInput = useRef<HTMLInputElement>(null);
   const [switching, setSwitching] = useState(false);
   const [tick, setTick] = useState(0);
@@ -100,7 +105,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
     saveChangesChoice(source.key, next);
   };
   useEffect(() => {
-    if (!active || choice.scope !== "all") return;
+    if (!active) return;
     let cancelled = false;
     const read = async () => {
       try {
@@ -111,7 +116,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
     void read();
     window.addEventListener("focus", read);
     return () => { cancelled = true; window.removeEventListener("focus", read); };
-  }, [source, active, choice.scope]);
+  }, [source, active]);
   useEffect(() => {
     if (!active || loading || !reads || choice.scope === "commit" || choice.scope === "checkpoint") return;
     const id = window.setInterval(() => setTick((t) => t + 1), 4000);
@@ -168,7 +173,12 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
         const work = await source.reviewRange(null, true);
         return { range: { base: work.base, head: work.head }, files: await source.changesBetween(work.base, work.head, hideWhitespace) };
       })();
-      if (!cancelled) { setResult({ range, target, files, ...merge, mergeWork }); setError(null); }
+      if (!cancelled) {
+        setResult({ range, target, files, ...merge, mergeWork });
+        setError(null);
+        // The panel's tab row counts the branch's files (PRO-394): All changes against the default comparison is that.
+        if (choice.scope === "all" && !choice.target) noteChangesCount(source.key, files.length);
+      }
     };
     void read().catch((e) => {
       if (!cancelled) { setResult(null); setError(source.errorMessage(e)); }
@@ -177,8 +187,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   }, [source, choice.scope, choice.target, choice.commit, choice.checkpoint, checkpoint?.base, checkpoint?.head, choice.scope === "turn" ? turnRange?.base : null, choice.scope === "turn" ? turnRange?.head : null, active, tick, workingTree, live, reads, hideWhitespace]);
   // A comparison branch is tried before it is switched to (PRO-295): one that cannot be used leaves the comparison
   // where it was, and a toast says why, what it still compares against, and git's own words.
-  const applyTarget = async () => {
-    const target = draft.trim() || null;
+  const applyTarget = async (target: string | null) => {
     if (switching) return;
     if (!target || target === choice.target) {
       dismissErrorKey("compare-switch");
@@ -194,7 +203,7 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
         current: result?.target ?? choice.target ?? "the automatic base branch",
         error: source.errorMessage(e),
         branches,
-        onChooseAnother: () => { targetInput.current?.focus(); targetInput.current?.select(); },
+        onChooseAnother: () => setTargetOpen(true),
       });
       return;
     } finally {
@@ -206,16 +215,17 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   };
   // Turn, checkpoint and commit scopes are fixed snapshots; All and Uncommitted are live comparisons a tab can refresh.
   const fixed = choice.scope === "turn" || choice.scope === "checkpoint" || choice.scope === "commit";
-  const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openDiff(editor.sessionId, editor.root, file.path, fixed
-    ? { scope: "turn", range, oldPath: file.oldPath, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
-    : { scope: "all", range, oldPath: file.oldPath, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
+  // A file opens the scope's one review tab, which stacks every changed file (PRO-392); the panel stays as it is.
+  const onOpenDiff = editor ? (file: ChangedFile, range: ChangeRange) => openReviewStack(editor.sessionId, editor.root, file.path, fixed
+    ? { scope: "turn", range, turnLabel: choice.scope === "commit" && choice.commit ? `Commit ${choice.commit.slice(0, 7)}` : choice.scope === "checkpoint" ? "Turn" : undefined }
+    : { scope: "all", range, target: choice.target, uncommitted: choice.scope === "uncommitted" }) : undefined;
   // A Checks row whose file this list does not have yet: read All changes, then open the file (PRO-234).
   useEffect(() => onThreadJumpFallback(source.key, async (thread) => {
     const all = await source.reviewRange(choice.target, false);
     const file = threadFile(await source.changesBetween(all.base, all.head, hideWhitespace), thread);
     if (!file) return false;
     if (editor) {
-      openDiff(editor.sessionId, editor.root, file.path, { scope: "all", range: { base: all.base, head: all.head }, oldPath: file.oldPath, target: choice.target, uncommitted: false });
+      openReviewStack(editor.sessionId, editor.root, file.path, { scope: "all", range: { base: all.base, head: all.head }, target: choice.target, uncommitted: false });
       return true;
     }
     // Here the list itself shows the diff: it opens the file once All changes has loaded it.
@@ -225,55 +235,51 @@ function ScopedChanges({ source, events, version, active, live, workingTree, edi
   }), [source, choice, hideWhitespace, editor?.sessionId, editor?.root]);
   useEffect(() => { if (result) review?.refresh(); }, [result, review?.refresh]);
   const merge = result?.merge ?? null;
-  // While a merge is in progress, its card is the uncommitted view: conflicts, what was changed here, what it brought in.
-  const mergeOnly = !!merge && choice.scope === "uncommitted";
+  // While a merge is in progress, its card is the live views: conflicts, what was changed here, what it brought in.
+  // Nothing is listed under it: All changes would count what the merge brings in as the branch's own work.
+  const mergeOnly = !!merge && (choice.scope === "uncommitted" || choice.scope === "all");
   const openPath = useOpenConflictPath(editor);
   const onOpenConflict = editor && merge && source.conflictFile ? (path: string) => openConflict(editor.sessionId, editor.root, path, merge, merge.conflictCounts[path] ?? 0) : undefined;
   const onOpenMergeFile = editor && result?.mergeWork ? (file: ChangedFile) => openDiff(editor.sessionId, editor.root, file.path,
     { scope: "all", range: result.mergeWork!.range, oldPath: file.oldPath, target: null, uncommitted: true }) : undefined;
-  const label = choice.scope === "all" ? "All changes" : choice.scope === "uncommitted" ? "Uncommitted changes" : choice.scope === "commit" ? "Commit changes" : choice.scope === "checkpoint" ? "Turn changes" : live ? "This turn" : "Last turn";
+  const currentBranch = branches.find((branch) => branch.current)?.name ?? null;
+  const comparedWith = (choice.scope === "all" && result?.target) || choice.target;
+  const showTurn = !workingTree && (live || !checkpoints.length);
+  const back = () => choose({ ...choice, scope: "all" });
+  const backButton = <Button size="sm" variant="outline" className="border" onClick={back}><ArrowLeft /> Back to all changes</Button>;
+  const commitSubject = choice.scope === "commit" && result?.target ? result.target.split(" · ").slice(1).join(" · ") : "";
+  const emptyState = choice.scope === "all"
+    ? <EmptyState icon={<Layers />} title="No file changes yet">This branch has no changes against <span className="font-mono">{result?.target ?? "its base branch"}</span>.</EmptyState>
+    : choice.scope === "uncommitted"
+      ? <EmptyState icon={<CircleDot />} title="No uncommitted changes" actions={backButton}>Everything in this workspace is committed.</EmptyState>
+      : choice.scope === "commit"
+        ? <EmptyState icon={<GitCommitHorizontal />} title={`No file changes in ${choice.commit?.slice(0, 7) ?? "this commit"}`}
+          actions={<>{backButton}<Button size="sm" variant="outline" className="border" onClick={() => setScopeOpen(true)}><GitCommitHorizontal /> Pick another commit</Button></>}>
+          {commitSubject && <p className="font-mono text-muted-foreground">{commitSubject}</p>}
+          <p>{/^Merge /.test(commitSubject) ? "A merge with no conflicts adds no changes of its own." : "This commit doesn't change any files."}</p>
+        </EmptyState>
+        : <EmptyState icon={<MessageSquare />} title="No changes in the selected turn" actions={backButton}>The agent didn't change any files in this turn.</EmptyState>;
+  const unavailable = loading ? null : choice.scope === "commit" && !choice.commit
+    ? <EmptyState icon={<GitCommitHorizontal />} title="Choose a commit" actions={<Button size="sm" variant="outline" className="border" onClick={() => setScopeOpen(true)}><GitCommitHorizontal /> Pick a commit</Button>}>Choose a commit to review its changes.</EmptyState>
+    : <EmptyState role="note" icon={choice.scope === "turn" || choice.scope === "checkpoint" ? <MessageSquare /> : <Layers />} title="Changes unavailable" actions={choice.scope !== "all" ? backButton : undefined}><p role="alert">{error ?? "Changes unavailable."}</p></EmptyState>;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-2 border-b border-hairline px-3 py-2 text-xs">
-        <label className="flex items-center gap-2">Scope
-          <select aria-label="Changes scope" className="min-w-0 flex-1 rounded bg-well p-1" value={choice.scope === "checkpoint" ? `checkpoint:${choice.checkpoint ?? ""}` : choice.scope} onChange={(e) => {
-            const value = e.target.value;
-            choose(value.startsWith("checkpoint:") ? { ...choice, scope: "checkpoint", checkpoint: value.slice(11) } : { ...choice, scope: value as ChangesScope });
-          }}>
-            <option value="all">All changes</option>
-            <option value="uncommitted">Uncommitted changes</option>
-            <option value="turn">Latest turn</option>
-            {choice.scope === "checkpoint" && !checkpoint && <option value={`checkpoint:${choice.checkpoint ?? ""}`} disabled>Unavailable turn checkpoint</option>}
-            {checkpoints.map((entry) => <option key={entry.id} value={`checkpoint:${entry.id}`}>{entry.label}</option>)}
-            <option value="commit">Single commit</option>
-            <option value="history">History</option>
-          </select>
-        </label>
-        {choice.scope !== "all" && <Button size="xs" variant="ghost" onClick={() => choose({ ...choice, scope: "all" })}>Back to all changes</Button>}
-        {choice.scope === "commit" && <CommitPicker source={source} active={active} value={choice.commit} onChange={(commit) => choose({ ...choice, commit })} />}
-        {choice.scope === "all" && <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); void applyTarget(); }}>
-          <label htmlFor={targetId}>Target</label>
-          <input ref={targetInput} id={targetId} list={`${targetId}-branches`} aria-label="Comparison target" className="min-w-0 flex-1 rounded bg-well p-1 font-mono" value={draft} placeholder={result?.target ?? "Automatic base branch"} onChange={(e) => setDraft(e.target.value)} />
-          <datalist id={`${targetId}-branches`}>{branches.map((branch) => <option key={branch.name} value={branch.name}>{branch.current ? "Current branch" : branch.remote ? "Remote branch" : "Local branch"}</option>)}</datalist>
-          <Button type="submit" variant="secondary" size="sm" disabled={switching} aria-busy={switching || undefined}>Apply</Button>
-        </form>}
-        {choice.scope === "all" && branchError && <p className="text-muted-foreground">Branch suggestions unavailable: {branchError}</p>}
-        {!repo && <p className="break-words text-muted-foreground">{result
-          ? choice.scope === "all" ? `Against ${result.target} · merge-base tree ${result.range.base.slice(0, 7)}`
-            : choice.scope === "uncommitted" ? `Against HEAD · tree ${result.range.base.slice(0, 7)}` : result.target
-          : choice.scope === "all" ? `Target: ${choice.target ?? "automatic base branch"}` : choice.scope === "uncommitted" ? "Against HEAD" : choice.scope === "commit" ? "Changes introduced by one commit" : "Turn snapshots"}</p>}
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline px-3 py-2">
+        <ScopePicker source={source} choice={choice} onChoose={choose} checkpoints={checkpoints} showTurn={showTurn} live={live} open={scopeOpen} onOpenChange={setScopeOpen}
+          currentBranch={currentBranch} target={comparedWith} onPickTarget={() => setTargetOpen(true)} hideWhitespace={hideWhitespace} />
+        {choice.scope === "all" && <TargetPicker open={targetOpen} onOpenChange={setTargetOpen} label={(comparedWith ?? "base").replace(/^origin\//, "")} value={choice.target}
+          branches={branches} busy={switching} onApply={(target) => void applyTarget(target)} inputRef={targetInput} />}
       </div>
-      <DiffOptions />
+      {choice.scope === "all" && branchError && targetOpen && <p className="px-3 pt-1 text-xs text-muted-foreground">Branch suggestions unavailable: {branchError}</p>}
       {merge && <div className={cn("overflow-y-auto pb-2 scrollbar-thin", mergeOnly ? "min-h-0 flex-1" : "max-h-[55%] shrink-0 border-b border-hairline")}>
-        <MergeInProgress source={source} merge={merge} files={result?.mergeWork?.files ?? []} allChanges={choice.scope === "all"} sessionId={sessionId}
+        <MergeInProgress source={source} merge={merge} files={result?.mergeWork?.files ?? []} sessionId={sessionId}
           onChanged={() => setTick((t) => t + 1)} onOpenConflict={onOpenConflict} onOpenFile={onOpenMergeFile} openPath={openPath} />
       </div>}
       {result?.mergeError && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">Whether a merge is in progress could not be read: {result.mergeError}</div>}
       {!mergeOnly && <div className="min-h-0 flex-1">
-        {repo ? <RepoPanel onOpenDiff={onOpenDiff} source={source} active={active} revision={tick} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} onReviewCommit={(commit) => choose({ ...choice, scope: "commit", commit })} embedded /> : <ChangesBody onOpenDiff={onOpenDiff} key={`${choice.scope}:${choice.target}:${choice.commit}:${choice.checkpoint}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
+        {repo ? <RepoPanel openFileAction={openFileAction} onOpenDiff={onOpenDiff} source={source} active={active} revision={tick} view={repo} onViewChange={(view) => choose({ ...choice, scope: view })} onReviewCommit={(commit) => choose({ ...choice, scope: "commit", commit })} embedded /> : <ChangesBody openFileAction={openFileAction} onOpenDiff={onOpenDiff} key={`${choice.scope}:${choice.target}:${choice.commit}:${choice.checkpoint}`} source={source} files={result?.files ?? []} loading={loading} error={error} range={result?.range ?? null}
           allowDiscard={choice.scope !== "commit" && choice.scope !== "checkpoint"}
-          label={label} empty={loading ? "Loading changes…" : error ? "Changes unavailable." : "No changes in this scope."}
-          noRange={loading ? "Loading changes…" : choice.scope === "commit" && !choice.commit ? "Choose a commit to review its changes." : "Changes unavailable."} onChanged={() => setTick((t) => t + 1)} />}
+          empty={emptyState} unavailable={unavailable} onChanged={() => setTick((t) => t + 1)} />}
       </div>}
       {threads?.snapshot && <ReviewThreadsFooter view={threads} />}
     </div>
@@ -305,27 +311,29 @@ function useOpenConflictPath(editor: { root: string; sessionId: string } | undef
 }
 
 function ChangesBody({
+  openFileAction,
   source,
   files,
   loading,
   error,
   range,
-  label,
   empty,
-  noRange,
+  unavailable,
   onOpenDiff,
   onChanged,
   allowDiscard,
 }: {
+  openFileAction?: (path: string) => (() => void) | undefined;
   onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   source: GitSource;
   files: ChangedFile[];
   loading: boolean;
   error: string | null;
   range: ChangeRange | null;
-  label: string;
-  empty: string;
-  noRange: string;
+  /** Drawn in place of the list when the scope has no files. */
+  empty: React.ReactNode;
+  /** Drawn when there is no range to list (loading, failed, nothing chosen); null while loading. */
+  unavailable: React.ReactNode;
   onChanged: () => void;
   allowDiscard: boolean;
 }) {
@@ -353,28 +361,20 @@ function ChangesBody({
     setPendingThreadJump(source.key, null);
     if (onOpenDiff) onOpenDiff(file, range); else setSelected(file.path);
   }, [source.key, files, range]);
-  const totals = sumChanges(files);
   const discardAction = allowDiscard && source.discard && source.canWrite ? (file: ChangedFile) => <DiscardButton path={file.path} onClick={() => setDiscarding(file)} /> : undefined;
 
-  if (!range) return <div role={error ? "alert" : "status"} className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">{error ?? noRange}</div>;
+  if (!range) return unavailable ?? <div role="status" className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">Loading changes…</div>;
+  if (!files.length && !error) return loading ? <div role="status" className="animate-panel-content px-3 py-4 text-xs text-muted-foreground">Loading changes…</div> : empty;
 
   return (
     <div className="animate-panel-content flex h-full min-h-0 flex-col">
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-        <span>{label} · {files.length} {files.length === 1 ? "file" : "files"}</span>
-        <span className="font-mono tabular-nums">
-          {totals.additions > 0 && <span className="text-add">+{totals.additions}</span>}{" "}
-          {totals.deletions > 0 && <span className="text-destructive">−{totals.deletions}</span>}
-        </span>
-        {loading && <span className="text-faint">…</span>}
-      </div>
       <DiscardDialog source={source} file={discarding} base={range.base} onClose={() => setDiscarding(null)} onDiscarded={() => { setSelected(null); onChanged(); }} />
       {error && <div className="mx-3 mb-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       <div className={cn("shrink-0 overflow-y-auto scrollbar-thin", current ? "max-h-[40%] border-b border-hairline" : "flex-1")}>
-        <ReviewFileList workspace={source.key} base={range.base} files={files} selected={selected} onSelect={select} empty={empty} trailing={discardAction} />
+        <ReviewFileList workspace={source.key} base={range.base} files={files} selected={selected} onSelect={select} empty="No changes in this scope." trailing={discardAction} loading={loading} />
       </div>
       {current && <div className="min-h-0 flex-1">
-        <FileDiff source={source} path={current.path} oldPath={current.oldPath} base={range.base} head={range.head} onDiscard={discardAction ? () => setDiscarding(current) : undefined} />
+        <FileDiff onOpenFile={current.status !== "deleted" ? openFileAction?.(current.path) : undefined} source={source} path={current.path} oldPath={current.oldPath} base={range.base} head={range.head} stats={current} onDiscard={discardAction ? () => setDiscarding(current) : undefined} />
       </div>}
     </div>
   );

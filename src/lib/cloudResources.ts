@@ -2,9 +2,9 @@
 // connection a session already holds (PRO-33). Nothing here connects or
 // wakes: a workspace that is not connected is simply not sampled, and what
 // was last read of it is dropped rather than shown as current.
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { runtimeResources, type RuntimeResources } from "@terminalx/portable/workspaceGit";
-import { connectedCloudClient, subscribeCloudConnections } from "@/lib/cloudConnections";
+import { cloudConnectionInfo, connectedCloudClient, subscribeCloudConnections } from "@/lib/cloudConnections";
 
 export type { RuntimeResources };
 
@@ -236,4 +236,55 @@ export function useCloudResources(workspaceKey: string | null, turn = false): Cl
 export const sampleCloudResources = sample;
 export function setCloudResourcesReader(reader: typeof runtimeResources | null) {
   read = reader ?? runtimeResources;
+}
+
+/** Details telemetry is separate from agent low-memory streaks. Mount only while the card is open. */
+export function useWorkspaceDetailsResources(key: string | null): RuntimeResources | null {
+  const [sampled, setSampled] = useState<{ key: string; resources: RuntimeResources } | null>(null);
+  useEffect(() => {
+    if (!key) { setSampled(null); return; }
+    let live = true;
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    const clear = () => { clearTimeout(expiry); setSampled(null); };
+    let request = 0;
+    let client = connectedCloudClient(key);
+    let generation = cloudConnectionInfo(key).connects;
+    let reading = false;
+    const sample = async () => {
+      if (reading) return;
+      if (!client) { clear(); return; }
+      const asked = client;
+      const epoch = ++request;
+      reading = true;
+      try {
+        const resources = await runtimeResources(asked);
+        if (!live || request !== epoch || connectedCloudClient(key) !== asked) return;
+        const age = resources ? Date.now() - resources.observedAt : Infinity;
+        clearTimeout(expiry);
+        if (!resources || resources.v !== 1 || !Number.isFinite(age) || age < 0 || age > 20_000) return clear();
+        setSampled({ key, resources });
+        // Expiry must run independently of sampling: the next RPC may stall.
+        expiry = setTimeout(() => { if (live) setSampled(null); }, 20_001 - age);
+      } catch {
+        if (live && request === epoch) clear();
+      } finally {
+        if (request === epoch) reading = false;
+      }
+    };
+    const stop = subscribeCloudConnections(() => {
+      const next = connectedCloudClient(key);
+      const nextGeneration = cloudConnectionInfo(key).connects;
+      if (client === next && generation === nextGeneration) return;
+      ++request;
+      reading = false;
+      client = next;
+      generation = nextGeneration;
+      clear();
+      void sample();
+    });
+    void sample();
+    const timer = setInterval(() => void sample(), TURN_SAMPLE_MS);
+    return () => { live = false; ++request; stop(); clearInterval(timer); clearTimeout(expiry); };
+  }, [key]);
+  return sampled?.key === key ? sampled.resources : null;
 }

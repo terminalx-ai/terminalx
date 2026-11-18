@@ -23,7 +23,7 @@ export function ModelSwitchConfirm({ model, onCancel, onConfirm }: { model: stri
         <div className="mt-2 flex flex-wrap justify-end gap-1.5">
           <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
           <Button variant="secondary" size="sm" className="bg-warning/20 text-warning hover:bg-warning/30" onClick={onConfirm} autoFocus>
-            Switch after this turn
+            Switch model
           </Button>
         </div>
       </div>
@@ -35,7 +35,7 @@ export function ModelSwitchConfirm({ model, onCancel, onConfirm }: { model: stri
 export function ModelSwitchNotice({ model, onUndo }: { model: string; onUndo: () => void }) {
   return (
     <div className="mt-1.5 flex items-center gap-1 px-2 text-[11px] text-muted-foreground" role="status" data-testid="model-switch-notice">
-      <span className="min-w-0 truncate">Switching to {model} after this turn</span>
+      <span className="min-w-0 truncate">Switch requested for {model}</span>
       <span aria-hidden className="text-faint">·</span>
       <button type="button" className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline" onClick={onUndo}>
         Undo

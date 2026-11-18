@@ -99,6 +99,32 @@ jobs:
       # scripts/webkit/run-all.mjs runs them several at once, permission-details among them.
       - name: WebKit layout checks
         run: pnpm test:webkit-layout
+        # The machine checks among them also keep their pictures (PRO-360).
+        env:
+          MACHINE_SIDEBAR_SHOTS: scripts/webkit/output/machines-screens/machine-sidebar
+          MACHINE_SESSION_SHOTS: scripts/webkit/output/machines-screens/machine-session
+          MACHINE_PORTS_SHOTS: scripts/webkit/output/machines-screens/machine-ports
+      # Every other 21.xx screen, from the built app, for review beside the
+      # designs (PRO-360): pairing (21.04 to 21.06), connection states (21.09),
+      # the machine page and adding a project (21.10, 21.11) and updates. These
+      # A failure in these scripts fails the job, like the other required steps.
+      - name: Shoot the other machine screens
+        timeout-minutes: 8
+        run: |
+          status=0
+          for name in machines-pairing machine-connection machine-page machine-update; do
+            mkdir -p "scripts/webkit/output/machines-screens/$name"
+            MACHINES_SHOTS="scripts/webkit/output/machines-screens/$name" node "scripts/webkit/$name.mjs" || status=1
+          done
+          exit $status
+      # The machine screens the WebKit fixture shoots against two machines
+      # (PRO-358, scripts/webkit/machines-screens.mjs), and the ones above, kept for review.
+      - name: Upload the machine screens
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: machine-screens
+          path: scripts/webkit/output/machines-screens
+          if-no-files-found: error
 
   linux-rust:
     runs-on: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -350,6 +376,149 @@ jobs:
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
+        run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/debug/terminalx-serve
+
+  # PRO-354: this build against the previous two released runtimes, both
+  # ways (docs/MACHINES.md "Versions and updates"). The released runtimes
+  # ship only inside the macOS app, so this runs on macOS. The test build is
+  # the headless runtime's (no desktop features), which macos-native does
+  # not build, so the job keeps its own cache.
+  machine-compat:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # As headless-serve: the binary and the tests share one library build.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Show the Rust toolchain
+        run: rustup show && cargo --version
+      - name: Restore the cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ci-v3-machine-compat-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ci-v3-machine-compat-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-machine-compat-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+      # The two newest v* releases before this build's version, each
+      # archive checked against its SHA256SUMS before the runtime comes out.
+      - name: Fetch and verify the previous two released runtimes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/machine-compat/fetch_releases.py --out "$RUNNER_TEMP/machine-compat"
+      - name: Build the compatibility matrix
+        working-directory: src-tauri/serve
+        run: cargo test --locked --test machine_compat --no-run
+      - name: This build against the previous two runtimes
+        working-directory: src-tauri/serve
+        env:
+          TERMINALX_MACHINE_COMPAT: ${{ runner.temp }}/machine-compat/manifest.json
+        run: cargo test --locked --test machine_compat -- --test-threads=1
+      - name: Save the cargo cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # PRO-358: two machines end to end. The desktop's own pairing client and
+  # machine supervisor against two runtimes in their own processes, "Mac
+  # mini" on this runner and "dev-server" in a Linux container, beside the
+  # operating computer's own runtime (tests/machines_e2e.rs, built and run by
+  # scripts/machine-e2e/run.py), and the machine routes through a relay in
+  # the test (tests/machine_routes.rs). `check` fails on a skipped job, so this
+  # always runs and decides in a step: every push, schedule and dispatch, and
+  # a pull request that touches the machines (scripts/machine-e2e/relevant.py).
+  # A pull request gets ten minutes; main gets more, so a cold cache can be
+  # built and saved there for pull requests to restore. Previous-release
+  # compatibility is machine-compat (PRO-354), not this.
+  # .github/workflows/machines-e2e-breaks.yml proves a deliberate break in
+  # the pairing check or the project scoping fails these scenarios.
+  machines-e2e:
+    runs-on: ubuntu-latest
+    # The ten-minute budget is checked at the end, for a run with a warm
+    # cache; a cold one (the first after a Cargo.lock change) gets room to
+    # build and save one.
+    timeout-minutes: 25
+    env:
+      # As headless-serve: the binary and the tests share one library build.
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      # The dev-server container must run here: its absence fails the tests.
+      TERMINALX_E2E_REQUIRE_LINUX: "1"
+    steps:
+      - name: Note when the job started
+        run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # The merge commit and its base, for relevant.py's fallback.
+          fetch-depth: 2
+      - name: Does this change touch the machines?
+        id: relevant
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/machine-e2e/relevant.py
+      - name: Restore the cargo cache
+        if: steps.relevant.outputs.run == 'true'
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ci-v3-machines-e2e-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            ci-v3-machines-e2e-${{ env.CI_CACHE_SCOPE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ci-v3-machines-e2e-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+      - name: Two machines end to end (machines_e2e, machine_routes), timed
+        if: steps.relevant.outputs.run == 'true'
+        run: python3 -I scripts/machine-e2e/run.py tests machines_e2e machine_routes
+      - name: The job's run time, against its ten minutes
+        if: always() && steps.relevant.outputs.run == 'true'
+        env:
+          WARM: ${{ steps.cargo-cache.outputs.cache-matched-key != '' }}
+        run: |
+          seconds=$(( $(date +%s) - JOB_STARTED ))
+          line="machines-e2e took $((seconds / 60)) min $((seconds % 60)) s (cache: $([ "$WARM" = true ] && echo warm || echo cold))"
+          echo "$line"
+          echo "**$line**; the budget is 10 min with a warm cache." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$WARM" = true ] && [ "$seconds" -gt 600 ]; then
+            echo "::error::machines-e2e took over ten minutes with a warm cache"
+            exit 1
+          fi
+      # Saved from main, schedule and dispatch runs only: uploading the
+      # target directory would eat a pull request's ten minutes.
+      - name: Save the cargo cache
+        if: steps.relevant.outputs.run == 'true' && github.event_name != 'pull_request' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   desktop-platforms:
     strategy:
@@ -437,7 +606,7 @@ jobs:
   check:
     # Keep the exact required status and fail closed on failed/cancelled/skipped jobs.
     if: always()
-    needs: [frontend, webkit-layout, linux-rust, macos-rust-changes, macos-native, headless-serve, desktop-platforms, legacy-runtime-probe]
+    needs: [frontend, webkit-layout, linux-rust, macos-rust-changes, macos-native, headless-serve, machine-compat, machines-e2e, desktop-platforms, legacy-runtime-probe]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

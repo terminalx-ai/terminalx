@@ -11,11 +11,27 @@
   answers.cloud_catalog_load = { version: 1, createMemory: {}, orgs: {} };
   answers.session_share_status = () => share;
   answers.session_join_pending = f.localSharing === "guest" ? "https://terminalx.ai/join#fixture" : null;
-  answers.session_share_create = ({ settings: next }) => {
-    share = { ...share, active: true, links: [{ id: "link", settings: next, url: "https://terminalx.ai/join#secret-fixture", directOnly: true, revoked: false }] };
+  let hostSession = "";
+  answers.session_share_create = ({ sessionId, settings: next }) => {
+    hostSession = sessionId;
+    share = { ...share, active: true, links: [{ id: "link", settings: next, url: "https://terminalx.ai/join#secret-fixture", directOnly: true, revoked: false, credentialExpiresAt: Date.now() + 24 * 3600000 }] };
     return share;
   };
-  answers.session_share_change = ({ action }) => { if (action === "stop") share = { ...share, active: false, links: [] }; return share; };
+  answers.session_share_change = ({ action, params }) => {
+    if (action === "stop") share = { ...share, active: false, links: [] };
+    if (action === "edit") share = { ...share, links: share.links.map((link) => (link.id === params.linkId ? { ...link, settings: params.settings } : link)) };
+    return share;
+  };
+  // PRO-390: a host with one person waiting and one let in, as the People list shows them.
+  window.__PW_SHARE_HOST_PEOPLE__ = () => {
+    const entry = (userId, displayName, admitted, connections) => ({
+      person: { userId, displayName, email: userId + "@example.com", emailVerified: true },
+      role: "viewer", canApprove: false, admitted, connections, viewing: [], typing: false, linkIds: ["link"], pendingLinkIds: admitted ? [] : ["link"],
+    });
+    share = { ...share, people: [entry("aisha", "Aisha Khan", false, 1), entry("sam", "Sam Rivera", true, 2)] };
+    emit("session_share_changed", { sessionId: hostSession, state: share });
+    return share;
+  };
   answers.session_guest_join = () => {
     share = { ...share, active: true, people: [{ person, role: "driver", admitted: true, connections: 1, typing: false, viewing: ["tab"], linkIds: ["link"] }] };
     return { sessionId: "invited-session", connectionId: "connection", admitted: true };

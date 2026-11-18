@@ -73,7 +73,7 @@ try {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra, colorScheme });
     const errors = [];
     page.on("pageerror", (error) => errors.push(String(error)));
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await page.getByTestId("workspace-panes").waitFor();
     const host = page.getByTestId("workspace-panes");
     const bounds = await host.boundingBox();
@@ -108,7 +108,7 @@ try {
 
     // A browser restart re-reads the backend's persisted layout and active tabs.
     await page.reload();
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await page.getByTestId("workspace-panes").waitFor();
     await panel(page, "a2").waitFor({ state: "visible" });
     await panel(page, "b1").waitFor({ state: "visible" });
@@ -146,7 +146,7 @@ try {
     assert(Number(ratio) > 50);
     if (shots) await page.screenshot({ path: join(shots, `${colorScheme}-terminals.png`) });
     await page.reload();
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await separator.waitFor();
     assert.equal(await separator.getAttribute("aria-valuenow"), ratio);
     await page.locator('[id="session-terminal-panel-s-a%3Aone"][aria-hidden="false"]').waitFor({ state: "visible" });

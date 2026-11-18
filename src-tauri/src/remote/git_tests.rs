@@ -198,7 +198,7 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
     let files: Vec<(&str, &str)> = changes["files"].as_array().unwrap().iter().map(|file| (file["path"].as_str().unwrap(), file["status"].as_str().unwrap())).collect();
     assert_eq!(files, [("README.md", "modified"), ("new.txt", "added")]);
     let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "README.md", "base": head })).unwrap();
-    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n" }));
+    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n", "beforeSize": 6, "afterSize": 12 }));
 
     // A commit's changes, by the trees `git.log` reports.
     f.call("git.commit", json!({ "repo": "app", "message": "second", "author": me() })).unwrap();
@@ -422,6 +422,26 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     f.fault("auth-expired");
     assert_eq!(f.code("git.prs", json!({ "repo": "app" })), "auth_failed");
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
+}
+
+#[test]
+fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let head = "a".repeat(40);
+    let pr = json!({
+        "number": 8, "title": "Pinned", "url": "https://github.test/octo/repo/pull/8",
+        "state": "OPEN", "headRefName": "feature/p", "baseRefName": "main", "headRefOid": head,
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": []
+    });
+    std::fs::write(f.state.join("pr-8.json"), pr.to_string()).unwrap();
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"not a sha"})), "invalid_params");
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"b".repeat(40)})), "conflict");
+    assert_eq!(f.call("git.prs", json!({"repo":"app","number":8})).unwrap()["prs"][0]["state"], "OPEN");
+    let merged = f.call("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":head})).unwrap();
+    assert_eq!(merged["pr"]["state"], "MERGED");
+    assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")));
 }
 
 #[test]
@@ -707,4 +727,50 @@ fn cloud_approval_is_refused_before_running_gh_even_with_a_personal_viewer_claim
         assert!(error.message.contains("personal account"));
     }
     assert!(f.gh_calls().is_empty(), "approval must never use the App token");
+}
+
+#[test]
+fn log_limits_commits_to_the_selected_base_branch() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    for i in 0..3 {
+        git(&repo, &["commit", "--allow-empty", "-m", &format!("main {i}")]);
+    }
+    git(&repo, &["checkout", "-b", "feature"]);
+    let range = json!({ "repo": "app", "from": "main..HEAD", "limit": 8 });
+    assert_eq!(f.call("git.log", range.clone()).unwrap()["commits"], json!([]));
+    git(&repo, &["commit", "--allow-empty", "-m", "branch change"]);
+    let log = f.call("git.log", range).unwrap();
+    assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(log["commits"][0]["subject"], "branch change");
+    for from in ["--all..HEAD", "main...HEAD", "main~1..HEAD", "main..HEAD~1"] {
+        assert_eq!(f.code("git.log", json!({ "repo": "app", "from": from })), "invalid_params");
+    }
+}
+
+#[test]
+fn oversized_file_contents_keep_actual_revision_byte_sizes() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    // Beyond both the desktop and relay preview limits; count bytes, not characters.
+    let text = "é".repeat(3 * 1024 * 1024);
+    std::fs::write(repo.join("large.txt"), &text).unwrap();
+    f.call("git.commit", json!({ "repo": "app", "message": "large", "author": me() })).unwrap();
+    let log = f.call("git.log", json!({ "repo": "app", "limit": 1 })).unwrap();
+    let tree = &log["commits"][0]["tree"];
+    let working = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(working["after"], "<file too large to show>");
+    assert_eq!(working["afterSize"], text.len());
+    std::fs::write(repo.join("large.txt"), "small").unwrap();
+    let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(pair["before"], "<file too large to show>");
+    assert_eq!(pair["beforeSize"], text.len());
+    assert_eq!(pair["afterSize"], 5);
+    let snapshot = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree, "head": tree })).unwrap();
+    assert_eq!(snapshot["afterSize"], text.len());
+    std::fs::remove_file(repo.join("large.txt")).unwrap();
+    let deleted = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert!(deleted["afterSize"].is_null());
 }

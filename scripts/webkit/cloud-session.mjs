@@ -61,7 +61,7 @@ const measure = (page) =>
       header: box(document.querySelector("main header")),
       sidebar: box(document.querySelector('[data-testid="sidebar-rail"]')),
       composer: box(document.querySelector("main textarea[placeholder]")?.closest("form, div")),
-      banner: box(document.querySelector('[aria-label="Session recovery"]')),
+      banner: box(document.querySelector('[data-ask-card]')),
       notes: box(document.querySelector('[aria-label="Note for teammates"]')),
       scroller: scroller ? { ...box(scroller), fromBottom: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight), overflows: scroller.scrollHeight > scroller.clientHeight } : null,
       scrolledAncestors,
@@ -121,7 +121,7 @@ for (const role of ["manager", "viewer"]) {
 
   // ---- repro A: a permission request appears above the composer
   await page.evaluate(() => window.__PW_RUNTIME__.ask());
-  await page.locator('[aria-label="Session recovery"]').waitFor();
+  await page.locator('[data-ask-card]').waitFor();
   await page.waitForTimeout(300);
   layout = await measure(page);
   failed += report(
@@ -277,7 +277,7 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
     await page.getByLabel("Note for teammates").waitFor();
     await page.evaluate(() => window.__PW_RUNTIME__.prompt("ask:rm -rf /tmp/build-cache"));
     await page.evaluate(() => window.__PW_RUNTIME__.ask());
-    await page.locator('[aria-label="Session recovery"]').waitFor();
+    await page.locator('[data-ask-card]').waitFor();
     await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "Stop" }).waitFor();
     await page.waitForTimeout(300);
     measured = await toolbarLayout(page);
@@ -397,7 +397,7 @@ for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
     await tab(page, label).click();
     const panel = page.locator('[role="tabpanel"]:not([aria-hidden="true"])');
     await panel.getByText("chunk 30 of 30", { exact: true }).waitFor();
-    await panel.locator('[aria-label="Session recovery"]').waitFor();
+    await panel.locator('[data-ask-card]').waitFor();
     await page.waitForTimeout(300);
     const layout = await page.evaluate(() => {
       const shown = document.querySelector('[role="tabpanel"]:not([aria-hidden="true"])');
@@ -414,7 +414,7 @@ for (const viewport of [{ width: 1000, height: 520 }, VIEWPORT]) {
         rootTop: document.getElementById("root").scrollTop,
         shell: box(document.querySelector("[data-app-shell]")),
         header: box(document.querySelector("main header")),
-        banner: box(shown.querySelector('[aria-label="Session recovery"]')),
+        banner: box(shown.querySelector('[data-ask-card]')),
         composer: box(shown.querySelector("textarea[placeholder]")),
         scroller: scroller ? { ...box(scroller), fromBottom: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight), overflows: scroller.scrollHeight > scroller.clientHeight } : null,
         scrolledAncestors,

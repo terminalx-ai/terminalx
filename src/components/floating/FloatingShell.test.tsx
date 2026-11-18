@@ -157,7 +157,14 @@ describe("the floating chat window", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Prompt")));
 
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
-    await waitFor(() => expect(called("send_message")).toEqual([{ sessionId: "chat-new", tabId: "tab-new", text: "hello", images: null, confirmDelivery: false }]));
+    await waitFor(() => expect(called("send_message")).toEqual([{
+      sessionId: "chat-new",
+      tabId: "tab-new",
+      text: "hello",
+      images: null,
+      confirmDelivery: false,
+      promptRequestId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+    }]));
   });
 
   it("shows a session in compact chrome with its tabs in a strip, and remembers it for the next time the window opens", async () => {

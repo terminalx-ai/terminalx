@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
-  COMPUTE_PROVIDERS,
   IDLE_CAP_OPTIONS,
   alertMessage,
   checkLimits,
@@ -14,7 +13,6 @@ import {
   formatMicros,
   organizationCompute,
   parseAllowList,
-  providerLabel,
   usageText,
   type ComputePolicy,
   type ComputePolicyView,
@@ -23,7 +21,8 @@ import {
   type LimitField,
   type LimitsText,
 } from "@/lib/organizationCompute";
-import { machine0Offered } from "@/lib/hiddenProviders";
+import { api } from "@/lib/api";
+import { cloudProviderDescriptor, cloudProviderIsPlatform, cloudProviderLabel as providerLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 
 const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 
@@ -43,8 +42,8 @@ const draftFrom = (policy: ComputePolicy): LimitsDraft => ({
   createsPerHour: limitText(policy.maxCreatesPerMemberPerHour),
   createsPerDay: limitText(policy.maxCreatesPerMemberPerDay),
   maxIdleSuspendMinutes: policy.maxIdleSuspendMinutes === null ? "" : String(policy.maxIdleSuspendMinutes),
-  machineClasses: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedMachineClasses[provider] ?? []).join(", ")])),
-  locations: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedLocations[provider] ?? []).join(", ")])),
+  machineClasses: Object.fromEntries(Object.entries(policy.allowedMachineClasses).map(([provider, ids]) => [provider, ids.join(", ")])),
+  locations: Object.fromEntries(Object.entries(policy.allowedLocations).map(([provider, ids]) => [provider, ids.join(", ")])),
 });
 
 const NO_LIMIT = "No limit";
@@ -52,9 +51,9 @@ const NO_LIMIT = "No limit";
 /** What an empty field means, for its placeholder: the limit that applies anyway, or none. */
 const blankMeans = (limit: number | null) => (limit === null ? NO_LIMIT : `${limit} (default)`);
 
-// Providers this build does not edit keep whatever the server holds for them.
+// Providers the form did not edit keep whatever the server holds for them.
 const allowLists = (texts: Record<string, string>, stored: Record<string, string[]>): Record<string, string[]> => ({
-  ...Object.fromEntries(Object.entries(stored).filter(([provider]) => !(COMPUTE_PROVIDERS as readonly string[]).includes(provider))),
+  ...Object.fromEntries(Object.entries(stored).filter(([provider]) => !(provider in texts))),
   ...Object.fromEntries(
     Object.entries(texts).flatMap(([provider, text]) => {
       const ids = parseAllowList(text);
@@ -63,10 +62,16 @@ const allowLists = (texts: Record<string, string>, stored: Record<string, string
   ),
 });
 
-// A hidden provider (Machine0, see hiddenProviders) gets no row unless the
-// policy already limits it, so an admin can still see and clear those limits.
-const shownProviders = (policy: ComputePolicy) =>
-  COMPUTE_PROVIDERS.filter((provider) => provider !== "machine0" || machine0Offered() || Boolean(policy.allowedMachineClasses[provider]?.length || policy.allowedLocations[provider]?.length));
+// Every provider the server describes, in its descriptors' order (PRO-415),
+// and any the policy already limits. A hidden provider (see hiddenProviders)
+// gets no row unless the policy already limits it, so an admin can still see
+// and clear those limits.
+const shownProviders = (policy: ComputePolicy, described: ReturnType<typeof useCloudProviderDescriptors>): string[] => {
+  const limited = (provider: string) => Boolean(policy.allowedMachineClasses[provider]?.length || policy.allowedLocations[provider]?.length);
+  const ordered = [...described.values()].sort((left, right) => left.order - right.order).filter((item) => item.listed || limited(item.id)).map((item) => item.id);
+  const others = [...new Set([...Object.keys(policy.allowedMachineClasses), ...Object.keys(policy.allowedLocations)])].filter((provider) => limited(provider) && !ordered.includes(provider));
+  return [...ordered, ...others];
+};
 
 const formatTime = (timestamp: number | null | undefined) => (timestamp ? new Date(timestamp).toLocaleString() : "never");
 
@@ -86,6 +91,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
 
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
+  const described = useCloudProviderDescriptors();
 
   const loadUsage = useCallback(async (fresh: () => boolean) => {
     try {
@@ -128,6 +134,10 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     setBusy(null);
     setError(null);
     void load();
+    // The provider rows come from the server's descriptors: read them, so a
+    // provider the server gained has its row. A failure keeps the ones the
+    // app already knows.
+    api.cloudProviders().catch(() => undefined);
     return () => {
       contextEpoch.current += 1;
     };
@@ -210,6 +220,8 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     setDraft(next);
     setDirty(true);
   };
+  // The providers TerminalX itself provides (PRO-452): no account of the organization's, so the billing note says so.
+  const platformProviders = [...described.values()].filter((item) => item.listed && cloudProviderIsPlatform(item)).sort((left, right) => left.order - right.order);
 
   const saveLimits = () =>
     void mutate("limits", (current) =>
@@ -258,6 +270,12 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         Cloud workspaces run on the provider account this organization connected. That provider bills the account directly for compute and storage,
         separately from agent usage and from any TerminalX plan. These limits stop new workspaces from starting; they are not a spending cap. Provider
         billing can arrive late, and stopped disks, archives and snapshots keep charging until they are deleted.
+        {platformProviders.map((item) => (
+          <span key={item.id} data-testid="compute-platform-billing">
+            {" "}
+            {item.label} is provided by TerminalX, with no provider account to connect{item.billing ? `: ${item.billing}` : ""}.
+          </span>
+        ))}
       </p>
 
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" aria-label="Compute status">
@@ -411,14 +429,14 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
               </p>
             ))}
             <div className="text-[11px] text-muted-foreground">Allowed sizes and regions (comma-separated IDs; blank allows any)</div>
-            {shownProviders(view.policy).map((provider) => (
+            {shownProviders(view.policy, described).map((provider) => (
               <div key={provider} className="grid grid-cols-[5rem_1fr_1fr] items-center gap-2">
                 <span className="text-[11px]">{providerLabel(provider)}</span>
                 <input
                   aria-label={`Allowed sizes for ${providerLabel(provider)}`}
                   placeholder="Any size"
                   className={inputClass}
-                  value={draft.machineClasses[provider]}
+                  value={draft.machineClasses[provider] ?? ""}
                   disabled={Boolean(busy)}
                   onChange={(event) => change({ ...draft, machineClasses: { ...draft.machineClasses, [provider]: event.target.value } })}
                 />
@@ -426,7 +444,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   aria-label={`Allowed regions for ${providerLabel(provider)}`}
                   placeholder="Any region"
                   className={inputClass}
-                  value={draft.locations[provider]}
+                  value={draft.locations[provider] ?? ""}
                   disabled={Boolean(busy)}
                   onChange={(event) => change({ ...draft, locations: { ...draft.locations, [provider]: event.target.value } })}
                 />
@@ -519,7 +537,12 @@ function ProviderUsage({ usage }: { usage: ComputeProviderUsage }) {
         <dt className="text-muted-foreground">Provider billing</dt>
         <dd>
           {reported.status === "unavailable" || reported.totalMicros === undefined ? (
-            <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            cloudProviderIsPlatform(usage.provider) ? (
+              // TerminalX provides it (PRO-452): there is no provider console or invoice of the organization's own.
+              <span className="text-faint">{cloudProviderDescriptor(usage.provider)?.billing || "Provided by TerminalX"}. There is no provider invoice for it.</span>
+            ) : (
+              <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            )
           ) : (
             <>
               {formatMicros(reported.totalMicros, reported.currency ?? usage.currency)}{" "}

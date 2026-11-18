@@ -116,6 +116,8 @@ try {
         "rows are one line inside the dialog": rowsFit,
         "no match quotes the query and says what was searched": emptyText.includes("No files match “zqx”") && emptyText.includes("File names and paths in raccoon/project-scripts were searched. Gitignored files are skipped."),
         "both actions, side by side": sideBySide,
+        // PRO-401: under the title bar, as the design draws it.
+        "the dialog opens under the title bar": Math.round(top) === 44,
         "the dialog stays put when nothing matches": pinned,
         "no match footer: edit the query and the count": emptyFooter.includes("edit the query") && emptyFooter.includes("412 files in this worktree"),
         "including ignored files finds them": withIgnored.includes("Gitignored files included · 414 files in this worktree"),

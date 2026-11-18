@@ -256,6 +256,42 @@ terminalx-saas relay code.
 A local runtime given `--relay-link` and no `--project-root` serves every project it
 knows over that one connection (`machine/1`, PRO-340; [MACHINES.md](MACHINES.md#machine1)).
 
+## Testing
+
+The serve integration tests (`src-tauri/serve/tests/`) drive the real
+`terminalx-serve` binary with fake-Claude (`scripts/remote-runtime/fake-claude`) on
+`PATH` and throwaway data directories (`tests/common/agent.rs`). CI's `headless-serve`
+job builds the binary without GUI crates and runs the runtime's own checks; three jobs
+test it as a machine:
+
+- **`machines-e2e`** (PRO-358): two machines end to end. `tests/common/world.rs` starts
+  this Mac's runtime (hosting off), "Mac mini" (a second runtime on the runner, approved
+  in its window over the runtime IPC) and "dev-server" (this binary in an ubuntu:24.04
+  container, paired with `terminalx-serve pair` in a terminal on it), and
+  `tests/machines_e2e.rs` operates both with the desktop's own pairing client and
+  `MachineSupervisor`: sessions and the fake agent, approvals, interrupts, a shell with
+  resize and replay after a reconnect, a file written and committed and found with git on
+  that machine's disk, the refusals that guard the pairing check and the project scoping,
+  and revocation. `tests/machine_routes.rs` runs the relay route with a relay in the test.
+  Locally, on Linux with Docker:
+
+  ```sh
+  python3 -I scripts/machine-e2e/run.py tests machines_e2e machine_routes
+  ```
+
+  It builds the image (`scripts/machine-e2e/Dockerfile`), the binary and the tests,
+  sets `TERMINALX_E2E_LINUX_IMAGE`, and times each test. On a Mac,
+  `cargo test --test machines_e2e` runs the Mac mini scenarios and leaves the dev-server
+  out with a message; `TERMINALX_E2E_REQUIRE_LINUX=1` (set in CI) makes that a failure.
+  `.github/workflows/machines-e2e-breaks.yml` applies each patch in
+  `scripts/machine-e2e/breaks/` (a pairing check and the project scoping, removed on
+  purpose) and fails unless the scenarios then fail on the assertion named in its
+  `.expect` file. [MACHINES.md](MACHINES.md#as-built-pro-358-two-machines-end-to-end-in-ci)
+  has the details.
+- **`machine-compat`** (PRO-354): this build against the previous two released runtimes,
+  both ways (`tests/machine_compat.rs`).
+- **`headless-serve`** also runs `machine_host` (PRO-341) and `headless_pair` (PRO-353).
+
 ## Testing on Linux
 
 `scripts/remote-runtime/e2e-linux.sh` builds `terminalx-serve` in a `rust:1-bookworm`
@@ -315,3 +351,17 @@ resend), `session.update`, a session's terminal (`pty.create` with `sessionId`) 
   finds the data directory as the runtime does: `--data-dir`, `TERMINALX_HOME`, then
   `~/.terminalx/data`. Installing the service does not turn hosting on; `pair` does, with
   consent in that terminal ([MACHINES.md](MACHINES.md), decision 9).
+- **Update** (`src/serve_cli/update.rs`, PRO-354). `update` and the helper a machine's
+  runtime starts for `machine.update` (`update --apply <version> --status <file>
+  [--stop <blocker id>]...`, in a session of its own) run one pipeline: download and check
+  as the installer does into `versions/<version>` (`current` stays); a trial on a scratch
+  data directory under `<data>/run/` (or `/tmp` when its sockets would not fit), ready
+  within 60 s as that version, else removed; the in-place handover
+  (`serve_cli::handover::begin`, stopping only the agreed blockers); ready within 90 s as
+  that version, then `current` moves; otherwise `current` stays and
+  `service::restart_for` (`systemctl --user restart`, `launchctl kickstart -k`) runs the old
+  version again, the record written first because the restart may end the helper; and
+  `prune`: `current`, the two versions below it and the running one in `versions/`, and
+  only their digests (and the running executable's) in `<data>/runtime/`. Each step is
+  written to `<data>/run/machine-update.json` (`remote/machine_update.rs`, `Record`), which
+  the runtime turns into `machine.updateChanged`.

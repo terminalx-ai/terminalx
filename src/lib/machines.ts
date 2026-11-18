@@ -3,6 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { api, errorMessage, invoke } from "@/lib/api";
 import type {
   InspectedMachineCode,
+  MachineAccountDirectory,
+  MachineAccountOffer,
+  MachineActivityEntry,
   MachineConnectionView,
   MachineHostView,
   MachinePairingCode,
@@ -23,6 +26,12 @@ export const machinesApi = {
   approve: (requestId: string) => invoke<unknown>("machines_approve", { requestId }),
   decline: (requestId: string) => invoke<unknown>("machines_decline", { requestId }),
   revoke: (id: string) => invoke<unknown>("machines_revoke", { id }),
+  /** Close a computer's connections and refuse it until it is let back (PRO-357). */
+  disconnect: (id: string) => invoke<unknown>("machines_disconnect", { id }),
+  /** Let a disconnected computer connect again. Like Allow, only a person may. */
+  letBack: (id: string) => invoke<unknown>("machines_let_back", { id }),
+  /** What operating computers did on this Mac: the last 200 entries, newest first. */
+  activity: () => invoke<MachineActivityEntry[]>("machines_activity"),
   inspectCode: (code: string) => invoke<InspectedMachineCode>("machines_inspect_code", { code }),
   pair: (code: string, route: MachineRoute) => invoke<MachinePairResult>("machines_pair", { code, route }),
   cancelPairing: () => invoke<unknown>("machines_cancel_pairing"),
@@ -32,6 +41,16 @@ export const machinesApi = {
   connections: () => invoke<MachineConnectionView[]>("machines_connections"),
   /** "Try again": nudge the machine's owner; after access removed or needs update it tries once more. */
   reconnect: (machineId: string) => invoke<unknown>("machines_reconnect", { machineId }),
+  /** Forget a paired machine: its connection, record and credentials. Its sessions stay on it. */
+  remove: (machineId: string) => invoke<boolean>("machines_remove", { machineId }),
+  /** The account's computers (PRO-349). */
+  accountList: () => invoke<MachineAccountDirectory>("machines_account_list"),
+  /** Ask a computer on the account for a one-time grant; its offer comes back as a code. */
+  accountRequest: (hostId: string) => invoke<MachineAccountOffer>("machines_account_request", { hostId }),
+  /** Stop waiting for a grant. */
+  accountCancel: () => invoke<unknown>("machines_account_cancel"),
+  /** After pairing with an account offer: consume the grant when paired, revoke it when not. */
+  accountFinish: (grantRequestId: string, paired: boolean) => invoke<unknown>("machines_account_finish", { grantRequestId, paired }),
 };
 
 interface MachineHostState {
@@ -132,6 +151,16 @@ export function declineMachine(requestId: string): Promise<boolean> {
 /** End a computer's credential and close its connection. */
 export function revokeComputer(id: string): Promise<boolean> {
   return command(() => machinesApi.revoke(id));
+}
+
+/** Close a computer's connections; it may not reconnect until it is let back. */
+export function disconnectComputer(id: string): Promise<boolean> {
+  return command(() => machinesApi.disconnect(id));
+}
+
+/** Let a disconnected computer connect again. */
+export function letComputerBack(id: string): Promise<boolean> {
+  return command(() => machinesApi.letBack(id));
 }
 
 /**

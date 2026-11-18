@@ -251,6 +251,9 @@ pub(crate) struct Entry {
     /// Project id → the account its new tabs use (#980). Local only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) project_defaults: BTreeMap<String, String>,
+    /// Switching accounts automatically (#981). Off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_switch: Option<crate::agent_accounts::auto_switch::Setting>,
     /// What a newer build wrote here: kept as it is.
     #[serde(flatten)]
     pub(crate) rest: Map<String, Value>,

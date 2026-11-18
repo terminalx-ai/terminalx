@@ -283,12 +283,14 @@ pub(crate) struct WindowControl {
     pairing: Option<Arc<crate::pairing::PairingManager>>,
     computer: Arc<crate::computer::ComputerService>,
     browser: std::sync::Arc<crate::browser::BrowserRuntime>,
+    /// Paired machines, for `machine.*` (PRO-356).
+    machines: Option<Arc<crate::machines::connect::MachineConnections>>,
 }
 
 #[cfg(feature = "desktop")]
 impl WindowControl {
     pub(crate) fn new(sink: Arc<dyn EventSink>, computer: Arc<crate::computer::ComputerService>, browser: Arc<crate::browser::BrowserRuntime>) -> Self {
-        Self { sink, computer, browser, pairing: None, questions: None }
+        Self { sink, computer, browser, pairing: None, questions: None, machines: None }
     }
 
     #[cfg(unix)]
@@ -296,6 +298,7 @@ impl WindowControl {
         use tauri::Manager;
         self.pairing = Some(pairing);
         self.questions = Some(ask);
+        self.machines = app.try_state::<Arc<crate::machines::connect::MachineConnections>>().map(|state| state.inner().clone());
         crate::hooks::serve_private(endpoint, |_| crate::hooks::HookReply::refused("Agent hooks belong to the background owner."), move |request| {
             let result = (|| {
                 let runtime = app.state::<crate::AppState>().runtime().ok_or_else(|| ControlError::new("desktop_unavailable","The desktop has no runtime attachment.",None::<String>))?;
@@ -338,6 +341,13 @@ impl WindowControl {
             return crate::store::environment::desktop_snapshot(key, revision)
                 .and_then(|snapshot| Ok(serde_json::to_value(snapshot)?)).map_err(|_| ControlError::internal("Environment overrides are unavailable."));
         }
+        // The runtime's relay session needs a current access token (PRO-368).
+        // The window rotates the session and keeps the runtime's copy itself.
+        if command == "account.refresh" {
+            let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("The account is unavailable."))?;
+            pairing.refresh_account_for_runtime();
+            return Ok(json!({ "refreshed": true }));
+        }
         if command == "agentKey.snapshot" {
             let harness = params["harness"].as_str().ok_or_else(|| ControlError::invalid("Agent required."))?;
             let revision = params["revision"].as_str().ok_or_else(|| ControlError::invalid("Key revision required."))?;
@@ -362,6 +372,12 @@ impl WindowControl {
             return self.computer.call(method, params, request_id).map_err(computer_error);
         }
         if command.starts_with("browser.") { return crate::browser::control::handle(&self.browser, command, params); }
+        // Paired machines (PRO-356): resolved and checked here, run over the
+        // machine's connection in the window.
+        if let Some(action) = command.strip_prefix("machine.") {
+            let machines = self.machines.as_ref().ok_or_else(|| ControlError::new("unsupported", "This TerminalX has no paired machines.", None::<String>))?;
+            return crate::machine_control::execute(machines, self.sink.as_ref(), action, params);
+        }
         if let Some(action) = command.strip_prefix("cloud.") {
             if action != "status" && !crate::cloud_control::enabled() { return Err(crate::cloud_control::disabled_error()); }
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
@@ -492,6 +508,10 @@ impl ControlService {
             let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
             return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
         }
+        // A run's worker stays within its limits on other machines too.
+        if let Some(action) = command.strip_prefix("machine.") {
+            refuse_limited_machine_caller(action, &params)?;
+        }
         #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
@@ -520,6 +540,16 @@ impl ControlService {
                         Some(host) => host.execute(command, params),
                         None => Err(ControlError::new("unsupported", "This runtime does not host operating computers.", None::<String>)),
                     };
+                }
+                // The window's report of the app's own updater run, for a
+                // computer that asked this machine to update (PRO-354). Only
+                // the attached window reports.
+                if command == "runtime.machineUpdate.report" {
+                    let epoch = params["epoch"].as_str().unwrap_or_default();
+                    let lease = params["lease"].as_str().unwrap_or_default();
+                    lifetime.attachment(epoch, lease).map_err(|_| ControlError::new("unavailable", "The desktop attachment is no longer current.", None::<String>))?;
+                    let data = crate::store::root().map_err(ControlError::internal)?;
+                    return crate::remote::machine_update::report(&data, &params).map_err(|error| ControlError::invalid(format!("{error:#}")));
                 }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
@@ -644,6 +674,14 @@ impl ControlService {
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
         }
+        // Paired machines live in the desktop app; the window above serves them.
+        if command.starts_with("machine.") {
+            return Err(ControlError::new(
+                "unsupported",
+                format!("{command} needs the TerminalX desktop app: machines are paired with it."),
+                Some("Run it on the computer that paired the machine, with TerminalX open.".into()),
+            ));
+        }
         // The Local VM (`container_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
         if let Some(action) = command.strip_prefix("vm.") {
             let vm_error = |error: anyhow::Error| ControlError::new("vm_failed", format!("{error:#}"), Some("See `terminalx skills get local-vm`.".to_string()));
@@ -747,11 +785,37 @@ impl ControlService {
             // `terminalx-serve projects add` on a headless server (PRO-353):
             // the runtime writes the store, so no write of its own is lost,
             // and a paired computer's `machine.changed` hears of it.
+            //
+            // `terminalx projects add` (#1078) passes `refuseExisting`: the
+            // same checks, but a folder that is already a project is refused
+            // with `already_added`, so a script learns nothing was added.
             "projects.add" => {
                 let path = required_string(&params, "path")?;
-                let project = projects::ensure(&path).map_err(|error| ControlError::new("invalid_project", format!("{error:#}"), None))?;
+                let refuse_existing = params.get("refuseExisting").and_then(Value::as_bool).unwrap_or(false);
+                let added = if refuse_existing { projects::add_new(&path) } else { projects::ensure(&path) };
+                let project = added.map_err(project_refusal)?;
                 self.sink.emit("projects_changed", &());
                 Ok(json!({ "project": project }))
+            }
+            // `terminalx projects remove` (#1078), as the sidebar's Remove
+            // project does it: the project's open conversations are archived
+            // (Show archived brings them back), the project leaves the list,
+            // and the folder on disk is not touched.
+            "projects.remove" => {
+                let selector = required_string(&params, "project")?;
+                let project = resolve_project_exactly(&selector)?;
+                let open: Vec<String> = index::load().map_err(ControlError::internal)?
+                    .into_iter()
+                    .filter(|session| !session.archived && session.project() == Some(project.path.as_str()))
+                    .map(|session| session.id)
+                    .collect();
+                if !open.is_empty() {
+                    crate::session_archive::set_archived(self.sink.as_ref(), &open, true, crate::session_archive::By::Person)
+                        .map_err(ControlError::internal)?;
+                }
+                projects::remove(&project.path).map_err(ControlError::internal)?;
+                self.sink.emit("projects_changed", &());
+                Ok(json!({ "project": project, "archivedSessions": open }))
             }
             "sessions.list" => self.sessions_list(params),
             "sessions.show" => {
@@ -789,6 +853,16 @@ impl ControlService {
                     .map_err(ControlError::internal)?;
                 self.sink.emit("session_updated", &session);
                 Ok(json!({"sessionId": session.id, "session": session}))
+            }
+            "sessions.pin" | "sessions.unpin" => {
+                let session = resolve_session(&required_string(&params, "session")?)?;
+                let pinned = command == "sessions.pin";
+                if session.pinned != pinned {
+                    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+                    let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(ControlError::internal)?;
+                    self.sink.emit("session_updated", &updated);
+                }
+                Ok(json!({"sessionId": session.id, "pinned": pinned}))
             }
             "sessions.status" => {
                 let status = serde_json::from_value::<index::ManualStatus>(params.get("status").cloned().unwrap_or(Value::Null))
@@ -851,11 +925,10 @@ impl ControlService {
             "worktrees.delete" => self.worktree_delete(params),
             "review.comment" | "review.comments" => self.review_comments(command, params),
             "issues.list" => self.issues_list(params),
-            // Creation uses the local owner's credentials and never needs a
+            // Non-deletion operations use the owner's credentials without a
             // desktop attachment. Cloud workspace capabilities stay unchanged.
-            "issues.create" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => issue_operation(None, command, params),
-            #[cfg(feature = "desktop")]
-            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" => self.issue_op(command, params),
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create"
+                if cfg!(feature = "desktop") || self.local_lifetime.is_some() => issue_operation(None, command, params),
             #[cfg(not(feature = "desktop"))]
             "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => Err(ControlError::new(
                 "unsupported",
@@ -1063,7 +1136,7 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path).map_err(ControlError::internal)?;
             self.manager.annotate_row_statuses_among(&mut held, &stored);
             let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
@@ -1083,7 +1156,47 @@ impl ControlService {
         sessions.retain(|session| session.archived == archived);
         self.manager.annotate_row_statuses_among(&mut sessions, &stored);
         let sessions: Vec<Value> = sessions.iter().map(crate::session_usage::with_cost).collect();
+        if params.get("allMachines").and_then(Value::as_bool) == Some(true) {
+            return Ok(self.with_machine_sessions(sessions, archived));
+        }
         Ok(json!({"sessions": sessions}))
+    }
+
+    /// `sessions list --all-machines` (PRO-356): this computer's sessions,
+    /// each with `machine: null`, then every paired machine's, each naming
+    /// its machine; `machines` says how each machine stands. Machines that
+    /// cannot be read leave this computer's list whole, with the reason.
+    fn with_machine_sessions(&self, local: Vec<Value>, archived: bool) -> Value {
+        let mut sessions: Vec<Value> = local
+            .into_iter()
+            .map(|mut session| {
+                session["machine"] = Value::Null;
+                session
+            })
+            .collect();
+        match self.window_call("machine.sessions.listAll", json!({"archived": archived})) {
+            Ok(mut answer) => {
+                if let Some(Value::Array(rows)) = answer.get_mut("sessions").map(Value::take) {
+                    sessions.extend(rows);
+                }
+                json!({"sessions": sessions, "machines": answer.get("machines").cloned().unwrap_or_else(|| json!([]))})
+            }
+            Err(error) => json!({"sessions": sessions, "machines": [], "machinesError": error}),
+        }
+    }
+
+    /// A window service from the control socket: the attached desktop's.
+    fn window_call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        #[cfg(unix)]
+        if let Some(lifetime) = &self.local_lifetime {
+            return lifetime.window.call(command, params);
+        }
+        #[cfg(all(feature = "desktop", unix))]
+        if let Some(desktop) = &self.desktop {
+            return desktop.execute(command, params, "");
+        }
+        let _ = params;
+        Err(ControlError::new("unsupported", format!("{command} needs the TerminalX desktop app."), None::<String>))
     }
 
     /// `sessions usage <session>`, or `--children-of <lead>`: the lead's own
@@ -1738,11 +1851,19 @@ impl ControlService {
                 .map_err(ControlError::internal)?;
             let mut listed = Vec::with_capacity(worktrees.len());
             for worktree in worktrees {
-                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
                 let mut value = serde_json::to_value(&worktree).map_err(ControlError::internal)?;
-                value["sessionCount"] = json!(held.len());
-                if !worktree.is_main {
-                    value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                match crate::worktree_control::sessions_in(&sessions, &worktree.path) {
+                    Ok(held) => {
+                        value["sessionCount"] = json!(held.len());
+                        if !worktree.is_main {
+                            value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                        }
+                    }
+                    Err(error) => {
+                        value["sessionCount"] = Value::Null;
+                        if !worktree.is_main { value["sessions"] = Value::Null; }
+                        value["sessionError"] = json!(error);
+                    }
                 }
                 listed.push(value);
             }
@@ -2041,15 +2162,30 @@ impl ControlService {
         Ok(json!({"project": project, "provider": provider, "issues": issues}))
     }
 
-    #[cfg(feature = "desktop")]
-    /// Existing issue operations, with their confirmation policy in `issue_control`.
-    fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        issue_operation(self.questions.as_ref(), command, params)
+}
+
+/// `machine.*` a run's worker may not ask for (`orchestration::guard`): it
+/// pairs or forgets no machine, and starts no session on one. A session it
+/// starts here is marked a worker as it is made; one on a machine cannot be.
+const LIMITED_MACHINE_ACTIONS: [&str; 3] = ["add", "remove", "sessions.create"];
+
+fn refuse_limited_machine_caller(action: &str, params: &Value) -> Result<(), ControlError> {
+    if !LIMITED_MACHINE_ACTIONS.contains(&action) {
+        return Ok(());
     }
+    let limited = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).is_some_and(|caller| crate::orchestration::guard::limited(&caller));
+    if limited {
+        return Err(ControlError::new(
+            "forbidden",
+            "A worker of an orchestration run does not pair machines or start sessions on them. Report what the piece needs; the lead decides.",
+            None::<String>,
+        ));
+    }
+    Ok(())
 }
 
 fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str, params: Value) -> Result<Value, ControlError> {
-        use crate::issue_control::{authorize, in_project, run, Caller, Live, Subject, Write};
+        use crate::issue_control::{authorize, run, Caller, Live, Subject, Write};
         use crate::issue_ops::{Provider, Target};
         let action = command.trim_start_matches("issues.");
         let caller = Caller::of(&params);
@@ -2068,19 +2204,13 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
             refuse_other_repository(&project.path, reference)?;
         }
         let target = Target::resolve(Path::new(&project.path), if provider == "linear" { Provider::Linear } else { Provider::Github }).map_err(crate::issue_control::op_error)?;
-        let project_repo = match &target {
-            Target::Github { repo, .. } => Some(repo.clone()),
-            Target::Linear { .. } => None,
-        };
         // Shown in the question as the caller's claim, never trusted.
         let session = caller.session.as_deref().and_then(|session| resolve_session(session).ok());
-        let gate = |write: &Write, subject: &str, issue_repo: Option<&str>| {
+        let gate = |write: &Write, subject: &str, _issue_repo: Option<&str>| {
             let subject = Subject {
                 issue: subject,
                 provider,
                 project_name: &project.name,
-                // The switch is the project's, and applies only to an issue that is verifiably its own.
-                routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
                 session_title: session.as_ref().map(|s| s.title.as_str()),
                 session_id: session.as_ref().map(|s| s.id.as_str()),
             };
@@ -2267,6 +2397,35 @@ fn resolve_project(selector: &str) -> Result<Project, ControlError> {
         .filter(|project| project.name.contains(selector))
         .collect();
     unique(partial, "project", selector)
+}
+
+/// [`resolve_project`] for a command that changes what it names: a project
+/// matched only by part of its name is refused, so `remove api` cannot take
+/// out `api-gateway`.
+fn resolve_project_exactly(selector: &str) -> Result<Project, ControlError> {
+    let project = resolve_project(selector)?;
+    let canonical = Path::new(selector).exists().then(|| canonical_or_original(selector));
+    if project.path == selector || project.name == selector || canonical.as_deref() == Some(project.path.as_str()) {
+        return Ok(project);
+    }
+    Err(ControlError::new(
+        "ambiguous_selector",
+        format!("{selector} only matches part of the name of project {}.", project.name),
+        Some(format!("Name the project by its full name ({}) or its path.", project.name)),
+    ))
+}
+
+/// A folder `projects.add` would not take, with the code the CLI reports.
+fn project_refusal(error: anyhow::Error) -> ControlError {
+    use projects::Refusal;
+    let message = format!("{error:#}");
+    match error.downcast_ref::<Refusal>() {
+        Some(Refusal::Missing(_)) => ControlError::new("not_found", message, Some("Check the path; create the folder or clone the repository first.".into())),
+        Some(Refusal::NotADirectory(_)) => ControlError::new("not_a_directory", message, Some("Name the folder the project lives in, not a file inside it.".into())),
+        Some(Refusal::AlreadyAdded(path)) => ControlError::new("already_added", message, Some(format!("Nothing was changed. Use it as it is: terminalx sessions create --project {path} ..."))),
+        Some(Refusal::Mirror) => ControlError::new("invalid_project", message, None),
+        None => ControlError::new("invalid_project", message, None),
+    }
 }
 
 fn selected_projects(selector: Option<String>) -> Result<Vec<Project>, ControlError> {
@@ -2855,6 +3014,105 @@ mod tests {
         }
     }
 
+    /// `terminalx projects add|remove` (#1078): the app's checks and git
+    /// detection, a code for each refusal, and the windows told at once.
+    #[test]
+    fn the_cli_adds_and_removes_projects_as_the_app_does() {
+        let _home = crate::store::temp_home();
+        let parent = tempfile::tempdir().unwrap();
+        let repository = parent.path().join("api");
+        std::fs::create_dir(&repository).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repository).status().unwrap().success());
+        let gateway = parent.path().join("api-gateway");
+        std::fs::create_dir(&gateway).unwrap();
+        let file = parent.path().join("notes.txt");
+        std::fs::write(&file, "notes").unwrap();
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let add = |path: &Path| service.execute("projects.add", json!({"path": path, "refuseExisting": true}), "r");
+
+        let added = add(&repository).unwrap();
+        let path = std::fs::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
+        assert_eq!((added["project"]["path"].as_str(), added["project"]["name"].as_str(), added["project"]["kind"].as_str()), (Some(path.as_str()), Some("api"), Some("git")));
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        assert_eq!(add(&gateway).unwrap()["project"]["kind"], "folder");
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        // Added from outside the app, it does not take the reader's selection.
+        assert_eq!(projects::list().unwrap().1, None);
+
+        let refused = add(&repository).unwrap_err();
+        assert_eq!(refused.code, "already_added");
+        assert!(refused.recovery.unwrap().contains(&path));
+        assert_eq!(add(&file).unwrap_err().code, "not_a_directory");
+        assert_eq!(add(&parent.path().join("gone")).unwrap_err().code, "not_found");
+        assert!(heard.try_recv().is_err(), "nothing refused is announced");
+        assert_eq!(projects::list().unwrap().0.len(), 2);
+        // `terminalx-serve projects add` still takes a folder it has already.
+        assert_eq!(service.execute("projects.add", json!({"path": repository}), "r").unwrap()["project"]["path"], path.as_str());
+        heard.try_recv().unwrap();
+
+        // A session in it starts at once.
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": path, "useWorktree": false, "title": "first", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+
+        // Removing names the project exactly: part of a name is not enough.
+        assert_eq!(service.execute("projects.remove", json!({"project": "gate"}), "r").unwrap_err().code, "ambiguous_selector");
+        assert_eq!(service.execute("projects.remove", json!({"project": "nothing-like-it"}), "r").unwrap_err().code, "not_found");
+        assert!(heard.try_recv().is_err());
+
+        // Its conversations are archived, the project leaves the list, the folder stays.
+        let removed = service.execute("projects.remove", json!({"project": "api"}), "r").unwrap();
+        assert_eq!((removed["project"]["path"].as_str(), &removed["archivedSessions"]), (Some(path.as_str()), &json!([session.id])));
+        let event = heard.try_recv().unwrap();
+        assert_eq!(&*event.event, "session_updated");
+        assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
+        assert!(index::get(&session.id).unwrap().archived);
+        assert_eq!(projects::list().unwrap().0.iter().map(|project| project.name.as_str()).collect::<Vec<_>>(), vec!["api-gateway"]);
+        assert!(repository.join(".git").is_dir());
+        // By its path, from a folder of another name.
+        service.execute("projects.remove", json!({"project": gateway}), "r").unwrap();
+        assert!(projects::list().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn the_cli_pins_and_unpins_the_persisted_sidebar_session() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let new = || crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "test", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (first, second) = (new(), new());
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let prefix = &first.id[..first.id.len() - 2];
+        assert_eq!(service.execute("sessions.pin", json!({"session": prefix}), "r").unwrap(), json!({"sessionId": first.id, "pinned": true}));
+        let event = heard.try_recv().unwrap();
+        assert_eq!(&*event.event, "session_updated");
+        assert!(serde_json::from_str::<SessionEntry>(&event.payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], true);
+        assert!(index::get(&first.id).unwrap().pinned);
+        service.execute("sessions.pin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        for selector in ["", "no-such-session"] {
+            assert!(service.execute("sessions.unpin", json!({"session": selector}), "r").is_err());
+        }
+        // UUIDs generated together share a prefix, which must never select both.
+        let common: String = first.id.chars().zip(second.id.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+        assert!(!common.is_empty());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": common}), "r").unwrap_err().code, "ambiguous_selector");
+        assert!(index::get(&first.id).unwrap().pinned);
+        assert!(!index::get(&second.id).unwrap().pinned);
+        assert!(heard.try_recv().is_err());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap(), json!({"sessionId": first.id, "pinned": false}));
+        assert!(!serde_json::from_str::<SessionEntry>(&heard.try_recv().unwrap().payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], false);
+        service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        assert_eq!(index::get(&first.id).unwrap().tabs.len(), first.tabs.len());
+    }
+
     #[test]
     fn the_cli_archives_and_brings_back_sessions_as_the_app_does_and_lists_the_archived_ones() {
         let _home = crate::store::temp_home();
@@ -2923,6 +3181,54 @@ mod tests {
 
     fn ids(sessions: &Value) -> std::collections::BTreeSet<String> {
         sessions.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn worktree_listing_keeps_other_results_when_session_identity_is_uncertain() {
+        let _home = crate::store::temp_home();
+        let (repo, other_repo) = (git_repo(), git_repo());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let other = projects::add(other_repo.path().to_str().unwrap()).unwrap();
+        let sub = Path::new(&project.path).join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": sub, "title": "Legacy subdirectory", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let isolated = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": true, "title": "Isolated", "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let (service, _sink) = headless_service();
+        let listed = service.execute("worktrees.list", json!({}), "r").unwrap();
+        let groups = listed["projects"].as_array().unwrap();
+        let group = |path: &str| groups.iter().find(|group| group["project"]["path"] == path).unwrap();
+        let worktrees = group(&project.path)["worktrees"].as_array().unwrap();
+        let main = worktrees.iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert!(main["sessionCount"].is_null());
+        assert!(main["sessionError"].as_str().unwrap().contains("Legacy subdirectory"));
+        assert!(main.get("sessions").is_none());
+        let tree = worktrees.iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert_eq!(tree["sessionCount"], 1);
+        assert_eq!(ids(&tree["sessions"]), std::collections::BTreeSet::from([isolated.id.clone()]));
+        assert!(tree.get("sessionError").is_none());
+        let other_main = group(&other.path)["worktrees"].as_array().unwrap().iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert_eq!(other_main["sessionCount"], 0);
+        assert!(other_main.get("sessionError").is_none());
+
+        // The same uncertainty in a non-main worktree must not look like
+        // an empty session list either.
+        let nested = Path::new(&isolated.cwd).join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": nested, "title": "Nested legacy", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&nested_legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let listed = service.execute("worktrees.list", json!({"project": project.path}), "r2").unwrap();
+        let tree = listed["projects"][0]["worktrees"].as_array().unwrap().iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert!(tree["sessionCount"].is_null() && tree["sessions"].is_null());
+        assert!(tree["sessionError"].as_str().unwrap().contains("Nested legacy"));
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&isolated.cwd), false).is_err());
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&project.path), false).is_err());
     }
 
     /// #719: a session of another project and a quick chat run in the

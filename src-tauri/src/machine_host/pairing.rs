@@ -54,17 +54,21 @@ pub(crate) struct Approving {
     pub label: String,
     pub platform: Option<String>,
     pub fingerprint: String,
+    /// The account grant the code answered, if it did.
+    pub grant_request_id: Option<String>,
 }
 
 struct LiveCode {
     token_hash: [u8; 32],
     expires_at: i64,
+    grant_request_id: Option<String>,
 }
 
 struct Pending {
     view: PendingComputer,
     token_hash: [u8; 32],
     client_key_b64: String,
+    grant_request_id: Option<String>,
     /// Connections waiting on it; the last one closing declines it.
     waiters: usize,
     outcome: watch::Sender<Outcome>,
@@ -115,15 +119,16 @@ impl Pairing {
 
     /// A new code, ending the one before and any computer waiting on it.
     /// The token's hash is kept; the token goes only to the caller. `Err`
-    /// with the end of the pause while pairing is paused.
-    pub(crate) fn create(&mut self, now: i64) -> Result<(String, i64), i64> {
+    /// with the end of the pause while pairing is paused. `grant_request_id`:
+    /// the account grant the code answers, carried to the computer's record.
+    pub(crate) fn create(&mut self, now: i64, grant_request_id: Option<String>) -> Result<(String, i64), i64> {
         if let Some(until) = self.paused_until(now) {
             return Err(until);
         }
         self.end(REFUSED_CODE_INACTIVE);
         let token = crate::relay_e2ee::random_token();
         let expires_at = now + CODE_TTL_MS;
-        self.code = Some(LiveCode { token_hash: super::registry::token_hash(&token), expires_at });
+        self.code = Some(LiveCode { token_hash: super::registry::token_hash(&token), expires_at, grant_request_id });
         Ok((token, expires_at))
     }
 
@@ -147,6 +152,7 @@ impl Pairing {
             return Decision::Wait { request_id: pending.view.request_id.clone(), outcome: pending.outcome.subscribe() };
         }
         let request_id = uuid::Uuid::new_v4().simple().to_string();
+        let grant_request_id = self.code.as_ref().and_then(|code| code.grant_request_id.clone());
         let (outcome, receiver) = watch::channel(Outcome::Waiting);
         self.pending = Some(Pending {
             view: PendingComputer {
@@ -160,6 +166,7 @@ impl Pairing {
             },
             token_hash: asking.token_hash,
             client_key_b64: asking.client_key_b64.into(),
+            grant_request_id,
             waiters: 1,
             outcome,
         });
@@ -178,6 +185,7 @@ impl Pairing {
             label: pending.view.label.clone(),
             platform: pending.view.platform.clone(),
             fingerprint: pending.view.fingerprint.clone(),
+            grant_request_id: pending.grant_request_id.clone(),
         })
     }
 
@@ -279,7 +287,7 @@ mod tests {
     #[test]
     fn a_code_starts_one_approval_that_spends_it() {
         let mut pairing = Pairing::default();
-        let (token, expires_at) = pairing.create(1_000).unwrap();
+        let (token, expires_at) = pairing.create(1_000, None).unwrap();
         assert_eq!(expires_at, 1_000 + CODE_TTL_MS);
         assert_eq!(pairing.view(1_000).1, Some(CodeExpiry { expires_at }));
         let (request, outcome) = waits(pairing.ask(asking(&token, "key-a"), 2_000));
@@ -290,6 +298,7 @@ mod tests {
         assert_eq!((pending.label.as_str(), pending.expires_at), ("MacBook", 2_000 + APPROVAL_TTL_MS));
         let approving = pairing.approving(&request, 3_000).unwrap();
         assert_eq!(approving.client_key_b64, "key-a");
+        assert_eq!(approving.grant_request_id, None, "a code made on this Mac answers no grant");
         assert_eq!(approving.token_hash, token_hash(&token));
         assert!(pairing.approved(&request));
         assert_eq!(*outcome.borrow(), Outcome::Approved);
@@ -300,28 +309,28 @@ mod tests {
     #[test]
     fn decline_timeout_and_closing_end_the_code() {
         let mut pairing = Pairing::default();
-        let (token, _) = pairing.create(0).unwrap();
+        let (token, _) = pairing.create(0, None).unwrap();
         let (request, outcome) = waits(pairing.ask(asking(&token, "k"), 10));
         assert!(pairing.decline(&request));
         assert_eq!(*outcome.borrow(), Outcome::Refused(REFUSED_NOT_APPROVED));
         assert_eq!(refused(pairing.ask(asking(&token, "k"), 20)), REFUSED_CODE_INACTIVE);
 
-        let (token, _) = pairing.create(100).unwrap();
+        let (token, _) = pairing.create(100, None).unwrap();
         let (_, outcome) = waits(pairing.ask(asking(&token, "k"), 100));
         assert!(pairing.tick(100 + APPROVAL_TTL_MS), "no answer in two minutes");
         assert_eq!(*outcome.borrow(), Outcome::Refused(REFUSED_NOT_APPROVED));
         assert_eq!(pairing.view(100 + APPROVAL_TTL_MS), (None, None, None));
 
-        let (token, _) = pairing.create(200_000).unwrap();
+        let (token, _) = pairing.create(200_000, None).unwrap();
         let (request, _) = waits(pairing.ask(asking(&token, "k"), 200_000));
         let _ = waits(pairing.ask(asking(&token, "k"), 200_001));
         assert!(!pairing.leave(&request), "another connection still waits");
         assert!(pairing.leave(&request), "the last one closing declines");
         assert!(pairing.approving(&request, 200_002).is_none());
 
-        let (old, _) = pairing.create(300_000).unwrap();
+        let (old, _) = pairing.create(300_000, None).unwrap();
         let (_, outcome) = waits(pairing.ask(asking(&old, "k"), 300_000));
-        let (_, _) = pairing.create(300_001).unwrap();
+        let (_, _) = pairing.create(300_001, None).unwrap();
         assert_eq!(*outcome.borrow(), Outcome::Refused(REFUSED_CODE_INACTIVE), "a newer code ends the one before");
         assert_eq!(refused(pairing.ask(asking(&old, "k"), 300_002)), REFUSED_CODE_INACTIVE);
     }
@@ -329,7 +338,7 @@ mod tests {
     #[test]
     fn five_wrong_attempts_in_a_minute_pause_pairing_for_a_minute() {
         let mut pairing = Pairing::default();
-        let (token, _) = pairing.create(0).unwrap();
+        let (token, _) = pairing.create(0, None).unwrap();
         // Four, then one more after the first has left the window: no pause.
         for at in [0, 10, 20, 30] {
             assert_eq!(refused(pairing.ask(asking("wrong", "k"), at)), REFUSED_CODE_INACTIVE);
@@ -341,15 +350,27 @@ mod tests {
         assert_eq!(pairing.paused_until(fifth), Some(fifth + PAUSE_MS));
         assert_eq!(pairing.view(fifth).2, Some(fifth + PAUSE_MS));
         assert_eq!(refused(pairing.ask(asking(&token, "k"), fifth + 1)), REFUSED_PAIRING_PAUSED, "even the live code");
-        assert_eq!(pairing.create(fifth + 1).unwrap_err(), fifth + PAUSE_MS);
-        assert!(pairing.create(fifth + PAUSE_MS).is_ok(), "a minute later");
+        assert_eq!(pairing.create(fifth + 1, None).unwrap_err(), fifth + PAUSE_MS);
+        assert!(pairing.create(fifth + PAUSE_MS, None).is_ok(), "a minute later");
         assert_eq!(pairing.view(fifth + PAUSE_MS).2, None);
+    }
+
+    #[test]
+    fn a_code_made_for_a_grant_carries_it_to_allow() {
+        let mut pairing = Pairing::default();
+        let (token, _) = pairing.create(0, Some("grant-1".into())).unwrap();
+        let (request, _) = waits(pairing.ask(asking(&token, "k"), 10));
+        assert_eq!(pairing.approving(&request, 20).unwrap().grant_request_id.as_deref(), Some("grant-1"));
+        // A newer code for no grant replaces it, and its computer has none.
+        let (token, _) = pairing.create(30, None).unwrap();
+        let (request, _) = waits(pairing.ask(asking(&token, "k"), 40));
+        assert_eq!(pairing.approving(&request, 50).unwrap().grant_request_id, None);
     }
 
     #[test]
     fn an_expired_code_is_a_wrong_attempt() {
         let mut pairing = Pairing::default();
-        let (token, expires_at) = pairing.create(0).unwrap();
+        let (token, expires_at) = pairing.create(0, None).unwrap();
         assert_eq!(refused(pairing.ask(asking(&token, "k"), expires_at)), REFUSED_CODE_INACTIVE);
         assert_eq!(pairing.wrong.len(), 1);
         assert_eq!(pairing.view(expires_at).1, None);

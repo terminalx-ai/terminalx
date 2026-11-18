@@ -88,6 +88,47 @@ struct Input {
 }
 
 impl Input {
+    /// The input mutex serializes the complete frame. Admission belongs only
+    /// to `attempt`, which must perform exactly one nonblocking write/flush.
+    /// In particular neither POLLOUT nor a flush retry owns policy admission.
+    fn write_admitted(&mut self, data: &[u8], mut attempt: impl FnMut(&mut dyn Write, Option<&[u8]>) -> Result<usize>) -> Result<()> {
+        let mut written = 0;
+        let started = Instant::now();
+        let mut progress = started;
+        loop {
+            let flushing = written == data.len();
+            match attempt(self.writer.as_mut(), (!flushing).then(|| &data[written..])) {
+                Ok(_) if flushing => return Ok(()),
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+                Ok(count) => {
+                    written += count;
+                    progress = Instant::now();
+                    self.stalled = false;
+                }
+                Err(error) => {
+                    let kind = error.downcast_ref::<std::io::Error>().map(std::io::Error::kind);
+                    if kind == Some(std::io::ErrorKind::Interrupted) { continue; }
+                    if kind != Some(std::io::ErrorKind::WouldBlock) { return Err(error); }
+                    let left = if self.stalled { Duration::ZERO } else {
+                        INPUT_STALL.saturating_sub(progress.elapsed()).min(INPUT_DEADLINE.saturating_sub(started.elapsed()))
+                    };
+                    if left.is_zero() {
+                        self.stalled = true;
+                        return Err(InputStalled { written, total: data.len() }.into());
+                    }
+                    #[cfg(test)]
+                    tests::remote_capacity_wait();
+                    // Periodic retries also observe cancellation when the old
+                    // launch never becomes writable again.
+                    #[cfg(unix)]
+                    ready(&self.room, libc::POLLOUT, Some(left.min(Duration::from_millis(10))))?;
+                    #[cfg(not(unix))]
+                    std::thread::sleep(left.min(Duration::from_millis(10)));
+                }
+            }
+        }
+    }
+
     fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut written = 0;
         let started = Instant::now();
@@ -1538,12 +1579,61 @@ impl Terminals {
     }
 
     /// A remote queue may wait behind local input. Acquire its original
-    /// authority only after that wait, and keep the lease through every partial
-    /// write/flush. Activation can then acknowledge either no write or its end.
-    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket) -> Result<bool> {
-        let input = self.panes.lock().unwrap().get(id).context("no such terminal")?.input.clone();
-        let mut input = input.lock().unwrap();
+    /// authority only after that wait. V2 physical retries retain the original
+    /// permit and launch, releasing policy admission during capacity waits.
+    pub(crate) fn write_remote(&self, id: &str, data: &[u8], ticket: &crate::data_privacy::Ticket,
+        policy: Option<&crate::remote::collab::v2::Permit>, pid: Option<u32>) -> Result<bool> {
+        let (input_handle, group) = {
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id).context("no such terminal")?;
+            anyhow::ensure!(pid.is_some() && pane.pid == pid && *pane.alive.lock().unwrap(), "terminal process changed before input");
+            (pane.input.clone(), pane.group.clone())
+        };
+        let mut input = input_handle.lock().unwrap();
+        // Decide the legacy/v2 path under admission too: a first v2 install
+        // must not race a legacy classification into a long admitted wait.
+        let initial_policy = policy.map(|permit| permit.collaboration.enter_admission());
         let Ok(_privacy) = ticket.enter() else { return Ok(false) };
+        if policy.is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+            drop(initial_policy);
+            let mut delivered = 0;
+            let result = input.write_admitted(data, |writer, bytes| {
+                let _policy = policy.map(|permit| permit.collaboration.enter_admission());
+                if let Some(permit) = policy { permit.check(None)?; }
+                // Retain exact launch identity through each physical syscall.
+                let panes = self.panes.lock().unwrap();
+                let pane = panes.get(id).context("no such terminal")?;
+                anyhow::ensure!(pane.pid == pid && Arc::ptr_eq(&pane.input, &input_handle)
+                    && Arc::ptr_eq(&pane.group, &group) && *pane.alive.lock().unwrap(),
+                    "terminal process changed while input waited");
+                match bytes {
+                    Some(bytes) => { let count = writer.write(bytes)?; delivered += count; Ok(count) }
+                    None => { writer.flush()?; Ok(0) }
+                }
+            });
+            if result.is_err() && delivered > 0 {
+                // Never replay an uncertain prefix or redirect its suffix.
+                // Remove only this original launch; a replacement is unrelated.
+                let mut panes = self.panes.lock().unwrap();
+                if panes.get(id).is_some_and(|pane| Arc::ptr_eq(&pane.input, &input_handle) && Arc::ptr_eq(&pane.group, &group)) {
+                    panes.remove(id);
+                }
+                drop(panes);
+                group.signal(false);
+            }
+            return result.map(|()| true);
+        }
+        // Legacy physical writer and independent privacy barrier are unchanged.
+        let _policy = initial_policy;
+        if let Some(policy) = policy {
+            policy.check(None)?;
+            if policy.collaboration.runtime_policy.is_v2() {
+                let panes = self.panes.lock().unwrap();
+                let pane = panes.get(id).context("no such terminal")?;
+                anyhow::ensure!(pane.pid == pid && Arc::ptr_eq(&pane.input, &input_handle) && *pane.alive.lock().unwrap(),
+                    "terminal process changed while input waited");
+            }
+        }
         input.write(data).map(|()| true)
     }
 
@@ -1575,6 +1665,24 @@ impl Terminals {
         };
         let mut input = input.lock().unwrap();
         input.write(data)
+    }
+
+    /// One nonblocking physical attempt. A caller can hold its tab/mode
+    /// guard here without holding it while the PTY waits for input capacity.
+    pub(crate) fn try_write_for_process(&self, id: &str, pid: u32, data: &[u8]) -> Result<usize> {
+        // Keep pane identity stable through this nonblocking syscall.
+        let panes = self.panes.lock().unwrap();
+        let pane = panes.get(id).context("no such terminal")?;
+        anyhow::ensure!(pane.pid == Some(pid) && *pane.alive.lock().unwrap(), "terminal process changed before input");
+        let mut input = match pane.input.try_lock() {
+            Ok(input) => input,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock).into()),
+            Err(std::sync::TryLockError::Poisoned(_)) => anyhow::bail!("terminal input lock poisoned"),
+        };
+        if data.is_empty() { input.writer.flush()?; return Ok(0); }
+        let count = input.writer.write(data)?;
+        if count > 0 { input.stalled = false; }
+        Ok(count)
     }
 
     /// How many bytes written into the pane its program has yet to read.
@@ -2296,6 +2404,14 @@ mod supervised_tests {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static REMOTE_CAPACITY_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn remote_capacity_wait() {
+        let hook = REMOTE_CAPACITY_WAIT.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook { hook(); }
+    }
+
     #[test]
     fn scoped_stop_retains_removed_shell_ownership_without_vetoing_other_sessions() {
         let dir = tempfile::tempdir().unwrap();
@@ -2382,6 +2498,152 @@ time.sleep(60)
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn phase2_collaboration_v2_raw_configure_releases_admission_after_partial_write_and_flush() {
+        use crate::remote::collab::v2::{Snapshot, Permit, Action};
+        use std::sync::mpsc;
+        struct PartialWriter {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            step: usize,
+            flush_wait: bool,
+        }
+        impl Write for PartialWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.step += 1;
+                if self.step == 2 { return Err(std::io::ErrorKind::WouldBlock.into()); }
+                let count = if self.step == 1 { bytes.len().min(3) } else { bytes.len() };
+                self.bytes.lock().unwrap().extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.flush_wait { self.flush_wait = false; return Err(std::io::ErrorKind::WouldBlock.into()); }
+                Ok(())
+            }
+        }
+        for change in ["revision", "source", "generation", "attachment", "launch", "valid", "flush-revision", "flush-valid", "v1"] {
+            let dir = tempfile::tempdir().unwrap();
+            let terminals = Arc::new(Terminals::new());
+            let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+            pane(&terminals, &sink, &dir, "raw", "sleep 600");
+            let pid = terminals.pid("raw");
+            let rpc = crate::remote::server::WorkspaceRpc::new(dir.path(), 1, sink.clone(), terminals.clone(), None).unwrap();
+            let policy = rpc.collab.clone();
+            let policy_dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(policy_dir.path(), 1).unwrap();
+            let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"writeSource":source}]})).unwrap() };
+            if change != "v1" { policy.install_v2(snapshot("1", "explicit")).unwrap(); }
+            let (peer, _notifications) = crate::remote::server::Peer::for_user("raw-attachment".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
+            let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Configure).for_peer(&peer);
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let captured = bytes.clone();
+            let flush_wait = change.starts_with("flush-");
+            terminals.wrap_input_for_test("raw", move |_| Box::new(PartialWriter { bytes: captured, step: if flush_wait { 2 } else { 0 }, flush_wait }));
+            let reached = Arc::new(AtomicBool::new(false)); let observed = reached.clone();
+            let replacement = Arc::new(Mutex::new(None)); let saved = replacement.clone();
+            let attached_peer = peer.clone();
+            let (writing, cwd) = (terminals.clone(), dir.path().to_path_buf());
+            if change != "v1" {
+                REMOTE_CAPACITY_WAIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+                    observed.store(true, Ordering::SeqCst);
+                    let (done, completed) = mpsc::channel();
+                    let update = std::thread::spawn(move || {
+                        match change {
+                            "revision" | "flush-revision" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
+                            "source" => { policy.install_v2(snapshot("2", "implicit")).unwrap(); }
+                            "generation" => { let _guard = policy.enter_admission(); policy.runtime_policy.set_generation(2); }
+                            "attachment" => rpc.disconnect(&attached_peer),
+                            "launch" => {
+                                writing.begin_stop("raw").unwrap();
+                                writing.spawn(sink, "raw", PaneSpec { cwd: cwd.to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 600"), env: &[] }).unwrap();
+                                *saved.lock().unwrap() = writing.pid("raw");
+                            }
+                            "valid" | "flush-valid" => { let _guard = policy.enter_admission(); }
+                            _ => unreachable!(),
+                        }
+                        done.send(()).unwrap();
+                    });
+                    completed.recv_timeout(Duration::from_secs(3)).expect("raw policy admission held over capacity/flush wait");
+                    update.join().unwrap();
+                })));
+            }
+            let result = terminals.write_remote("raw", b"one complete frame", &crate::data_privacy::Ticket::default(), Some(&permit), pid);
+            let delivered = bytes.lock().unwrap().clone();
+            if matches!(change, "valid" | "flush-valid" | "v1") {
+                assert!(result.unwrap());
+                assert_eq!(delivered, b"one complete frame", "{change}: duplicated retry");
+                assert_eq!(terminals.pid("raw"), pid);
+            } else {
+                assert!(result.is_err(), "{change}");
+                assert_eq!(delivered, if flush_wait { b"one complete frame".to_vec() } else { b"one".to_vec() }, "{change}: bytes after revocation");
+                if change == "launch" {
+                    assert_eq!(terminals.pid("raw"), *replacement.lock().unwrap(), "old failure retired replacement");
+                    assert!(terminals.pid("raw").is_some());
+                } else { assert!(terminals.pid("raw").is_none(), "uncertain original launch was reusable"); }
+            }
+            assert_eq!(reached.load(Ordering::SeqCst), change != "v1");
+            terminals.kill_all();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn phase2_collaboration_v2_raw_real_full_pipe_rechecks_explicit_permit_and_valid_retry() {
+        use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
+        for revoke in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let terminals = Arc::new(Terminals::new());
+            let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+            let (tap, output) = collector(); terminals.attach("main", "full", "test", tap);
+            pane(&terminals, &sink, &dir, "full", "sh -c 'stty raw -echo; printf full-ready; while [ ! -f release ]; do sleep 0.01; done; cat > received'");
+            read_until(&output, "full-ready");
+            let pid = terminals.pid("full");
+            let policy = Arc::new(Collaboration::new());
+            let policy_dir = tempfile::tempdir().unwrap(); policy.runtime_policy.bind(policy_dir.path(), 1).unwrap();
+            let snapshot = |revision: &str| -> Snapshot { serde_json::from_value(serde_json::json!({"v":2,"revision":revision,"members":[{"userId":"guest","role":"manager","canApprove":true,"writeSource":"explicit"}]})).unwrap() };
+            policy.install_v2(snapshot("1")).unwrap();
+            let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Configure);
+            struct CountWriter { inner: Box<dyn Write + Send>, written: Arc<AtomicU64> }
+            impl Write for CountWriter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    let count = self.inner.write(bytes)?; self.written.fetch_add(count as u64, Ordering::SeqCst); Ok(count)
+                }
+                fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+            }
+            let written = Arc::new(AtomicU64::new(0)); let counted = written.clone();
+            terminals.wrap_input_for_test("full", move |inner| Box::new(CountWriter { inner, written: counted }));
+            let at_wait = Arc::new(AtomicU64::new(0)); let paused = at_wait.clone();
+            let observed = written.clone(); let cwd = dir.path().to_path_buf();
+            REMOTE_CAPACITY_WAIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+                paused.store(observed.load(Ordering::SeqCst), Ordering::SeqCst);
+                assert!(paused.load(Ordering::SeqCst) > 0, "expected physical partial progress before WouldBlock");
+                let (done, completed) = std::sync::mpsc::channel();
+                let update = std::thread::spawn(move || {
+                    if revoke { policy.install_v2(snapshot("2")).unwrap(); }
+                    else { let _guard = policy.enter_admission(); }
+                    done.send(()).unwrap();
+                });
+                completed.recv_timeout(Duration::from_secs(3)).expect("policy cannot change with real pipe full"); update.join().unwrap();
+                if !revoke { std::fs::write(cwd.join("release"), "").unwrap(); }
+            })));
+            let data = vec![b'x'; 2 * 1024 * 1024];
+            let result = terminals.write_remote("full", &data, &crate::data_privacy::Ticket::default(), Some(&permit), pid);
+            assert!(at_wait.load(Ordering::SeqCst) > 0 && at_wait.load(Ordering::SeqCst) < data.len() as u64);
+            if revoke {
+                assert!(result.is_err());
+                assert_eq!(written.load(Ordering::SeqCst), at_wait.load(Ordering::SeqCst), "remainder reached revoked real launch");
+                assert!(terminals.pid("full").is_none());
+            } else {
+                assert!(result.unwrap()); assert_eq!(written.load(Ordering::SeqCst), data.len() as u64);
+                let until = Instant::now() + Duration::from_secs(3);
+                while std::fs::read(dir.path().join("received")).unwrap_or_default().len() != data.len() {
+                    assert!(Instant::now() < until, "real raw child never received the full retry"); std::thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(std::fs::read(dir.path().join("received")).unwrap(), data);
+            }
+            terminals.kill_all();
+        }
+    }
 
     #[test]
     fn mobile_input_permit_cannot_target_a_replacement_terminal_process() {

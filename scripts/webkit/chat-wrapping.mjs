@@ -47,7 +47,8 @@ try {
           const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const readers = [...root.querySelectorAll('[data-testid="reader-message"] > div')];
           const queued = root.querySelector('[data-testid="queued-message"]');
-          const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
+          // A message taken mid-turn keeps its time inside the bubble, after the text (PRO-380).
+          const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild.matches("time") ? bubble.lastElementChild.previousElementSibling : bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
           const messages = targets.map(({ bubble, content }) => {
             const box = content.getBoundingClientRect();
             const range = document.createRange();

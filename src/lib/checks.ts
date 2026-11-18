@@ -94,3 +94,68 @@ export function withPendingChecks(pr: PullRequest, pending: PendingCheckRun[], n
   if (!runs.length) return pr;
   return { ...pr, checks: pr.checks.map((check) => runs.some((p) => p.runId === check.actions?.runId && (!p.failedOnly || isFailingCheck(check))) ? { ...check, state: "queued" } : check) };
 }
+
+/** How long a check ran, or has run so far while it runs. Null where GitHub gave no start. */
+export function checkDurationMs(check: PrCheck, now: number): number | null {
+  const started = check.startedAt ? Date.parse(check.startedAt) : NaN;
+  if (Number.isNaN(started)) return null;
+  const ended = check.completedAt ? Date.parse(check.completedAt) : NaN;
+  const until = checkBucket(check.state) === "running" || Number.isNaN(ended) ? now : ended;
+  return Math.max(0, until - started);
+}
+
+/** "41s", "3m 12s", "1h 4m": a finished check's time to the second. */
+export function durationLabel(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  return minutes % 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${Math.floor(minutes / 60)}h`;
+}
+
+/** A running check's time so far, to the minute: "<1m", "4m". */
+function runningLabel(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  return minutes < 1 ? "<1m" : minutes < 60 ? `${minutes}m` : durationLabel(minutes * 60_000);
+}
+
+/**
+ * A check's second line (PRO-394): its state and time, then GitHub's own line
+ * when it gave one. "Failed after 3m 12s · 2 tests failing", "Running · 4m",
+ * "Passed in 2m 48s", "Skipped".
+ */
+export function checkLine(check: PrCheck, now: number): string {
+  const bucket = checkBucket(check.state);
+  const ms = checkDurationMs(check, now);
+  const label = checkStateLabel(check.state);
+  const state = bucket === "running"
+    ? `${label}${ms == null ? "" : ` · ${runningLabel(ms)}`}`
+    : bucket === "failed"
+      ? `${label}${ms == null ? "" : ` after ${durationLabel(ms)}`}`
+      : bucket === "passed"
+        ? `Passed${ms == null ? "" : ` in ${durationLabel(ms)}`}`
+        : label;
+  const summary = check.summary?.trim();
+  return summary && bucket !== "skipped" ? `${state} · ${summary}` : state;
+}
+
+/** A finished or running check's time alone, for the short rows: "41s", "running · 3m". */
+export function checkTime(check: PrCheck, now: number): string {
+  const ms = checkDurationMs(check, now);
+  const bucket = checkBucket(check.state);
+  if (bucket === "running") return ms == null ? checkStateLabel(check.state).toLowerCase() : `${checkStateLabel(check.state).toLowerCase()} · ${runningLabel(ms)}`;
+  if (bucket === "skipped") return "skipped";
+  return ms == null ? "" : durationLabel(ms);
+}
+
+/** Whether `name` is a check the merge needs. Unknown requirements say nothing. */
+export const isRequiredCheck = (pr: Pick<PullRequest, "requiredChecks">, name: string) => !!pr.requiredChecks?.includes(name);
+
+/** Provider URLs are untrusted data; only web links may leave the app. */
+export function webUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}

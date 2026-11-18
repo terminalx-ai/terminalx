@@ -1,6 +1,6 @@
 import { privacyEnabled, useDataPrivacy } from "@/lib/dataPrivacy";
 import { useEffect, useMemo } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { getAccount, useAccount } from "@/lib/account";
 import type { AccountStatus, OrganizationSummary } from "@/lib/api";
 import { cloudOrganizations, defaultOrgId, getCloudCatalog, liveCloudOrgIds, type CloudCatalogState } from "@/lib/cloudCatalog";
@@ -63,7 +63,11 @@ export async function setOrganizationHidden(orgId: string, hidden: boolean): Pro
   if (!org || getPrefs().organizationDisplay === "one") return false;
   const running = hidden ? organizationRunningCount(orgId) : 0;
   if (running > 0) {
-    const confirmed = await ask(`${organizationName(org)} has ${running} running workspace${running === 1 ? "" : "s"}. They will keep running and costing money while this organization is hidden. Hide it from the sidebar on this desktop?`, { title: "Hide organization", kind: "warning", okLabel: "Hide organization", cancelLabel: "Cancel" }).catch(() => false);
+    const confirmed = await confirmInApp({
+      title: `Hide ${organizationName(org)}?`,
+      body: `It has ${running} running workspace${running === 1 ? "" : "s"}. ${running === 1 ? "It keeps" : "They keep"} running and costing money while this organization is hidden from the sidebar on this desktop.`,
+      action: "Hide organization",
+    });
     if (!confirmed) return false;
   }
   if (getPrefs().organizationDisplay === "one" || !cloudOrganizations(getAccount().status).some((entry) => entry.id === orgId)) return false;

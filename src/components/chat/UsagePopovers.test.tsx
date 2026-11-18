@@ -10,7 +10,7 @@ const { check, readiness, status } = vi.hoisted(() => ({
   status: { accounts: undefined as unknown },
 }));
 vi.mock("@/lib/agentReadiness", () => ({ checkAgentReadiness: check }));
-vi.mock("@/lib/agentAccounts", () => ({ agentAccounts: { readiness } }));
+vi.mock("@/lib/agentAccounts", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/agentAccounts")>()), agentAccounts: { readiness } }));
 const localWindows = [
   { agent: "claude", key: "five", label: "5 hours", usedPercent: 42, resetsAt: Date.now() + 3600000, updatedAt: Date.now(), stale: false },
   { agent: "codex", key: "week", label: "Codex weekly", usedPercent: 81, resetsAt: null, updatedAt: Date.now(), stale: false },
@@ -31,14 +31,36 @@ async function openContext() {
 }
 
 describe("context popover", () => {
-  it("shows context, requested and reported settings, estimate and only this agent's account windows", async () => {
+  it("leads with the context and its bar, names the model and plan, and shows only this agent's windows (PRO-379)", async () => {
     render(<ContextPopover {...base} />);
     const dialog = await openContext();
-    await waitFor(() => expect(dialog.textContent).toContain("Claude account"));
-    for (const text of ["80,000 / 100,000", "sonnet", "claude-opus-4-6", "high", "max", "$0.12", "42% used", "main agent only"]) expect(dialog.textContent).toContain(text);
+    await waitFor(() => expect(dialog.textContent).toContain("Claude Max"));
+    expect(within(dialog).queryByRole("heading")).toBeNull();
+    expect(dialog.textContent!.startsWith("Context80K of 100K · 80%")).toBe(true);
+    expect(within(dialog).getByRole("meter", { name: "Context used" }).getAttribute("aria-valuenow")).toBe("80");
+    // Compact sits right under the bar, with what it does.
+    const order = ["Compact now", "Types /compact into Claude Code", "Claude usage", "Signed in", "Provider", "Model", "This session so far"].map((text) => dialog.textContent!.indexOf(text));
+    expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!))).toBe(true);
+    for (const text of ["Anthropic", "Opus 4.6", "claude-opus-4-6", "High", "$0.12", "estimated", "42%", "Max plan"]) expect(dialog.textContent).toContain(text);
+    expect(dialog.textContent).toMatch(/Resets at .+ · in (59m|1h 0m)/);
+    expect(within(dialog).getByRole("meter", { name: "5 hours used" }).getAttribute("aria-valuenow")).toBe("42");
     expect(within(dialog).queryByText("Codex weekly")).toBeNull();
+    expect(within(dialog).queryByRole("status")).toBeNull();
+    // Nothing below 12px.
+    expect(dialog.querySelector("[class*='text-[11px]'], [class*='text-[10px]']")).toBeNull();
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows the percentage beside the ring, and warns in amber when a window is close to its limit", async () => {
+    localWindows[0]!.usedPercent = 86;
+    try {
+      render(<ContextPopover {...base} />);
+      expect(screen.getByRole("button", { name: "Context 80% used" }).textContent).toBe("80%");
+      const dialog = await openContext();
+      expect(within(dialog).getByRole("status").textContent).toBe("You're close to your 5 hours limit.");
+      expect(within(dialog).getByText("86%").className).toContain("text-warning");
+    } finally { localWindows[0]!.usedPercent = 42; }
   });
 
   it("sends compact once while pending and reflects lower and zero context readings", async () => {
@@ -86,7 +108,8 @@ describe("context popover", () => {
   it("with one account names none and reads This Mac's login, as before", async () => {
     render(<ContextPopover {...base} />);
     const dialog = await openContext();
-    await waitFor(() => expect(dialog.textContent).toContain("Claude account usage"));
+    await waitFor(() => expect(dialog.textContent).toContain("Claude account · Claude Max"));
+    expect(dialog.textContent).toContain("Claude usage");
     expect(within(dialog).queryByText("Account")).toBeNull();
     expect(within(dialog).queryByText(/Other Claude accounts/)).toBeNull();
     expect(check).toHaveBeenCalledWith("claude");
@@ -104,18 +127,18 @@ describe("context popover", () => {
     ];
     render(<ContextPopover {...base} tab={{ ...tab, launchedAccount: "aaaa1111bbbb2222" } as TabEntry} />);
     const dialog = await openContext();
-    await waitFor(() => expect(dialog.textContent).toContain("pro"));
+    await waitFor(() => expect(dialog.textContent).toContain("Claude Pro"));
     expect(readiness).toHaveBeenCalledWith("claude", "aaaa1111bbbb2222");
     expect(check).not.toHaveBeenCalled();
     expect(dialog.textContent).toContain("Claude usage · Work · Max");
     const others = within(dialog).getByLabelText("Other Claude accounts");
-    expect(within(others).getByLabelText("This Mac's login").textContent).toContain("42% used");
+    expect(within(others).getByLabelText("This Mac's login").textContent).toContain("42%");
     expect(within(others).getByLabelText("Home · Pro").textContent).toContain("Usage unavailable");
     expect(within(others).getByLabelText("API key").textContent).toContain("No subscription usage windows");
     // The tab's own windows come first, read with its own account.
     const own = dialog.textContent!.slice(0, dialog.textContent!.indexOf("Other Claude accounts"));
-    expect(own).toContain("12% used");
-    expect(own).not.toContain("42% used");
+    expect(own).toContain("12%");
+    expect(own).not.toContain("42%");
     expect(dialog.textContent).not.toContain("Codex weekly");
   });
 
@@ -128,13 +151,30 @@ describe("context popover", () => {
 });
 
 describe("turn details", () => {
-  it("shows completed metrics with disjoint token counters and full-turn throughput", async () => {
-    render(<TurnDetailsPopover turn={turn}>Worked for 2s</TurnDetailsPopover>);
+  it("heads with the agent and model names and the time range, then settings, tokens and tiles (PRO-379)", async () => {
+    render(<TurnDetailsPopover turn={{ ...turn, settings: { permissionMode: "manual" }, usage: { ...turn.usage, effort: "high", fast: false } }}>Worked for 2s</TurnDetailsPopover>);
     fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
     const dialog = await screen.findByRole("dialog", { name: "Turn details" });
-    for (const text of ["Claude", "claude-sonnet-4-6", "70.0%", "50.0 tokens/s", "Avg output rate", "Started", "Ended", "Input (uncached)", "Cache write"]) expect(dialog.textContent).toContain(text);
+    expect(dialog.textContent).toMatch(/^Claude Code · Sonnet 4\.6/);
+    expect(dialog.textContent).toMatch(/· \d{1,2}:00:00( [AP]M)? → \d{1,2}:00:02/);
+    for (const text of ["EffortHigh", "Fast modeOff", "Permission modeAsk every time", "Tokens this turn", "Input20", "Output100", "Cache read70", "Cache write10",
+      "70%cache hit", "50/soutput tokens", "$0.12estimated", "Cost is an estimate at API prices, not your bill."]) expect(dialog.textContent).toContain(text);
+    expect(dialog.querySelector("[class*='text-[11px]'], [class*='text-[10px]']")).toBeNull();
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("takes the tab's settings for a turn without its own record, unless they changed since", async () => {
+    const view = render(<TurnDetailsPopover turn={turn} fallback={{ effort: "low", permissionMode: "plan" }}>Worked</TurnDetailsPopover>);
+    fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
+    let dialog = await screen.findByRole("dialog", { name: "Turn details" });
+    expect(dialog.textContent).toContain("EffortLow");
+    expect(dialog.textContent).toContain("Permission modePlan");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    view.rerender(<TurnDetailsPopover turn={turn} fallback={{ effort: "low", permissionMode: "plan", changed: { permissionMode: true } }}>Worked</TurnDetailsPopover>);
+    fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
+    dialog = await screen.findByRole("dialog", { name: "Turn details" });
+    expect(dialog.textContent).toContain("Permission modeNot recorded");
   });
 
   it("never offers metrics for unfinished turns", () => {
@@ -148,7 +188,8 @@ describe("turn details", () => {
     render(<TurnDetailsPopover turn={{ ...turn, usage: { inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }, completed: { ...turn.completed!, durationMs: 0 } }}>Worked</TurnDetailsPopover>);
     fireEvent.click(screen.getByRole("button", { name: "Turn details" }));
     const dialog = await screen.findByRole("dialog", { name: "Turn details" });
-    expect(dialog.textContent).not.toMatch(/NaN|Infinity|tokens\/s/);
-    expect(within(dialog).getAllByText("Unavailable")).toHaveLength(2);
+    expect(dialog.textContent).not.toMatch(/NaN|Infinity|\d\/s/);
+    // No cache hit, rate or price: each tile says so with a dash.
+    expect(within(dialog).getAllByText("–")).toHaveLength(3);
   });
 });

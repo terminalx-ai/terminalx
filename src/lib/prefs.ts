@@ -11,6 +11,13 @@ import userPreferenceDefaults from "./userPreferenceDefaults.json";
  * User-facing preferences live in settings.json after the one-time migration.
  * Transient navigation/layout state stays in localStorage.
  */
+/** A prompt kept to send again: offered as `/name` in the composer, which puts its text in. */
+export interface PromptSnippet {
+  id: string;
+  name: string;
+  text: string;
+}
+
 export interface Prefs {
   dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
@@ -62,6 +69,8 @@ export interface Prefs {
   resetFiles: boolean;
   /** Appended to the prompt that sends failed CI logs to an agent. */
   fixErrorsInstructions: string;
+  /** Prompts saved from a turn's menu (PRO-379), offered by name under / in the composer. */
+  promptSnippets: PromptSnippet[];
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -178,14 +187,15 @@ const DEFAULTS: Prefs = {
   sounds: true,
   animations: true,
   fontScale: "md",
-  transcriptLayout: "wide",
-  // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
-  foldToolCalls: false,
+  transcriptLayout: "chat",
+  // On: a settled turn's steps fold behind one summary row; opened, they read in the order the agent did them.
+  foldToolCalls: true,
   turnChanges: true,
   writeCommitMessagesWithAgent: false,
   promptMap: true,
   resetFiles: false,
   fixErrorsInstructions: "",
+  promptSnippets: [],
   autocorrect: false,
   followUps: "now",
   lastProject: null,
@@ -254,6 +264,11 @@ export interface CloudSidebarSection {
   name: string;
   /** Project identities (`host/owner/name` or `blank/<name>`), each in one section at most. */
   projects: string[];
+  /** Workspace ids; absent on legacy project sections until migration. */
+  workspaces?: string[];
+  icon?: string;
+  sort?: "active" | "created" | "name";
+  collapsed?: boolean;
 }
 
 /** Saved sections as written, minus anything malformed (a hand-edited or older file never breaks the sidebar). */
@@ -265,7 +280,12 @@ function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
     if (!isObject(orgs)) continue;
     for (const [orgId, sections] of Object.entries(orgs)) {
       if (!Array.isArray(sections)) continue;
-      const kept = sections.filter((section): section is CloudSidebarSection => isObject(section) && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.projects)).map((section) => ({ id: section.id, name: section.name, projects: section.projects.filter((id): id is string => typeof id === "string") }));
+      const kept = sections.filter((section): section is CloudSidebarSection => isObject(section) && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.projects)).map((section) => ({ id: section.id, name: section.name, projects: section.projects.filter((id): id is string => typeof id === "string"),
+        ...(Array.isArray(section.workspaces) ? { workspaces: section.workspaces.filter((id): id is string => typeof id === "string") } : {}),
+        ...(typeof section.icon === "string" ? { icon: section.icon.slice(0, 16) } : {}),
+        ...(["active", "created", "name"].includes(section.sort ?? "") ? { sort: section.sort } : {}),
+        ...(typeof section.collapsed === "boolean" ? { collapsed: section.collapsed } : {}),
+      }));
       if (kept.length) (out[who] ??= {})[orgId] = kept;
     }
   }
@@ -317,6 +337,8 @@ function load(legacyOnly = false): Prefs {
     if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
     if (typeof prefs.resetFiles !== "boolean") prefs.resetFiles = false;
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
+    prefs.promptSnippets = Array.isArray(prefs.promptSnippets) ? prefs.promptSnippets.filter((snippet: Partial<PromptSnippet> | null): snippet is PromptSnippet =>
+      !!snippet && typeof snippet.id === "string" && typeof snippet.name === "string" && typeof snippet.text === "string") : [];
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
@@ -381,6 +403,11 @@ export function legacyUserPreferences(): Record<string, unknown> {
     const legacy = load(true);
     return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, legacy[key]]));
   } catch { return {}; }
+}
+
+/** A preference's built-in value, for "Reset to default" to name (PRO-374). */
+export function preferenceDefault(key: string): unknown {
+  return Object.hasOwn(DEFAULTS, key) ? (DEFAULTS as unknown as Record<string, unknown>)[key] : undefined;
 }
 
 export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }

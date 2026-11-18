@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::pairing::{Asking, Decision, Outcome};
 use super::registry::token_hash;
 use super::MachineHost;
-use crate::machine_wire::{encode_header, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
+use crate::machine_wire::{encode_header, ComputerRoute, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
 use crate::relay_e2ee::{begin_e2ee_session, E2eeHello, PayloadKind};
 use crate::remote::protocol::Authority;
 use crate::remote::server::{Peer, WorkspaceRpc};
@@ -45,6 +45,15 @@ pub(crate) struct Listening {
 }
 
 impl Listening {
+    /// A reported endpoint for consent tests that never opens a TCP listener.
+    #[cfg(all(test, feature = "desktop", target_os = "macos"))]
+    pub(super) fn for_window_consent_test() -> Self {
+        Self {
+            address: SocketAddr::from((Ipv4Addr::LOCALHOST, 6768)),
+            accept: tokio::spawn(std::future::pending()),
+        }
+    }
+
     /// Close the port. Open connections are closed by the host.
     pub fn stop(self) {
         self.accept.abort();
@@ -97,7 +106,7 @@ async fn connection(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: toki
     let mut stream = crate::data_privacy::NetworkIo::new(stream);
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await.context("no request")??;
     if request_path(&head)? == MACHINE_PATH {
-        serve_computer(host, rpc, Prefixed::new(head, stream)).await
+        serve_computer(host, rpc, Prefixed::new(head, stream), ComputerRoute::of_peer(peer.ip())).await
     } else {
         forward_phone(&host, head, stream, peer).await
     }
@@ -178,7 +187,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 /// full operating rights (decision 5); the live code's token waits for Allow;
 /// anything else is refused. Nothing is granted before Allow: no
 /// `e2ee_authenticated`, no record, no RPC.
-pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S) -> Result<()> {
+pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S, route: ComputerRoute) -> Result<()> {
     let mut socket = tokio_tungstenite::accept_async_with_config(stream, Some(crate::remote::host::websocket_config())).await?;
     let keypair = host.keypair().context("the machine host key is not loaded")?;
     let hello = match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.next()).await.context("no E2EE hello")? {
@@ -229,10 +238,13 @@ pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
     // Admitted before it is told it is in, so turning the switch off or a
     // revocation meanwhile either refuses it here or finds it and closes it.
+    // An expired credential or a computer the person disconnected is
+    // refused with its reason (PRO-357).
     let admit = host.clone();
-    let id = computer.id.clone();
-    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&id, cancel_tx)).await? {
-        Ok(tracked) => tracked,
+    let admitted = computer.clone();
+    let tracked = match tokio::task::spawn_blocking(move || admit.admit(&admitted, &token, route, cancel_tx)).await? {
+        Ok(Ok(tracked)) => tracked,
+        Ok(Err(reason)) => return refuse_pairing(&mut socket, &mut session, reason).await,
         Err(error) => {
             refuse(&mut socket).await;
             return Err(error);
@@ -241,9 +253,6 @@ pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<
     let result = async {
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         crate::remote::host::send_sealed(&mut socket, &mut session, &authenticated).await?;
-        let touch = host.clone();
-        let id = computer.id.clone();
-        let _ = tokio::task::spawn_blocking(move || touch.registry.touch(&id, chrono::Utc::now().timestamp_millis())).await;
         log::info!("machine host: computer {} connected directly", computer.id);
         let (peer, notifications) = Peer::for_installation(computer.id.clone(), Authority::Manage, None, None);
         crate::remote::host::serve_rpc(&mut socket, &mut session, &rpc, &peer, notifications, &mut cancel, |_| None).await
@@ -342,8 +351,10 @@ async fn refuse<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenit
 async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, mut stream: S, peer: SocketAddr) -> Result<()> {
     #[cfg(unix)]
     {
-        // No window takes phones: refused as unreachable, as with the window closed.
-        let route = host.phone_route().ok_or_else(|| anyhow!("no window takes phones"))?;
+        // No window takes phones: the runtime serves the phone itself (PRO-359).
+        let Some(route) = host.phone_route() else {
+            return serve_phone(host, head, stream).await;
+        };
         let mut window = tokio::net::UnixStream::connect(&route).await.context("reach the window's phone route")?;
         window.write_all(&encode_header(&Forwarded::Direct { peer: Some(peer.to_string()) })?).await?;
         window.write_all(&head).await?;
@@ -363,6 +374,21 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
         let _ = (host, head, &mut stream, peer);
         bail!("phone routes need Unix sockets")
     }
+}
+
+/// Serve a phone here, while no window takes phones (`phones`). It holds
+/// the port as a forwarded phone does, so it closes with the listener.
+#[cfg(unix)]
+async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S) -> Result<()> {
+    let (phones, keypair, port, stopped, epoch) = host.phone_admission().context("the runtime no longer owns phone admission")?;
+    let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
+    let Some(tracked) = host.track_phone(cancel_tx) else { bail!("the machine host is off") };
+    let result = tokio::select! {
+        served = phones.serve(keypair, Prefixed::new(head, stream), port, stopped, epoch) => served,
+        _ = cancel.recv() => Ok(()),
+    };
+    host.untrack_phone(tracked);
+    result
 }
 
 #[cfg(test)]

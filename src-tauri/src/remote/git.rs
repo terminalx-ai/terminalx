@@ -137,6 +137,8 @@ fn classify(text: &str, timed_out: bool) -> Failure {
         "merge conflict",
         "fix conflicts",
         "not mergeable",
+        // `gh pr merge --match-head-commit` when the head moved.
+        "head branch was modified",
         "would be overwritten",
     ]) {
         return Failure::Conflict;
@@ -701,39 +703,43 @@ impl WorkspaceGit {
         if !valid_object_id(base) || head.is_some_and(|head| !valid_object_id(head)) {
             return Err(RpcError::invalid("base and head are tree ids"));
         }
-        let bound = |text: Option<String>| text.map(|text| if text.len() > MAX_CONTENT_BYTES { TOO_LARGE.to_string() } else { text });
-        let before = bound(crate::git::blob_at(&repo.dir, base, &path).map_err(git_error)?);
-        let after = match head {
-            Some(head) => bound(crate::git::blob_at(&repo.dir, head, &path).map_err(git_error)?),
+        let (before, before_size) = crate::git::blob_text_at(&repo.dir, base, &path, MAX_CONTENT_BYTES).map_err(git_error)?;
+        let (after, after_size) = match head {
+            Some(head) => crate::git::blob_text_at(&repo.dir, head, &path, MAX_CONTENT_BYTES).map_err(git_error)?,
             None => self.working_file(&repo, &path)?,
         };
-        Ok(json!({ "before": before, "after": after }))
+        Ok(json!({ "before": before, "after": after, "beforeSize": before_size, "afterSize": after_size }))
     }
 
     /// A working-tree file, never through a link that leaves the workspace.
-    fn working_file(&self, repo: &Repo, path: &str) -> Result<Option<String>, RpcError> {
+    fn working_file(&self, repo: &Repo, path: &str) -> Result<(Option<String>, Option<u64>), RpcError> {
         let relative = if repo.name == "." { path.to_string() } else { format!("{}/{path}", repo.name) };
         let resolved = match self.files.existing_path(&relative) {
             Ok(resolved) => resolved,
-            Err(error) if error.code == "not_found" => return Ok(None),
+            Err(error) if error.code == "not_found" => return Ok((None, None)),
             Err(error) => return Err(error),
         };
-        let Ok(meta) = std::fs::metadata(&resolved) else { return Ok(None) };
+        let Ok(meta) = std::fs::metadata(&resolved) else { return Ok((None, None)) };
         if !meta.is_file() {
-            return Ok(None);
+            return Ok((None, None));
         }
         if meta.len() > MAX_CONTENT_BYTES as u64 {
-            return Ok(Some(TOO_LARGE.into()));
+            return Ok((Some(TOO_LARGE.into()), Some(meta.len())));
         }
-        Ok(std::fs::read(&resolved).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        Ok(match std::fs::read(&resolved) {
+            Ok(bytes) => (Some(String::from_utf8_lossy(&bytes).into_owned()), Some(bytes.len() as u64)),
+            Err(_) => (None, None),
+        })
     }
 
     fn log(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 500) as u32;
         let from = params.get("from").and_then(Value::as_str);
-        if from.is_some_and(|from| !valid_object_id(from)) {
-            return Err(RpcError::invalid("from is a commit id"));
+        // ScopePicker excludes the selected base's history. Accept only this
+        // bounded range form in addition to the existing commit-id cursor.
+        if from.is_some_and(|from| !valid_object_id(from) && !from.strip_suffix("..HEAD").is_some_and(valid_ref_name)) {
+            return Err(RpcError::invalid("from is a commit id or a base branch followed by ..HEAD"));
         }
         if crate::git::head_commit(&repo.dir).is_none() && from.is_none() {
             return Ok(json!({ "repo": repo.name, "commits": [] }));
@@ -1153,7 +1159,17 @@ impl WorkspaceGit {
             }
             _ => return Err(RpcError::invalid("method is merge, squash, rebase or queue")),
         };
-        let result = self.gh(&repo, &["pr", "merge", &number, flag], NETWORK_TIMEOUT);
+        // A merge pinned to the head the person saw: GitHub refuses it once the head has moved.
+        let head = match params.get("head") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(head)) if valid_object_id(head) => Some(head.as_str()),
+            Some(_) => return Err(RpcError::invalid("head is a commit id")),
+        };
+        let mut args = vec!["pr", "merge", number.as_str(), flag];
+        if let Some(head) = head {
+            args.extend(["--match-head-commit", head]);
+        }
+        let result = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.
         match (result, self.pr_view(&repo, &number)) {
             (_, Ok(pr)) if pr.state == "MERGED" => Ok(json!({ "repo": repo.name, "pr": pr })),

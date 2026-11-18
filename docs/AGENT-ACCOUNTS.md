@@ -156,8 +156,66 @@ The limit message in a tab offers **Continue with <label>** for each other
 account of that agent whose windows have room. It restarts the agent on that
 account and resumes the conversation. If the resumed conversation's model is
 not on that account's plan, the agent falls back as it does and the tab says
-which model is in use. Rotation is always the person's choice; automatic
-rotation is out of scope.
+which model is in use. With automatic switching on, the runtime makes this
+move itself (below).
+
+## Switching automatically (#981)
+
+**Setting.** Settings → Agents, under an agent's accounts, only with two or
+more subscription accounts; per agent and off by default. It is kept on the
+agent's entry in `agent-logins.json` (`autoSwitch`, unknown fields kept):
+
+- **Threshold**, 50–100 % (default 90): an account is *full* once any window
+  that applies to the tab (5-hour, weekly, or the model's own weekly window)
+  is at or past it, or a usage-limit error was received on it.
+- **Accounts to use**, an ordered checklist. Subscriptions are checked by
+  default; an API key is unchecked and marked "billed per request", and is
+  only chosen when no checked subscription has room.
+- **Order**: *Most room left* (default) or *In my order*.
+- Notifications per switch and when no account has room, each can be off.
+- Per project, Settings → Project → accounts: **Never switch accounts in this
+  project** (`neverProjects`).
+- Turning it on shows a note that the person is responsible for each
+  provider's terms.
+
+**Decision.** One pure function, `agent_accounts::auto_switch::decide`, in the
+runtime (terminalx-serve). An account is *available* when it is signed in,
+checked, not full, its usage read in the last 30 minutes, and its plan was not
+seen lacking the tab's model (a model the tab's settings ask for, which the
+agent fell back from right after a switch onto it; remembered six hours). An
+account a tab left counts again only after
+its window resets or its usage drops 10 points below the threshold. When
+every account is above the threshold the tab stays, unless its own account
+is at its limit: then it moves to the one with the most room, so an
+unattended run goes on. When every account is at its limit the tab says so
+with the earliest reset. Several tabs leaving one account are
+spread: each recent arrival costs an account 10 points of room for 5 minutes.
+
+**When.** Between turns only: never during a turn, a permission request, a
+question, a compaction, background work, or within 20 s of typing in the
+composer or the terminal. At most one automatic switch per tab per 5 minutes;
+a move by hand resets that pause. A limit hit mid-turn switches as soon as the
+turn ends and sends `continue`. Follow-ups held for the tab wait while a
+switch is owed at a turn's end and are sent on the new account (after the
+`continue`); one the person sends now goes where the tab is. A new tab whose account is full starts on the
+chosen account instead ("Started on Personal: Work is at 93 % …"), and New
+Session's account picker shows that choice and why. The picker sends the
+account it moved off, so the runtime decides again as the tab starts and the
+move is said in the conversation and kept in the log.
+
+**How.** The switch is #980's *Continue with*: restart on the other account
+and resume. A switch refused (the agent reports a sign-out within 2 minutes)
+goes back to the original account and tries the next one once; the refused
+account is skipped for 30 minutes or until the person moves a tab onto it.
+Accounts within 15 points of the threshold are polled every minute; the
+runtime checks running tabs every 30 s.
+
+**Telling the person.** The conversation (desktop and phone) shows "Switched
+from Work to Personal: Work reached 91% of its 5-hour limit." A tab out of
+view gets a notification per switch and when no account is left. The usage
+popover marks full accounts and says which account new sessions start on.
+Every switch is kept 30 days in `agent-account-switches.jsonl` and listed in
+Settings → Agents.
 
 ## Security and privacy
 
@@ -256,6 +314,6 @@ rotation is out of scope.
 
 ## Out of scope
 
-Automatic rotation between accounts, cloud workspaces (they use organization
+Resuming a tab by itself when a limit resets, cloud workspaces (they use organization
 agent logins, PRO-107), agents other than Claude Code and Codex, and syncing
 accounts between Macs.

@@ -50,6 +50,12 @@ export interface TabEntry {
   contextMax?: number | null;
   /** Tokens and estimated cost of every conversation the tab holds or held, by model, as of its last turn end (PRO-273). */
   usage?: TabUsage | null;
+  /**
+   * A machine session's tab (PRO-408): the account it runs on as the machine
+   * names it, only when its agent has several there; `null` with one. Absent
+   * on a tab of this computer, whose account is read from its own list.
+   */
+  accountLabel?: string | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
   loadingHistory?: boolean;
   /**
@@ -244,10 +250,12 @@ export interface Project {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  /** Hidden from the sidebar; its sessions keep running. Absent is shown. */
+  hidden?: boolean;
   archived?: boolean;
   /** Absent while every setting is the default. */
   issuePipeline?: IssuePipelineSettings | null;
-  /** Agents may comment on issues and move their status without asking. Absent is off. */
+  /** Legacy persisted preference; issue approval is always deletion-only. */
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
@@ -266,6 +274,7 @@ export interface ProjectPatch {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  hidden?: boolean;
   archived?: boolean;
   issuePipeline?: IssuePipelineSettings;
   agentIssueUpdates?: boolean;
@@ -494,6 +503,10 @@ export interface BranchInfo {
   name: string;
   current: boolean;
   remote: boolean;
+  /** When its tip was committed (RFC 3339). Absent on older runtimes. */
+  updated?: string;
+  /** Who wrote its tip commit. Absent on older runtimes. */
+  author?: string;
 }
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";

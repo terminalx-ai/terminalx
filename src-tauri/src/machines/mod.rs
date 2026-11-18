@@ -11,8 +11,10 @@
 //!
 //! The shapes are `src/types/machines.ts`.
 
+pub mod account;
 pub mod connect;
-pub mod pair;
+/// Compiled at the crate root as `machine_pair`, so headless builds have it too.
+pub use crate::machine_pair as pair;
 pub mod secrets;
 pub mod store;
 
@@ -31,6 +33,14 @@ use self::store::{MachineRoute, MachineStore, PairedMachine};
 /// Emitted with a [`MachineHostView`] whenever the runtime's status or the
 /// two switches it shows change.
 pub const HOST_CHANGED_EVENT: &str = "machines_host_changed";
+
+/// Emitted with `{ version }` when another computer asks this Mac's app to
+/// update (`MACHINES_APP_UPDATE_REQUESTED_EVENT` in src/types/machines.ts):
+/// the runtime's [`crate::remote::machine_update::REQUESTED_EVENT`], re-emitted.
+pub const APP_UPDATE_REQUESTED_EVENT: &str = "machines_app_update_requested";
+
+/// The control call the window's updater reports go to (PRO-354).
+const APP_UPDATE_REPORT: &str = "runtime.machineUpdate.report";
 
 /// `MachineHostView` in src/types/machines.ts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -115,6 +125,15 @@ impl Machines {
                 events.emit(HOST_CHANGED_EVENT, &view(Some(status)));
             }),
         );
+        let events = sink.clone();
+        sink.listen(
+            crate::remote::machine_update::REQUESTED_EVENT,
+            Box::new(move |payload| {
+                let Ok(requested) = serde_json::from_str::<serde_json::Value>(payload) else { return };
+                log::info!("machines: another computer asked this Mac to update to {}", requested["version"]);
+                events.emit(APP_UPDATE_REQUESTED_EVENT, &serde_json::json!({ "version": requested["version"] }));
+            }),
+        );
         let (machines, events) = (Arc::downgrade(self), sink.clone());
         sink.listen(
             "settings_file_changed",
@@ -180,6 +199,7 @@ impl Machines {
             last_seen_at: Some(now),
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         };
         let keep = self.clone();
@@ -280,11 +300,12 @@ pub async fn machines_host_status(state: tauri::State<'_, crate::AppState>, mach
 /// "Let other computers operate this Mac". The runtime watches the file.
 #[tauri::command]
 pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
-    let (runtime, machines) = (state.runtime(), machines.inner().clone());
+    let (runtime, machines, pairing) = (state.runtime(), machines.inner().clone(), state.pairing.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = crate::store::settings::load();
         settings.machines.allow_operating = enabled;
         crate::store::settings::save(&settings).map_err(err)?;
+        pairing.machine_operating_changed();
         Ok(host_view(&machines, runtime))
     })
     .await
@@ -313,10 +334,77 @@ pub async fn machines_decline(request_id: String, state: tauri::State<'_, crate:
     host_command(state, machines, wire::DECLINE, serde_json::json!({ "requestId": request_id })).await
 }
 
-/// Remove a paired computer: its connections close and its credential is refused.
+/// Remove a paired computer: its connections close and its credential is
+/// refused. One allowed through the account (PRO-349) also has its grant
+/// revoked, so the operating computer's account stops listing this Mac as
+/// paired; that is best effort, and a failure is only logged.
 #[tauri::command]
 pub async fn machines_revoke(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
-    host_command(state, machines, wire::REVOKE, serde_json::json!({ "id": id })).await
+    let (runtime, machines, pairing) = (runtime(&state)?, machines.inner().clone(), state.pairing.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        let answer = runtime.machine_host(wire::REVOKE, serde_json::json!({ "id": id })).map_err(err)?;
+        if let Some(grant_request_id) = revoked_grant(&answer) {
+            pairing.host_removed_computer(grant_request_id);
+        }
+        Ok(host_view(&machines, Some(runtime)))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The account grant of the computer a [`wire::REVOKE`] removed, if it had one.
+fn revoked_grant(answer: &serde_json::Value) -> Option<&str> {
+    answer["revoked"].as_bool().filter(|revoked| *revoked)?;
+    answer["grantRequestId"].as_str().filter(|grant| !grant.is_empty())
+}
+
+/// "Disconnect" (PRO-357): close a paired computer's connections now and
+/// hold it off until the person lets it back. Its credential is kept.
+#[tauri::command]
+pub async fn machines_disconnect(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
+    host_command(state, machines, wire::DISCONNECT, serde_json::json!({ "id": id })).await
+}
+
+/// Let a disconnected computer connect again. Only a person may (`consent`).
+#[tauri::command]
+pub async fn machines_let_back(id: String, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
+    host_command(state, machines, wire::LET_BACK, serde_json::json!({ "id": id })).await
+}
+
+/// The activity log (PRO-357): the last 200 entries, newest first.
+#[tauri::command]
+pub async fn machines_activity(state: tauri::State<'_, crate::AppState>) -> CmdResult<Vec<crate::machine_host::activity::Entry>> {
+    let runtime = runtime(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let answer = runtime.machine_host(wire::ACTIVITY, serde_json::json!({})).map_err(err)?;
+        serde_json::from_value(answer["entries"].clone()).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The app's own updater run, as the window reports each step after
+/// [`APP_UPDATE_REQUESTED_EVENT`] (`MachineAppUpdateReport`): forwarded to
+/// the runtime, which tells the computer that asked (`machine.updateChanged`).
+/// `available` is the version the app's updater offers, once it has checked.
+#[tauri::command]
+pub async fn machines_app_update_report(
+    phase: String,
+    step: Option<String>,
+    message: Option<String>,
+    available: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<()> {
+    const PHASES: [&str; 6] = ["checking", "downloading", "installing", "restarting", "upToDate", "failed"];
+    if !PHASES.contains(&phase.as_str()) {
+        return Err(format!("unknown app update phase {phase:?}"));
+    }
+    let runtime = runtime(&state)?;
+    let mut params = serde_json::json!({ "phase": phase, "step": step, "message": message });
+    if let Some(available) = available {
+        params["available"] = serde_json::json!(available);
+    }
+    tauri::async_runtime::spawn_blocking(move || runtime.machine_host(APP_UPDATE_REPORT, params).map(drop).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -364,6 +452,33 @@ mod tests {
     fn a_pair_result_serialises_as_the_ui_reads_it() {
         let failed = MachinePairResult::failed(pair::Failure { reason: "not-approved", message: "no".into() });
         assert_eq!(serde_json::to_value(failed).unwrap(), serde_json::json!({ "paired": false, "reason": "not-approved", "message": "no" }));
+    }
+
+    /// PRO-354: the runtime's request reaches the web views under the name
+    /// src/types/machines.ts listens for.
+    #[test]
+    fn an_app_update_request_is_re_emitted_to_the_window() {
+        let _home = crate::store::temp_home();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let mut events = sink.subscribe();
+        let machines = Arc::new(Machines::new(MachineSecrets::default(), None));
+        machines.configure(sink.clone(), "ai.terminalx.test").unwrap();
+        let emitter: Arc<dyn EventSink> = sink.clone();
+        emitter.emit(crate::remote::machine_update::REQUESTED_EVENT, &serde_json::json!({ "version": "0.2.40" }));
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push((event.event.to_string(), event.payload.to_string()));
+        }
+        assert!(seen.iter().any(|(event, payload)| event == APP_UPDATE_REQUESTED_EVENT && payload == r#"{"version":"0.2.40"}"#), "{seen:?}");
+    }
+
+    #[test]
+    fn only_a_removed_computer_with_a_grant_revokes_one() {
+        use serde_json::json;
+        assert_eq!(revoked_grant(&json!({ "revoked": true, "grantRequestId": "grant-1" })), Some("grant-1"));
+        assert_eq!(revoked_grant(&json!({ "revoked": true, "grantRequestId": null })), None, "paired by code");
+        assert_eq!(revoked_grant(&json!({ "revoked": true })), None, "a runtime before PRO-349");
+        assert_eq!(revoked_grant(&json!({ "revoked": false, "grantRequestId": "grant-1" })), None);
     }
 
     #[test]

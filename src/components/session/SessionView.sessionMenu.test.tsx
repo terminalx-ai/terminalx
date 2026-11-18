@@ -88,8 +88,7 @@ describe("the title bar's session menu", () => {
       expect.stringMatching(/^Open in terminal view/),
       expect.stringMatching(/^Archive session/),
     ]);
-    // The dropped rows stay elsewhere: the sidebar's menu, the title bar's Continue button, the command palette.
-    for (const gone of ["Copy branch name", "Reveal in Finder", "Continue in New Session…", "Pair a phone…"]) expect(within(menu).queryByText(gone)).toBeNull();
+    for (const kept of ["Copy branch name", "Reveal in Finder", "Continue in New Session…", "Pair a phone…"]) expect(within(menu).getByText(kept)).toBeTruthy();
   });
 
   it("shows only shortcuts the keymap has, with the keys it has for them", async () => {
@@ -105,8 +104,7 @@ describe("the title bar's session menu", () => {
     expect(menu.querySelector('[data-row="terminal-view"] [data-shortcut="session.toggleTerminalView"]')).not.toBeNull();
   });
 
-  // The design's ⌘I, ⇧⌘C and ⇧⌘A belong to Issues, Create pull request and the dashboard: these rows have no keys
-  // until the reader gives them some in Settings → Shortcuts, and then the menu shows those keys and they work.
+  // Optional bindings appear in the menu and work with the menu closed.
   it("shows the keys the reader gave the rows, each a registered action, and the keys work with the menu closed", async () => {
     const rows = { "link-issue": "session.linkIssue", "copy-link": "session.copyLink", "terminal-view": "session.toggleTerminalView", archive: "session.archive" } as const;
     const chords = { "session.linkIssue": "mod+alt+i", "session.copyLink": "mod+alt+shift+c", "session.archive": "mod+alt+shift+a" } as const;

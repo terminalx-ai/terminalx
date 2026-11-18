@@ -1,5 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// Provider names come from the descriptors the server publishes (PRO-415).
+learnDescriptors();
 
 const mocks = vi.hoisted(() => ({
   offerPreparation: vi.fn(),
@@ -96,7 +100,7 @@ it("asks before any machine starts: what it costs, the running limit, and when i
   mount();
   expect(mocks.offerPreparation).not.toHaveBeenCalled();
   const before = await open();
-  expect(before.textContent).toMatch(/starts a cloud machine on the organization's Local Docker account/);
+  expect(before.textContent).toMatch(/starts a cloud machine on the organization's Local Docker \(development\) account/);
   expect(before.textContent).toMatch(/bills that account for it: about \$0\.02 an hour/);
   expect(before.textContent).toMatch(/counts toward the running limit: 1 of 3 are running now/);
   expect(before.textContent).toMatch(/after 60 minutes, whichever comes first\. The server enforces the 60 minutes even if this app is closed/);

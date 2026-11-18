@@ -29,6 +29,9 @@ mod compaction;
 mod codex_stdio;
 #[path = "session_view_transition.rs"]
 mod view_transition;
+#[path = "session_provider_authority.rs"]
+#[allow(dead_code)] // Guarded source-only integration; activation still requires acceptance.
+pub(crate) mod provider_authority;
 pub use view_transition::TerminalViewReport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,18 +45,25 @@ use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
 use crate::sink::{EventSink, SessionObserver};
 use crate::{git, pty, store};
+use crate::remote::collab::v2::{self as collaboration_v2, Permit as CollaborationPermit};
 
 #[cfg(test)]
 static ACP_FULL_PIPE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+#[cfg(test)]
+static COLLABORATION_PTY_CAPACITY: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_account_switch.rs"]
+pub(crate) mod account_switch;
 #[path = "session_row_status.rs"]
 pub(crate) mod row_status;
 #[path = "session_held.rs"]
 pub mod held;
 #[path = "session_reset.rs"]
 mod reset;
+#[cfg(feature = "desktop")]
+pub(crate) use reset::{destination as fork_conversation_destination, fork_conversation, write_forked_conversation};
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -129,14 +139,47 @@ pub struct QueuedMessage {
 
 /// Private queue state; public list/cancel responses expose only the message.
 /// Handover retains the original ticket, never mints one for remote work.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct PendingMessage {
-    #[serde(flatten)]
     message: QueuedMessage,
-    #[serde(default)]
     privacy: Option<crate::data_privacy::Ticket>,
-    #[serde(default)]
     seq: u64,
+}
+
+// Keep the Rust literal layout used by native stdio and historical fixtures.
+// The wire requirement is non-authorizing; only the native sidecar has permits.
+impl Serialize for PendingMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Record<'a> {
+            #[serde(flatten)]
+            message: &'a QueuedMessage,
+            privacy: &'a Option<crate::data_privacy::Ticket>,
+            seq: u64,
+            provider_authority: provider_authority::QueueRequirement,
+        }
+        Record { message: &self.message, privacy: &self.privacy, seq: self.seq,
+            provider_authority: provider_authority::queue_requirement(&self.message.id) }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PendingMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Record {
+            #[serde(flatten)]
+            message: QueuedMessage,
+            #[serde(default)]
+            privacy: Option<crate::data_privacy::Ticket>,
+            #[serde(default)]
+            seq: u64,
+            #[serde(default)]
+            provider_authority: provider_authority::QueueRequirement,
+        }
+        let mut record = Record::deserialize(deserializer)?;
+        record.message.id = provider_authority::restore_queue_id(record.message.id, record.provider_authority);
+        Ok(Self { message: record.message, privacy: record.privacy, seq: record.seq })
+    }
 }
 
 /// What the reader chose, in terms every CLI's hooks can express. The hook
@@ -310,6 +353,8 @@ type DeliveryReceipt = std::sync::mpsc::Sender<std::result::Result<(), String>>;
 /// published the archived images. Codex writes the labels with a space before
 /// the text; Claude Code writes them with nothing in between.
 struct ComposerEcho {
+    /// A v2 echo restored without its native permit must never be nudged.
+    collaboration_required: bool,
     text: String,
     image_count: usize,
     sent_at: Instant,
@@ -511,7 +556,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, typing: false, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
+        Self { collaboration_required: false, text, image_count, sent_at: Instant::now(), receipt: None, typing: false, submitted: false, queued: false, command: false, seq: 0, overtaken: false, continuation: false }
     }
 
     fn echoed(&self) -> Echoed {
@@ -584,7 +629,7 @@ fn strip_image_labels(mut text: &str) -> (usize, &str) {
 fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, ComposerEcho) {
     // The CLI's record holds the paths of the attached files, which its
     // decoder takes off again (`attachments::split_block`), as here.
-    let echo = ComposerEcho { queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
+    let echo = ComposerEcho { collaboration_required: prompt.collaboration.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()), queued, ..ComposerEcho::new(crate::attachments::split_block(&prompt.agent).0, images.len()) };
     let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, files: prompt.files.clone(), baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
@@ -1027,6 +1072,7 @@ pub struct TabRuntime {
     /// The phone or share the prompt just sent came from, until its frame is
     /// queued with it: it is held to its permits when that frame is written.
     stdio_authority: Option<codex_stdio::Authority>,
+    stdio_launch_permit: Option<CollaborationPermit>,
     /// A continuation sent to experimental Codex, answered once Codex takes
     /// its turn or the connection ends before it does.
     stdio_receipt: Option<(u64, DeliveryReceipt)>,
@@ -1044,6 +1090,8 @@ pub struct TabRuntime {
     pub queued: Vec<PendingMessage>,
     pub held_queue: held::Queue,
     pub turn_open: bool,
+    turn_generation: u64,
+    automation_completions_in_flight: usize,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
     /// A compact boundary observed during this command, not proof a model turn ended.
@@ -1071,6 +1119,11 @@ pub struct TabRuntime {
     /// again (a status line repeats itself) costs nothing. Forgotten whenever
     /// the app asks for a change, since the answer to that must be heard.
     last_settings_report: Option<Signal>,
+    /// Raw provider report bound to this exact owned PTY launch.
+    collaboration_stance: Option<(Arc<tui::Tail>, settings::Stance)>,
+    collaboration_raw: Option<Arc<tui::Tail>>,
+    collaboration_prompts: HashMap<u64, CollaborationPermit>,
+    collaboration_settings: HashMap<String, CollaborationPermit>,
     /// A mode the provider reported that a shared session may not be in, not
     /// stored yet: whether the session is shared is asked under the sharing
     /// lock, which is taken before this tab's and so not from under it.
@@ -1105,6 +1158,17 @@ struct CliRestart {
     _privacy: Vec<crate::data_privacy::RemoteWrite>,
 }
 
+/// Prevent handover from capturing a closed turn before its automation
+/// acknowledgment and durable completion have both been applied.
+struct AutomationCompletionGuard(Arc<Mutex<TabRuntime>>);
+
+impl Drop for AutomationCompletionGuard {
+    fn drop(&mut self) {
+        let mut rt = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        rt.automation_completions_in_flight = rt.automation_completions_in_flight.saturating_sub(1);
+    }
+}
+
 impl TabRuntime {
     /// A prompt sent now would be queued behind the open turn (and so take
     /// no baseline). A slash command's turn that saw no work is not one.
@@ -1126,6 +1190,7 @@ impl TabRuntime {
     /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
         if !self.turn_open {
+            self.turn_generation = self.turn_generation.saturating_add(1);
             self.turn_by_command = false;
             self.signed_out_in_turn = false;
             self.turn_opener = Some(("session", "prompt"));
@@ -1148,8 +1213,10 @@ impl TabRuntime {
         let ended = matches!(&self.engine, Engine::Cli(p) if p.transcript_turn.is_some_and(tui::TurnMark::ends));
         let fresh = !self.turn_open || (self.turn_by_command && !command)
             || (compact && (self.turn_by_command || ended));
+        let was_open = self.turn_open;
         self.open_turn();
         if fresh {
+            if was_open { self.turn_generation = self.turn_generation.saturating_add(1); }
             self.turn_started_at = Some(Instant::now());
             self.turn_by_command = command;
             self.compact_completed = false;
@@ -1268,6 +1335,7 @@ pub struct SessionManager {
     status: Arc<crate::status::StatusState>,
     control: crate::hooks::ControlEndpoint,
     tabs: Arc<Mutex<HashMap<String, Arc<Mutex<TabRuntime>>>>>,
+    provider_states: Arc<Mutex<HashMap<String, ProviderTabState>>>,
     /// Explicit command grants for this tab's conversation. Kept across
     /// turns and CLI restarts; forgotten when the owner runtime exits.
     session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
@@ -1287,6 +1355,52 @@ pub struct SessionManager {
     follow: Arc<follow::Following>,
     /// New tabs whose agent's first start is still told apart (PRO-291).
     first_starts: Arc<FirstStarts>,
+    /// What automatic account switching remembers between decisions (#981).
+    account_switch: Arc<Mutex<crate::agent_accounts::auto_switch::Memory>>,
+}
+
+/// Native tab-lifetime sidecar; weak runtime ownership avoids retaining tabs.
+/// Accessed only while that runtime is held, never used to acquire runtime.
+struct ProviderTabState {
+    runtime: std::sync::Weak<Mutex<TabRuntime>>,
+    binding: Option<provider_authority::ProviderBinding>,
+    queue: provider_authority::QueueCarriers,
+    acp_carried: bool,
+    opencode: OpenCodeOwner,
+    operations: HashMap<String, provider_authority::OperationContext>,
+    settings: HashMap<String, provider_authority::OperationContext>,
+}
+
+#[cfg(test)]
+type OpenCodeBeforeCallback = Box<dyn FnOnce(&opencode::NativeHttpReply) + Send>;
+
+#[derive(Default)]
+struct OpenCodeOwner {
+    carried: bool,
+    preparing: Option<(u64, provider_authority::OperationContext)>,
+    requests: HashMap<String, OpenCodeRequest>,
+    answers: HashMap<String, String>,
+    #[cfg(test)]
+    before_writes: std::collections::VecDeque<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    before_callbacks: std::collections::VecDeque<OpenCodeBeforeCallback>,
+    asks: HashMap<String, (String, String)>,
+}
+
+#[derive(Clone)]
+struct OpenCodeRequest {
+    context: provider_authority::OperationContext,
+    generation: u64,
+    tag: String,
+    prompt_seq: Option<u64>,
+    ask_incarnation: Option<String>,
+}
+
+impl Drop for ProviderTabState {
+    fn drop(&mut self) {
+        self.queue.clear();
+        for context in self.operations.values().chain(self.settings.values()) { context.withdraw(); }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1352,6 +1466,8 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    request_id: Option<uuid::Uuid>,
+    collaboration: Option<CollaborationPermit>,
     /// A new desktop follow-up: decide again under the final send lock.
     /// Some(true) requests interrupt-and-send; Some(false) holds it.
     hold_if_busy: Option<bool>,
@@ -1415,6 +1531,7 @@ pub struct SendShown {
 
 #[derive(Default)]
 struct PromptDelivery {
+    collaboration: Option<CollaborationPermit>,
     mobile: Option<(crate::local_runtime::mobile::WritePermit, String, String, u64)>,
     ready: Option<Arc<tui::Ready>>,
     /// The composer's `user_message` this is the typing of. `None` for a
@@ -1730,6 +1847,7 @@ impl SessionManager {
             status,
             control,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            provider_states: Arc::default(),
             session_commands: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1742,6 +1860,7 @@ impl SessionManager {
             stopping_ptys: Arc::default(),
             follow: Arc::default(),
             first_starts: Arc::default(),
+            account_switch: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -1773,6 +1892,7 @@ impl SessionManager {
     /// follows from those two and the tabs, so it can be checked at any
     /// moment one cares to name, without waiting for it.
     fn watch_tabs(&self, patience: recovery::Patience, now: Instant, drawn_at: impl Fn(&str) -> Option<Instant>) {
+        self.provider_states.lock().unwrap().retain(|_, state| state.runtime.strong_count() != 0);
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         for rt_arc in tabs {
             let mut rt = rt_arc.lock().unwrap();
@@ -1803,8 +1923,9 @@ impl SessionManager {
                 // never reset it. Left to the latch, such a turn would not
                 // close here, and skipping the rest of the pass for it would
                 // leave the tab "Working" for good with no warning either.
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(&rt_arc, rt, final_message);
+                self.after_turn_completed(&rt_arc, rt, final_message, completed);
                 continue;
             }
             self.nudge_if_due(&mut rt, now);
@@ -1928,7 +2049,27 @@ impl SessionManager {
             }
             return Nudged::Unread(unread);
         }
-        let written = self.terminals.write(pane, tui::SUBMIT).map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
+        let permit = rt.collaboration_prompts.get(&seq).cloned();
+        if permit.is_none() && matches!(&rt.engine, Engine::Cli(cli) if cli.echoed.iter().any(|echo| echo.seq == seq && echo.collaboration_required)) {
+            return Nudged::Written(false);
+        }
+        let _policy = match permit.as_ref() {
+            Some(permit) => match permit.collaboration.try_enter_admission() {
+                Some(guard) => Some(guard),
+                None => return Nudged::Typing,
+            },
+            None => None,
+        };
+        if permit.as_ref().is_some_and(|permit| Self::check_collaboration_permit(permit, rt).is_err()) {
+            return Nudged::Written(false);
+        }
+        let written = if permit.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+            self.terminals.pid(pane).context("terminal process missing")
+                .and_then(|pid| self.terminals.try_write_for_process(pane, pid, tui::SUBMIT))
+                .and_then(|written| { anyhow::ensure!(written == tui::SUBMIT.len(), "terminal submit incomplete"); Ok(()) })
+        } else {
+            self.terminals.write(pane, tui::SUBMIT)
+        }.map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
         if let (true, Engine::Cli(p)) = (written, &mut rt.engine) {
             p.entered_at = Some(now);
         }
@@ -2069,8 +2210,11 @@ impl SessionManager {
             }
             "finish" => {
                 self.accepting_work()?;
-                engine::shown(&engine::finish(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?.run)
+                let accept: Vec<String> = params["accept"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                engine::shown(&engine::finish_accepting(&host, string("id")?, string("piece")?, engine::By::Person, false, &accept).map_err(refused)?.run)
             }
+            // What Check and finish would add to a held piece's files, shown before it is pressed.
+            "finishWidens" => serde_json::to_value(engine::finish_widens(&host, string("id")?, string("piece")?).map_err(refused)?)?,
             "widen" => {
                 self.accepting_work()?;
                 let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
@@ -2157,12 +2301,14 @@ impl SessionManager {
                 queued: Vec::new(),
                 held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
+                turn_generation: 0,
+                automation_completions_in_flight: 0,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
                 source_timestamp: None,
                 message_times: HashMap::new(),
-                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_receipt: None, stdio_followups: Default::default(),
+                compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, setup_failed: false, stdio_writer: None, stdio_authority: None, stdio_launch_permit: None, stdio_receipt: None, stdio_followups: Default::default(),
                 stdio_retiring: None,
                 turn_started_at: None,
                 turn_usage: Default::default(),
@@ -2173,6 +2319,8 @@ impl SessionManager {
                 incidents: Default::default(),
                 stalled_at: None,
                 last_settings_report: None,
+                collaboration_stance: None, collaboration_raw: None,
+                collaboration_prompts: HashMap::new(), collaboration_settings: HashMap::new(),
                 reported_mode_to_judge: None,
                 restart_claim: None,
                 stopping: false,
@@ -2193,7 +2341,15 @@ impl SessionManager {
     }
 
     /// Stamp, persist, emit. The one path every event takes.
-    fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+    fn publish(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+        self.publish_event(rt, payload, subagent, None)
+    }
+
+    fn publish_prompt(&self, rt: &mut TabRuntime, payload: Payload, request_id: Option<uuid::Uuid>) -> AgentEvent {
+        self.publish_event(rt, payload, None, request_id)
+    }
+
+    fn publish_event(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
@@ -2234,6 +2390,7 @@ impl SessionManager {
             )).then(|| ts.clone()),
             ts,
             subagent,
+            prompt_request_id,
             payload,
         };
         if ev.payload.is_persisted() {
@@ -2880,7 +3037,7 @@ impl SessionManager {
 
     fn spawn_child(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, program: &Path, args: &[String], cwd: &str) -> Result<()> {
         self.accepting_work()?;
-        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone(), epoch: std::sync::atomic::AtomicU64::new(0) });
+        let sink = Arc::new(TabSink { manager: self.clone(), rt: rt_arc.clone(), epoch: std::sync::atomic::AtomicU64::new(0), child: Mutex::new(None) });
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
         env.extend([
@@ -2900,8 +3057,15 @@ impl SessionManager {
         env.extend(index::workspace_ports::environment(cwd)?);
         let child = self.host.spawn(&rt.key(), SpawnSpec { program, args, cwd: Path::new(cwd), env: &env, unset: &["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()] }, sink.clone())?;
         sink.epoch.store(child.epoch, std::sync::atomic::Ordering::Release);
+        *sink.child.lock().unwrap() = Some(Arc::downgrade(&child));
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
+        self.with_provider_state(rt, |state| {
+            state.binding = None;
+            for context in state.operations.values().chain(state.settings.values()) { context.withdraw(); }
+            state.operations.clear(); state.settings.clear();
+            state.opencode.requests.clear(); state.opencode.answers.clear(); state.opencode.asks.clear(); state.opencode.preparing = None;
+        });
         rt.child = Some(child);
         Ok(())
     }
@@ -2939,14 +3103,28 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        self.send_pressed_with_request(session_id, tab_id, text, images, pressed_at, files, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pressed_with_request(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+        pressed_at: Option<i64>,
+        files: Vec<FileRef>,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<SendOutcome> {
         let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
         crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
-            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id)
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -2960,13 +3138,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -3043,7 +3221,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3063,7 +3241,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3195,9 +3373,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3237,7 +3415,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3247,7 +3425,7 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
     #[cfg(test)]
@@ -3333,6 +3511,11 @@ impl SessionManager {
         let mut entry = index::get(session_id)?;
         let mut tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
         let mut rt = rt_arc.lock().unwrap();
+        if let Some(permit) = &prompt.collaboration { Self::check_collaboration_permit(permit, &rt)?; }
+        if prompt.collaboration.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(tab.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 final writer");
+        }
         // Shutdown may have fenced and cleared this runtime while the sender
         // was waiting for its lock. Do not refill a cleared follow-up queue.
         self.accepting_work()?;
@@ -3402,13 +3585,13 @@ impl SessionManager {
             );
         }
 
-        if rt.turn_open && rt.child.is_some() {
-            let q = QueuedMessage {
+        if rt.child.is_some() && (rt.turn_open || matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session())) {
+            let mut q = QueuedMessage {
                 id: uuid::Uuid::now_v7().to_string(),
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            let ev = self.publish(
+            let ev = self.publish_prompt(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
@@ -3418,9 +3601,16 @@ impl SessionManager {
                     queued: true,
                     cwd: Some(entry.cwd.clone()),
                 },
-                None,
+                prompt.request_id,
             );
-            rt.queued.push(PendingMessage { message: q, privacy: crate::data_privacy::remote_ticket(), seq: ev.seq });
+            let privacy = crate::data_privacy::remote_ticket();
+            let binding = self.provider_binding(&rt).context("provider association missing before queue")?;
+            let sender = provider_authority::SenderAuthority::capture(prompt.collaboration.clone(), provider_authority::RequiredAction::Drive,
+                privacy.clone(), prompt.mobile.clone(), prompt.shared_connection.clone());
+            let operation = provider_authority::OperationContext::new(sender, provider_authority::RequiredAction::Drive, binding,
+                provider_authority::Correlation::Prompt { seq: ev.seq, request: q.id.clone() });
+            q.id = self.with_provider_state(&rt, |state| state.queue.insert(ev.seq, operation));
+            rt.queued.push(PendingMessage { message: q, privacy, seq: ev.seq });
             return Ok(SendOutcome { queued: true, events: vec![ev], in_input: false });
         }
 
@@ -3434,7 +3624,7 @@ impl SessionManager {
         }
 
         let baseline = rt.baseline_for(&entry.cwd);
-        let events = vec![self.publish(
+        let events = vec![self.publish_prompt(
             &mut rt,
             Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
@@ -3444,13 +3634,28 @@ impl SessionManager {
                 queued: false,
                 cwd: Some(entry.cwd.clone()),
             },
-            None,
+            prompt.request_id,
         )];
 
         let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
             mobile: prompt.mobile.clone(), shared: prompt.shared_connection.clone() };
         let acp_waits = matches!(&rt.engine, Engine::Acp(_));
-        match &mut rt.engine {
+        let use_carried = (acp_waits || matches!(rt.engine, Engine::OpenCode(_)))
+            && (self.carried_acp(&rt) || self.carried_opencode(&rt)
+                || prompt.collaboration.as_ref().is_some_and(|p| p.collaboration.runtime_policy.is_v2()));
+        if use_carried {
+            use provider_authority::{SenderAuthority, RequiredAction, OperationContext, Correlation};
+            let binding = self.provider_binding(&rt).context("ACP association missing at ingress")?;
+            let sender = SenderAuthority::capture(prompt.collaboration.clone(), RequiredAction::Drive,
+                acp_delivery.privacy.clone(), prompt.mobile.clone(), prompt.shared_connection.clone());
+            let context = OperationContext::new(sender, RequiredAction::Drive, binding,
+                Correlation::Prompt { seq: events[0].seq, request: uuid::Uuid::new_v4().to_string() });
+            if matches!(rt.engine, Engine::OpenCode(_)) {
+                self.send_opencode_carried(&mut rt, prompt.agent.clone(), wire_images, events[0].seq, context)?;
+            } else {
+                self.send_acp_carried(&mut rt, prompt.agent.clone(), wire_images, acp_delivery, context)?;
+            }
+        } else { match &mut rt.engine {
             Engine::Acp(a) => {
                 let actions = if a.ready {
                     a.prompt_with_delivery(prompt.agent.clone(), wire_images, Some(acp_delivery))
@@ -3469,6 +3674,7 @@ impl SessionManager {
                 self.apply_actions(&mut rt, actions);
             }
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
+        }
         }
         // ACP records delivery only at its admitted physical prompt write.
         if let Some(event) = events.first().filter(|_| !acp_waits) {
@@ -3525,6 +3731,9 @@ impl SessionManager {
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        let launch_permits = Self::pending_configuration_permits(rt)?;
+        let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("ACP launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -3537,21 +3746,32 @@ impl SessionManager {
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        let launch_permits = Self::pending_configuration_permits(rt)?;
+        let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("OpenCode launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
         let (tab, _privacy) = self.launching(rt, tab)?;
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start OpenCode")?;
-        let pid = rt.child_pid;
+        let child = rt.child.clone().context("OpenCode event association missing")?;
+        let binding = self.provider_binding(rt).context("OpenCode event binding missing")?;
         let base = format!("http://127.0.0.1:{}", plan.port);
         let manager = self.clone();
         let rt_weak = Arc::downgrade(rt_arc);
         std::thread::Builder::new()
             .name("opencode-events".into())
             .spawn(move || {
-                let alive = || rt_weak.upgrade().map(|r| r.lock().map(|g| g.child_pid == pid).unwrap_or(false)).unwrap_or(false);
+                // Native association/launch only: an old remote prompt's
+                // Drive revocation must not hide an independent local turn.
+                let alive = || rt_weak.upgrade().is_some_and(|runtime| {
+                    let rt = runtime.lock().unwrap();
+                    !rt.stopping && matches!(rt.engine, Engine::OpenCode(_))
+                        && rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, &child))
+                        && manager.provider_binding(&rt).is_some_and(|live| binding.current(&live))
+                });
                 let emit = |line: String| {
-                    if let Some(r) = rt_weak.upgrade() {
-                        manager.on_line(&r, &line);
+                    if let Some(runtime) = rt_weak.upgrade() {
+                        manager.on_opencode_event_from(&runtime, &child, &binding, &line);
                     }
                 };
                 opencode::pump_events(&base, alive, emit);
@@ -3694,8 +3914,99 @@ impl SessionManager {
         }
     }
 
+    fn with_provider_state<R>(&self, rt: &TabRuntime, run: impl FnOnce(&mut ProviderTabState) -> R) -> R {
+        let mut states = self.provider_states.lock().unwrap();
+        states.retain(|_, state| state.runtime.strong_count() != 0);
+        let state = states.entry(rt.key()).or_insert_with(|| ProviderTabState {
+            runtime: rt.me.clone(), binding: None, queue: Default::default(), acp_carried: false, opencode: OpenCodeOwner::default(), operations: HashMap::new(), settings: HashMap::new(),
+        });
+        if !std::sync::Weak::ptr_eq(&state.runtime, &rt.me) {
+            *state = ProviderTabState { runtime: rt.me.clone(), binding: None, queue: Default::default(), acp_carried: false, opencode: OpenCodeOwner::default(), operations: HashMap::new(), settings: HashMap::new() };
+        }
+        run(state)
+    }
+
+    fn retire_provider(&self, rt: &TabRuntime) {
+        self.provider_states.lock().unwrap().remove(&rt.key());
+    }
+
+    fn provider_binding(&self, rt: &TabRuntime) -> Option<provider_authority::ProviderBinding> {
+        let child = rt.child.as_ref()?;
+        self.with_provider_state(rt, |state| {
+            if state.binding.as_ref().is_none_or(|binding| !binding.matches_child(child)) {
+                state.binding = Some(provider_authority::ProviderBinding::owned(&rt.session_id, &rt.tab_id, child));
+            }
+            state.binding.clone()
+        })
+    }
+
+    /// Native callback entry for future adapters. The legacy Action path never
+    /// implies a remote carrier. Physical envelope integration is refused until
+    /// B/C supply reviewed final writers, including deferred/retry boundaries.
+    #[allow(dead_code)]
+    fn apply_provider_envelope(&self, rt: &mut TabRuntime, envelope: crate::harness::ProviderAction,
+        reply: &provider_authority::Correlation) -> Result<provider_authority::Attempt> {
+        let Some(binding) = self.provider_binding(rt).filter(|_| !rt.stopping) else {
+            envelope.context.withdraw();
+            return Ok(provider_authority::Attempt::Withdrawn);
+        };
+        if matches!(&envelope.action, Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. } | Action::Http { .. }) {
+            envelope.context.withdraw();
+            bail!("Provider envelope has no reviewed physical writer");
+        }
+        let witness = Self::collaboration_witness(rt);
+        envelope.context.try_callback(&binding, reply, witness.as_ref(), |sender| {
+            // Such callbacks need sender/attachment gates acquired before runtime.
+            // Do not reverse the lock order or silently drop independent permits.
+            anyhow::ensure!(sender.mobile.is_none() && sender.local_share.is_none(), "provider callback sender gates require adapter integration");
+            Ok(())
+        }, || {
+            if let provider_authority::Correlation::Setting { setting, request_id, .. } = reply {
+                let entry = index::get(&rt.session_id)?;
+                let current = Settings::of(entry.tab(&rt.tab_id).context("tab not found")?);
+                anyhow::ensure!(current.collaboration_requests().get(setting) == Some(request_id), "provider setting request was replaced");
+                match envelope.action {
+                    Action::Emit(Payload::ProviderSettings { signal: Signal::Accepted { setting: accepted } }) if accepted.noun() == setting => {
+                        let mut settled = false;
+                        self.update_settings(rt, |settings| { settled = settings.settle_provider_request(setting, request_id); })?;
+                        anyhow::ensure!(settled, "provider setting request was replaced");
+                    }
+                    Action::AcpModelRefused { request_id: model_request, model, message } if setting == "model" => {
+                        let mut refused = false;
+                        self.update_settings(rt, |settings| {
+                            refused = false;
+                            if settings.collaboration_requests().get(setting) == Some(request_id)
+                                && settings.model_request_id() == Some(model_request.as_str()) {
+                                refused = settings.refused(Setting::Model, Some(&model)).is_some();
+                            }
+                        })?;
+                        anyhow::ensure!(refused, "provider model refusal request was replaced");
+                        self.publish(rt, Payload::Status { text: message }, None);
+                    }
+                    _ => bail!("Provider setting callback requires an exact supported settlement"),
+                }
+            } else {
+                anyhow::ensure!(!matches!(&envelope.action, Action::AcpModelRefused { .. } | Action::Emit(Payload::ProviderSettings { .. })),
+                    "provider setting callback lacks request correlation");
+                self.apply_actions(rt, vec![envelope.action]);
+            }
+            Ok(())
+        })
+    }
+
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
         for a in actions {
+            if self.carried_opencode(rt) && matches!(&a, Action::Http { .. } | Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }) {
+                // Only the exact original ProviderAction may reach NativeHttp.
+                continue;
+            }
+            if self.carried_acp(rt) && matches!(&a, Action::Write(_) | Action::AcpMode { .. } | Action::AcpPrompt(_)) {
+                // A carried association never downgrades a callback/control to
+                // the legacy privacy-only writer. Callers must supply an exact
+                // ProviderAction; automatic cleanup may retire, never remint.
+                if let Engine::Acp(engine) = &mut rt.engine { engine.discard_write(&a); }
+                continue;
+            }
             if matches!(&a, Action::Write(_) | Action::AcpMode { .. }) {
                 if let Engine::Acp(engine) = &mut rt.engine {
                     if engine.writing.is_some() {
@@ -3826,8 +4137,11 @@ impl SessionManager {
     /// - An ACP or OpenCode agent has no queue: the app's is kept, and its
     ///   next message starts when the interrupted turn has ended (`apply`).
     pub fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if let Some(permit) = &policy { Self::check_collaboration_permit(permit, &rt)?; }
         // A hard stop already under way is ending more than the turn.
         if rt.stopping {
             return Ok(false);
@@ -3840,6 +4154,66 @@ impl SessionManager {
         };
         if !busy || !running {
             return Ok(false);
+        }
+        if self.carried_opencode(&rt) {
+            use provider_authority::{SenderAuthority, RequiredAction, OperationContext, Correlation};
+            let binding = self.provider_binding(&rt).context("OpenCode control association missing")?;
+            let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Drive,
+                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Drive, binding,
+                Correlation::Control { request: uuid::Uuid::new_v4().to_string(), kind: "interrupt".into() });
+            if self.opencode_opening(&rt) {
+                let preparing = self.with_provider_state(&rt, |s| s.opencode.preparing.clone());
+                if let Some((seq, preparing)) = preparing {
+                    preparing.withdraw();
+                    self.with_provider_state(&rt, |s| { s.opencode.preparing = None; s.operations.remove(preparing.operation_id()); });
+                    self.prompt_withdrawn(&mut rt, seq, None);
+                    rt.turn_open = false;
+                }
+                let originals = self.with_provider_state(&rt, |s| s.opencode.requests.values()
+                    .filter(|r| matches!(r.tag.as_str(), "session_get" | "session_new")).cloned().collect::<Vec<_>>());
+                let child = rt.child.clone();
+                drop(rt);
+                if let Some(child) = child {
+                    for old in originals { self.retire_opencode_original(&rt_arc, &child, &old.context, old.generation, &old.tag); }
+                }
+                let manager = self.clone(); let runtime = rt_arc.clone();
+                std::thread::spawn(move || manager.drain_carried_acp_queue(&runtime));
+            } else {
+                let Engine::OpenCode(engine) = &mut rt.engine else { unreachable!() };
+                let actions = engine.interrupt();
+                let staged = self.carry_opencode_actions(&mut rt, &context, None, actions)?;
+                context.seal_origin();
+                self.stage_opencode_actions(&mut rt, staged, None);
+                drop(rt);
+            }
+            self.observer.interrupted(&key_of(session_id, tab_id));
+            return Ok(true);
+        }
+        if self.carried_acp(&rt) {
+            use provider_authority::{SenderAuthority, RequiredAction, OperationContext, Correlation};
+            let binding = self.provider_binding(&rt).context("ACP control association missing")?;
+            let opening = matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session());
+            let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Drive,
+                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Drive, binding,
+                Correlation::Control { request: uuid::Uuid::new_v4().to_string(), kind: "interrupt".into() });
+            if opening {
+                let old = self.with_provider_state(&rt, |state| state.operations.values()
+                    .find(|original| matches!(original.correlation(), Correlation::Opening { .. })).cloned());
+                let child = rt.child.clone();
+                drop(rt);
+                if let (Some(child), Some(old)) = (child, old) {
+                    self.retire_acp_original(&rt_arc, &child, &old, false);
+                    let manager = self.clone(); let runtime = rt_arc.clone();
+                    std::thread::spawn(move || manager.drain_carried_acp_queue(&runtime));
+                }
+            } else {
+                let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
+                let actions = a.interrupt_carried(context)?;
+                self.stage_acp_actions(&mut rt, actions);
+                drop(rt);
+            }
+            self.observer.interrupted(&key_of(session_id, tab_id));
+            return Ok(true);
         }
         let asked = !rt.pending.is_empty();
         self.cancel_asks(&mut rt);
@@ -3894,6 +4268,7 @@ impl SessionManager {
     /// turned down where the agent waits on it (a parked hook, an ACP
     /// request, an OpenCode permission), and its card stops offering buttons.
     fn cancel_asks(&self, rt: &mut TabRuntime) {
+        let carried = self.carried_acp(rt);
         let asks: Vec<String> = rt.pending.drain().map(|(id, _)| id).collect();
         let mut actions = Vec::new();
         for request_id in &asks {
@@ -3901,7 +4276,8 @@ impl SessionManager {
                 // Dropping the sender wakes the hook, which finds its request
                 // gone and answers the CLI with a denial (`ask_permission`).
                 Engine::Cli(p) => drop(p.decisions.remove(request_id)),
-                Engine::Acp(a) => actions.extend(a.answer(request_id, "raccoon:cancel").unwrap_or_default()),
+                Engine::Acp(a) if !carried => actions.extend(a.answer(request_id, "raccoon:cancel").unwrap_or_default()),
+                Engine::Acp(_) => {},
                 Engine::OpenCode(o) => actions.extend(o.answer(request_id, "reject").unwrap_or_default()),
                 Engine::CodexStdio(engine) => {
                     let writes = engine.cancel_asks();
@@ -3967,6 +4343,7 @@ impl SessionManager {
         let mut rt = rt_arc.lock().unwrap();
         let pos = rt.queued.iter().position(|q| q.message.id == message_id);
         let removed = pos.map(|p| rt.queued.remove(p));
+        if let Some(pending) = &removed { self.with_provider_state(&rt, |state| state.queue.cancel(pending.seq, &pending.message.id)); }
         if matches!(rt.engine, Engine::CodexStdio(_)) {
             if let Some(seq) = removed.as_ref().map(|q| q.seq) {
                 rt.stdio_followups.authorities.remove(&seq);
@@ -4011,7 +4388,9 @@ impl SessionManager {
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        self.stop_with(session_id, tab_id, false)
+        self.stop_with(session_id, tab_id, false)?;
+        self.observer.automation_cancelled(session_id, tab_id, "The automation agent was stopped.");
+        Ok(())
     }
 
     /// Stop a tab's agent, and whatever it left running, if nothing is using
@@ -4043,6 +4422,7 @@ impl SessionManager {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
+        self.observer.automation_execution_lost(session_id, tab_id, "The agent stopped before the automation run completed.");
         // Kept with the tab, so a runtime started since knows it too.
         if let Err(error) = index::set_parked(session_id, tab_id, true) {
             log::warn!("mark {session_id}:{tab_id} as stopped for sitting idle: {error:#}");
@@ -4083,6 +4463,63 @@ impl SessionManager {
             return Some(what);
         }
         crate::idle_agents::left_running(leader?)
+    }
+
+    /// A new turn may already have started by the time the previous turn's
+    /// completion is delivered. Background work can also wake a later turn.
+    pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
+        let watch = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return true; }
+            rt.background.clone()
+        };
+        if watch.is_some_and(|watch| watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_some()) { return true; }
+        self.background_work(session_id, tab_id).is_some()
+    }
+
+    fn automation_runtime_busy(rt: &TabRuntime) -> bool {
+        rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
+            || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
+    }
+
+    /// Serialize the durable completion transition with turn admission. The
+    /// potentially slow process/transcript scan is outside the tab lock, then
+    /// the live state is checked again while that lock is held.
+    pub(crate) fn with_automation_quiescent<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let observed = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return None; }
+            rt.seq
+        };
+        if self.automation_execution_continues(session_id, tab_id) { return None; }
+        let rt = runtime.lock().unwrap();
+        if Self::automation_runtime_busy(&rt) || rt.seq != observed || generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    pub(crate) fn with_automation_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = runtime.lock().unwrap();
+        if generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    /// A deferred automation still owns work while its CLI waits at a prompt.
+    /// Keep this status persisted so all windows and the idle reaper agree.
+    pub(crate) fn automation_deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return };
+        let mut rt = runtime.lock().unwrap();
+        if rt.turn_open || rt.stopping || !rt.pending.is_empty() || rt.recovery.is_some() { return; }
+        if !active && (!rt.queued.is_empty() || rt.held_queue.keeps_runtime_busy()
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))) { return; }
+        if active && rt.status == TabStatus::Completed {
+            self.set_display_status(&mut rt, TabStatus::InProgress);
+        } else if !active && rt.status == TabStatus::InProgress {
+            self.set_display_status(&mut rt, TabStatus::Completed);
+        }
     }
 
     /// Every running agent that has nothing to do, with how long it has had
@@ -4134,6 +4571,9 @@ impl SessionManager {
     /// agent was stopped for sitting idle. Its transcript reads the same
     /// without one, and its next prompt (or its terminal view) starts it.
     pub fn start_on_open(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?;
         if !tab.is_terminal() && !tab.by_hand() && !self.is_running(session_id, tab_id) {
@@ -4202,6 +4642,7 @@ impl SessionManager {
             rt.stop_in_flight = true;
             rt.stopping = true;
             rt.queued.clear();
+            self.with_provider_state(&rt, |state| state.queue.clear());
             // Only an agent's own process: the shell of a tab that is a
             // terminal is not what Stop is for.
             let agent_pane = matches!(rt.engine, Engine::Cli(_)).then_some(&own_pane);
@@ -4212,6 +4653,8 @@ impl SessionManager {
             rt.stopping_pid = pid;
             // Unsent ACP prompts have no provider turn to cancel and cannot
             // be handed to the next launch as local input.
+            if let Engine::Acp(a) = &mut rt.engine { a.withdraw_carriers(); }
+            self.with_provider_state(&rt, |state| { for context in state.operations.values().chain(state.settings.values()) { context.withdraw(); } });
             self.withdraw_acp_input(&mut rt);
             // Settle before waiting for the OS. Late exits cannot reopen this turn.
             self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
@@ -4228,6 +4671,7 @@ impl SessionManager {
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
+            self.retire_provider(&rt);
             // A headless engine's process is gone too (`let_go_of_cli` has
             // done this for a CLI's).
             self.settle_settings_without_process(&mut rt);
@@ -4406,6 +4850,9 @@ impl SessionManager {
     }
 
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
@@ -4421,6 +4868,30 @@ impl SessionManager {
                 _ => None,
             }.ok_or_else(|| anyhow!("that request does not offer a session command allowance"))?
         } else { String::new() };
+        if self.carried_opencode(&rt) {
+            use provider_authority::{SenderAuthority, RequiredAction, OperationContext, Correlation};
+            let binding = self.provider_binding(&rt).context("OpenCode approval association missing")?;
+            let provider_request = request_id.strip_prefix("oc:").context("OpenCode ask identity invalid")?.to_string();
+            let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
+                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
+            self.answer_opencode_carried(&mut rt, request_id, option_id, context)?;
+            return Ok(());
+        }
+        if self.carried_acp(&rt) {
+            use provider_authority::{SenderAuthority, RequiredAction, OperationContext, Correlation};
+            let binding = self.provider_binding(&rt).context("ACP approval association missing")?;
+            // Adapter ask IDs are acp:<numeric provider request> in its native
+            // ask registry; the original ID is preserved, never guessed by tag.
+            let provider_request = request_id.strip_prefix("acp:").context("ACP ask identity invalid")?.to_string();
+            let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
+                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
+            let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
+            let envelope = a.answer_carried(request_id, option_id, context)?;
+            self.stage_acp_actions(&mut rt, vec![envelope]);
+            return Ok(());
+        }
         let (allow, label) = match &mut rt.engine {
             Engine::Cli(p) => {
                 let (decision, label) = match option_id {
@@ -4444,8 +4915,8 @@ impl SessionManager {
                 (allow, label)
             }
             Engine::Acp(a) => {
+                let allow = a.answer_choice(request_id, option_id).ok_or_else(|| anyhow!("that option has no unambiguous outcome"))?;
                 let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                let allow = !(option_id.contains("cancel") || option_id.contains("reject") || option_id.contains("deny"));
                 self.apply_actions(&mut rt, actions);
                 (allow, if allow { "Allowed".to_string() } else { "Denied".to_string() })
             }
@@ -4487,6 +4958,9 @@ impl SessionManager {
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
     pub fn answer_questions(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
@@ -4509,16 +4983,41 @@ impl SessionManager {
     /// moves when the provider is running it (`harness::settings`): at once
     /// when nothing is running, on the provider's word when something is.
     pub fn set_model(&self, session_id: &str, tab_id: &str, model: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if HarnessId::parse(&rt.harness).settings().model == Apply::Restart {
             if let Some(refusal) = Self::by_hand_refusal(&rt, "the model") {
                 bail!(refusal);
             }
         }
         let turn_open = rt.turn_open;
-        let waits = self.change_waits(&rt, Setting::Model);
-        let (before, after) = self.update_settings(&mut rt, |s| s.request_model(model, waits))?;
+        let waits = self.change_waits(&rt, Setting::Model) || self.carried_opencode(&rt);
+        let carried = self.carried_acp(&rt) || self.carried_opencode(&rt);
+        let original_privacy = crate::data_privacy::remote_ticket();
+        let (before, after) = self.update_settings(&mut rt, |s| {
+            s.request_model_explicit(model, waits, policy.as_ref(), original_privacy.clone());
+            if carried { s.retain_provider_request("model", policy.as_ref(), original_privacy.clone()); }
+        })?;
+        Self::remember_configuration(&mut rt, &after, "model", policy.as_ref());
+        if self.carried_opencode(&rt) {
+            let context = self.capture_acp_setting(&mut rt, &after, "model", policy.as_ref())?;
+            self.stage_opencode_setting(&mut rt, context);
+            return Ok(());
+        }
+        if self.carried_acp(&rt) {
+            let context = self.capture_acp_setting(&mut rt, &after, "model", policy.as_ref())?;
+            let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
+            let actions = a.set_model_carried(model, after.model_request_id().map(String::from), context)?;
+            self.stage_acp_actions(&mut rt, actions);
+            return Ok(());
+        }
         let mut restart = false;
         match &mut rt.engine {
             // Claude's own `/model` takes the change live, and its status
@@ -4620,6 +5119,12 @@ impl SessionManager {
     /// its picker, Shift+Tab, a default it resolved at startup — reaches the
     /// tab.
     fn provider_settings(&self, rt: &mut TabRuntime, signal: Signal) {
+        // Identical reports from a replacement launch are still fresh
+        // witnesses. Deduplicating the settings update must not retain the
+        // previous launch's stance identity.
+        if let (Signal::Permissions { stance }, Engine::Cli(cli)) = (&signal, &rt.engine) {
+            rt.collaboration_stance = Some((cli.tail.clone(), stance.clone()));
+        }
         if rt.last_settings_report.as_ref() == Some(&signal) {
             return;
         }
@@ -4773,9 +5278,9 @@ impl SessionManager {
         true
     }
 
-    /// Add an agent tab to a session, from whichever surface asked. A shared
-    /// session takes no Bypass tab, and the share cannot start between the
-    /// check and the save because both hold the sharing lock.
+    /// Add an agent tab from whichever surface asked. Local sharing retains
+    /// the host's chosen modes; cloud v2 checks independent configuration
+    /// authority and admits Everyone input separately for each owned launch.
     pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
         self.add_tab_on(session_id, tab, None)
     }
@@ -4783,6 +5288,9 @@ impl SessionManager {
     /// [`Self::add_tab`] on agent account `account` (#980); without one, on
     /// the account its agent's other tabs in the session asked for.
     pub fn add_tab_on(&self, session_id: &str, tab: &crate::session_ops::NewTab, account: Option<&str>) -> Result<index::TabEntry> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let sharing = self.sharing.lock().unwrap();
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
@@ -4808,6 +5316,16 @@ impl SessionManager {
     /// to resume on its next prompt); `false` when only the account was
     /// recorded.
     pub fn switch_account(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
+        let restarted = self.switch_account_on(session_id, tab_id, account)?;
+        // The person's own move: automatic switching leaves it there until
+        // that account is full (#981).
+        self.account_moved_by_hand(session_id, tab_id, account);
+        Ok(restarted)
+    }
+
+    /// [`Self::switch_account`]'s restart and resume, which automatic
+    /// switching (#981) makes too.
+    fn switch_account_on(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
         let account = crate::session_ops::requested_account(Some(account)).map_err(|error| anyhow!(error))?.context("Choose an account to switch to.")?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
@@ -4840,6 +5358,9 @@ impl SessionManager {
     }
 
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         self.mobile.invalidate_tab(session_id, tab_id);
         let sharing = self.sharing.lock().unwrap();
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(mode) {
@@ -4847,13 +5368,35 @@ impl SessionManager {
         }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if let Some(refusal) = Self::by_hand_refusal(&rt, "the permission mode") {
             bail!(refusal);
         }
         let turn_open = rt.turn_open;
         let stdio = self.codex_stdio_mode_change(session_id, tab_id, mode, turn_open)?;
-        let waits = (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready || a.writing.is_some());
-        let (before, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
+        let waits = self.carried_opencode(&rt) || (turn_open && matches!(rt.engine, Engine::Cli(_))) || matches!(&rt.engine, Engine::Acp(a) if !a.ready || a.writing.is_some());
+        let carried = self.carried_acp(&rt) || self.carried_opencode(&rt);
+        let original_privacy = crate::data_privacy::remote_ticket();
+        let (before, after) = self.update_settings(&mut rt, |s| {
+            s.request_mode_explicit(mode, waits, policy.as_ref(), original_privacy.clone());
+            if carried { s.retain_provider_request("mode", policy.as_ref(), original_privacy.clone()); }
+        })?;
+        Self::remember_configuration(&mut rt, &after, "mode", policy.as_ref());
+        if self.carried_opencode(&rt) {
+            let context = self.capture_acp_setting(&mut rt, &after, "mode", policy.as_ref())?;
+            self.stage_opencode_setting(&mut rt, context);
+            return Ok(());
+        }
+        if self.carried_acp(&rt) {
+            let context = self.capture_acp_setting(&mut rt, &after, "mode", policy.as_ref())?;
+            let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
+            let actions = a.set_mode_carried(mode, context)?;
+            self.stage_acp_actions(&mut rt, actions);
+            return Ok(());
+        }
         let mut restart = false;
         match &mut rt.engine {
             Engine::Cli(p) => {
@@ -4893,8 +5436,15 @@ impl SessionManager {
     /// headless peers have no effort setting at all, and say so rather than
     /// take a value that would change nothing.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if policy.as_ref().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2())
+            && !matches!(rt.harness.as_str(), "claude" | "codex") {
+            bail!("This engine has no collaboration-v2 settings writer");
+        }
         if HarnessId::parse(&rt.harness).settings().effort == Apply::Unsupported && effort.is_some_and(|e| !e.is_empty()) {
             bail!("{} has no effort setting.", agent_name(&rt.harness));
         }
@@ -4907,6 +5457,7 @@ impl SessionManager {
         let waits = self.change_waits(&rt, Setting::Effort)
             && (HarnessId::parse(&rt.harness).settings().effort == Apply::Restart || effort.is_some_and(|e| !e.is_empty()));
         let (before, after) = self.update_settings(&mut rt, |s| s.request_effort(effort, waits))?;
+        Self::remember_configuration(&mut rt, &after, "effort", policy.as_ref());
         let mut respawn = false;
         let mut restart = false;
         match &mut rt.engine {
@@ -4935,6 +5486,7 @@ impl SessionManager {
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
+            self.retire_provider(&rt);
         }
         drop(rt);
         if restart {
@@ -5036,6 +5588,7 @@ impl SessionManager {
             runtime.restart_claim = None;
             if matches!(runtime.engine, Engine::CodexStdio(_)) { self.withdraw_codex_followups(&mut runtime); }
             runtime.queued.clear();
+            self.with_provider_state(&runtime, |state| state.queue.clear());
             if let Engine::Cli(cli) = &mut runtime.engine {
                 for echo in &mut cli.echoed {
                     if let Some(receipt) = echo.receipt.take() {
@@ -5062,6 +5615,9 @@ impl SessionManager {
     /// started — the app restarting into a session that was already running —
     /// never saw the event, and would show a terminal view with nothing in it.
     pub fn ensure_started(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_configuration()?; }
         let _admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
         self.accepting_work()?;
         // Nothing starts in a session that is being deleted or moved, or in a
@@ -5170,6 +5726,12 @@ impl SessionManager {
     /// same breath knows to wait for the TUI to finish drawing. `prompting`
     /// is whether the caller is about to send one.
     fn start_cli(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, prompting: bool) -> Result<bool> {
+        let permits = Self::pending_configuration_permits(rt)?;
+        // Runtime is already held: use try admission to avoid reversing the
+        // policy -> runtime order against a refresh or a direct operation.
+        let _policy: Vec<_> = permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("Collaboration policy is changing; retry the launch")).collect::<Result<_>>()?;
+        if let Some(permit) = collaboration_v2::current() { Self::check_collaboration_permit(&permit, rt)?; }
         let result = self.start_cli_inner(rt, rt_arc, entry, tab, prompting);
         if !rt.stopping && rt.restart_claim.is_none() { rt.setup_failed = result.is_err(); }
         result
@@ -5267,6 +5829,11 @@ impl SessionManager {
         // agent's CLAUDE_CONFIG_DIR or CODEX_HOME. With This Mac's login
         // alone the grant is the one above, word for word.
         let asked = crate::session_ops::tab_account(tab).map(str::to_owned);
+        // Another account when automatic switching finds this one full (#981).
+        let (asked, moved) = self.launch_account(&rt.session_id, &rt.tab_id, &tab.harness, crate::session_ops::project_key(entry), &entry.title, asked);
+        if let Some(text) = moved {
+            self.publish(rt, Payload::Status { text }, None);
+        }
         let grant = crate::agent_keys::launch_grant_on(&tab.harness, Path::new(&entry.cwd), crate::agent_keys::Choice { account: asked.as_deref(), project: crate::session_ops::project_key(entry) })?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
@@ -5657,9 +6224,30 @@ impl SessionManager {
     /// Persist withdrawal before a launch can consume requested settings.
     /// The returned leases belong to the whole physical restart/launch.
     fn admit_pending_settings(&self, rt: &mut TabRuntime) -> Result<Vec<crate::data_privacy::RemoteWrite>> {
+        let permits = Self::pending_configuration_permits(rt)?;
+        let _policy: Vec<_> = permits.iter().map(|permit| permit.collaboration.try_enter_admission()
+            .context("Collaboration policy is changing; retry the settings")).collect::<Result<_>>()?;
+        let authority = rt.collaboration_settings.clone();
         let mut privacy = Vec::new();
-        self.update_settings(rt, |s| privacy = s.admit_pending())?;
+        let (_, after) = self.update_settings(rt, |s| {
+            s.retain_collaboration_requests(|id| authority.get(id).is_some_and(|permit| permit.check_configuration().is_ok()));
+            privacy = s.admit_pending();
+        })?;
+        rt.collaboration_settings.retain(|id, _| after.collaboration_requests().values().any(|pending| pending == id));
         Ok(privacy)
+    }
+
+    fn remember_configuration(rt: &mut TabRuntime, settings: &Settings, key: &str, permit: Option<&CollaborationPermit>) {
+        rt.collaboration_settings.retain(|id, _| settings.collaboration_requests().values().any(|pending| pending == id));
+        if let (Some(id), Some(permit)) = (settings.collaboration_requests().get(key), permit) {
+            rt.collaboration_settings.insert(id.clone(), permit.clone());
+        }
+    }
+
+    fn pending_configuration_permits(rt: &TabRuntime) -> Result<Vec<CollaborationPermit>> {
+        let entry = index::get(&rt.session_id)?;
+        let settings = Settings::of(entry.tab(&rt.tab_id).context("tab not found")?);
+        Ok(settings.collaboration_requests().values().filter_map(|id| rt.collaboration_settings.get(id).cloned()).collect())
     }
 
     fn prepare_cli_restart(&self, rt: &mut TabRuntime, tail: &Arc<tui::Tail>, idle: bool) -> Option<CliRestart> {
@@ -5759,6 +6347,7 @@ impl SessionManager {
             self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);
         }
         rt.engine = Engine::None;
+        self.retire_provider(rt);
         rt.turn_open = false;
         self.settle_settings_without_process(rt);
         Some(pane)
@@ -6115,9 +6704,10 @@ impl SessionManager {
                 drop(application);
                 self.observer.automation_failed(&session, &tab, "The automation turn was interrupted.");
             } else {
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
                 drop(application);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             self.judge_reported_mode(rt_arc, tail);
             return;
@@ -6271,7 +6861,13 @@ impl SessionManager {
                 log::warn!("record the continuation prompt of {}: {error:#}", rt.key());
             }
         }
+        if let Engine::Cli(cli) = &rt.engine {
+            let pending: std::collections::HashSet<_> = cli.echoed.iter().map(|echo| echo.seq).collect();
+            rt.collaboration_prompts.retain(|seq, _| pending.contains(seq));
+        }
+        if let Some(permit) = &prompt.collaboration { rt.collaboration_prompts.insert(ev.seq, permit.clone()); }
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
+            collaboration: prompt.collaboration,
             ready: Some(ready),
             seq: Some(ev.seq),
             queued,
@@ -6292,7 +6888,7 @@ impl SessionManager {
         let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { rt.baseline_for(cwd) };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
-        let ev = self.publish(rt, message, None);
+        let ev = self.publish_prompt(rt, message, prompt.request_id);
         echo.continuation = receipt.is_some();
         echo.receipt = receipt;
         echo.seq = ev.seq;
@@ -6347,7 +6943,7 @@ impl SessionManager {
     /// the CLI has not acknowledged it (`nudge_by`); the watcher tells the
     /// reader when it never does (`accept_by`).
     fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
-        let PromptDelivery { ready, seq, queued, receipt, shared, mobile, stops } = delivery;
+        let PromptDelivery { ready, seq, queued, receipt, shared, mobile, stops, collaboration } = delivery;
         let sent_at = Instant::now();
         // A slash command opens a palette or runs in the CLI itself: it is
         // held to acknowledging nothing. A continuation is held to it like any
@@ -6396,8 +6992,9 @@ impl SessionManager {
                 Some(left) => Err(anyhow::Error::new(follow::Refusal(left))),
                 None => Ok(()),
             };
+            let policy_revoked = || collaboration.as_ref().is_some_and(|permit| Self::check_collaboration_permit(permit, &rt_arc.lock().unwrap()).is_err());
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || stopped(&rt_arc.lock().unwrap()));
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref(), mobile.as_ref(), || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || policy_revoked() || stopped(&rt_arc.lock().unwrap()));
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
@@ -6412,6 +7009,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6421,7 +7019,7 @@ impl SessionManager {
             }
             // Nothing is typed into an input box that holds something: the
             // Enter would send that and this prompt as one (#722).
-            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
+            let revoked = || privacy.as_ref().is_some_and(|ticket| !ticket.valid()) || policy_revoked() || manager.delivery_revoked(shared.as_ref(), mobile.as_ref());
             let input = match manager.wait_for_empty_input(&rt_arc, &pane, seq, stops, &ticket, &mut held, revoked, &stage) {
                 InputWait::Type(input) => input,
                 InputWait::Revoked => {
@@ -6430,6 +7028,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6490,7 +7089,7 @@ impl SessionManager {
                 admitted_to_writer = true;
                 still_there()?;
                 for path in &attachments {
-                    terminals.write(&pane, &tui::attachment_bytes(path))?;
+                    manager.write_collaboration_prompt(&rt_arc, collaboration.as_ref(), ready.as_ref(), &pane, &tui::attachment_bytes(path))?;
                 }
                 let unread = || terminals.unread_input(&pane);
                 if !attachments.is_empty() {
@@ -6499,7 +7098,7 @@ impl SessionManager {
                 }
                 let body = tui::body_bytes(&text);
                 still_there()?;
-                terminals.write(&pane, &body)?;
+                manager.write_collaboration_prompt(&rt_arc, collaboration.as_ref(), ready.as_ref(), &pane, &body)?;
                 stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len(), "input": input }));
                 let (read, read_after) = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                 if read == tui::PasteRead::Unread {
@@ -6515,7 +7114,7 @@ impl SessionManager {
                 }
                 std::thread::sleep(tui::submit_delay(body.len()).saturating_sub(read_after.elapsed()));
                 still_there()?;
-                if !Self::submit_composer_prompt(&rt_arc, seq, receipt.as_ref().map(|(seq, _)| *seq), watched, stopped, || terminals.write(&pane, tui::SUBMIT))? {
+                if !manager.submit_collaboration_prompt(&rt_arc, collaboration.as_ref(), &pane, (seq, receipt.as_ref().map(|(seq, _)| *seq)), watched, |rt| stopped(rt) || ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(cli) if Arc::ptr_eq(ready, &cli.ready))))? {
                     return Ok(false);
                 }
                 stage("submit_written", serde_json::json!({ "paste": read.as_str(), "drawn": drawn }));
@@ -6539,6 +7138,7 @@ impl SessionManager {
                     if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let Some((_, _, _, seq)) = &mobile { manager.cancel_shared_prompt(&mut rt, *seq); }
                     if let (Some(_), Some(seq)) = (&privacy, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
+                    if let (Some(_), Some(seq)) = (&collaboration, seq) { manager.cancel_shared_prompt(&mut rt, seq); }
                     manager.refuse_continuation(&mut rt, receipt);
                     return;
                 }
@@ -6925,7 +7525,9 @@ impl SessionManager {
     /// message nobody sent.
     fn type_command(&self, p: &mut CliTab, rt_arc: &Arc<Mutex<TabRuntime>>, command: String) {
         p.echoed.push_back(ComposerEcho { command: true, ..ComposerEcho::new(command.clone(), 0) });
-        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery { stops: p.input.stops, ..Default::default() });
+        let collaboration = collaboration_v2::current();
+        let ready = collaboration.as_ref().map(|_| p.ready.clone());
+        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery { collaboration, ready, stops: p.input.stops, ..Default::default() });
     }
 
     // ---- inbound from the CLI's hooks
@@ -7245,8 +7847,9 @@ impl SessionManager {
                 if !mine(&rt) { return HookReply::default(); }
                 rt.last_activity = Instant::now();
                 if rt.turn_open {
+                    let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                     self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
-                    self.after_turn_completed(&rt_arc, rt, final_text);
+                    self.after_turn_completed(&rt_arc, rt, final_text, completed);
                     return HookReply::default();
                 }
             }
@@ -7285,6 +7888,8 @@ impl SessionManager {
                         &frame.tab,
                         "The agent session ended before the automation turn completed.",
                     );
+                } else {
+                    self.observer.automation_execution_lost(&frame.session, &frame.tab, "The agent session ended before the automation run completed.");
                 }
             }
             _ => {}
@@ -7296,11 +7901,18 @@ impl SessionManager {
     /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
     /// before notifying automation or scheduling a settings restart that may
     /// re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        let (generation, started_at, finished) = completed;
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
+        let started = started_at.and_then(|at| chrono::TimeDelta::from_std(at.elapsed()).ok()).map(|elapsed| chrono::Utc::now() - elapsed);
+        let watch = rt.background.clone();
+        rt.automation_completions_in_flight += 1;
+        let completion = AutomationCompletionGuard(rt_arc.clone());
         drop(rt);
-        self.observer.automation_completed(&session, &tab, final_message);
+        if let Some(watch) = watch { watch.lock().unwrap().automation_turn_completed(started, finished, final_message.as_deref()); }
+        self.observer.automation_completed(&session, &tab, final_message, generation);
+        drop(completion);
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
@@ -7644,8 +8256,10 @@ impl SessionManager {
         {
             let mut rt = rt_arc.lock().unwrap();
             rt.engine = Engine::None;
+            self.retire_provider(&rt);
             rt.turn_open = false;
             rt.queued.clear();
+            self.with_provider_state(&rt, |state| state.queue.clear());
             self.set_status(&mut rt, TabStatus::Idle);
         }
         let command = match HarnessId::parse(&tab.harness) {
@@ -7657,11 +8271,15 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
+    #[cfg(test)]
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) { self.on_line_from(rt_arc, line, None); }
 
     fn on_line_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str, epoch: Option<&std::sync::atomic::AtomicU64>) {
         let mut rt = rt_arc.lock().unwrap();
         if epoch.is_some_and(|epoch| rt.child.as_ref().is_none_or(|child| child.epoch != epoch.load(std::sync::atomic::Ordering::Acquire))) { return; }
+        // OpenCode stdout is not its native event transport, and cannot
+        // manufacture an original HTTP callback for a carried association.
+        if self.carried_opencode(&rt) { return; }
         if rt.stopping && matches!(&rt.engine, Engine::Acp(_)) { return; }
         rt.last_activity = Instant::now();
         let _privacy = match self.prepare_acp_opening_settings(&mut rt) {
@@ -7725,6 +8343,7 @@ impl SessionManager {
                 rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
                 self.needs_recovery(rt, kind, crate::recovery_log::source_of(&payload));
             }
+            self.account_switch_observe(rt, &payload);
         }
         match &payload {
             Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
@@ -7797,6 +8416,10 @@ impl SessionManager {
         let sign_in_refused = main && matches!(&payload, Payload::TurnCompleted { auth_failed: true, .. });
         let worked = main && matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Ok, auth_failed: false, .. });
         self.publish(rt, payload, subagent);
+        if main && is_boundary {
+            // Whether it moves to another account before its next prompt (#981).
+            self.account_switch_after_turn(rt);
+        }
         if sign_in_refused {
             // A reply drawn after the refusal may have taken the recovery back.
             if rt.recovery != Some(RecoveryKind::SignedOut) {
@@ -7839,41 +8462,93 @@ impl SessionManager {
             // An interrupted turn hands over to the next queued message like
             // one that finished (#427): Escape stops a turn, not the queue. A
             // hard stop has emptied the queue before it closes the turn.
-            while !matches!(rt.engine, Engine::CodexStdio(_)) && !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
-                let pending = rt.queued.remove(0);
-                let Ok(_privacy) = crate::data_privacy::delivery_scope(pending.privacy.as_ref()) else {
-                    self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
-                    continue;
-                };
-                let q = pending.message;
-                let delivery = pending.privacy.map(|privacy| acp::Delivery { seq: pending.seq, privacy: Some(privacy), mobile: None, shared: None });
-                let actions = match &mut rt.engine {
-                    Engine::Acp(a) => match delivery {
-                        Some(delivery) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), Some(delivery)),
-                        None => a.prompt(q.text.clone(), q.images.clone()),
-                    },
-                    Engine::OpenCode(o) => {
-                        o.set_prompt_seq(pending.seq);
-                        o.prompt(q.text.clone(), q.images.clone())
-                    },
-                    // A PTY tab never queues here: the CLI holds typed input
-                    // itself, so the message went in when it was written.
-                    Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
-                };
-                // ACP may retain this local follow-up until its handshake
-                // completes. It owns the next turn even before it has writes.
-                let sent = !actions.is_empty() || matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session());
-                self.apply_actions(rt, actions);
-                if sent {
-                    rt.open_turn();
-                    rt.turn_started_at = Some(Instant::now());
-                    self.set_status(rt, TabStatus::InProgress);
-                    return;
-                }
-            }
+            if self.drain_provider_queue(rt) { return; }
             self.set_status(rt, if rt.recovery.is_some() { TabStatus::Waiting } else if aborted { TabStatus::Idle } else { TabStatus::Completed });
             if main && (worked || (aborted && rt.held_queue.next.is_some())) { self.schedule_held(rt); }
         }
+    }
+
+    /// Queue admission is per item; the completing callback's TLS is never
+    /// a source of authority. V2 physical routes remain refused below.
+    fn drain_provider_queue(&self, rt: &mut TabRuntime) -> bool {
+        if self.carried_acp(rt) || self.carried_opencode(rt) {
+            let manager = self.clone(); let runtime = rt.me.clone();
+            std::thread::spawn(move || { if let Some(runtime) = runtime.upgrade() { manager.drain_carried_acp_queue(&runtime); } });
+            return !rt.queued.is_empty();
+        }
+        while !matches!(rt.engine, Engine::CodexStdio(_)) && !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
+            let pending = rt.queued.remove(0);
+            let Some(binding) = self.provider_binding(rt) else {
+                self.with_provider_state(rt, |state| state.queue.cancel(pending.seq, &pending.message.id));
+                self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            };
+            let operation = self.with_provider_state(rt, |state| state.queue.take(pending.seq, &pending.message.id, pending.privacy.clone(), binding.clone()));
+            let witness = Self::collaboration_witness(rt);
+            let admitted = operation.try_dispatch(&binding, operation.correlation(), witness.as_ref(), |sender| {
+                // V2 provider physical writers remain blocked, including restored
+                // work. This check does not upgrade an unsupported Everyone witness.
+                anyhow::ensure!(!sender.permit().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()), "This engine has no collaboration-v2 final writer");
+                anyhow::ensure!(sender.mobile.is_none() && sender.local_share.is_none(), "queued provider sender requires adapter integration");
+                Ok(())
+            }, || Ok(()));
+            if matches!(admitted, Ok(provider_authority::Attempt::Deferred)) {
+                // No mutation on contention. Preserve exact operation, sequence,
+                // ID and sender rather than relabel it with this callback's TLS.
+                let policy = operation.sender().permit().cloned();
+                let manager = self.clone();
+                let runtime = rt.me.clone();
+                self.with_provider_state(rt, |state| state.queue.reinsert(pending.seq, pending.message.id.clone(), operation));
+                rt.queued.insert(0, pending);
+                std::thread::spawn(move || {
+                    // Wait with no runtime/session/sender guards. This is only a
+                    // wakeup: drop admission and recheck the ORIGINAL operation
+                    // in drain_provider_queue, never carry a ready token forward.
+                    { let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission()); }
+                    let Some(runtime) = runtime.upgrade() else { return };
+                    let mut rt = runtime.lock().unwrap();
+                    if !rt.turn_open { manager.drain_provider_queue(&mut rt); }
+                });
+                break;
+            }
+            if !matches!(admitted, Ok(provider_authority::Attempt::Applied)) {
+                self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            }
+            let sender = operation.sender();
+            let Ok(_privacy) = crate::data_privacy::delivery_scope(sender.privacy.as_ref()) else {
+                operation.withdraw();
+                self.publish(rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            };
+            let q = pending.message;
+            let delivery = Some(acp::Delivery { seq: pending.seq, privacy: sender.privacy.clone(),
+                mobile: sender.mobile.clone(), shared: sender.local_share.clone() });
+            let actions = match &mut rt.engine {
+                Engine::Acp(a) => match delivery {
+                    Some(delivery) => a.prompt_with_delivery(q.text.clone(), q.images.clone(), Some(delivery)),
+                    None => a.prompt(q.text.clone(), q.images.clone()),
+                },
+                Engine::OpenCode(o) => {
+                    o.set_prompt_seq(pending.seq);
+                    o.prompt(q.text.clone(), q.images.clone())
+                },
+                // A PTY tab never queues here: the CLI holds typed input
+                // itself, so the message went in when it was written.
+                Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => Vec::new(),
+            };
+            // ACP may retain this local follow-up until its handshake
+            // completes. It owns the next turn even before it has writes.
+            let sent = !actions.is_empty() || matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session());
+            self.apply_actions(rt, actions);
+            if sent {
+                rt.open_turn();
+                rt.turn_started_at = Some(Instant::now());
+                self.set_status(rt, TabStatus::InProgress);
+                return true;
+            }
+        }
+        false
     }
 
     fn on_exit(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pid: u32, code: Option<i32>) {
@@ -7886,6 +8561,7 @@ impl SessionManager {
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;
+        self.retire_provider(&rt);
         self.settle_settings_without_process(&mut rt);
         let pending: Vec<String> = rt.pending.drain().map(|(k, _)| k).collect();
         for request_id in pending {
@@ -7900,6 +8576,7 @@ impl SessionManager {
             self.publish(&mut rt, Payload::TurnCompleted { status, final_text, usage: None, duration_ms, head: None, auth_failed: false, detail: None }, None);
         }
         rt.queued.clear();
+        self.with_provider_state(&rt, |state| state.queue.clear());
         if let Some(kind) = recovery { self.needs_recovery(&mut rt, kind, crate::recovery_log::Source::Connection); }
         else { self.set_status(&mut rt, TabStatus::Idle); }
     }
@@ -7909,11 +8586,19 @@ struct TabSink {
     manager: SessionManager,
     rt: Arc<Mutex<TabRuntime>>,
     epoch: std::sync::atomic::AtomicU64,
+    child: Mutex<Option<std::sync::Weak<crate::harness::host::LiveChild>>>,
 }
 
 impl Sink for TabSink {
     fn stdout_line(&self, line: String) {
-        self.manager.on_line_from(&self.rt, &line, Some(&self.epoch));
+        let child = {
+            // spawn_child publishes the exact Arc while holding runtime.
+            // An eager child must wait for that publication, not lose output.
+            let _runtime = self.rt.lock().unwrap();
+            self.child.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade)
+        };
+        let Some(child) = child else { return };
+        self.manager.on_acp_line_from(&self.rt, &line, &child, &self.epoch);
     }
     fn stderr_line(&self, line: String) {
         let key = self.rt.lock().map(|r| r.key()).unwrap_or_default();
@@ -8082,7 +8767,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -8102,7 +8787,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -8323,3 +9008,1610 @@ mod tests {
 #[cfg(test)]
 #[path = "session_review_tests.rs"]
 mod review_tests;
+
+impl SessionManager {
+    pub(crate) fn collaboration_v2_witness(&self, session: &str, tab: &str) -> Option<collaboration_v2::TabWitness> {
+        let rt = self.runtime(session, tab).ok()?;
+        let rt = rt.lock().unwrap();
+        Self::collaboration_witness(&rt)
+    }
+
+    fn collaboration_witness(rt: &TabRuntime) -> Option<collaboration_v2::TabWitness> {
+        let entry = index::get(&rt.session_id).ok()?;
+        let tab = entry.tab(&rt.tab_id)?;
+        let (owned, actual) = match &rt.engine {
+            Engine::Cli(cli) => (cli.by_hand.is_none() && !rt.stopping && rt.restart_claim.is_none()
+                && rt.collaboration_raw.as_ref().is_none_or(|tail| !Arc::ptr_eq(tail, &cli.tail)),
+                rt.collaboration_stance.as_ref().filter(|(tail, _)| Arc::ptr_eq(tail, &cli.tail)).map(|(_, stance)| stance.clone())),
+            Engine::CodexStdio(engine) => (!engine.exited && !engine.blocked && !rt.stopping, engine.actual_stance.clone()),
+            _ => (false, None),
+        };
+        Some(collaboration_v2::TabWitness {
+            owned: owned && !tab.by_hand() && !tab.is_terminal(), harness: tab.harness.clone(),
+            stored_mode: tab.permission_mode.clone(), pending_mode: tab.requested_permission_mode.clone(), actual,
+        })
+    }
+
+    fn check_collaboration_permit(permit: &CollaborationPermit, rt: &TabRuntime) -> Result<()> {
+        permit.check(Self::collaboration_witness(rt).as_ref())
+    }
+
+    /// The legacy writer retries a full PTY as before. V2 retries also
+    /// recheck original authority and tab state before each physical Enter,
+    /// releasing both locks while waiting for capacity.
+    fn submit_collaboration_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, permit: Option<&CollaborationPermit>, pane: &str,
+        sequences: (Option<u64>, Option<u64>), watched: bool, stopped: impl Fn(&TabRuntime) -> bool) -> Result<bool> {
+        let (seq, receipt_seq) = sequences;
+        let started = Instant::now();
+        let pid = self.terminals.pid(pane);
+        loop {
+            let result = {
+                let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+                let guarded = permit.is_some_and(|permit| permit.collaboration.runtime_policy.is_v2());
+                Self::submit_composer_prompt(runtime, seq, receipt_seq, watched,
+                    |rt| stopped(rt) || permit.is_some_and(|permit| Self::check_collaboration_permit(permit, rt).is_err()),
+                    || {
+                        if !guarded { return self.terminals.write(pane, tui::SUBMIT); }
+                        let pid = pid.context("terminal process missing")?;
+                        anyhow::ensure!(self.terminals.try_write_for_process(pane, pid, tui::SUBMIT)? == tui::SUBMIT.len(), "terminal submit incomplete");
+                        Ok(())
+                    })
+            };
+            match result {
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)) => {
+                    #[cfg(test)]
+                    if let Some(blocked) = COLLABORATION_PTY_CAPACITY.lock().unwrap().take() { let _ = blocked.send(()); }
+                    if started.elapsed() >= pty::INPUT_STALL {
+                        return Err(pty::InputStalled { written: 0, total: tui::SUBMIT.len() }.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn write_collaboration_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, permit: Option<&CollaborationPermit>, ready: Option<&Arc<tui::Ready>>, pane: &str, bytes: &[u8]) -> Result<()> {
+        // Preserve the legacy retrying writer (including flush and its stall
+        // budget). Only v2 needs to release the tab lock between attempts.
+        {
+            let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+            if permit.is_none_or(|permit| !permit.collaboration.runtime_policy.is_v2()) {
+                return self.terminals.write(pane, bytes);
+            }
+        }
+        let pid = self.terminals.pid(pane).context("terminal process missing")?;
+        let mut offset = 0;
+        let started = Instant::now();
+        let mut progress = started;
+        loop {
+            let attempted = {
+                let _policy = permit.map(|permit| permit.collaboration.enter_admission());
+                let rt = runtime.lock().unwrap();
+                if let Some(permit) = permit { Self::check_collaboration_permit(permit, &rt)?; }
+                anyhow::ensure!(matches!(&rt.engine, Engine::Cli(cli) if cli.pane_id == pane && ready.is_none_or(|ready| Arc::ptr_eq(ready, &cli.ready))), "Terminal instance changed before input");
+                self.terminals.try_write_for_process(pane, pid, &bytes[offset..])
+            };
+            match attempted {
+                Ok(_) if offset == bytes.len() => return Ok(()), // guarded flush
+                Ok(0) => bail!("terminal input closed"),
+                Ok(written) => { offset += written; progress = Instant::now(); }
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted)) => {
+                    #[cfg(test)]
+                    if let Some(blocked) = COLLABORATION_PTY_CAPACITY.lock().unwrap().take() { let _ = blocked.send(()); }
+                    if progress.elapsed() >= pty::INPUT_STALL || started.elapsed() >= pty::INPUT_DEADLINE {
+                        return Err(pty::InputStalled { written: offset, total: bytes.len() }.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl SessionManager {
+    /// Raw terminal input can change stance without a reliable report. Latch
+    /// this launch unknown for Everyone until a managed replacement; a delayed
+    /// provider report from before the raw write cannot make it safe again.
+    pub(crate) fn with_raw_terminal_input<T>(&self, pane: &str, write: impl FnOnce() -> Result<T>) -> Result<T> {
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for runtime in runtimes {
+            let mut rt = runtime.lock().unwrap();
+            if let Engine::Cli(cli) = &rt.engine {
+                if cli.pane_id == pane {
+                    rt.collaboration_raw = Some(cli.tail.clone());
+                    drop(rt);
+                    return write();
+                }
+            }
+        }
+        write()
+    }
+}
+
+#[cfg(test)]
+#[path = "session_acp_collaboration_tests.rs"]
+mod provider_acp_collaboration;
+
+// ACP's native owner path is selected only after original ingress supplies a
+// carrier (or private integration tests select it). Public V2 entry refusals
+// and the generic drain refusal remain in place pending acceptance.
+impl SessionManager {
+    fn carried_acp(&self, rt: &TabRuntime) -> bool {
+        matches!(rt.engine, Engine::Acp(_)) && self.with_provider_state(rt, |state| state.acp_carried)
+    }
+
+    fn retain_acp_operation(&self, rt: &TabRuntime, context: &provider_authority::OperationContext) {
+        self.with_provider_state(rt, |state| {
+            state.acp_carried = true;
+            state.operations.insert(context.operation_id().into(), context.clone());
+        });
+    }
+
+    /// No guard escapes this call. Workers call it once per short syscall or
+    /// whole callback, never around a frame/capacity/network wait.
+    fn with_provider_admission(&self, runtime: &Arc<Mutex<TabRuntime>>,
+        context: &provider_authority::OperationContext,
+        run: impl FnOnce(&mut TabRuntime) -> Result<provider_authority::Attempt>,
+    ) -> Result<provider_authority::Attempt> {
+        use provider_authority::Attempt;
+        let sender = context.sender();
+        let _policy = match sender.permit() {
+            Some(permit) => match permit.collaboration.try_enter_admission() {
+                Some(guard) => Some(guard), None => return Ok(Attempt::Deferred),
+            }, None => None,
+        };
+        // The session's identity is captured at ingress, not looked up by PID.
+        let (session, tab) = context.destination();
+        // lock(), not lock_for(): a Hold fence must not wait while policy is
+        // held. check below refuses held work; writer waits own no guards.
+        let _session = crate::issue_pipeline::admission::lock();
+        let _privacy = sender.privacy.iter()
+            .chain(sender.mobile.iter().map(|permit| &permit.grant.privacy))
+            .chain(sender.local_share.iter().map(|permit| &permit.privacy))
+            .map(|ticket| ticket.enter()).collect::<Result<Vec<_>>>()?;
+        let mut sharing = (sender.mobile.is_some() || sender.local_share.is_some()).then(|| self.sharing.lock().unwrap());
+        let mut attachment = None;
+        if let Some(permit) = &sender.local_share {
+            let share = sharing.as_mut().and_then(|s| s.sessions.get_mut(session)).context("Sharing ended before ACP delivery")?;
+            share.admit_at_writer(permit, tab, chrono::Utc::now().timestamp_millis())?;
+            attachment = share.owner.as_ref().map(|owner| owner.attachment.clone());
+            let entry = index::get(session)?;
+            anyhow::ensure!(entry.tab(tab).is_some_and(|tab| !tab.by_hand() && settings::allowed_while_shared(&tab.permission_mode)), "Shared ACP association or mode changed");
+        }
+        if let Some(permit) = &sender.mobile { permit.check_mode(session, tab)?; }
+        let _mobile = sender.mobile.as_ref().map(|permit| permit.enter()).transpose()?;
+        let _owner = attachment.as_ref().map(|attachment| attachment.enter()).transpose()?;
+        let mut rt = runtime.lock().unwrap();
+        anyhow::ensure!(rt.session_id == session && rt.tab_id == tab && !rt.stopping, "ACP owner retired");
+        self.accepting_work()?;
+        crate::issue_pipeline::admission::check(session, tab)?;
+        run(&mut rt)
+    }
+
+    /// Pure exact-request gate. The authority check itself remains in the
+    /// original OperationContext immediately before the physical syscall.
+    fn acp_request_current(&self, rt: &TabRuntime, context: &provider_authority::OperationContext) -> bool {
+        use provider_authority::Correlation;
+        let Engine::Acp(a) = &rt.engine else { return false };
+        let request = match context.correlation() {
+            Correlation::Opening { request, .. } | Correlation::Prompt { request, .. } => request.parse::<u64>().ok(),
+            Correlation::Setting { setting, request_id, adapter_request } => {
+                let exact = self.with_provider_state(rt, |state| state.settings.get(setting).is_some_and(|current|
+                    matches!(current.correlation(), Correlation::Setting { request_id: id, .. } if id == request_id)));
+                if !exact { return false; }
+                let Ok(entry) = index::get(&rt.session_id) else { return false };
+                let Some(tab) = entry.tab(&rt.tab_id) else { return false };
+                let settings = Settings::of(tab);
+                if context.sender().permit().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) && settings.collaboration_requests().get(setting) != Some(request_id) { return false; }
+                // Local edits are keyed by the native sidecar; a remote intent
+                // replacing one also retires that sidecar at ingress.
+                if !context.sender().is_remote() && settings.collaboration_requests().contains_key(setting) { return false; }
+                adapter_request.parse::<u64>().ok()
+            },
+            Correlation::Approval { .. } => return a.answer_current(context),
+            Correlation::Control { .. } => return true,
+        };
+        request.is_some_and(|id| a.request_current(id, context))
+    }
+
+    fn capture_acp_setting(&self, rt: &mut TabRuntime, settings: &Settings, setting: &str,
+        original: Option<&CollaborationPermit>,
+    ) -> Result<provider_authority::OperationContext> {
+        use provider_authority::{Correlation, OperationContext, RequiredAction, SenderAuthority};
+        let binding = self.provider_binding(rt).context("ACP setting has no association")?;
+        let request_id = settings.collaboration_requests().get(setting).cloned().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // A persisted remote requirement cannot turn into explicit Local.
+        if settings.collaboration_requests().contains_key(setting) {
+            anyhow::ensure!(original.is_some(), "original ACP Configure request carrier missing");
+        }
+        let sender = SenderAuthority::capture(original.cloned(), RequiredAction::Configure, settings.provider_ticket(setting), None, None);
+        let context = OperationContext::new(sender, RequiredAction::Configure, binding,
+            Correlation::Setting { setting: setting.into(), request_id, adapter_request: String::new() });
+        self.with_provider_state(rt, |state| {
+            if let Some(old) = state.settings.insert(setting.into(), context.clone()) { old.withdraw(); }
+        });
+        Ok(context)
+    }
+
+    fn retain_acp_opening_configuration(&self, rt: &mut TabRuntime) -> Result<()> {
+        if matches!(&rt.engine, Engine::Acp(a) if a.ready) { return Ok(()); }
+        let entry = index::get(&rt.session_id)?;
+        let settings = Settings::of(entry.tab(&rt.tab_id).context("tab not found")?);
+        for setting in ["model", "mode"] {
+            let existing = self.with_provider_state(rt, |state| state.settings.get(setting).cloned());
+            let context = if let Some(context) = existing { context } else {
+                let original = settings.collaboration_requests().get(setting)
+                    .and_then(|id| rt.collaboration_settings.get(id)).cloned();
+                self.capture_acp_setting(rt, &settings, setting, original.as_ref())?
+            };
+            if let Engine::Acp(a) = &mut rt.engine { a.retain_setting(context)?; }
+        }
+        Ok(())
+    }
+
+    fn send_acp_carried(&self, rt: &mut TabRuntime, text: String, images: Vec<(String, String)>,
+        delivery: acp::Delivery, original: provider_authority::OperationContext,
+    ) -> Result<()> {
+        self.retain_acp_operation(rt, &original);
+        self.retain_acp_opening_configuration(rt)?;
+        let Engine::Acp(a) = &mut rt.engine else { bail!("ACP association missing") };
+        anyhow::ensure!(!a.waiting_for_session(), "ACP opening already owns its original prompt; successor must remain queued");
+        let actions = if a.ready { a.prompt_carried(text, images, delivery, original)? }
+            else { a.start_carried(text, images, delivery, original)? };
+        self.stage_acp_actions(rt, actions);
+        Ok(())
+    }
+
+    /// Only physical ACP actions leave the callback. Read-only effects execute
+    /// inside its ONE admission; no second per-action callback consumption.
+    fn stage_acp_actions(&self, rt: &mut TabRuntime, actions: Vec<crate::harness::ProviderAction>) {
+        for envelope in actions {
+            self.retain_acp_operation(rt, &envelope.context);
+            if let provider_authority::Correlation::Prompt { seq, .. } = envelope.context.correlation() {
+                self.with_provider_state(rt, |state| state.operations.retain(|id, original| {
+                    let handed_off = id != envelope.context.operation_id()
+                        && matches!(original.correlation(), provider_authority::Correlation::Prompt { seq: original_seq, .. } if original_seq == seq);
+                    if handed_off { original.seal_origin(); }
+                    !handed_off
+                }));
+            }
+            match &envelope.action {
+                Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. } => {
+                    // Spawning doesn't dispatch bytes; this thread still owns
+                    // runtime. Writer obtains fresh ordered gates afterwards.
+                    let manager = self.clone();
+                    let runtime = rt.me.clone();
+                    let child = rt.child.clone();
+                    std::thread::spawn(move || {
+                        let (Some(runtime), Some(child)) = (runtime.upgrade(), child) else { envelope.context.withdraw(); return };
+                        manager.write_acp_carried(&runtime, &child, envelope);
+                    });
+                },
+                Action::Http { .. } => { envelope.context.withdraw(); }, // C remains unintegrated
+                _ => self.apply_actions(rt, vec![envelope.action]),
+            }
+        }
+    }
+
+    fn settle_acp_setting(&self, rt: &mut TabRuntime, context: &provider_authority::OperationContext,
+        success: bool, actions: &mut Vec<crate::harness::ProviderAction>,
+    ) -> Result<()> {
+        use provider_authority::Correlation;
+        let Correlation::Setting { setting, request_id, .. } = context.correlation() else { return Ok(()) };
+        // acp_request_current was checked before handle consumed its request.
+        let remote = context.sender().permit().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2());
+        self.update_settings(rt, |s| {
+            let exact = !remote || s.collaboration_requests().get(setting) == Some(request_id);
+            if !exact { return; }
+            if success {
+                if remote { s.settle_provider_request(setting, request_id); }
+                else { s.settle_local_provider_request(setting); }
+            } else {
+                // Model refusal retains BOTH native Configure ID and the
+                // legacy request ID. Never apply a value-only refusal.
+                for envelope in actions.iter() {
+                    if let Action::AcpModelRefused { request_id: legacy, model, .. } = &envelope.action {
+                        if setting == "model" && s.model_request_id() == Some(legacy.as_str()) {
+                            s.refused(Setting::Model, Some(model));
+                        }
+                    }
+                }
+            }
+        })?;
+        actions.retain(|envelope| !matches!(&envelope.action,
+            Action::Emit(Payload::ProviderSettings { .. }) | Action::AcpModelRefused { .. }));
+        self.with_provider_state(rt, |state| {
+            if state.settings.get(setting).is_some_and(|original|
+                matches!(original.correlation(), Correlation::Setting { request_id: id, .. } if id == request_id)) {
+                state.settings.remove(setting);
+            }
+        });
+        Ok(())
+    }
+
+    fn write_acp_carried(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<crate::harness::host::LiveChild>,
+        envelope: crate::harness::ProviderAction,
+    ) {
+        use provider_authority::{Attempt, Correlation, StreamOutcome};
+        let context = envelope.context;
+        let (line, prompt, no_wire) = match envelope.action {
+            Action::Write(line) => (Some(line), None, false),
+            Action::AcpPrompt(write) => (Some(write.line.clone()), Some(write), false),
+            Action::AcpMode { line, .. } => { let none = line.is_none(); (line, None, none) },
+            _ => { context.withdraw(); return },
+        };
+        let Ok(mut stream) = context.reserve_stream() else { return };
+        // Cleanup tickets count in-flight I/O rather than holding policy or
+        // sender mutexes. Privacy acknowledgement follows captured-pipe cleanup.
+        // EACH independent ticket is retained, including distinct constraints.
+        let cleanup = context.sender().privacy.iter()
+            .chain(context.sender().mobile.iter().map(|p| &p.grant.privacy))
+            .chain(context.sender().local_share.iter().map(|p| &p.privacy))
+            .map(|ticket| ticket.enter()).collect::<Result<Vec<_>>>();
+        let mut emitted = false;
+        let mut offset = 0usize;
+        let total = line.as_ref().map_or(0, |line| line.len() + 1);
+        let no_response = matches!(context.correlation(), Correlation::Approval { .. } | Correlation::Control { .. });
+        let result = (|| -> Result<()> {
+            cleanup.as_ref().map_err(|error| anyhow!("{error:#}"))?;
+            if no_wire {
+                loop {
+                    let result = self.with_provider_admission(runtime, &context, |rt| {
+                        let binding = self.provider_binding(rt).context("ACP association missing")?;
+                        anyhow::ensure!(binding.matches_child(child), "ACP no-wire child replaced");
+                        let Correlation::Setting { setting, request_id, .. } = context.correlation() else { bail!("ACP no-wire mode requires Configure identity") };
+                        anyhow::ensure!(self.with_provider_state(rt, |state| state.settings.get(setting).is_some_and(|current| current.operation_id() == context.operation_id())), "ACP mode request replaced");
+                        let entry = index::get(&rt.session_id)?;
+                        let settings = Settings::of(entry.tab(&rt.tab_id).context("ACP mode tab missing")?);
+                        if context.sender().permit().is_some_and(|permit| permit.collaboration.runtime_policy.is_v2()) {
+                            anyhow::ensure!(settings.collaboration_requests().get(setting) == Some(request_id), "ACP no-wire Configure intent replaced");
+                        }
+                        let witness = Self::collaboration_witness(rt);
+                        let attempt = stream.try_confirm(&binding, witness.as_ref())?;
+                        // No OS write for a provider-known no-op. Still reserve,
+                        // validate exact Configure, and settle only that intent.
+                        if attempt == Attempt::Applied {
+                            let mut actions = Vec::new();
+                            self.settle_acp_setting(rt, &context, true, &mut actions)?;
+                        }
+                        let _ = request_id;
+                        Ok(attempt)
+                    })?;
+                    if result == Attempt::Deferred { std::thread::sleep(Duration::from_millis(5)); continue; }
+                    anyhow::ensure!(result == Attempt::Applied, "ACP no-wire withdrawn");
+                    return Ok(());
+                }
+            }
+            acp::write_carried_frame(&context, child, line.as_deref().context("ACP frame missing")?,
+                |original, exact_child, bytes| {
+                    let mut chunk = acp::Chunk::Withdrawn;
+                    let admitted = self.with_provider_admission(runtime, original, |rt| {
+                        let binding = self.provider_binding(rt).context("ACP association missing")?;
+                        anyhow::ensure!(binding.matches_child(exact_child) && self.acp_request_current(rt, original), "ACP exact request or child retired");
+                        let witness = Self::collaboration_witness(rt);
+                        let (attempt, syscall) = stream.try_chunk(&binding, original.correlation(), witness.as_ref(), |_| Ok(()),
+                            || exact_child.try_write_stdin(&bytes[..bytes.len().min(4096)]))?;
+                        chunk = match syscall {
+                            Some(Ok(n)) => { offset += n; acp::Chunk::Written(n) },
+                            Some(Err(error)) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {
+                                #[cfg(test)]
+                                if let Some(observed) = ACP_FULL_PIPE.lock().unwrap().take() { let _ = observed.send(()); }
+                                acp::Chunk::Capacity
+                            },
+                            Some(Err(error)) => return Err(error.into()),
+                            None if attempt == Attempt::Deferred => acp::Chunk::Deferred,
+                            None => acp::Chunk::Withdrawn,
+                        };
+                        if offset == total && attempt == Attempt::Applied {
+                            anyhow::ensure!(stream.finish(if no_response { StreamOutcome::Complete } else { StreamOutcome::Response }), "ACP full frame cancelled");
+                            if let Some(write) = &prompt {
+                                if let Engine::Acp(a) = &mut rt.engine { a.delivered(write.id); }
+                                recovery::diagnose_send(&rt.diagnostics_path(), write.delivery.seq, "delivered", serde_json::json!({"since_sent_ms":0}));
+                                self.apply(rt, write.started.clone(), None);
+                                self.apply(rt, Payload::ModelRequestStarted, None);
+                            }
+                            if let Correlation::Approval { ask_id, .. } = original.correlation() {
+                                let delivered = match &mut rt.engine { Engine::Acp(a) => a.answer_delivered(original), _ => None };
+                                if let Some(allow) = delivered {
+                                    self.permission_delivered(rt, ask_id, allow);
+                                }
+                            }
+                            emitted = true;
+                        }
+                        Ok(attempt)
+                    })?;
+                    Ok(if admitted == Attempt::Deferred { acp::Chunk::Deferred } else { chunk })
+                }, || { std::thread::sleep(Duration::from_millis(5)); Ok(()) })
+        })();
+        if result.is_err() {
+            stream.finish(if stream.written() == 0 { StreamOutcome::Refused } else { StreamOutcome::Unknown });
+            self.retire_acp_original(runtime, child, &context, stream.written() > 0);
+        }
+        if emitted || no_wire || result.is_err() {
+            let rt = runtime.lock().unwrap();
+            self.with_provider_state(&rt, |state| { state.operations.remove(context.operation_id()); });
+        }
+        // Child cleanup/withdrawal above precedes privacy acknowledgement.
+        drop(cleanup);
+        if emitted && matches!(context.correlation(), Correlation::Approval { .. }) {
+            let (session, tab) = context.destination();
+            self.observer.answered(session, tab);
+        }
+        if result.is_err() { self.drain_carried_acp_queue(runtime); }
+    }
+
+    fn retire_acp_original(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<crate::harness::host::LiveChild>,
+        context: &provider_authority::OperationContext, partial: bool,
+    ) {
+        use provider_authority::Correlation;
+        context.withdraw();
+        if partial { child.close_stdin(); }
+        let mut rt = runtime.lock().unwrap();
+        if !rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child)) { return; }
+        let input = matches!(context.correlation(), Correlation::Prompt { .. } | Correlation::Opening { .. });
+        if let Engine::Acp(a) = &mut rt.engine {
+            let id = match context.correlation() {
+                Correlation::Prompt { request, .. } | Correlation::Opening { request, .. } => request.parse().ok(),
+                Correlation::Setting { adapter_request, .. } => adapter_request.parse().ok(),
+                _ => None,
+            };
+            if let Some(id) = id { a.retire_request(id, context); }
+        }
+        if input || partial {
+            // Retire only this association. Queue successors have their OWN
+            // untouched original senders; never drain under this callback TLS.
+            if let Engine::Acp(a) = &mut rt.engine { a.withdraw_carriers(); }
+            child.close_stdin();
+            rt.child = None;
+            rt.child_pid = None;
+            self.with_provider_state(&rt, |state| {
+                state.binding = None;
+                for original in state.operations.values() { original.withdraw(); }
+                state.operations.clear();
+                state.settings.clear();
+            });
+            if let Correlation::Prompt { seq, .. } = context.correlation() { self.prompt_withdrawn(&mut rt, *seq, None); }
+            rt.turn_open = false;
+            // Local successor remains queued and is launched independently by
+            // drain_carried_acp_queue, outside all original callback gates.
+        }
+    }
+
+    fn acp_response_batch(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<crate::harness::host::LiveChild>,
+        line: &str, context: &provider_authority::OperationContext,
+    ) -> Result<provider_authority::Attempt> {
+        use provider_authority::Attempt;
+        if context.callback_finished() { return Ok(Attempt::Withdrawn); }
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        let id = value["id"].as_u64().context("ACP response request missing")?;
+        let success = value.get("error").is_none_or(|error| error.is_null());
+        let mut staged = Vec::new();
+        let result = self.with_provider_admission(runtime, context, |rt| {
+            let binding = self.provider_binding(rt).context("ACP response association missing")?;
+            anyhow::ensure!(binding.matches_child(child), "ACP response child replaced");
+            if !self.acp_request_current(rt, context) { return Ok(Attempt::Withdrawn); }
+            let witness = Self::collaboration_witness(rt);
+            context.try_callback(&binding, context.correlation(), witness.as_ref(), |_| Ok(()), || {
+                let Engine::Acp(a) = &mut rt.engine else { bail!("ACP response engine retired") };
+                // The adapter is touched only AFTER exact child/request checks
+                // and the once-only whole-batch callback reservation.
+                let mut actions = a.handle_carried_response(line, context)?;
+                self.settle_acp_setting(rt, context, success, &mut actions)?;
+                for envelope in actions {
+                    match &envelope.action {
+                        Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. } => staged.push(envelope),
+                        Action::Http { .. } => { envelope.context.withdraw(); },
+                        Action::Emit(Payload::ProviderSettings { .. }) => {},
+                        _ => self.apply_actions(rt, vec![envelope.action]),
+                    }
+                }
+                Ok(())
+            })
+        });
+        match result {
+            Ok(Attempt::Applied) => {
+                let mut rt = runtime.lock().unwrap();
+                // Derived envelopes were created inside callback; physical
+                // dispatch starts only after every callback gate was released.
+                self.with_provider_state(&rt, |state| { state.operations.remove(context.operation_id()); });
+                if rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child)) { self.stage_acp_actions(&mut rt, staged); }
+                else { for envelope in staged { envelope.context.withdraw(); } }
+                Ok(Attempt::Applied)
+            },
+            Ok(Attempt::Deferred) => Ok(Attempt::Deferred), // retain EXACT raw line + context on caller's worker
+            _ => {
+                // Another callback may have completed while this local batch
+                // waited for session admission. Duplicate delivery is inert.
+                if context.callback_finished() { return Ok(Attempt::Withdrawn); }
+                let mut rt = runtime.lock().unwrap();
+                if rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child)) {
+                    if let Engine::Acp(a) = &mut rt.engine { a.retire_request(id, context); }
+                }
+                drop(rt);
+                self.retire_acp_original(runtime, child, context, false);
+                Ok(Attempt::Withdrawn)
+            },
+        }
+    }
+
+    fn on_acp_line_from(&self, runtime: &Arc<Mutex<TabRuntime>>, line: &str,
+        child: &Arc<crate::harness::host::LiveChild>, epoch: &std::sync::atomic::AtomicU64,
+    ) {
+        let context = {
+            let mut rt = runtime.lock().unwrap();
+            if rt.stopping || child.epoch != epoch.load(std::sync::atomic::Ordering::Acquire)
+                || !rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child)) { return; }
+            if !self.carried_acp(&rt) {
+                drop(rt);
+                self.on_line_from(runtime, line, Some(epoch));
+                return;
+            }
+            let Some(binding) = self.provider_binding(&rt).filter(|binding| binding.matches_child(child)) else { return };
+            let _ = binding; // association-only read fence, no old prompt Drive
+            let value: serde_json::Value = match serde_json::from_str(line) { Ok(value) => value, Err(_) => return };
+            if let Some(method) = value["method"].as_str() {
+                // Only read-only output/permission asks enter here. Filesystem
+                // RPCs need their separately reviewed mutation owner, not Drive.
+                if !matches!(method, "session/update" | "session/request_permission") { return; }
+                let Engine::Acp(a) = &mut rt.engine else { return };
+                let actions = a.handle(line).into_iter().filter(|action| !matches!(action,
+                    Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }
+                    | Action::Http { .. } | Action::Emit(Payload::ProviderSettings { .. }))).collect();
+                self.apply_actions(&mut rt, actions);
+                return;
+            }
+            let Engine::Acp(a) = &rt.engine else { return };
+            a.response_context(line)
+        };
+        let Some(context) = context else { return };
+        let manager = self.clone();
+        let runtime = runtime.clone();
+        let child = child.clone();
+        let line = line.to_string();
+        std::thread::spawn(move || {
+            while let Ok(provider_authority::Attempt::Deferred) = manager.acp_response_batch(&runtime, &child, &line, &context) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            manager.drain_carried_acp_queue(&runtime);
+        });
+    }
+}
+
+impl SessionManager {
+    fn drain_carried_acp_queue(&self, runtime: &Arc<Mutex<TabRuntime>>) {
+        use provider_authority::{RequiredAction, Attempt};
+        loop {
+            let mut rt = runtime.lock().unwrap();
+            if rt.stopping || rt.recovery.is_some() || rt.turn_open || rt.queued.is_empty() { return; }
+            if matches!(&rt.engine, Engine::Acp(a) if a.waiting_for_session())
+                || self.opencode_opening(&rt) { return; }
+            let pending = rt.queued.remove(0);
+            let original = self.with_provider_state(&rt, |state| state.queue.remove(pending.seq, &pending.message.id));
+            // Restore cannot recover a required original sender. Refuse before
+            // starting a process, without synthesizing a Permit from JSON/TLS.
+            if original.is_none() && provider_authority::queue_requirement(&pending.message.id) == provider_authority::QueueRequirement::NeedsOriginalCarrier {
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            }
+            let policy = original.as_ref().and_then(|context| context.sender().permit()).cloned();
+            let _policy = match &policy {
+                Some(permit) => match permit.collaboration.try_enter_admission() {
+                    Some(guard) => Some(guard), None => {
+                        if let Some(original) = original { self.with_provider_state(&rt, |state| state.queue.reinsert(pending.seq, pending.message.id.clone(), original)); }
+                        rt.queued.insert(0, pending);
+                        drop(rt);
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    },
+                }, None => None,
+            };
+            let witness = Self::collaboration_witness(&rt);
+            if original.as_ref().is_some_and(|context| context.sender().check(RequiredAction::Drive, witness.as_ref()).is_err())
+                || pending.privacy.as_ref().is_some_and(|ticket| !ticket.valid()) {
+                if let Some(original) = original { original.withdraw(); }
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            }
+            if rt.child.is_none() {
+                let launch = (|| -> Result<()> {
+                    let entry = index::get(&rt.session_id)?;
+                    let tab = entry.tab(&rt.tab_id).context("ACP queue tab missing")?;
+                    match HarnessId::parse(&tab.harness) {
+                        HarnessId::Acp(binary) => self.start_acp(&mut rt, runtime, tab, &entry.cwd, &binary),
+                        HarnessId::OpenCode => self.start_opencode(&mut rt, runtime, tab, &entry.cwd),
+                        _ => bail!("carried queue engine replaced"),
+                    }
+                })();
+                if launch.is_err() {
+                    if let Some(original) = original { original.withdraw(); }
+                    self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                    continue;
+                }
+            }
+            let Some(binding) = self.provider_binding(&rt) else { return };
+            let original = match original {
+                Some(original) => match original.bind_queued(binding.clone()) { Ok(original) => original, Err(_) => continue },
+                None => self.with_provider_state(&rt, |state| state.queue.take(pending.seq, &pending.message.id, pending.privacy.clone(), binding)),
+            };
+            let sender = original.sender();
+            let delivery = acp::Delivery { seq: pending.seq, privacy: sender.privacy.clone(), mobile: sender.mobile.clone(), shared: sender.local_share.clone() };
+            let result = if matches!(rt.engine, Engine::OpenCode(_)) {
+                self.send_opencode_carried(&mut rt, pending.message.text, pending.message.images, pending.seq, original.clone())
+            } else {
+                self.send_acp_carried(&mut rt, pending.message.text, pending.message.images, delivery, original.clone())
+            };
+            if result.is_err() {
+                original.withdraw();
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: pending.seq, unconfirmed: false }, None);
+                continue;
+            }
+            rt.open_turn();
+            rt.turn_started_at = Some(Instant::now());
+            self.set_status(&mut rt, TabStatus::InProgress);
+            let _ = Attempt::Applied;
+            return;
+        }
+    }
+}
+
+/// Source-authored manager regressions, ALL UNRUN pending root B collection
+/// and a fresh serial allocation. No per-syscall child contexts in this fixture.
+#[cfg(test)]
+mod provider_integration_d {
+    use super::*;
+    use super::provider_authority::{Attempt, Correlation, OperationContext, RequiredAction, SenderAuthority};
+    use crate::remote::collab::{Collaboration, v2::{Action as Right, Permit, Snapshot}};
+    use serde_json::json;
+    use std::sync::mpsc;
+
+    const SESSION: &str = "provider-integration-d";
+    const TAB: &str = "acp";
+    const AGENT: &str = r#"
+import json, os, pathlib, select, sys, time
+base=pathlib.Path(sys.argv[1]); buffer=b''; held=None
+print('{"fixture":"ready"}', flush=True)
+while True:
+    if (base/'pause').exists():
+        (base/'paused').touch()
+        while (base/'pause').exists(): time.sleep(.002)
+    if not select.select([0],[],[],.01)[0]: continue
+    data=os.read(0,4096)
+    if not data:
+        (base/'eof').touch(); break
+    with (base/'bytes').open('ab') as f: f.write(data)
+    buffer+=data
+    while b'\n' in buffer:
+        line,buffer=buffer.split(b'\n',1); v=json.loads(line)
+        with (base/'requests').open('a') as f: f.write(json.dumps(v)+'\n')
+        method=v.get('method')
+        if method is None:
+            if held is not None:
+                print(json.dumps({'id':held,'result':{'stopReason':'end_turn'}}),flush=True); held=None
+            continue
+        if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+        elif method=='session/new': result={'sessionId':'same-id','modes':{'currentModeId':'normal','availableModes':[{'id':'normal'},{'id':'plan'}]}}
+        elif method=='session/prompt':
+            if any(x.get('text')=='ask' for x in v['params']['prompt']):
+                held=v['id']
+                options=json.loads((base/'permission-options').read_text()) if (base/'permission-options').exists() else [{'optionId':'allow','kind':'allow_once'},{'optionId':'deny','kind':'reject_once'}]
+                print(json.dumps({'id':77,'method':'session/request_permission','params':{'toolCall':{'toolCallId':'tool','kind':'execute'},'options':options}}),flush=True)
+                continue
+            result={'stopReason':'end_turn'}
+        elif method=='session/set_mode': result={'modeId':v['params']['modeId']}
+        else: result={}
+        print(json.dumps({'jsonrpc':'2.0','id':v['id'],'result':result}),flush=True)
+"#;
+
+    struct Inbox(Mutex<mpsc::Sender<String>>);
+    impl Sink for Inbox {
+        fn stdout_line(&self, line: String) { let _ = self.0.lock().unwrap().send(line); }
+        fn stderr_line(&self, _: String) {}
+        fn exited(&self, _: u32, _: Option<i32>) {}
+    }
+    struct Rig {
+        manager: SessionManager,
+        rt: Arc<Mutex<TabRuntime>>,
+        child: Arc<LiveChild>,
+        lines: mpsc::Receiver<String>,
+        dir: tempfile::TempDir,
+        policy: Arc<Collaboration>,
+        _home: store::TempHome,
+    }
+    fn until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "session ACP barrier timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    impl Rig {
+        fn new() -> Self {
+            let home = store::temp_home();
+            let dir = tempfile::tempdir().unwrap();
+            index::save(&[serde_json::from_value(json!({"id":SESSION,"projectPath":dir.path(),"cwd":dir.path(),
+                "title":"D integration","created":index::now(),"modified":index::now(),
+                "tabs":[{"id":TAB,"harness":"cursor","model":"base","permissionMode":"auto","created":index::now()}]})).unwrap()]).unwrap();
+            let manager = SessionManager::new(Arc::new(crate::sink::BroadcastSink::new(256)), Arc::new(crate::sink::NoObserver),
+                Arc::new(Host::new()), Arc::new(pty::Terminals::new()), Arc::default(), Arc::default(), crate::hooks::prepare_control().unwrap());
+            let rt = manager.runtime(SESSION, TAB).unwrap();
+            let (child, lines) = Self::spawn(&manager, dir.path());
+            {
+                let mut runtime = rt.lock().unwrap();
+                runtime.child = Some(child.clone()); runtime.child_pid = Some(child.pid);
+                runtime.engine = Engine::Acp(acp::Acp::new(dir.path().to_str().unwrap(), None, None, "auto"));
+                manager.with_provider_state(&runtime, |state| state.acp_carried = true);
+            }
+            let policy = Arc::new(Collaboration::new());
+            policy.runtime_policy.bind(dir.path(), 1).unwrap();
+            let rig = Self { manager, rt, child, lines, dir, policy, _home: home };
+            rig.revision("1");
+            rig
+        }
+        fn spawn(manager: &SessionManager, path: &Path) -> (Arc<LiveChild>, mpsc::Receiver<String>) {
+            let program = crate::binpath::resolve("python3").expect("real ACP fixture requires python3");
+            let args = vec!["-u".into(), "-c".into(), AGENT.into(), path.to_string_lossy().into_owned()];
+            let (tx, rx) = mpsc::channel();
+            let child = manager.host.spawn(&uuid::Uuid::new_v4().to_string(), SpawnSpec { program: &program, args: &args,
+                cwd: path, env: &[], unset: &[] }, Arc::new(Inbox(Mutex::new(tx)))).unwrap();
+            assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().contains("ready"));
+            (child, rx)
+        }
+        fn revision(&self, revision: &str) {
+            self.policy.install_v2(serde_json::from_value::<Snapshot>(json!({"v":2,"revision":revision,"members":[
+                {"userId":"explicit","role":"manager","canApprove":true,"writeSource":"explicit"},
+                {"userId":"everyone","role":"driver","canApprove":false,"writeSource":"everyone"}]})).unwrap()).unwrap();
+        }
+        fn permit(&self, right: Right) -> Permit { Permit::new(self.policy.clone(), "explicit", self.policy.runtime_policy.stamp("explicit"), right) }
+        fn operation(&self, seq: u64, permit: Option<Permit>) -> OperationContext {
+            let binding = self.manager.provider_binding(&self.rt.lock().unwrap()).unwrap();
+            OperationContext::new(SenderAuthority::capture(permit, RequiredAction::Drive, None, None, None), RequiredAction::Drive,
+                binding, Correlation::Prompt { seq, request: format!("original-{seq}") })
+        }
+        fn send(&self, seq: u64, text: String, permit: Option<Permit>) -> OperationContext {
+            let context = self.operation(seq, permit);
+            let mut rt = self.rt.lock().unwrap();
+            self.manager.send_acp_carried(&mut rt, text, vec![], acp::Delivery { seq, privacy: None, mobile: None, shared: None }, context.clone()).unwrap();
+            rt.open_turn();
+            context
+        }
+        fn line(&self) -> String { self.lines.recv_timeout(Duration::from_secs(5)).expect("real ACP reply") }
+        fn context(&self, line: &str) -> OperationContext {
+            let rt = self.rt.lock().unwrap(); let Engine::Acp(a) = &rt.engine else { panic!("ACP retired") };
+            a.response_context(line).expect("native exact response context")
+        }
+        fn reply_with(&self, line: &str, context: &OperationContext) -> Attempt {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let result = self.manager.acp_response_batch(&self.rt, &self.child, line, context).unwrap();
+                if result != Attempt::Deferred { return result; }
+                assert!(std::time::Instant::now() < deadline, "ACP response admission remained deferred");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        fn reply(&self, line: &str) -> Attempt {
+            // The real callback worker retains this exact native context while
+            // admission is occupied by a concurrent physical writer.
+            self.reply_with(line, &self.context(line))
+        }
+        fn ready(&self) {
+            self.send(1, "first".into(), None);
+            loop {
+                let line = self.line(); assert_eq!(self.reply(&line), Attempt::Applied);
+                if line.contains("stopReason") { break; }
+            }
+            until(|| !self.rt.lock().unwrap().turn_open);
+        }
+        fn requests(&self) -> Vec<Value> {
+            std::fs::read_to_string(self.dir.path().join("requests")).unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+        }
+        fn configure(&self, setting: &str, value: &str, permit: Option<&Permit>) -> OperationContext {
+            let mut rt = self.rt.lock().unwrap();
+            let (_, settings) = self.manager.update_settings(&mut rt, |s| {
+                if setting == "model" { s.request_model_explicit(value, true, permit, None); }
+                else { s.request_mode_explicit(value, true, permit, None); }
+                s.retain_provider_request(setting, permit, None);
+            }).unwrap();
+            SessionManager::remember_configuration(&mut rt, &settings, setting, permit);
+            let context = self.manager.capture_acp_setting(&mut rt, &settings, setting, permit).unwrap();
+            let Engine::Acp(a) = &mut rt.engine else { panic!("ACP") };
+            let actions = if setting == "model" { a.set_model_carried(value, settings.model_request_id().map(String::from), context.clone()).unwrap() }
+                else { a.set_mode_carried(value, context.clone()).unwrap() };
+            self.manager.stage_acp_actions(&mut rt, actions);
+            context
+        }
+        fn settings(&self) -> Settings { Settings::of(index::get(SESSION).unwrap().tab(TAB).unwrap()) }
+    }
+    impl Drop for Rig { fn drop(&mut self) { self.manager.host.kill_all(); } }
+
+    #[test]
+    fn provider_integration_d_whole_batch_deferred_and_duplicate_opening() {
+        let rig = Rig::new();
+        rig.send(1, "first".into(), Some(rig.permit(Right::Drive)));
+        assert_eq!(rig.reply(&rig.line()), Attempt::Applied); // initialize -> new
+        let raw = rig.line(); let original = rig.context(&raw);
+        let policy = rig.policy.clone();
+        let (ready, waiting) = mpsc::channel(); let (release, released) = mpsc::channel();
+        let holder = std::thread::spawn(move || { let _guard = policy.enter_admission(); ready.send(()).unwrap(); released.recv_timeout(Duration::from_secs(5)).unwrap(); });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(rig.manager.acp_response_batch(&rig.rt, &rig.child, &raw, &original).unwrap(), Attempt::Deferred);
+        assert_eq!(rig.context(&raw).operation_id(), original.operation_id());
+        release.send(()).unwrap(); holder.join().unwrap();
+        assert_eq!(rig.manager.acp_response_batch(&rig.rt, &rig.child, &raw, &original).unwrap(), Attempt::Applied);
+        assert_eq!(rig.manager.acp_response_batch(&rig.rt, &rig.child, &raw, &original).unwrap(), Attempt::Withdrawn);
+        assert!(rig.rt.lock().unwrap().child.as_ref().is_some_and(|child| Arc::ptr_eq(child, &rig.child)));
+        assert_eq!(rig.reply(&rig.line()), Attempt::Applied);
+        assert_eq!(rig.requests().iter().filter(|v| v["method"] == "session/prompt").count(), 1);
+    }
+
+    #[test]
+    fn provider_integration_d_exact_model_and_mode_ack_do_not_settle_newer_intent() {
+        let rig = Rig::new(); rig.ready();
+        let permit = rig.permit(Right::Configure);
+        rig.configure("model", "same", Some(&permit));
+        let old = rig.line(); let old_context = rig.context(&old);
+        let old_id = rig.settings().collaboration_requests()["model"].clone();
+        rig.revision("2");
+        let permit = rig.permit(Right::Configure);
+        rig.configure("model", "same", Some(&permit));
+        let new_id = rig.settings().collaboration_requests()["model"].clone();
+        assert_ne!(old_id, new_id);
+        assert_eq!(rig.reply_with(&old, &old_context), Attempt::Withdrawn);
+        assert_eq!(rig.settings().collaboration_requests()["model"], new_id);
+        assert_eq!(rig.reply(&rig.line()), Attempt::Applied);
+        assert_eq!(rig.settings().model, "same");
+        let mode = rig.configure("mode", "plan", Some(&permit));
+        let raw = rig.line();
+        assert!(matches!(rig.context(&raw).correlation(), Correlation::Setting { setting, request_id, .. }
+            if setting == "mode" && matches!(mode.correlation(), Correlation::Setting { request_id: original, .. } if original == request_id)));
+        assert_eq!(rig.reply(&raw), Attempt::Applied);
+        assert_eq!(rig.settings().permission_mode, "plan");
+        assert!(rig.settings().requested_permission_mode.is_none());
+        // Exact no-wire confirmation uses a separate Configure reservation,
+        // without a fake syscall or nonexistent Setting::Mode.
+        let mode_writes = rig.requests().iter().filter(|request| request["method"] == "session/set_mode").count();
+        rig.configure("mode", "plan", Some(&permit));
+        until(|| !rig.manager.with_provider_state(&rig.rt.lock().unwrap(), |s| s.settings.contains_key("mode")));
+        assert_eq!(rig.settings().permission_mode, "plan");
+        assert_eq!(rig.requests().iter().filter(|request| request["method"] == "session/set_mode").count(), mode_writes,
+            "provider-confirmed no-wire mode must not enqueue another RPC");
+    }
+
+    #[test]
+    fn provider_integration_d_approval_attempt_new_deny_retires_old_allow_on_real_writer() {
+        let rig = Rig::new(); rig.ready();
+        rig.send(2, "ask".into(), None);
+        let ask = rig.line(); assert!(ask.contains("request_permission"));
+        let epoch = std::sync::atomic::AtomicU64::new(rig.child.epoch);
+        rig.manager.on_acp_line_from(&rig.rt, &ask, &rig.child, &epoch);
+        let approval = rig.permit(Right::Approve);
+        let binding = rig.manager.provider_binding(&rig.rt.lock().unwrap()).unwrap();
+        let allow = {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Acp(a) = &mut rt.engine else { panic!("ACP") };
+            a.answer_carried("acp:77", "allow", OperationContext::new(SenderAuthority::capture(Some(approval.clone()), RequiredAction::Approve, None, None, None),
+                RequiredAction::Approve, binding, Correlation::Approval { ask_id:"acp:77".into(),provider_request:"77".into(),attempt:"old-allow".into() })).unwrap()
+        };
+        approval.with(|| rig.manager.respond_permission(SESSION, TAB, "acp:77", "deny")).unwrap();
+        rig.manager.write_acp_carried(&rig.rt, &rig.child, allow);
+        until(|| !rig.rt.lock().unwrap().pending.contains_key("acp:77"));
+        assert_eq!(rig.reply(&rig.line()), Attempt::Applied);
+        let answers: Vec<_> = rig.requests().into_iter().filter(|v| v["id"] == 77).collect();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0]["result"]["outcome"]["optionId"], "deny");
+    }
+
+    #[test]
+    fn provider_integration_d_approval_opaque_ids_publish_option_kind_after_real_delivery() {
+        for (choice, kind, allowed) in [("opaque-allow-42", "reject_once", false), ("opaque-42", "allow_once", true),
+            ("opaque-deny-42", "allow_always", true)] {
+            let rig = Rig::new(); rig.ready();
+            std::fs::write(rig.dir.path().join("permission-options"), json!([
+                {"optionId":choice,"kind":kind}]).to_string()).unwrap();
+            rig.send(2, "ask".into(), None);
+            let ask = rig.line();
+            let epoch = std::sync::atomic::AtomicU64::new(rig.child.epoch);
+            rig.manager.on_acp_line_from(&rig.rt, &ask, &rig.child, &epoch);
+            let decisions = Arc::new(Mutex::new(Vec::new()));
+            let observed = decisions.clone();
+            let listener = rig.manager.sink.listen("agent_event", Box::new(move |raw| {
+                let event: crate::events::AgentEvent = serde_json::from_str(raw).unwrap();
+                if let Payload::PermissionDecided { request_id, allowed, label, .. } = event.payload {
+                    observed.lock().unwrap().push((request_id, allowed, label));
+                }
+            }));
+            let approval = rig.permit(Right::Approve);
+            approval.with(|| rig.manager.respond_permission(SESSION, TAB, "acp:77", choice)).unwrap();
+            until(|| !decisions.lock().unwrap().is_empty());
+            assert_eq!(*decisions.lock().unwrap(), vec![("acp:77".into(), allowed,
+                if allowed { "Allowed".into() } else { "Denied".into() })]);
+            until(|| rig.requests().iter().any(|v| v["id"] == 77));
+            let answers: Vec<_> = rig.requests().into_iter().filter(|v| v["id"] == 77).collect();
+            assert_eq!(answers.len(), 1);
+            assert_eq!(answers[0]["result"]["outcome"], json!({"outcome":"selected","optionId":choice}));
+            rig.manager.sink.unlisten(listener);
+        }
+    }
+
+    #[test]
+    fn provider_integration_d_approval_unknown_mapping_refuses_without_wire_or_decision() {
+        for options in [json!([{"optionId":"opaque-allow","kind":"future_kind"}]),
+            json!([{"optionId":"opaque-allow"}]),
+            json!([{"optionId":"opaque-allow","kind":"allow_once"}, {"optionId":"opaque-allow","kind":"reject_once"}]),
+            json!([{"optionId":"different","kind":"allow_once"}])] {
+            let rig = Rig::new(); rig.ready();
+            std::fs::write(rig.dir.path().join("permission-options"), options.to_string()).unwrap();
+            rig.send(2, "ask".into(), None);
+            let ask = rig.line();
+            let epoch = std::sync::atomic::AtomicU64::new(rig.child.epoch);
+            rig.manager.on_acp_line_from(&rig.rt, &ask, &rig.child, &epoch);
+            let decisions = Arc::new(Mutex::new(Vec::new()));
+            let observed = decisions.clone();
+            let listener = rig.manager.sink.listen("agent_event", Box::new(move |raw| {
+                let event: crate::events::AgentEvent = serde_json::from_str(raw).unwrap();
+                if let Payload::PermissionDecided { .. } = event.payload { observed.lock().unwrap().push(()); }
+            }));
+            let approval = rig.permit(Right::Approve);
+            assert!(approval.with(|| rig.manager.respond_permission(SESSION, TAB, "acp:77", "opaque-allow")).is_err());
+            assert!(rig.requests().iter().all(|v| v["id"] != 77), "unknown metadata must not produce a frame");
+            assert!(decisions.lock().unwrap().is_empty());
+            assert!(rig.rt.lock().unwrap().pending.contains_key("acp:77"));
+            rig.manager.sink.unlisten(listener);
+        }
+    }
+
+    #[test]
+    fn provider_integration_d_actual_partial_frame_wouldblock_revoke_stop_and_replacement() {
+        for change in ["revision", "stop", "replacement"] {
+            let rig = Rig::new(); rig.ready();
+            let before = std::fs::read(rig.dir.path().join("bytes")).unwrap().len();
+            std::fs::write(rig.dir.path().join("pause"), b"").unwrap();
+            until(|| rig.dir.path().join("paused").exists());
+            let (full, observed) = mpsc::channel(); *ACP_FULL_PIPE.lock().unwrap() = Some(full);
+            let original = rig.send(20, "x".repeat(4 * 1024 * 1024), Some(rig.permit(Right::Drive)));
+            observed.recv_timeout(Duration::from_secs(5)).expect("manager writer reaches real WouldBlock");
+            let replacement_dir = tempfile::tempdir().unwrap();
+            let mut replacement = None;
+            match change {
+                "revision" => rig.revision("2"), // would deadlock if capacity wait retained policy
+                "stop" => { let mut rt = rig.rt.lock().unwrap(); rt.stopping = true; if let Engine::Acp(a) = &mut rt.engine { a.withdraw_carriers(); } },
+                "replacement" => {
+                    let (child, lines) = Rig::spawn(&rig.manager, replacement_dir.path());
+                    let mut rt = rig.rt.lock().unwrap();
+                    rt.child = Some(child.clone()); rt.child_pid = Some(child.pid);
+                    rt.engine = Engine::Acp(acp::Acp::new(replacement_dir.path().to_str().unwrap(), None, None, "auto"));
+                    rt.turn_open = false;
+                    rig.manager.with_provider_state(&rt, |s| {
+                        s.binding = None;
+                        for original in s.operations.values().chain(s.settings.values()) { original.withdraw(); }
+                        s.operations.clear(); s.settings.clear();
+                    });
+                    replacement = Some((child, lines));
+                }, _ => unreachable!(),
+            }
+            std::fs::remove_file(rig.dir.path().join("pause")).unwrap();
+            until(|| rig.dir.path().join("eof").exists());
+            let bytes = std::fs::read(rig.dir.path().join("bytes")).unwrap();
+            assert!(!bytes[before..].is_empty()); assert!(!bytes[before..].contains(&b'\n'));
+            assert!(original.derive_follow_on(Correlation::Control { request:"replay".into(),kind:"replay".into() }).is_err());
+            if let Some((child, lines)) = replacement {
+                assert!(rig.rt.lock().unwrap().child.as_ref().is_some_and(|current| Arc::ptr_eq(current, &child)));
+                assert!(!replacement_dir.path().join("bytes").exists(), "no old tail reaches replacement");
+                let local = rig.operation(21, None);
+                {
+                    let mut rt = rig.rt.lock().unwrap();
+                    let id = rig.manager.with_provider_state(&rt, |state| state.queue.insert(21, local));
+                    rt.queued.push(PendingMessage { message: QueuedMessage { id, text:"local successor".into(),images:vec![] },privacy:None,seq:21 });
+                }
+                rig.manager.drain_carried_acp_queue(&rig.rt);
+                loop {
+                    let line = lines.recv_timeout(Duration::from_secs(5)).unwrap();
+                    let context = rig.context(&line); assert!(!context.sender().is_remote());
+                    assert_eq!(rig.manager.acp_response_batch(&rig.rt, &child, &line, &context).unwrap(), Attempt::Applied);
+                    if line.contains("stopReason") { break; }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provider_integration_d_queue_restore_missing_remote_and_explicit_local_under_other_tls() {
+        let rig = Rig::new(); rig.ready();
+        let remote = rig.operation(30, Some(rig.permit(Right::Drive)));
+        let local = rig.operation(31, None);
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            for (seq, operation) in [(30, remote), (31, local)] {
+                let id = rig.manager.with_provider_state(&rt, |state| state.queue.insert(seq, operation));
+                let pending = PendingMessage { message: QueuedMessage { id: id.clone(), text:format!("restored-{seq}"),images:vec![] }, privacy:None, seq };
+                let restored: PendingMessage = serde_json::from_value(serde_json::to_value(pending).unwrap()).unwrap();
+                rig.manager.with_provider_state(&rt, |state| { state.queue.remove(seq, &id); });
+                rt.queued.push(restored);
+            }
+        }
+        let unrelated = Permit::new(rig.policy.clone(), "everyone", rig.policy.runtime_policy.stamp("everyone"), Right::Drive);
+        unrelated.with(|| rig.manager.drain_carried_acp_queue(&rig.rt));
+        let raw = rig.line(); let context = rig.context(&raw); assert!(!context.sender().is_remote());
+        assert_eq!(rig.reply(&raw), Attempt::Applied);
+        let requests = rig.requests();
+        let serialized = serde_json::to_string(&requests).unwrap();
+        assert!(!serialized.contains("restored-30")); assert!(serialized.contains("restored-31"));
+    }
+
+    #[test]
+    fn provider_integration_d_frame_wait_rechecks_revision_generation_and_original_attachment() {
+        for change in ["revision", "generation", "attachment"] {
+            let rig = Rig::new();
+            let (peer, _notifications) = crate::remote::server::Peer::for_user("original".into(), crate::remote::protocol::Authority::Manage, Some("explicit".into()));
+            let permit = Permit::new(rig.policy.clone(), "explicit", rig.policy.runtime_policy.stamp_for_peer("explicit", &peer), Right::Drive).for_peer(&peer);
+            let frame = rig.child.input_frame().unwrap();
+            rig.send(1, "held original".into(), Some(permit));
+            // The writer cannot touch policy/runtime while waiting for frame;
+            // each change completes before it gets permission to try a syscall.
+            match change {
+                "revision" => rig.revision("2"),
+                "generation" => rig.policy.runtime_policy.set_generation(2),
+                "attachment" => drop(peer),
+                _ => unreachable!(),
+            }
+            drop(frame);
+            until(|| rig.rt.lock().unwrap().child.is_none());
+            assert!(rig.requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn provider_integration_d_revoked_opening_keeps_queued_local_successor_independent() {
+        let rig = Rig::new();
+        rig.send(1, "old remote opening".into(), Some(rig.permit(Right::Drive)));
+        let raw = rig.line(); let opening = rig.context(&raw);
+        let successor = rig.operation(2, None);
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            let id = rig.manager.with_provider_state(&rt, |s| s.queue.insert(2, successor));
+            rt.queued.push(PendingMessage { message:QueuedMessage { id,text:"queued local successor".into(),images:vec![] },privacy:None,seq:2 });
+        }
+        rig.revision("2");
+        assert_eq!(rig.manager.acp_response_batch(&rig.rt, &rig.child, &raw, &opening).unwrap(), Attempt::Withdrawn);
+        assert_eq!(rig.rt.lock().unwrap().queued.len(), 1);
+        let fresh = tempfile::tempdir().unwrap(); let (child, lines) = Rig::spawn(&rig.manager, fresh.path());
+        {
+            let mut rt = rig.rt.lock().unwrap(); rt.child = Some(child.clone()); rt.child_pid = Some(child.pid);
+            rt.engine = Engine::Acp(acp::Acp::new(fresh.path().to_str().unwrap(), None, None, "auto"));
+        }
+        let unrelated = Permit::new(rig.policy.clone(), "everyone", rig.policy.runtime_policy.stamp("everyone"), Right::Drive);
+        unrelated.with(|| rig.manager.drain_carried_acp_queue(&rig.rt));
+        loop {
+            let raw = lines.recv_timeout(Duration::from_secs(5)).unwrap(); let context = rig.context(&raw);
+            assert!(!context.sender().is_remote());
+            assert_eq!(rig.manager.acp_response_batch(&rig.rt, &child, &raw, &context).unwrap(), Attempt::Applied);
+            if raw.contains("stopReason") { break; }
+        }
+        assert!(!serde_json::to_string(&rig.requests()).unwrap().contains("session/prompt"));
+        let requests = std::fs::read_to_string(fresh.path().join("requests")).unwrap();
+        assert!(requests.contains("queued local successor"));
+        // Late output carries the old exact child and cannot enter replacement.
+        let before = rig.rt.lock().unwrap().seq;
+        rig.manager.on_acp_line_from(&rig.rt, &raw, &rig.child, &std::sync::atomic::AtomicU64::new(rig.child.epoch));
+        assert_eq!(rig.rt.lock().unwrap().seq, before);
+    }
+
+    #[test]
+    fn provider_integration_d_independent_local_privacy_refusal_before_real_pipe() {
+        let rig = Rig::new();
+        let binding = rig.manager.provider_binding(&rig.rt.lock().unwrap()).unwrap();
+        let context = OperationContext::new(SenderAuthority::capture(None, RequiredAction::Drive,
+            Some(crate::data_privacy::Ticket::denied()), None, None), RequiredAction::Drive, binding,
+            Correlation::Prompt { seq:99,request:"private-local".into() });
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            rig.manager.send_acp_carried(&mut rt, "must not write".into(), vec![], acp::Delivery { seq:99,privacy:None,mobile:None,shared:None }, context).unwrap();
+        }
+        until(|| rig.rt.lock().unwrap().child.is_none());
+        assert!(rig.requests().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod provider_integration_d_stream_lifecycle {
+    use super::*;
+    use provider_authority::{Attempt, Correlation, OperationContext, ProviderBinding, RequiredAction, SenderAuthority, StreamOutcome};
+
+    /// Real Host/pipe, SAME operation reservation across byte-by-byte writes.
+    /// The manager partial-frame test separately forces actual WouldBlock.
+    #[test]
+    fn provider_integration_d_stream_reserve_once_full_newline_then_callback_once() {
+        struct Lines(std::sync::mpsc::Sender<String>);
+        impl Sink for Lines {
+            fn stdout_line(&self, line: String) { let _ = self.0.send(line); }
+            fn stderr_line(&self, _: String) {}
+            fn exited(&self, _: u32, _: Option<i32>) {}
+        }
+        let host = Host::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let program = crate::binpath::resolve("python3").unwrap();
+        let args = vec!["-u".into(), "-c".into(), "import sys; print(sys.stdin.readline().strip(), flush=True)".into()];
+        let child = host.spawn("provider-integration-d-stream", SpawnSpec { program:&program,args:&args,cwd:Path::new("/tmp"),env:&[],unset:&[] }, Arc::new(Lines(tx))).unwrap();
+        let binding = ProviderBinding::owned("stream", "tab", &child);
+        let context = OperationContext::new(SenderAuthority::capture(None, RequiredAction::Drive, None, None, None), RequiredAction::Drive,
+            binding.clone(), Correlation::Prompt { seq:1,request:"exact".into() });
+        let mut stream = context.reserve_stream().unwrap();
+        assert!(context.reserve_stream().is_err(), "cloned envelope cannot reserve another frame");
+        let mut offset = 0;
+        let mut callbacks = 0;
+        acp::write_carried_frame(&context, &child, "actual frame", |original, child, bytes| {
+            assert_eq!(original.operation_id(), context.operation_id());
+            let (admission, result) = stream.try_chunk(&binding, context.correlation(), None, |_| Ok(()), || child.try_write_stdin(&bytes[..1]))?;
+            assert_eq!(admission, Attempt::Applied);
+            match result.unwrap()? {
+                1 => { offset += 1; Ok(acp::Chunk::Written(1)) },
+                _ => anyhow::bail!("short one-byte pipe unexpectedly closed"),
+            }
+        }, || Ok(())).unwrap();
+        assert_eq!(offset, "actual frame\n".len());
+        assert!(context.stream_current(&binding), "newline completion is finalized by the owner, not first chunk");
+        assert!(stream.finish(StreamOutcome::Response));
+        assert!(!stream.finish(StreamOutcome::Response));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "actual frame");
+        assert_eq!(context.try_callback(&binding, context.correlation(), None, |_| Ok(()), || { callbacks += 1; Ok(()) }).unwrap(), Attempt::Applied);
+        assert_eq!(context.try_callback(&binding, context.correlation(), None, |_| Ok(()), || { callbacks += 1; Ok(()) }).unwrap(), Attempt::Withdrawn);
+        assert_eq!(callbacks, 1);
+        host.kill_all();
+    }
+}
+
+// OpenCode owner integration is selected only by retained native ingress or
+// private tests. Public V2 entry blocks and unsupported Everyone remain above.
+impl SessionManager {
+    fn carried_opencode(&self, rt: &TabRuntime) -> bool {
+        matches!(rt.engine, Engine::OpenCode(_)) && self.with_provider_state(rt, |s| s.opencode.carried)
+    }
+
+    fn opencode_opening(&self, rt: &TabRuntime) -> bool {
+        self.carried_opencode(rt) && self.with_provider_state(rt, |s| s.opencode.preparing.is_some() || s.opencode.requests.values()
+            .any(|r| matches!(r.tag.as_str(), "session_get" | "session_new")))
+    }
+
+    fn send_opencode_carried(&self, rt: &mut TabRuntime, text: String, images: Vec<(String, String)>,
+        seq: u64, original: provider_authority::OperationContext,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.opencode_opening(rt), "OpenCode opening retains its original stash; successor must queue");
+        self.with_provider_state(rt, |s| s.opencode.carried = true);
+        let Engine::OpenCode(engine) = &rt.engine else { bail!("OpenCode association missing") };
+        let opening = !engine.ready;
+        let entry = index::get(&rt.session_id)?;
+        let settings = Settings::of(entry.tab(&rt.tab_id).context("OpenCode configuration tab missing")?);
+        let mut configuration = Vec::new();
+        for setting in ["model", "mode"] {
+            let existing = self.with_provider_state(rt, |s| s.settings.get(setting).cloned());
+            if let Some(existing) = existing { configuration.push(existing); }
+            else if opening || settings.collaboration_requests().contains_key(setting)
+                || (setting == "model" && settings.requested_model.is_some())
+                || (setting == "mode" && settings.requested_permission_mode.is_some()) {
+                let permit = settings.collaboration_requests().get(setting).and_then(|id| rt.collaboration_settings.get(id)).cloned();
+                let context = self.capture_acp_setting(rt, &settings, setting, permit.as_ref())?;
+                self.stage_opencode_setting(rt, context.clone());
+                configuration.push(context);
+            }
+        }
+        if !configuration.is_empty() {
+            self.with_provider_state(rt, |s| {
+                s.opencode.preparing = Some((seq, original.clone()));
+                s.operations.insert(original.operation_id().into(), original.clone());
+            });
+            let manager = self.clone(); let runtime = rt.me.clone();
+            std::thread::spawn(move || {
+                let Some(runtime) = runtime.upgrade() else { original.withdraw(); return };
+                manager.prepare_opencode_prompt(&runtime, text, images, seq, original, configuration);
+            });
+            return Ok(());
+        }
+        let Engine::OpenCode(engine) = &mut rt.engine else { bail!("OpenCode association missing") };
+        engine.set_prompt_seq(seq);
+        let actions = engine.prompt(text, images);
+        let envelopes = self.carry_opencode_actions(rt, &original, Some(seq), actions)?;
+        // All child contexts exist before the ingress parent is sealed.
+        original.seal_origin();
+        self.stage_opencode_actions(rt, envelopes, Some(seq));
+        Ok(())
+    }
+
+    /// Called only by admitted ingress or INSIDE the one whole-response batch.
+    /// The adapter's pure opening/stash/fallback state never creates authority.
+    fn carry_opencode_actions(&self, rt: &mut TabRuntime, parent: &provider_authority::OperationContext,
+        seq: Option<u64>, actions: Vec<Action>,
+    ) -> Result<Vec<crate::harness::ProviderAction>> {
+        use provider_authority::Correlation;
+        let mut staged = Vec::new();
+        for action in actions {
+            if let Action::Http { tag, .. } = &action {
+                let request = uuid::Uuid::new_v4().to_string();
+                let correlation = match tag.as_str() {
+                    "session_get" | "session_new" => Correlation::Opening { request, parent_operation: parent.operation_id().into() },
+                    "prompt" => Correlation::Prompt { seq: seq.context("OpenCode prompt lost its original sequence")?, request },
+                    "abort" if matches!(parent.correlation(), Correlation::Control { kind, .. } if kind == "interrupt") => parent.correlation().clone(),
+                    _ if matches!(parent.correlation(), Correlation::Approval { ask_id, .. } if tag == &format!("permission:{ask_id}")) => parent.correlation().clone(),
+                    _ => bail!("OpenCode mutation has no exact original parent"),
+                };
+                let context = parent.derive_follow_on(correlation)?;
+                staged.push(crate::harness::ProviderAction { context, action });
+            } else {
+                // Read-only effects are part of the same admitted batch. No
+                // reusable per-action callback token or TLS recapture.
+                anyhow::ensure!(!matches!(action, Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. } | Action::AcpModelRefused { .. }),
+                    "OpenCode produced an uncarried mutation");
+                self.apply_actions(rt, vec![action]);
+            }
+        }
+        Ok(staged)
+    }
+
+    fn stage_opencode_actions(&self, rt: &mut TabRuntime, actions: Vec<crate::harness::ProviderAction>, seq: Option<u64>) {
+        for envelope in actions {
+            let Action::Http { generation, tag, .. } = &envelope.action else { envelope.context.withdraw(); continue };
+            let ask_incarnation = if let provider_authority::Correlation::Approval { ask_id, .. } = envelope.context.correlation() {
+                self.with_provider_state(rt, |s| s.opencode.asks.get(ask_id).map(|(_, incarnation)| incarnation.clone()))
+            } else { None };
+            let record = OpenCodeRequest { context: envelope.context.clone(), generation: *generation, tag: tag.clone(), prompt_seq: seq, ask_incarnation };
+            self.with_provider_state(rt, |s| {
+                s.opencode.carried = true;
+                if let provider_authority::Correlation::Approval { ask_id, .. } = record.context.correlation() {
+                    if let Some(old) = s.opencode.answers.insert(ask_id.clone(), record.context.operation_id().into()) {
+                        if let Some(old) = s.opencode.requests.get(&old) { old.context.withdraw(); }
+                    }
+                }
+                s.operations.insert(record.context.operation_id().into(), record.context.clone());
+                s.opencode.requests.insert(record.context.operation_id().into(), record);
+            });
+            let manager = self.clone(); let runtime = rt.me.clone(); let child = rt.child.clone();
+            std::thread::spawn(move || {
+                let (Some(runtime), Some(child)) = (runtime.upgrade(), child) else { envelope.context.withdraw(); return };
+                manager.write_opencode_carried(&runtime, &child, envelope);
+            });
+        }
+    }
+
+    fn opencode_request_current(&self, rt: &TabRuntime, context: &provider_authority::OperationContext,
+        generation: u64, tag: &str,
+    ) -> bool {
+        let Engine::OpenCode(engine) = &rt.engine else { return false };
+        if engine.generation() != generation { return false; }
+        self.with_provider_state(rt, |s| {
+            let exact = s.opencode.requests.get(context.operation_id()).is_some_and(|r|
+                r.generation == generation && r.tag == tag && r.context.correlation() == context.correlation());
+            exact && match context.correlation() {
+                provider_authority::Correlation::Approval { ask_id, .. } =>
+                    s.opencode.answers.get(ask_id).is_some_and(|id| id == context.operation_id()) && engine.answer_pending(ask_id)
+                        && s.opencode.requests.get(context.operation_id()).is_some_and(|r| s.opencode.asks.get(ask_id)
+                            .is_some_and(|(_, live)| r.ask_incarnation.as_ref() == Some(live))),
+                _ => true,
+            }
+        })
+    }
+
+    fn write_opencode_carried(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<LiveChild>,
+        envelope: crate::harness::ProviderAction,
+    ) {
+        use provider_authority::{Attempt, StreamOutcome};
+        use opencode::{PhysicalOutcome, WriteAdmission};
+        let context = envelope.context.clone();
+        let Ok(mut reservation) = context.reserve_stream() else { return };
+        let Ok(http) = opencode::NativeHttp::from_envelope(envelope) else { return };
+        // One reservation for the entire exchange. Neither closure retains
+        // policy/session/sender/runtime guards between calls or during reads.
+        let mut final_write = |original: &provider_authority::OperationContext, generation: u64,
+            syscall: &mut dyn FnMut() -> std::io::Result<usize>| {
+            #[cfg(test)]
+            self.opencode_write_barrier(runtime, original);
+            let mut result = WriteAdmission::Refused;
+            let admission = self.with_provider_admission(runtime, original, |rt| {
+                let binding = self.provider_binding(rt).context("OpenCode association retired")?;
+                let record = self.with_provider_state(rt, |s| s.opencode.requests.get(original.operation_id()).cloned())
+                    .context("OpenCode request retired")?;
+                anyhow::ensure!(original.operation_id() == context.operation_id() && binding.matches_child(child)
+                    && self.opencode_request_current(rt, original, generation, &record.tag), "OpenCode exact child/generation/request retired");
+                let witness = Self::collaboration_witness(rt);
+                let (attempt, called) = reservation.try_chunk(&binding, original.correlation(), witness.as_ref(), |_| Ok(()), syscall)?;
+                result = match (attempt, called) {
+                    (Attempt::Applied, Some(_)) => WriteAdmission::Admitted,
+                    (Attempt::Deferred, None) => WriteAdmission::Deferred,
+                    _ => WriteAdmission::Refused,
+                };
+                Ok(attempt)
+            });
+            if matches!(admission, Ok(Attempt::Deferred)) { WriteAdmission::Deferred } else { result }
+        };
+        let reply = http.dispatch(Some(&mut final_write), |original, generation| {
+            let rt = runtime.lock().unwrap();
+            !rt.stopping && rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child))
+                && self.provider_binding(&rt).is_some_and(|live| original.stream_current(&live))
+                && self.with_provider_state(&rt, |s| s.opencode.requests.get(original.operation_id())
+                    .is_some_and(|r| self.opencode_request_generation(&rt, r, generation)))
+        });
+        // Do not preempt the reservation with withdraw(). C supplies the exact
+        // physical classification; finish exactly once before ANY callback.
+        let awaiting = reservation.finish(match &reply.outcome {
+            PhysicalOutcome::Refused => StreamOutcome::Refused,
+            PhysicalOutcome::Unknown => StreamOutcome::Unknown,
+            PhysicalOutcome::Response { .. } => StreamOutcome::Response,
+        });
+        if awaiting {
+            #[cfg(test)] {
+                let hook = { let rt = runtime.lock().unwrap(); self.with_provider_state(&rt, |s| s.opencode.before_callbacks.pop_front()) };
+                if let Some(hook) = hook { hook(&reply); }
+            }
+            while let Ok(Attempt::Deferred) = self.opencode_response_batch(runtime, child, &reply) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        } else { self.retire_opencode_original(runtime, child, &reply.context, reply.generation, &reply.tag); }
+        self.drain_carried_acp_queue(runtime);
+    }
+
+    fn opencode_request_generation(&self, rt: &TabRuntime, record: &OpenCodeRequest, generation: u64) -> bool {
+        // Cancellation polling only. Physical authority is checked again by
+        // the final hook, including original Actor/source/revision and peers.
+        record.generation == generation && matches!(&rt.engine, Engine::OpenCode(e) if e.generation() == generation)
+    }
+
+    fn opencode_response_batch(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<LiveChild>,
+        reply: &opencode::NativeHttpReply,
+    ) -> Result<provider_authority::Attempt> {
+        use provider_authority::Attempt;
+        let context = &reply.context;
+        if context.callback_finished() { return Ok(Attempt::Withdrawn); }
+        let opencode::PhysicalOutcome::Response { status, body } = &reply.outcome else { bail!("OpenCode callback requires known response") };
+        let line = serde_json::json!({"raccoon_http":{"tag":reply.tag,"status":status,"body":body}}).to_string();
+        let mut staged = Vec::new(); let mut seq = None; let mut answered = false;
+        let result = self.with_provider_admission(runtime, context, |rt| {
+            let binding = self.provider_binding(rt).context("OpenCode callback association retired")?;
+            anyhow::ensure!(binding.matches_child(child), "OpenCode callback child replaced");
+            if !self.opencode_request_current(rt, context, reply.generation, &reply.tag) { return Ok(Attempt::Withdrawn); }
+            let witness = Self::collaboration_witness(rt);
+            context.try_callback(&binding, context.correlation(), witness.as_ref(), |_| Ok(()), || {
+                seq = self.with_provider_state(rt, |s| s.opencode.requests.get(context.operation_id()).and_then(|r| r.prompt_seq));
+                let Engine::OpenCode(engine) = &mut rt.engine else { bail!("OpenCode callback engine retired") };
+                let answer = engine.settle_answer(&reply.tag, &line);
+                let actions = engine.handle(&line);
+                // Resume failure may produce session_new ONLY from a real
+                // complete response, under the same original callback parent.
+                staged = self.carry_opencode_actions(rt, context, seq, actions)?;
+                if let Some((request, allow)) = answer {
+                    self.permission_delivered(rt, &request, allow);
+                    answered = true;
+                }
+                rt.last_activity = Instant::now();
+                rt.incidents.progress("agent_output");
+                self.stall_disproved(rt);
+                Ok(())
+            })
+        });
+        match result {
+            Ok(Attempt::Applied) => {
+                let mut rt = runtime.lock().unwrap();
+                self.remove_opencode_request(&rt, context);
+                // All original children exist; parent is Delivered; callback
+                // guards are gone before a physical child is scheduled.
+                if !rt.stopping && rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child))
+                    && self.provider_binding(&rt).is_some_and(|live| context.association_current(&live)) {
+                    self.stage_opencode_actions(&mut rt, staged, seq);
+                } else { for envelope in staged { envelope.context.withdraw(); } }
+                drop(rt);
+                if answered { let (session, tab) = context.destination(); self.observer.answered(session, tab); }
+                Ok(Attempt::Applied)
+            },
+            Ok(Attempt::Deferred) => Ok(Attempt::Deferred),
+            _ => {
+                if !context.callback_finished() {
+                    self.retire_opencode_original(runtime, child, context, reply.generation, &reply.tag);
+                }
+                Ok(Attempt::Withdrawn)
+            },
+        }
+    }
+
+    fn remove_opencode_request(&self, rt: &TabRuntime, context: &provider_authority::OperationContext) {
+        self.with_provider_state(rt, |s| {
+            s.operations.remove(context.operation_id());
+            s.opencode.requests.remove(context.operation_id());
+            if let provider_authority::Correlation::Approval { ask_id, .. } = context.correlation() {
+                if s.opencode.answers.get(ask_id).is_some_and(|id| id == context.operation_id()) { s.opencode.answers.remove(ask_id); }
+            }
+        });
+    }
+
+    fn retire_opencode_original(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<LiveChild>,
+        context: &provider_authority::OperationContext, generation: u64, tag: &str,
+    ) {
+        context.withdraw();
+        let mut rt = runtime.lock().unwrap();
+        let exact = rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child))
+            && self.provider_binding(&rt).is_some_and(|live| context.association_current(&live))
+            && self.opencode_request_current(&rt, context, generation, tag);
+        self.remove_opencode_request(&rt, context);
+        if !exact { return; } // old attempts cannot cancel a new equal tag
+        let Engine::OpenCode(engine) = &mut rt.engine else { return };
+        let actions = engine.withdraw_prompt(tag);
+        self.apply_actions(&mut rt, actions);
+    }
+
+    fn answer_opencode_carried(&self, rt: &mut TabRuntime, request: &str, option: &str,
+        original: provider_authority::OperationContext,
+    ) -> Result<()> {
+        let provider_authority::Correlation::Approval { ask_id, provider_request, .. } = original.correlation() else { bail!("OpenCode answer lacks original Approve correlation") };
+        anyhow::ensure!(ask_id == request && self.with_provider_state(rt, |s| s.opencode.asks.get(request)
+            .is_some_and(|(native, _)| native == provider_request)), "OpenCode original ask replaced");
+        // A new answer attempt is independent Approve, never an old Drive or
+        // old Allow carrier. Superseding retires only the exact old attempt.
+        let old = self.with_provider_state(rt, |s| s.opencode.answers.get(request)
+            .and_then(|id| s.opencode.requests.get(id)).cloned());
+        if let Some(old) = old {
+            old.context.withdraw();
+            self.remove_opencode_request(rt, &old.context);
+            if let Engine::OpenCode(e) = &mut rt.engine { e.withdraw_prompt(&old.tag); }
+        }
+        let Engine::OpenCode(engine) = &mut rt.engine else { bail!("OpenCode approval engine retired") };
+        let actions = engine.answer(request, option).context("OpenCode permission no longer answerable")?;
+        let staged = self.carry_opencode_actions(rt, &original, None, actions)?;
+        original.seal_origin();
+        self.stage_opencode_actions(rt, staged, None);
+        Ok(())
+    }
+
+    fn stage_opencode_setting(&self, rt: &mut TabRuntime, context: provider_authority::OperationContext) {
+        let manager = self.clone(); let runtime = rt.me.clone();
+        std::thread::spawn(move || {
+            let Some(runtime) = runtime.upgrade() else { context.withdraw(); return };
+            manager.confirm_opencode_setting(&runtime, &context);
+        });
+    }
+
+    fn confirm_opencode_setting(&self, runtime: &Arc<Mutex<TabRuntime>>, context: &provider_authority::OperationContext) {
+        use provider_authority::{Attempt, Correlation};
+        let Ok(mut reservation) = context.reserve_stream() else { return };
+        loop {
+            let result = self.with_provider_admission(runtime, context, |rt| {
+                let binding = self.provider_binding(rt).context("OpenCode setting association retired")?;
+                let Correlation::Setting { setting, request_id, .. } = context.correlation() else { bail!("OpenCode setting requires Configure identity") };
+                anyhow::ensure!(self.carried_opencode(rt) && self.with_provider_state(rt, |s| s.settings.get(setting)
+                    .is_some_and(|current| current.operation_id() == context.operation_id())), "OpenCode setting attempt replaced");
+                let entry = index::get(&rt.session_id)?;
+                let settings = Settings::of(entry.tab(&rt.tab_id).context("OpenCode setting tab missing")?);
+                let remote = context.sender().permit().is_some_and(|p| p.collaboration.runtime_policy.is_v2());
+                anyhow::ensure!(if remote { settings.collaboration_requests().get(setting) == Some(request_id) }
+                    else { !settings.collaboration_requests().contains_key(setting) }, "OpenCode native Configure intent replaced");
+                let witness = Self::collaboration_witness(rt);
+                let attempt = reservation.try_confirm(&binding, witness.as_ref())?;
+                if attempt != Attempt::Applied { return Ok(attempt); }
+                // OpenCode has no model/mode RPC. This is the actual no-wire
+                // next-prompt snapshot mutation, admitted with Configure.
+                let Engine::OpenCode(engine) = &mut rt.engine else { bail!("OpenCode setting engine retired") };
+                match setting.as_str() {
+                    "model" => engine.model = Some(settings.requested_model.as_ref().unwrap_or(&settings.model).clone()),
+                    "mode" => engine.mode = settings.requested_permission_mode.as_ref().unwrap_or(&settings.permission_mode).clone(),
+                    _ => bail!("unsupported OpenCode setting"),
+                }
+                self.settle_acp_setting(rt, context, true, &mut Vec::new())?;
+                Ok(attempt)
+            });
+            if matches!(result, Ok(Attempt::Deferred)) { std::thread::sleep(Duration::from_millis(5)); continue; }
+            if !matches!(result, Ok(Attempt::Applied)) { context.withdraw(); }
+            return;
+        }
+    }
+
+    fn on_opencode_event_from(&self, runtime: &Arc<Mutex<TabRuntime>>, child: &Arc<LiveChild>,
+        captured: &provider_authority::ProviderBinding, line: &str,
+    ) {
+        let mut rt = runtime.lock().unwrap();
+        if rt.stopping || !rt.child.as_ref().is_some_and(|live| Arc::ptr_eq(live, child))
+            || !self.provider_binding(&rt).is_some_and(|live| captured.current(&live)) { return; }
+        // No HTTP callbacks may enter through stdout/SSE. Only NativeHttpReply
+        // carries exact original identity. Output is association-only and does
+        // not borrow the previous remote prompt's Drive authority.
+        let Ok(value) = serde_json::from_str::<Value>(line) else { return };
+        if value.get("raccoon_http").is_some() { return; }
+        let carried = self.carried_opencode(&rt);
+        if carried && matches!(&rt.engine, Engine::OpenCode(e) if e.session_id.is_some()
+            && value["properties"]["sessionID"].as_str().is_some_and(|sid| Some(sid) != e.session_id.as_deref())) { return; }
+        if carried && matches!(value["type"].as_str(), Some("permission.asked" | "permission.updated" | "permission.replied")) {
+            let properties = &value["properties"];
+            let native = properties["id"].as_str().or_else(|| properties["permissionID"].as_str()).or_else(|| properties["requestID"].as_str());
+            let mine = matches!(&rt.engine, Engine::OpenCode(e) if e.session_id.is_none()
+                || properties["sessionID"].is_null() || properties["sessionID"].as_str() == e.session_id.as_deref());
+            if let Some(native) = native.filter(|_| mine) {
+                let ask = format!("oc:{native}");
+                let old = self.with_provider_state(&rt, |s| {
+                    if value["type"] == "permission.replied" { s.opencode.asks.remove(&ask); }
+                    else { s.opencode.asks.insert(ask.clone(), (native.into(), uuid::Uuid::new_v4().to_string())); }
+                    s.opencode.answers.get(&ask).and_then(|id| s.opencode.requests.get(id)).cloned()
+                });
+                if let Some(old) = old {
+                    old.context.withdraw(); self.remove_opencode_request(&rt, &old.context);
+                    if let Engine::OpenCode(e) = &mut rt.engine { e.withdraw_prompt(&old.tag); }
+                }
+            }
+        }
+        let Engine::OpenCode(engine) = &mut rt.engine else { return };
+        let actions = engine.handle(line).into_iter().filter(|a| !carried || !matches!(a,
+            Action::Http { .. } | Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }
+            | Action::AcpModelRefused { .. } | Action::Emit(Payload::ProviderSettings { .. }))).collect();
+        self.apply_actions(&mut rt, actions);
+    }
+}
+
+#[cfg(test)]
+impl SessionManager {
+    fn opencode_write_barrier(&self, runtime: &Arc<Mutex<TabRuntime>>, _: &provider_authority::OperationContext) {
+        let hook = {
+            let rt = runtime.lock().unwrap();
+            self.with_provider_state(&rt, |s| s.opencode.before_writes.pop_front())
+        };
+        // Test barriers, like capacity waits, never retain owner guards.
+        if let Some(hook) = hook { hook(); }
+    }
+}
+
+#[cfg(test)]
+#[path = "session_opencode_owner_tests.rs"]
+mod provider_integration_e;
+
+impl SessionManager {
+    fn prepare_opencode_prompt(&self, runtime: &Arc<Mutex<TabRuntime>>, text: String, images: Vec<(String, String)>,
+        seq: u64, original: provider_authority::OperationContext,
+        configuration: Vec<provider_authority::OperationContext>,
+    ) {
+        use provider_authority::Attempt;
+        let mut staged = Vec::new();
+        let admitted = loop {
+            // Configure workers confirm their own exact intents. No original
+            // Drive is upgraded to Configure, and no owner guard spans waiting.
+            let current = {
+                let rt = runtime.lock().unwrap();
+                !rt.stopping && self.provider_binding(&rt).is_some_and(|live| original.association_current(&live))
+                    && self.with_provider_state(&rt, |s| s.opencode.preparing.as_ref()
+                        .is_some_and(|(_, pending)| pending.operation_id() == original.operation_id()))
+            };
+            if !current || original.retired() || configuration.iter().any(|c| c.retired()) { break false; }
+            if !configuration.iter().all(|c| c.callback_finished()) {
+                std::thread::sleep(Duration::from_millis(5)); continue;
+            }
+            let result = self.with_provider_admission(runtime, &original, |rt| {
+                let binding = self.provider_binding(rt).context("OpenCode prepared association retired")?;
+                anyhow::ensure!(original.association_current(&binding) && !original.retired()
+                    && self.with_provider_state(rt, |s| s.opencode.preparing.as_ref()
+                        .is_some_and(|(_, pending)| pending.operation_id() == original.operation_id())), "OpenCode prepared prompt retired");
+                original.sender().check(provider_authority::RequiredAction::Drive, Self::collaboration_witness(rt).as_ref())?;
+                let pending = self.with_provider_state(rt, |s| s.settings.values().cloned().collect::<Vec<_>>());
+                anyhow::ensure!(!pending.iter().any(|c| c.retired()), "OpenCode pending Configure retired");
+                if !pending.is_empty() { return Ok(Attempt::Deferred); }
+                let Engine::OpenCode(engine) = &mut rt.engine else { bail!("OpenCode prepared engine retired") };
+                engine.set_prompt_seq(seq);
+                let actions = engine.prompt(text.clone(), images.clone());
+                staged = self.carry_opencode_actions(rt, &original, Some(seq), actions)?;
+                original.seal_origin();
+                // Retain preparing until physical children are registered, so
+                // another queued item cannot occupy this opening's stash.
+                Ok(Attempt::Applied)
+            });
+            if matches!(result, Ok(Attempt::Deferred)) { std::thread::sleep(Duration::from_millis(5)); continue; }
+            break matches!(result, Ok(Attempt::Applied));
+        };
+        let mut rt = runtime.lock().unwrap();
+        let exact = self.with_provider_state(&rt, |s| s.opencode.preparing.as_ref()
+            .is_some_and(|(_, pending)| pending.operation_id() == original.operation_id()));
+        if exact {
+            self.with_provider_state(&rt, |s| { s.opencode.preparing = None; s.operations.remove(original.operation_id()); });
+            if admitted && !rt.stopping && self.provider_binding(&rt).is_some_and(|live| original.association_current(&live)) {
+                self.stage_opencode_actions(&mut rt, staged, Some(seq));
+            } else {
+                for child in staged { child.context.withdraw(); }
+                original.withdraw();
+                self.prompt_withdrawn(&mut rt, seq, None);
+                rt.turn_open = false;
+            }
+        } else { for child in staged { child.context.withdraw(); } }
+        drop(rt);
+        self.drain_carried_acp_queue(runtime);
+    }
+}

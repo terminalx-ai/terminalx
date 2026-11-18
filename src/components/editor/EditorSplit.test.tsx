@@ -4,7 +4,7 @@ import { useRef } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, fs, git } from "@/lib/api";
 import { closeAllEditors, closeEditor, getEditors, openFile, openDiff, setActiveEditor, setLastFocused } from "@/lib/editors";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp as ask } from "@/lib/confirm";
 import { liveEditorsFor } from "@/lib/editorViews";
 import { selectSessionTab } from "@/lib/terminal";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -22,7 +22,7 @@ vi.mock("@/lib/api", () => ({
   git: { discard: vi.fn().mockResolvedValue(undefined) },
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn().mockResolvedValue(true) }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
 vi.mock("./PdfSurface", () => ({ default: ({ data }: { data: string }) => <div data-testid="pdf">{data}</div> }));
@@ -42,23 +42,48 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
 });
-afterEach(async () => { cleanup(); await closeAllEditors("split"); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+// A checkout with no session: its files are the editor pane's own tabs.
+const CHECKOUT = "checkout:/workspace";
+afterEach(async () => { cleanup(); await closeAllEditors("split"); await closeAllEditors(CHECKOUT); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-it("dispatches media before text reading and keeps SVG save behavior while navigating existing tabs", async () => {
+it("draws a local session's files as tabs of the session, one at a time, with no Open files strip of its own (PRO-402)", async () => {
   const image = openFile("split", "/workspace", "photo.png");
   const { container } = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
+  await screen.findByRole("img", { name: "photo.png" });
+  expect(screen.getByRole("tabpanel", { name: "photo.png" })).toBeTruthy();
+  // The pane's own strip and its hide and close-all buttons belong to files that are not session tabs.
+  expect(container.querySelector('[role="tablist"]')).toBeNull();
+  expect(screen.queryByRole("button", { name: "Hide editor pane" })).toBeNull();
+  let text = "";
+  act(() => { text = openFile("split", "/workspace", "docs/notes.txt"); });
+  await waitFor(() => expect(liveEditorsFor("/workspace/docs/notes.txt")).toHaveLength(1));
+  expect(screen.getByRole("tabpanel", { name: "notes.txt" })).toBeTruthy();
+  expect(screen.queryByRole("tabpanel", { name: "photo.png" })).toBeNull();
+  // The chat tab is selected again: neither file covers it, and both keep their place.
+  act(() => selectSessionTab("split", { kind: "agent", id: "agent" }));
+  expect(screen.queryByRole("tabpanel")).toBeNull();
+  expect(getEditors().editors.map((e) => e.id)).toEqual([image, text]);
+  act(() => setActiveEditor("split", image));
+  expect(screen.getByRole("tabpanel", { name: "photo.png" })).toBeTruthy();
+  expect(liveEditorsFor("/workspace/docs/notes.txt")).toHaveLength(1);
+});
+
+it("dispatches media before text reading and keeps SVG save behavior while navigating existing tabs", async () => {
+  const image = openFile(CHECKOUT, "/workspace", "photo.png");
+  const { container } = render(<TooltipProvider><EditorSplit sessionId={CHECKOUT} active /></TooltipProvider>);
+  expect(screen.getByRole("tablist", { name: "Open files" })).toBeTruthy();
   await screen.findByRole("img", { name: "photo.png" });
   expect(fs.readText).not.toHaveBeenCalled();
   await waitFor(() => expect(getEditors().lastFocused).toBe("editor"));
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   let svg = "";
-  act(() => { svg = openFile("split", "/workspace", "logo.svg"); });
+  act(() => { svg = openFile(CHECKOUT, "/workspace", "logo.svg"); });
   await waitFor(() => expect(liveEditorsFor("/workspace/logo.svg")).toHaveLength(1));
   act(() => liveEditorsFor("/workspace/logo.svg")[0].view.dispatch({ changes: { from: 0, to: 6, insert: '<svg id="edited"/>' } }));
   expect(getEditors().editors.find((e) => e.id === svg)?.dirty).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(fs.writeText).toHaveBeenCalledWith("/workspace/logo.svg", '<svg id="edited"/>'));
-  act(() => { expect(openFile("split", "/workspace", "photo.png")).toBe(image); });
+  act(() => { expect(openFile(CHECKOUT, "/workspace", "photo.png")).toBe(image); });
   expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
   expect(fs.readText).toHaveBeenCalledTimes(1);
   expect(liveEditorsFor("/workspace/photo.png")).toEqual([]);
@@ -159,9 +184,18 @@ it("does not compare a large-file placeholder with working-file contents", async
   vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "<file too large to show>" });
   openDiff("split", "/workspace", "large.ts", { scope: "turn", range: { base: "before", head: "after" } });
   render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("radio", { name: "Edit" });
+  // An expected limit, drawn as a calm empty state with the file to open: no red text, no Retry, no Edit of a placeholder.
+  const state = await screen.findByTestId("changes-empty-state");
+  expect(state.textContent).toContain("No diff to show");
+  expect(state.textContent).toContain("large.ts is over the text preview limit (size unknown), so the diff isn't drawn.");
+  expect(within(state).queryByRole("button", { name: "Retry" })).toBeNull();
+  expect(state.querySelector(".text-destructive")).toBeNull();
+  expect(screen.queryByText(/exceeds the text preview limit/)).toBeNull();
+  expect(screen.queryByRole("radio", { name: "Edit" })).toBeNull();
   expect(screen.queryByText(/differs from this snapshot/)).toBeNull();
   expect(fs.readText).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(getEditors().editors.some((e) => e.kind !== "diff" && e.rel === "large.ts")).toBe(true);
 });
 
 
@@ -188,16 +222,17 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "  const x = 1;\n", after: "const x=1;\n" });
   openDiff("split", "/workspace", "options.ts", { scope: "turn", range: { base: "before", head: "after" } });
   const first = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("button", { name: "Copy file" });
+  await screen.findByRole("button", { name: "Copy file contents" });
   // The button commits with the diff; CodeMirror is built in DiffPane's effect after it.
   await waitFor(() => expect(first.container.querySelector(".cm-changedLine")).not.toBeNull());
-  fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
+  fireEvent.click(within(openViewOptions()).getByRole("menuitemcheckbox", { name: "Hide whitespace changes" }));
   expect(first.container.querySelector(".cm-changedLine")).toBeNull();
-  fireEvent.change(screen.getByLabelText("Wrap lines for this file"), { target: { value: "false" } });
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Wrap lines" }));
   expect(first.container.querySelector(".cm-lineWrapping")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Split" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  fireEvent.click(screen.getByRole("radio", { name: "Split" }));
   expect(first.container.querySelectorAll(".cm-content")).toHaveLength(2);
-  fireEvent.click(screen.getByRole("button", { name: "Copy file" }));
+  fireEvent.click(screen.getByRole("button", { name: "Copy file contents" }));
   await screen.findByText("Copied file");
   expect(copyText).toHaveBeenCalledWith("const x=1;\n");
   expect(api.fileContentsAt).toHaveBeenCalledTimes(1);
@@ -208,9 +243,9 @@ it("shares persisted diff options, file wrapping and exact-text copying with the
   fireEvent.click(screen.getByRole("radio", { name: "Diff" }));
   first.unmount();
   const second = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  await screen.findByRole("button", { name: "Copy file" });
-  expect(screen.getByRole("button", { name: "Split" }).getAttribute("aria-pressed")).toBe("true");
-  expect((screen.getByLabelText("Hide whitespace changes") as HTMLInputElement).checked).toBe(true);
+  await screen.findByRole("button", { name: "Copy file contents" });
+  expect(screen.getByRole("radio", { name: "Split" }).getAttribute("aria-checked")).toBe("true");
+  expect(within(openViewOptions()).getByRole("menuitemcheckbox", { name: "Hide whitespace changes" }).getAttribute("aria-checked")).toBe("true");
   await waitFor(() => expect(second.container.querySelectorAll(".cm-content")).toHaveLength(2));
   expect(second.container.querySelector(".cm-lineWrapping")).toBeNull();
 });
@@ -220,7 +255,8 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   vi.mocked(api.reviewRange).mockResolvedValue({ base: "merge-base", head: "fresh", target: "main" });
   const id = openDiff("split", "/workspace", "live.ts", { scope: "all", range: { base: "merge-base", head: "snapshot" }, target: "main" });
   const view = render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
-  fireEvent.click(await screen.findByRole("button", { name: "Discard changes to live.ts" }));
+  await screen.findByRole("button", { name: "Copy file contents" });
+  fireEvent.click(within(openViewOptions()).getByRole("menuitem", { name: "Discard changes to live.ts" }));
   expect(git.discard).not.toHaveBeenCalled();
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(git.discard).toHaveBeenCalledWith("/workspace", "live.ts", "merge-base", undefined));
@@ -231,7 +267,7 @@ it("discards a live comparison from the centre diff header and refreshes it, but
   expect(getEditors().editors.find((e) => e.id === fixed)?.name).toBe("fixed.ts · Commit 5be01f4");
   render(<TooltipProvider><EditorSplit sessionId="split" active /></TooltipProvider>);
   await screen.findByRole("radio", { name: "Edit" });
-  expect(screen.queryByRole("button", { name: "Discard changes to fixed.ts" })).toBeNull();
+  expect(within(openViewOptions()).queryByRole("menuitem", { name: "Discard changes to fixed.ts" })).toBeNull();
 });
 
 it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in a centre diff", async (ext) => {
@@ -261,6 +297,11 @@ it.each(["png", "pdf", "svg"])("keeps both revisions of a renamed %s visible in 
     expect(screen.queryByRole("radio", { name: "Edit" })).toBeNull();
   }
 });
+
+function openViewOptions() {
+  fireEvent.pointerDown(screen.getByRole("button", { name: "View options" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  return screen.getByRole("menu");
+}
 
 const emptyTranscript = buildTranscript([], false);
 function SearchableChat({ label }: { label: string }) {
@@ -304,4 +345,23 @@ it("routes Cmd+F to the focused chat, actual file editor, or terminal regardless
   fireEvent.keyDown(second, { key: "f", ctrlKey: true });
   expect(screen.getAllByRole("search", { name: "Find in chat" })).toHaveLength(2);
   expect(document.activeElement?.parentElement?.closest('[data-find-scope="chat"]')).toBe(second.parentElement);
+});
+
+it("shows the actual byte size and opens the workspace file from a local Changes selection", async () => {
+  const { ChangesPanel } = await import("@/components/changes/ChangesPanel");
+  const files = [{ path: "large.ts", status: "modified" as const, additions: 0, deletions: 0 }];
+  vi.mocked(api.changesBetween).mockResolvedValue(files);
+  vi.mocked(api.reviewRange).mockResolvedValue({ target: "main", base: "base", head: "head" });
+  vi.mocked(api.fileContentsAt).mockResolvedValue({ before: "old", after: "<file too large to show>", afterSize: 7 * 1024 * 1024 });
+  const source = {
+    key: "local:/workspace", cloud: false, canWrite: false,
+    branches: async () => [], reviewRange: async () => ({ target: "main", base: "base", head: "head" }),
+    changesBetween: async () => files, logCommits: async () => [], errorMessage: String,
+  } as unknown as import("@/lib/gitSource").GitSource;
+  render(<TooltipProvider><ChangesPanel source={source} sessionId="split" events={[]} version={0} active live={false} /><EditorSplit sessionId="split" active /></TooltipProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: /Modified.*large.ts/ }));
+  expect(await screen.findByText("7.0 MB")).toBeTruthy();
+  expect(within(screen.getByTestId("changes-empty-state")).queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(getEditors().editors.some((entry) => entry.kind === "text" && entry.rel === "large.ts" && entry.root === "/workspace")).toBe(true);
 });

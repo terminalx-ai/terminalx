@@ -1,23 +1,32 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { Check, Circle, CircleCheck, CircleX, Copy, FolderGit2, Loader2, Pencil, Square } from "@/icons";
+import { Bot, Check, Circle, CircleCheck, CircleX, Copy, FolderGit2, Loader2, Pencil, RotateCcw, Square } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type CloudWorkspaceProviderId, type CloudWorkspaceSetup } from "@/lib/api";
 import { listedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderIsPlatform } from "@/lib/cloudProviders";
 import { providerLabel } from "@/lib/organizationCompute";
+import type { BuildFailureContext } from "@/lib/environmentProposal";
+import { useEnvironmentRun } from "@/lib/environmentRun";
+import { ConfigureEnvironmentWithAgent } from "@/components/settings/ConfigureEnvironmentWithAgent";
+import { EnvironmentRecipes } from "@/components/settings/EnvironmentRecipes";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import {
+  BUILD_STAGES,
   changeLabel,
   cleanDefinition,
   compareDefinitions,
   definitionProblem,
   emptyDefinition,
   environmentErrorMessage,
+  failureOutcome,
+  failureSummary,
   isBuilding,
   organizationEnvironment,
+  recipesUnavailable,
   sameDefinition,
   stageLabel,
-  versionStateLabel,
   type EnvironmentDefinition,
+  type EnvironmentRecipe,
   type EnvironmentRepository,
   type EnvironmentStatus,
   type EnvironmentVersion,
@@ -30,9 +39,10 @@ import { LeaveWithoutBuildingDialog } from "./LeaveWithoutBuildingDialog";
 import type { StepProps } from "./stepProps";
 
 const BUILD_POLL_MS = 5000;
-/** The build's stages in the order the server runs them (organizationEnvironment.ts STAGE_LABEL). */
-const STAGES = ["creating-builder", "toolchain", "install", "repositories", "setup", "sanitize", "verify", "snapshot", "publish", "cleanup"] as const;
+const STAGES = BUILD_STAGES;
 const LOG_TAIL = 4;
+/** How much of a failed build's log goes to the agent asked to fix it. */
+const FIX_LOG_LINES = 60;
 
 /** A repository chosen in the GitHub step: the only ones the environment may clone. */
 interface ChosenRepository {
@@ -163,6 +173,7 @@ function BuildPanel({
   busy,
   onCancel,
   onRetry,
+  onFix,
 }: {
   version: EnvironmentVersion | null;
   /** The shown version read on its own, with its log. */
@@ -173,6 +184,8 @@ function BuildPanel({
   busy: string | null;
   onCancel: (version: EnvironmentVersion) => void;
   onRetry: (version: EnvironmentVersion) => void;
+  /** Hands the failed build to an agent; absent where no recipe can be stored. */
+  onFix?: (version: EnvironmentVersion) => void;
 }) {
   const building = Boolean(version && isBuilding(version));
   const now = useNow(building);
@@ -233,27 +246,32 @@ function BuildPanel({
               <CircleX className="size-4 text-destructive" aria-hidden /> Build v{version.number} failed
             </span>
             <span className="text-[12px] text-muted-foreground">
-              {[elapsed(version, now) && `after ${elapsed(version, now)}`, versionStateLabel(version).toLowerCase()].filter(Boolean).join(" · ")}
+              {[elapsed(version, now) && `after ${elapsed(version, now)}`, failureSummary(shown ?? version)].filter(Boolean).join(" · ")}
             </span>
           </div>
-          {(version.errorCode || lines.length > 0) && (
-            <div className="mt-3 rounded-md bg-well px-3 py-2 font-mono text-[12px] leading-[18px]">
-              {lines.slice(-LOG_TAIL).map((entry, index, tail) => (
-                <div key={index} className={cn("break-words", index === tail.length - 1 ? "text-destructive" : "text-muted-foreground")}>
-                  {entry.content}
+          {/* The log's last lines, then what exited and what stays in use; never the internal error code (14.15). */}
+          <div className="mt-3 rounded-md bg-well px-3 py-2 font-mono text-[12px] leading-[18px]">
+            {lines
+              .flatMap((entry) => entry.content.split("\n"))
+              .filter((line) => line.trim())
+              .slice(-LOG_TAIL)
+              .map((line, index) => (
+                <div key={index} className="break-words text-muted-foreground">
+                  {line}
                 </div>
               ))}
-              {version.errorCode && <div className="text-faint">{version.errorCode}</div>}
-            </div>
-          )}
-          <p className="mt-2 text-[12px] text-muted-foreground">
-            {active ? `Version ${active.number} stays active.` : "Workspaces keep starting from the provider's base image."}
-          </p>
+            <div className="break-words text-destructive">{failureOutcome(shown ?? version, active)}</div>
+          </div>
           {canManage && (
             <div className="mt-3 flex flex-wrap gap-2">
               <Button size="sm" disabled={Boolean(busy)} onClick={() => onRetry(version)}>
-                Build again
+                <RotateCcw /> Restart build
               </Button>
+              {onFix && (
+                <Button size="sm" variant="outline" disabled={Boolean(busy)} onClick={() => onFix(version)}>
+                  <Bot /> Fix with an agent
+                </Button>
+              )}
               <Button size="sm" variant="outline" disabled={!text} onClick={copy}>
                 {copied ? <Check /> : <Copy />} Copy logs
               </Button>
@@ -400,11 +418,12 @@ function SharedVariables({ disabled }: { disabled: boolean }) {
   const editable = Boolean(view?.canEdit) && !disabled;
   return (
     <section className="mt-6" aria-label="Shared environment variables">
-      <div className="mb-1.5 flex items-baseline gap-1">
-        <span className="text-[12.5px] font-medium">Shared environment variables</span>
-        <span className="text-[12.5px] text-muted-foreground">· applied when a workspace is created</span>
+      {/* One line: the label, its hint (cut short when narrow), then the actions at the right (14.15). */}
+      <div className="mb-1.5 flex min-w-0 items-center gap-1">
+        <span className="shrink-0 text-[12.5px] font-medium whitespace-nowrap">Shared environment variables</span>
+        <span className="min-w-0 truncate text-[12.5px] text-muted-foreground">· applied when a workspace is created</span>
         {editable && (
-          <span className="ml-auto flex gap-1">
+          <span className="ml-auto flex shrink-0 gap-1">
             <input ref={file} type="file" accept=".env,text/plain" className="hidden" onChange={(event) => void importFile(event)} />
             <Button size="xs" variant="ghost" className="text-[12px]" onClick={() => file.current?.click()}>
               Import .env
@@ -495,6 +514,12 @@ export function EnvironmentStep(props: StepProps) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const [detail, setDetail] = useState<EnvironmentVersion | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  /** Null where this server stores no recipes: then no agent is offered. */
+  const [recipes, setRecipes] = useState<EnvironmentRecipe[] | null>(null);
+  const [fixing, setFixing] = useState<BuildFailureContext | null>(null);
+  // Each press asks again: a confirm cancelled earlier comes back.
+  const [fixPresses, setFixPresses] = useState(0);
+  const preparation = useEnvironmentRun();
   // A build this step just started: going on from here is not leaving it unbuilt.
   const [buildStarted, setBuildStarted] = useState(false);
   const [leaving, setLeaving] = useState<(() => void) | null>(null);
@@ -539,6 +564,13 @@ export function EnvironmentStep(props: StepProps) {
       if (!fresh()) return;
       setStatus(next);
       if (!options.keepError && !options.quiet) setError(null);
+      // The recipe list changes only with a press here, never with a build's progress: the quiet poll leaves it.
+      // Only a server without recipes takes the agent away; a failed read keeps what was shown, and a run in progress.
+      if (next.canManage && !options.quiet)
+        void organizationEnvironment.recipes(target).then(
+          (listed) => fresh() && setRecipes(listed.recipes),
+          (failure) => fresh() && recipesUnavailable(failure) && setRecipes(null),
+        );
       const shown = next.versions.find(isBuilding) ?? [...next.versions].sort((left, right) => right.number - left.number)[0] ?? null;
       if (shown && next.canManage) {
         try {
@@ -563,9 +595,10 @@ export function EnvironmentStep(props: StepProps) {
       .cloudProviders()
       .then((response) => {
         if (!alive.current) return;
-        const listed = listedProviders(response.providers, organization.id);
+        const listed = listedProviders(response.providers);
         const wanted = machine.current?.provider;
-        const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null);
+        // The provider the organization connected, else one TerminalX provides (PRO-452), which needs no connection.
+        const summary = (wanted ? listed.find((option) => option.id === wanted) : undefined) ?? listed.find((option) => option.connection !== null) ?? listed.find(cloudProviderIsPlatform);
         const id = wanted ?? summary?.id ?? null;
         setProvider(id ? { id, name: summary?.displayName ?? providerLabel(id) } : null);
         if (!id) setLoading(false);
@@ -679,6 +712,18 @@ export function EnvironmentStep(props: StepProps) {
       .catch(() => setBuildStarted(false));
   };
 
+  // "Fix with an agent" (PRO-389): the failed build's summary, the saved script and the log's end go to the agent.
+  const fix = (version: EnvironmentVersion) => {
+    const read = detail?.id === version.id ? detail : version;
+    const logTail = (read.logs ?? [])
+      .flatMap((entry) => entry.content.split("\n"))
+      .filter((line) => line.trim())
+      .slice(-FIX_LOG_LINES)
+      .join("\n");
+    setFixPresses((count) => count + 1);
+    setFixing({ version: version.number, summary: failureSummary(read), installScript: template?.definition.installScript ?? "", logTail });
+  };
+
   const cancel = (version: EnvironmentVersion) => void act(`cancel:${version.id}`, (current) => organizationEnvironment.cancel(version.id, current.contextRevision)).catch(() => undefined);
 
   const chooseSource = (sourceId: string) => {
@@ -715,7 +760,26 @@ export function EnvironmentStep(props: StepProps) {
         busy={busy}
         onCancel={cancel}
         onRetry={(version) => setConfirming(`retry:${version.id}`)}
+        onFix={recipes ? fix : undefined}
       />
+    ) : null;
+  // The agent run outlives this step; coming back to it shows it again.
+  const fixPanel =
+    status && status.supported && status.canManage && recipes && provider && (fixing || (preparation.kind !== "none" && preparation.provider === provider.id)) ? (
+      <section className="mt-4 rounded-xl border border-hairline bg-card p-4" aria-label="Fix with an agent" data-testid="cloud-setup-fix-with-agent">
+        <ConfigureEnvironmentWithAgent key={fixPresses} status={status} organizationId={organization.id} failure={fixing} autoBegin={fixing !== null} onSaved={() => void load(provider.id)} />
+        {recipes.length > 0 && (
+          <EnvironmentRecipes
+            recipes={recipes}
+            current={template?.definition ?? null}
+            currentRevision={template?.revision ?? 0}
+            busy={busy}
+            unsavedTemplate={dirty}
+            onApply={(recipe) => void act(`apply:${recipe.id}`, (current) => organizationEnvironment.applyRecipe(recipe.id, true, current.contextRevision)).catch(() => undefined)}
+            onDismiss={(recipe) => void act(`dismiss:${recipe.id}`, (current) => organizationEnvironment.dismissRecipe(recipe.id, current.contextRevision)).catch(() => undefined)}
+          />
+        )}
+      </section>
     ) : null;
 
   const savedByKey = new Map(saved.repositories.map((repository) => [keyOf(repository), repository]));
@@ -902,7 +966,14 @@ export function EnvironmentStep(props: StepProps) {
         ) : !dirty && status.rebuildRequired && !building && status.pendingChanges.length > 0 ? (
           <p className="mt-2 text-[12px] text-warning">Not built yet: {status.pendingChanges.map(changeLabel).join(", ")}.</p>
         ) : null}
-        <div className="xl:hidden">{panel && <div className="mt-6">{panel}</div>}</div>
+        <div className="xl:hidden">
+          {panel && (
+            <div className="mt-6">
+              {panel}
+              {fixPanel}
+            </div>
+          )}
+        </div>
       </>
     );
     actions =
@@ -954,7 +1025,14 @@ export function EnvironmentStep(props: StepProps) {
       title="Build the environment"
       description="A version is a snapshot of the machine with your tools installed and repositories cloned. New workspaces start from the active version in seconds."
       wide
-      aside={panel}
+      aside={
+        panel && (
+          <>
+            {panel}
+            {fixPanel}
+          </>
+        )
+      }
     >
       {body}
       <StepError>{status ? error : null}</StepError>

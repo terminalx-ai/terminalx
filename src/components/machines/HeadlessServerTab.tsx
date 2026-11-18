@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BookOpen, Check, CheckCircle2, Copy, Loader2, Terminal } from "@/icons";
+import { BookOpen, Check, CheckCircle2, Copy, LoaderCircle, Terminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { minutesSeconds } from "@/components/pairing/pairingText";
 import { api } from "@/lib/api";
@@ -11,6 +11,8 @@ import { failureCopy, type MachinePairing } from "./useMachinePairing";
 
 export const INSTALL_COMMAND = "curl -fsSL https://terminalx.ai/install.sh | sh";
 export const PAIR_COMMAND = "terminalx-serve pair";
+/** The transcript's shell prompt (21.06). The server's own user and host are not known here, so it names neither. */
+export const SERVER_PROMPT = "you@server";
 
 /** This Mac's name as other computers see it (Settings → Account), or null until it is read. */
 function useThisMacName(): string | null {
@@ -54,7 +56,7 @@ function CommandBox({ command, label }: { command: string; label: string }) {
   );
 }
 
-function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
+export function StepRow({ n, title, titleFor, children }: { n: number; title: string; titleFor?: string; children: ReactNode }) {
   const Title = titleFor ? "label" : "div";
   return (
     <li className="flex gap-3">
@@ -85,7 +87,7 @@ function OnTheServer({ pairing, thisMac }: { pairing: MachinePairing; thisMac: s
         <Terminal className="size-[13px] shrink-0" aria-hidden /> On the server
       </div>
       <div className="grid px-3 py-2.5 font-mono text-[12px] leading-[19px] text-foreground" data-testid="server-transcript">
-        <div className="whitespace-pre"><span className="text-faint">$ </span>{PAIR_COMMAND}</div>
+        <div className="whitespace-pre"><span className="text-info">{SERVER_PROMPT}</span> ~ $ {PAIR_COMMAND}</div>
         <div className="truncate text-muted-foreground">
           TerminalX {machine ? machine.version : <Placeholder>{"<version>"}</Placeholder>} · {machine ? osLabel(machine.os) : <Placeholder>{"<OS> <arch>"}</Placeholder>}
         </div>
@@ -163,7 +165,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
       </div>
       <footer className="flex min-h-[52px] flex-wrap items-center gap-2 border-t border-hairline px-5 py-2.5">
         <span className="mr-auto flex items-center gap-1.5 text-[12px] text-faint">
-          <BookOpen className="size-[13px] shrink-0" aria-hidden /> Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.
+          <BookOpen className="size-[13px] shrink-0" aria-hidden /> Agents sign in on the server after pairing, from its machine page.
         </span>
         {step.kind === "paired" ? (
           <Button size="sm" onClick={onDone}>Done</Button>
@@ -174,7 +176,7 @@ export function HeadlessServerTab({ pairing, onClose, onDone }: { pairing: Machi
               <Button size="sm" onClick={ask}>Try again</Button>
             ) : (
               <Button size="sm" disabled={!canContinue} onClick={ask}>
-                {step.kind === "waiting" && <Loader2 className="animate-spin" aria-hidden />} Continue
+                {step.kind === "waiting" && <LoaderCircle className="animate-spin" aria-hidden />} Continue
               </Button>
             )}
           </>
@@ -189,7 +191,7 @@ function CodeStatus({ pairing, name, failure }: { pairing: MachinePairing; name:
   const { step, inspected, remaining } = pairing;
   if (step.kind === "empty") return null;
   if (step.kind === "inspecting") {
-    return <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden /> Reading the code…</div>;
+    return <div className="flex items-center gap-2 text-[12.5px] text-muted-foreground"><LoaderCircle className="size-4 animate-spin" aria-hidden /> Reading the code…</div>;
   }
   if (step.kind === "invalid") {
     return (
@@ -211,7 +213,7 @@ function CodeStatus({ pairing, name, failure }: { pairing: MachinePairing; name:
       {step.kind === "ready" && remaining > 0 && <p className={soft}>Continue, then compare the fingerprint on the server and answer y there.</p>}
       {step.kind === "waiting" && (
         <div className="flex items-center gap-2 text-[12.5px] text-info" role="status">
-          <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
+          <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden /> Waiting for approval on {name}…
         </div>
       )}
       {step.kind === "paired" && (

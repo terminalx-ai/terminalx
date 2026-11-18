@@ -55,17 +55,17 @@ import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
+import { cloudProviderLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import type { MachineConnectionState, PairedMachine } from "@/types/machines";
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", hetzner: "Hetzner", "local-docker": "Local Docker" };
-
-/** A cloud provider's display name. */
+/** A cloud provider's display name, from its descriptor (PRO-415). */
 export function cloudProviderName(provider: string | null | undefined): string {
   if (!provider) return "Development runtime";
-  return PROVIDER_NAMES[provider] ?? provider;
+  return cloudProviderLabel(provider);
 }
 
 export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };
@@ -209,7 +209,8 @@ export interface CloudSessionModel {
    * once the runtime is back. Without it a stopped workspace stays stopped.
    */
   openTerminal(options?: { wake?: boolean }): Promise<void>;
-  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<void>;
+  /** Adds an agent tab and selects it; resolves to its id where the runtime names it. */
+  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<string | void>;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
   /** Agents the runtime has (`agents/1`), else the two every runtime ships. */
@@ -228,12 +229,30 @@ export interface CloudSessionModel {
    */
   removableWorkspace: RemovableWorkspace | undefined;
   /**
+   * A session on a paired machine (PRO-347) rather than in a cloud workspace:
+   * where it runs and how that machine is reached. Everything that belongs to
+   * an organization (sharing, presence, leases, wake and sleep, price, the
+   * mirror) is absent for it; `orgId` is empty and `collab` never live.
+   */
+  machine?: MachineSessionPlace;
+  /**
    * PRO-28: the Ports panel's inputs. `offered` is false for anyone who may
    * not use previews (not a manager, nor a driver who may approve) and for a
    * locked session: the panel and every entry to it are then left out.
    */
   ports: { offered: boolean; state: WorkspaceConnectionState; connectionId: string | null };
   error: string | null;
+}
+
+/** Where a machine session runs (docs/MACHINES.md decision 1). */
+export interface MachineSessionPlace {
+  machineId: string;
+  projectId: string;
+  /** The paired machine's record; null once it is no longer paired. */
+  record: PairedMachine | null;
+  name: string;
+  /** How the machine is reached now (21.09): direct, relay, reconnecting, offline… */
+  state: MachineConnectionState;
 }
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
@@ -253,7 +272,8 @@ function statusShown(tab: CloudAgentTab, asleep: boolean): TabEntry["status"] {
   return status;
 }
 
-function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
+/** A runtime's agent tab as SessionView reads a tab (a cloud workspace's, or a machine's). */
+export function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
   const { info } = tab;
   return {
     id: tab.tabId,
@@ -282,6 +302,8 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
  * once.
  */
 export function useCloudSession(key: string): CloudSessionModel | null {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const parsed = parseCloudWorkspaceKey(key);
   const orgId = parsed?.orgId ?? "";
   const workspaceId = parsed?.workspaceId ?? "";

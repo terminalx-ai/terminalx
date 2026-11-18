@@ -21,6 +21,11 @@ pub struct TurnUsage {
     model: Option<String>,
     unpriced_tier: bool,
     started: Option<i64>,
+    /// What the agent's records say the turn ran at (PRO-379): its effort and fast mode.
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    fast: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,6 +65,12 @@ impl TurnUsage {
                 .filter(|model| !model.is_empty())
                 .map(str::to_owned);
             self.unpriced_tier = stats::nonstandard_tier(payload);
+            if let Some(effort) = payload["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                self.effort = Some(effort.to_owned());
+            }
+            if let Some(tier) = payload["service_tier"].as_str() {
+                self.fast = Some(matches!(tier, "fast" | "priority"));
+            }
         }
         let mut changed = false;
         if record["type"] == "assistant"
@@ -90,6 +101,12 @@ impl TurnUsage {
                         .min(request.write),
                 );
                 request.model = record["message"]["model"].as_str().map(str::to_owned);
+                if let Some(effort) = record["perTurnEffort"].as_str().or(record["effort"].as_str()).filter(|effort| !effort.is_empty()) {
+                    self.effort = Some(effort.to_owned());
+                }
+                if let Some(speed) = usage["speed"].as_str() {
+                    self.fast = Some(speed == "fast");
+                }
                 request.unpriced |= stats::nonstandard_tier(usage)
                     || stats::nonstandard_tier(&record["message"])
                     || stats::nonstandard_tier(record)
@@ -106,6 +123,8 @@ impl TurnUsage {
                     cache_write_tokens: Some(0),
                     cost_usd: Some(0.0),
                     model: request.model.clone(),
+                    effort: self.effort.clone(),
+                    fast: self.fast,
                     ..Default::default()
                 };
                 for request in self.requests.values() {
@@ -160,6 +179,8 @@ impl TurnUsage {
                 add(&mut self.total.cache_read_tokens, read);
                 add(&mut self.total.cache_write_tokens, write);
                 self.total.model.clone_from(&self.model);
+                self.total.effort.clone_from(&self.effort);
+                self.total.fast = self.fast;
                 let priced = !self.unpriced_tier
                     && !stats::nonstandard_tier(payload)
                     && !stats::nonstandard_tier(info)
@@ -376,6 +397,24 @@ mod tests {
             );
             assert!(usage.model.is_some());
         }
+    }
+
+    #[test]
+    fn a_turn_says_the_effort_and_fast_mode_its_records_ran_at() {
+        let mut claude = TurnUsage::default();
+        let request = |speed: &str, effort: &str| serde_json::json!({"type":"assistant","requestId":"r1","effort":"medium","perTurnEffort":effort,
+            "message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":2,"speed":speed}}});
+        claude.record(&request("standard", "high"), None, &mut Vec::new());
+        assert_eq!((claude.total.effort.as_deref(), claude.total.fast), (Some("high"), Some(false)));
+        claude.record(&request("fast", "xhigh"), Some(TurnMark::Opened), &mut Vec::new());
+        assert_eq!((claude.total.effort.as_deref(), claude.total.fast), (Some("xhigh"), Some(true)));
+
+        let mut codex = TurnUsage::default();
+        codex.record(&serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"low","service_tier":"priority"}}), Some(TurnMark::Opened), &mut Vec::new());
+        codex.record(&serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":{"input_tokens":10,"output_tokens":2,"cached_input_tokens":0},
+            "last_token_usage":{"input_tokens":10,"output_tokens":2,"cached_input_tokens":0}}}}), None, &mut Vec::new());
+        assert_eq!((codex.total.effort.as_deref(), codex.total.fast), (Some("low"), Some(true)));
     }
 
     #[test]

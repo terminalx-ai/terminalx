@@ -11,7 +11,7 @@ import { CloudSearch } from "./CloudFiles";
 vi.mock("@/lib/api", () => ({ fs: { listDir: vi.fn() }, api: {} }));
 vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: [], loading: false, head: null }) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 
 const KEY = "cloud:org-1:ws-1";
 const ROOT = `cloud://${KEY}`;

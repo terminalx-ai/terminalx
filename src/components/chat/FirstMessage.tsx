@@ -1,101 +1,70 @@
 import { useEffect, useState } from "react";
 import { Check, CircleAlert, Loader2 } from "@/icons";
-import { cn } from "@/lib/cn";
-import { useSessionStore } from "@/lib/sessions";
-import { revealSetup, useWorkspaceSetup } from "@/lib/workspaceSetup";
-import type { HeldFirstMessage } from "@/lib/firstMessage";
+import { copiedStepText } from "@/components/ui/WorktreeCopyNotices";
+import type { FirstMessagePreview } from "@/lib/agentEvents";
+import { formatSetupDuration, revealSetup, setupActive, type WorkspaceSetup } from "@/lib/workspaceSetup";
+import type { SessionEntry } from "@/types/session";
 import { SendingMessage } from "./TurnBlock";
 
-type StepState = "done" | "running" | "failed";
-interface Step { key: string; label: string; state: StepState }
-
-const seconds = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
-
-/** Ticks while the session starts, for the elapsed time beside "Starting the session". */
-function useNow(running: boolean) {
-  const [now, setNow] = useState(() => Date.now());
+function Elapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => setNow(Date.now()), 100);
-    return () => clearInterval(timer);
-  }, [running]);
-  return now;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <span className="shrink-0 text-[11px] tabular-nums text-faint">{formatSetupDuration(Math.max(0, now - since))}</span>;
 }
 
-/**
- * A new session's first message, drawn the moment the session opens (PRO-397):
- * the prompt as written with its attachments, the start progress under it, and
- * that the message waits for the agent. A send that failed keeps the message,
- * with why, in place of the progress.
- */
-export function FirstMessage({ message, cwd }: { message: HeldFirstMessage; cwd?: string }) {
-  const { sessions, harnesses } = useSessionStore();
-  const session = sessions.find((item) => item.id === message.sessionId);
-  const harness = session?.tabs.find((tab) => tab.id === message.tabId)?.harness;
-  const agent = (harness && harnesses.find((item) => item.id === harness)?.name) || "the agent";
-  const setup = useWorkspaceSetup(message.sessionId);
-  const failed = message.error !== null;
-  const now = useNow(!failed);
+function Step({ label, state }: { label: string; state: "done" | "running" | "failed" }) {
+  const Icon = state === "done" ? Check : state === "running" ? Loader2 : CircleAlert;
+  return (
+    <li className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+      <Icon className={state === "running" ? "size-3 shrink-0 animate-spin" : "size-3 shrink-0"} aria-hidden />
+      <span className="truncate" title={label}>{label}</span>
+    </li>
+  );
+}
 
-  const steps: Step[] = [];
-  const branch = session?.branch || session?.worktreeName;
-  if (branch) {
-    const from = session?.worktreeBase?.from || session?.baseRef;
-    steps.push({ key: "worktree", label: `Created worktree ${branch}${from ? ` from ${from}` : ""}`, state: "done" });
-  }
-  const copy = session?.worktreeBase?.fileCopy;
-  if (copy && copy.copiedCount > 0) {
-    const first = copy.firstCopied;
-    const others = copy.copiedCount - (first ? 1 : 0);
-    const label = first
-      ? others > 0 ? `Copied ${first} and ${others} other ${others === 1 ? "file" : "files"}` : `Copied ${first}`
-      : `Copied ${copy.copiedCount} ${copy.copiedCount === 1 ? "file" : "files"}`;
-    steps.push({ key: "copy", label, state: copy.error ? "failed" : "done" });
-  }
-  if (setup) {
-    const state: StepState = setup.status === "succeeded" ? "done" : setup.status === "failed" || setup.status === "stopped" ? "failed" : "running";
-    const verb = state === "done" ? "Ran the setup script" : state === "failed" ? "The setup script did not finish" : "Running the setup script";
-    steps.push({ key: "setup", label: `${verb} · ${setup.command}`, state });
-  }
-  steps.push({ key: "agent", label: failed ? `${agent} did not take the message` : `Starting ${agent}`, state: failed ? "failed" : "running" });
+/** The reader's Create prompt stays visible until the tab log has a real prompt. */
+export function FirstMessage({ message, session, agent, setup }: {
+  message: FirstMessagePreview;
+  session: SessionEntry;
+  agent: string;
+  setup?: WorkspaceSetup;
+}) {
+  const failed = message.error !== null;
+  const base = session.worktreeBase;
+  const branch = session.branch || session.worktreeName;
+  const from = base?.from || session.baseRef;
+  const copy = base?.fileCopy;
+  const copied = copy ? copiedStepText(copy) : null;
+  const setupRunning = setup && setupActive(setup);
+  const setupDone = setup?.status === "succeeded";
 
   return (
-    <div data-testid="first-message" data-first-message-state={failed ? "failed" : "pending"}>
-      <SendingMessage message={message} cwd={cwd} />
-      <div className="mb-3 rounded-lg px-3 py-2.5 hairline" role="status" aria-live="polite" data-testid="start-progress">
+    <div data-testid="first-message">
+      <SendingMessage message={message} cwd={session.cwd} failed={failed} />
+      <div className="mb-3 rounded-lg px-3 py-2.5 hairline">
         <div className="flex items-center gap-2 text-[13px] text-foreground">
-          {failed ? <CircleAlert className="size-3.5 shrink-0 text-warning" aria-hidden /> : <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden />}
-          <span className="min-w-0 flex-1 truncate">{failed ? "The session started, but the first message was not sent" : "Starting the session"}</span>
-          {!failed && <span className="shrink-0 text-[11px] tabular-nums text-faint">{seconds(now - message.startedAt)}</span>}
+          <span className="min-w-0 flex-1" role="status">{failed ? "The session started, but the first message was not sent" : "Starting the session"}</span>
+          {!failed && <Elapsed since={message.startedAt} />}
           {setup?.hasPane && (
-            <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => revealSetup(message.sessionId)}>
+            <button type="button" className="shrink-0 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => revealSetup(session.id)}>
               Setup tab
             </button>
           )}
         </div>
-        <ul className="mt-1.5 space-y-1 pl-5.5">
-          {steps.map((step) => (
-            <li key={step.key} data-step={step.key} data-state={step.state} className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-              {step.state === "done" ? (
-                <Check className="size-3 shrink-0" aria-hidden />
-              ) : step.state === "failed" ? (
-                <CircleAlert className="size-3 shrink-0 text-warning" aria-hidden />
-              ) : (
-                <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
-              )}
-              <span className={cn("min-w-0 truncate", step.state === "running" && "text-foreground")}>{step.label}</span>
-            </li>
-          ))}
+        <ul className="mt-1.5 space-y-1">
+          {base && branch && <Step label={`Created worktree ${branch}${from ? ` from ${from}` : ""}`} state="done" />}
+          {(copied || copy?.error) && <Step label={copied ?? "Could not copy workspace files"} state={copy?.error ? "failed" : "done"} />}
+          {setup && <Step label={`${setupDone ? "Ran the setup script" : setupRunning ? "Running the setup script" : "The setup script did not finish"} · ${setup.command}`} state={setupDone ? "done" : setupRunning ? "running" : "failed"} />}
+          <Step label={failed ? `${agent} did not take the message` : `Starting ${agent}`} state={failed ? "failed" : "running"} />
         </ul>
       </div>
       {failed ? (
-        <p role="alert" className="mb-4 px-1 text-xs text-warning" data-testid="first-message-error">
-          Couldn't send the first message: {message.error}
-        </p>
+        <p role="alert" className="mb-4 px-1 text-xs text-warning">Couldn't send the first message: {message.error}</p>
       ) : (
-        <p className="mb-4 px-1 text-xs text-muted-foreground" data-testid="first-message-held">
-          Your first message is held and sent as soon as {agent} is ready.
-        </p>
+        <p className="mb-4 px-1 text-xs text-faint">Your first message is held and sent as soon as {agent} is ready.</p>
       )}
     </div>
   );

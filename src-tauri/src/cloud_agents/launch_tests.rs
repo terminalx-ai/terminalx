@@ -1261,6 +1261,49 @@ fn a_link_that_leads_anywhere_but_the_root_is_still_refused() {
     assert_eq!(std::fs::read_dir(root.join("nested")).unwrap().count(), 0);
 }
 
+/// A new Box workspace's first launch, read from the JSON the server sends
+/// (`claimLaunchIntent` with `launchCloneRepositories`: Codex with a model,
+/// effort and mode, a prompt, one repository to clone with no `ref`, named
+/// `<server's root>/<directory>`), on a root reached through a link as on
+/// Box. Runtime 0.2.21, from before the root's two spellings were accepted,
+/// refused exactly this launch as `payload-invalid` before cloning anything.
+#[cfg(unix)]
+#[test]
+fn a_box_workspaces_first_launch_as_the_server_sends_it_starts_its_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let starter = Arc::new(FakeStarter::default());
+    let api = FakeApi::new(None);
+    let (launcher, root, named_root) = linked(dir.path(), &remote, api.clone(), starter.clone());
+    let named = named_root.join("app").to_string_lossy().into_owned();
+    let work_branch = "terminalx/hello-0123456789ab";
+    let launch: Claim = serde_json::from_value(json!({
+        "launchId": "launch_1",
+        "state": "deliver",
+        "redelivery": false,
+        "workBranch": work_branch,
+        "title": "hello",
+        "agent": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "mode": "auto",
+        "prompt": "hello",
+        "repositories": [{ "owner": "acme", "name": "app", "path": named, "clone": { "provider": "github" } }]
+    }))
+    .unwrap();
+    *api.intent.lock().unwrap() = Some(launch);
+
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+    let completion = api.completions.lock().unwrap()[0].clone();
+    assert_eq!((completion.outcome.as_str(), completion.category), ("started", None));
+    // Cloned into the root on the workspace's branch; the agent works there.
+    let local = root.join("app");
+    assert_eq!(git(&local, &["branch", "--show-current"]), work_branch);
+    assert_eq!(starter.starts.lock().unwrap()[0], (local, "hello".to_string(), Some("hello".to_string())));
+    // The branch is reported under the server's spelling of the checkout.
+    assert_eq!(completion.branches[0].path, named);
+}
+
 #[test]
 fn the_claim_reads_a_checkout_plan_next_to_no_launch() {
     use std::io::{BufRead, BufReader, Read, Write};

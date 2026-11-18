@@ -317,6 +317,26 @@ pub fn start_for(data: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Restart the installed service if it runs the runtime of `data`, so it
+/// runs the version `current` names again: what an update that failed after
+/// its handover does (PRO-354). It ends the process the service runs, and
+/// everything that process started. `false` when no such service is
+/// installed.
+pub fn restart_for(data: &Path) -> Result<bool> {
+    let Some(home) = dirs::home_dir() else { return Ok(false) };
+    let path = definition_path(&home);
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    if !serves(&text, data) {
+        return Ok(false);
+    }
+    if cfg!(target_os = "macos") {
+        launchd::restart(&path)?;
+    } else {
+        systemd::systemctl(&["restart", UNIT])?;
+    }
+    Ok(true)
+}
+
 /// What the service manager says.
 struct State {
     running: bool,
@@ -456,6 +476,14 @@ mod launchd {
     pub(super) fn start(path: &Path) -> Result<()> {
         match loaded() {
             Some((domain, _)) => output("launchctl", &["kickstart", &format!("{domain}/{LABEL}")]).map(drop),
+            None => bootstrap(path),
+        }
+    }
+
+    /// End the running job and start it again (`kickstart -k`).
+    pub(super) fn restart(path: &Path) -> Result<()> {
+        match loaded() {
+            Some((domain, _)) => output("launchctl", &["kickstart", "-k", &format!("{domain}/{LABEL}")]).map(drop),
             None => bootstrap(path),
         }
     }

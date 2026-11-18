@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::RpcError;
+use super::collab::v2::Permit;
 use super::server::{Peer, MAX_WRITE_BYTES};
 
 /// Streams one connection may hold. A page with its assets and a WebSocket
@@ -65,6 +66,7 @@ struct Window {
 }
 
 struct Stream {
+    policy: Option<Permit>,
     id: String,
     peer_id: u64,
     port: u16,
@@ -140,14 +142,14 @@ fn stream_id(params: &Value) -> Result<&str, RpcError> {
 impl Ports {
     #[cfg(test)]
     pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
-        self.handle_admitted(peer, method, params, allowed, crate::github_process::ticket()).await
+        self.handle_admitted(peer, method, params, allowed, crate::github_process::ticket(), None).await
     }
 
-    pub async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+    pub(crate) async fn handle_admitted(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket, policy: Option<Permit>) -> Result<Value, RpcError> {
         let _privacy = ticket.enter().map_err(|error| RpcError::forbidden(error.to_string()))?;
         match method {
             "ports.list" => Ok(self.list(peer)),
-            "ports.open" => self.open(peer, &params, allowed, ticket).await,
+            "ports.open" => self.open(peer, &params, allowed, ticket, policy).await,
             "ports.write" => self.write(peer, &params),
             "ports.ack" => self.ack(peer, &params),
             "ports.close" => {
@@ -160,10 +162,11 @@ impl Ports {
         }
     }
 
-    /// The ports applications listen on, when this system can tell, and the
-    /// caller's own open streams.
+    /// The ports applications listen on, when this system can tell, each
+    /// with the process behind it (PRO-355), and the caller's own open
+    /// streams. The runtime's own listeners are left out.
     fn list(&self, peer: &Peer) -> Value {
-        let detected = listening_ports();
+        let detected = super::port_listeners::listening(std::process::id());
         let streams: Vec<Value> = self
             .streams
             .lock()
@@ -174,7 +177,7 @@ impl Ports {
             .collect();
         json!({
             "detected": detected.is_some(),
-            "ports": detected.unwrap_or_default().into_iter().map(|port| json!({ "port": port })).collect::<Vec<_>>(),
+            "ports": detected.unwrap_or_default().into_iter().map(listed_port).collect::<Vec<_>>(),
             "streams": streams,
         })
     }
@@ -186,7 +189,7 @@ impl Ports {
         }
     }
 
-    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket) -> Result<Value, RpcError> {
+    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value, allowed: Allowed<'_>, ticket: crate::data_privacy::Ticket, policy: Option<Permit>) -> Result<Value, RpcError> {
         let port = params
             .get("port")
             .and_then(Value::as_u64)
@@ -230,7 +233,9 @@ impl Ports {
             }
             Self::room(&streams, peer.id())?;
             let peer_window = self.windows.lock().unwrap().entry(peer.id()).or_default().clone();
+            if let Some(permit) = &policy { permit.check(None).map_err(|_| RpcError::forbidden("Port policy changed before open"))?; }
             let stream = Arc::new(Stream {
+                policy,
                 id: format!("port-{}", self.next.fetch_add(1, Ordering::Relaxed) + 1),
                 peer_id: peer.id(),
                 port,
@@ -420,7 +425,7 @@ impl Ports {
             };
             let written = tokio::select! {
                 _ = stream.cancel.cancelled() => break,
-                written = tokio::time::timeout(WRITE_TIMEOUT, writer.write_all(&bytes)) => written,
+                written = tokio::time::timeout(WRITE_TIMEOUT, write_port_input(&mut writer, &bytes, stream.policy.as_ref())) => written,
             };
             if !matches!(written, Ok(Ok(()))) {
                 self.end(&stream, Some((&peer, "error")));
@@ -504,48 +509,35 @@ fn release(counter: &AtomicUsize, bytes: usize) -> usize {
     }
 }
 
-/// TCP ports something listens on that a loopback connection reaches, or
-/// `None` where this system gives no cheap way to tell (a port can still be
-/// opened by number).
-fn listening_ports() -> Option<Vec<u16>> {
-    let v4 = std::fs::read_to_string("/proc/net/tcp").ok()?;
-    let v6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
-    let mut ports: Vec<u16> = parse_listeners(&v4).into_iter().chain(parse_listeners(&v6)).collect();
-    ports.sort_unstable();
-    ports.dedup();
-    Some(ports)
+/// One `ports.list` entry: `{ port, process? }`.
+fn listed_port(listener: super::port_listeners::Listener) -> Value {
+    match listener.process {
+        Some(process) => json!({ "port": listener.port, "process": process }),
+        None => json!({ "port": listener.port }),
+    }
 }
 
-/// Listening sockets in a `/proc/net/tcp` or `tcp6` table that are bound to
-/// loopback or to every address. One bound to a single other interface is
-/// not reachable over loopback and is left out.
-fn parse_listeners(table: &str) -> Vec<u16> {
-    const LISTEN: &str = "0A";
-    table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let local = fields.nth(1)?;
-            let state = fields.nth(1)?;
-            if state != LISTEN {
-                return None;
-            }
-            let (address, port) = local.rsplit_once(':')?;
-            let reachable = match address.len() {
-                // IPv4, little-endian: 127.x.x.x or 0.0.0.0.
-                8 => address == "00000000" || address.ends_with("7F"),
-                // IPv6 in four little-endian words: ::, ::1, or the IPv4 forms mapped.
-                32 => {
-                    address == "00000000000000000000000000000000"
-                        || address == "00000000000000000000000001000000"
-                        || (address.starts_with("0000000000000000FFFF0000") && (address.ends_with("00000000") || address.ends_with("7F")))
-                }
-                _ => false,
-            };
-            reachable.then(|| u16::from_str_radix(port, 16).ok()).flatten().filter(|port| *port != 0)
-        })
-        .collect()
+/// A port can be an agent's control interface. Each physical write retains
+/// the stream opener's native revision/source, including queued bytes. The
+/// lock is held only for a nonblocking syscall, never across an await.
+async fn write_port_input(writer: &mut tokio::net::tcp::OwnedWriteHalf, bytes: &[u8], policy: Option<&Permit>) -> std::io::Result<()> {
+    let Some(policy) = policy else { return writer.write_all(bytes).await };
+    let mut offset = 0;
+    while offset < bytes.len() {
+        writer.writable().await?;
+        let attempt = {
+            let _admission = policy.collaboration.enter_admission();
+            policy.check(None).map_err(|error| std::io::Error::other(error.to_string()))?;
+            writer.try_write(&bytes[offset..])
+        };
+        match attempt {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => offset += written,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -553,21 +545,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listeners_are_read_from_the_proc_tables() {
-        let v4 = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
-                  0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1 0\n\
-                  1: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 2 1 0\n\
-                  2: 0A00000A:2000 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 3 1 0\n\
-                  3: 0100007F:C350 0100007F:0BB8 01 00000000:00000000 00:00000000 00000000  1000        0 4 1 0\n";
-        // Loopback and any-address listeners; not one bound to another
-        // interface, and not an established connection.
-        assert_eq!(parse_listeners(v4), vec![3000, 8080]);
-        let v6 = "  sl  local_address                         remote_address                        st\n\
-                  0: 00000000000000000000000000000000:1389 00000000000000000000000000000000:0000 0A 0 0 0\n\
-                  1: 00000000000000000000000001000000:1F91 00000000000000000000000000000000:0000 0A 0 0 0\n\
-                  2: 000080FE00000000FF005450B6AD1DFE:0050 00000000000000000000000000000000:0000 0A 0 0 0\n";
-        assert_eq!(parse_listeners(v6), vec![5001, 8081]);
-        assert!(parse_listeners("garbage\nmore garbage").is_empty());
+    fn a_listed_port_names_its_process_only_when_known() {
+        use super::super::port_listeners::{Listener, Process};
+        let named = Listener { port: 5173, process: Some(Process { name: "vite".into(), pid: 42, cwd: Some("/repo/console".into()) }) };
+        assert_eq!(listed_port(named), json!({ "port": 5173, "process": { "name": "vite", "pid": 42, "cwd": "/repo/console" } }));
+        let no_cwd = Listener { port: 8080, process: Some(Process { name: "caddy".into(), pid: 7, cwd: None }) };
+        assert_eq!(listed_port(no_cwd), json!({ "port": 8080, "process": { "name": "caddy", "pid": 7 } }));
+        assert_eq!(listed_port(Listener { port: 3000, process: None }), json!({ "port": 3000 }));
     }
 
     #[test]
@@ -587,4 +571,31 @@ mod tests {
         assert_eq!(release(&counter, 500), 60);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
+}
+
+
+#[cfg(test)]
+#[tokio::test]
+async fn phase2_collaboration_v2_port_final_writer_keeps_original_revision_and_drive_source() {
+    use crate::remote::collab::{Collaboration, v2::{Action, Snapshot}};
+    let dir = tempfile::tempdir().unwrap();
+    let policy = Arc::new(Collaboration::new());
+    policy.runtime_policy.bind(dir.path(), 1).unwrap();
+    let snapshot = |revision: &str, source: &str| -> Snapshot { serde_json::from_value(json!({"v":2,"revision":revision,"members":[{
+        "userId":"guest","role":"driver","canApprove":true,"writeSource":source
+    }]})).unwrap() };
+    policy.install_v2(snapshot("1", "explicit")).unwrap();
+    let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Configure);
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+    let (mut server, _) = listener.accept().await.unwrap();
+    let (_, mut writer) = client.into_split();
+    write_port_input(&mut writer, b"safe", Some(&permit)).await.unwrap();
+    let mut first = [0;4]; server.read_exact(&mut first).await.unwrap(); assert_eq!(&first, b"safe");
+    policy.install_v2(snapshot("2", "everyone")).unwrap();
+    assert!(write_port_input(&mut writer, b"stale", Some(&permit)).await.is_err());
+    let current = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp("guest"), Action::Configure);
+    assert!(write_port_input(&mut writer, b"everyone", Some(&current)).await.is_err());
+    let mut byte = [0];
+    assert!(tokio::time::timeout(Duration::from_millis(30), server.read(&mut byte)).await.is_err());
 }

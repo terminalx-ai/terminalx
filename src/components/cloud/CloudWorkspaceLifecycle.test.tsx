@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem } from "@/lib/api";
 import type { RuntimeCheck } from "@/lib/cloudLifecycle";
 import { actionsFor, CloudWorkspaceLifecycleDialog, deletionLine, DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// Provider names come from the descriptors the server publishes (PRO-415).
+learnDescriptors();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -260,7 +264,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
       disposition({ provider: "local-docker", providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: true } }),
     );
     renderDialog(item("ready", { provider: "local-docker" }), "stop", clean);
-    await waitFor(() => expect(undo()).toMatch(/Local Docker freezes the machine as it is.*continue where they were/));
+    await waitFor(() => expect(undo()).toMatch(/Local Docker \(development\) freezes the machine as it is.*continue where they were/));
     cleanup();
 
     // An older server does not say: neither is promised.

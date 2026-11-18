@@ -21,6 +21,8 @@ const IDLE_POLL: Duration = Duration::from_secs(20);
 const MAX_TEXT: usize = 48 * 1024;
 /// Receipt category of a message that names an image the runtime does not hold.
 pub const ATTACHMENT_MISSING: &str = "attachment-missing";
+/// Said when a file a message names did not reach the runtime in full (PRO-407).
+pub const FILE_MISSING_MESSAGE: &str = "Not sent: a file of this message did not arrive in full. Attach it and send again.";
 
 pub fn run(agents: &CloudAgents) {
     let mut failures = 0u32;
@@ -124,6 +126,18 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         }
         Known::Interrupted | Known::New => {}
     }
+    if agents.collab().is_some_and(|collab| collab.runtime_policy.is_v2()) && lease.runtime_generation != agents.generation() {
+        return finish(agents, lease, "rejected", Some("collaboration-generation-changed"), json!({}));
+    }
+    // Capture the server's exact v2 revision/source before decrypt/judge;
+    // never manufacture explicit authority from a local role-only lookup.
+    let policy_stamp = match agents.collab().filter(|collab| collab.runtime_policy.is_v2()) {
+        Some(collab) => match lease_provenance(collab, lease) {
+            Ok(stamp) => Some(stamp),
+            Err(_) => return finish(agents, lease, "rejected", Some("collaboration-provenance-unavailable"), json!({})),
+        },
+        None => None,
+    };
     let plaintext = match decrypt(agents, lease) {
         Ok(plaintext) => plaintext,
         Err(category) => return finish(agents, lease, "rejected", Some(category), json!({})),
@@ -137,6 +151,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
         actor_id: &lease.actor.user_id,
         leases: true,
         access: agents.actor_access(&lease.actor),
+        policy_stamp,
         plaintext: &plaintext,
     };
     match decide(agents, &command, || agents.receipts.applying(id)) {
@@ -163,6 +178,7 @@ pub struct Command<'a> {
     pub leases: bool,
     /// What they may do now.
     pub access: crate::remote::collab::Access,
+    pub(crate) policy_stamp: Option<crate::remote::collab::v2::Stamp>,
     /// The command's body: `text`, `images` and settings for a send or
     /// steer, `requestId` with `optionId` or `answers` for a decision.
     pub plaintext: &'a Value,
@@ -185,6 +201,9 @@ pub enum Decided {
 /// durable `applying` record and runs only once every check has passed,
 /// right before the agent is touched.
 pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow::Result<()>) -> Decided {
+    // Same lock as policy/member replacement. Keep it through the durable
+    // applying mark and synchronous ops, including settings and queue push.
+    let _admission = agents.collab().map(|collab| collab.enter_admission());
     let decided = judge(agents, command, mark);
     // A message that was refused is never typed: the images its sender
     // uploaded for it are done with (PRO-22). Only their own: naming someone
@@ -194,9 +213,8 @@ pub fn decide(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> an
         Decided::MarkFailed => true,
     };
     if rejected && command.kind == "send" {
-        if let Some(ids) = attachments::named(command.plaintext) {
-            agents.attachments.remove_owned(command.actor_id, &ids);
-        }
+        // Every id it names, even in a list that made it invalid.
+        agents.attachments.remove_owned(command.actor_id, &attachments::named_any(command.plaintext));
     }
     decided
 }
@@ -206,7 +224,24 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     let Some(tab) = agents.tab(command.tab_id) else {
         return refused("tab-unknown", json!({}));
     };
-    let access = command.access;
+    let access = match agents.collab() {
+        Some(collab) if collab.known() => command.access.meet(collab.access_of(Some(command.actor_id))),
+        _ => command.access,
+    };
+    if let Some(collab) = agents.collab() {
+        let action = if command.kind == "permission-decision" { crate::remote::collab::v2::Action::Approve } else { crate::remote::collab::v2::Action::Drive };
+        let witness = agents.ops.collaboration_v2_witness(&tab.session_id, command.tab_id);
+        if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), action, witness.as_ref()).is_err() {
+            return refused("collaboration-policy-changed", json!({}));
+        }
+        if collab.runtime_policy.everyone(command.actor_id) && matches!(command.kind, "send" | "steer") && slash::is_command(command.plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+            // Everyone-provenance input cannot use commands to change stance,
+            // even when explicit approval independently remains authorized.
+            if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), crate::remote::collab::v2::Action::Configure, None).is_err() {
+                return refused("approval-required", json!({}));
+            }
+        }
+    }
     let allowed = match command.kind {
         "permission-decision" => access.can_approve,
         _ => access.can_drive(),
@@ -246,6 +281,12 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     if command.kind == "steer" && busy_before && slash::is_command(command.plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
         return refused(slash::NOT_QUEUED_CATEGORY, json!({ "message": slash::NOT_QUEUED_MESSAGE }));
     }
+    if let Some(permit) = crate::remote::collab::v2::current() {
+        let witness = agents.ops.collaboration_v2_witness(&tab.session_id, command.tab_id);
+        if permit.check(witness.as_ref()).is_err() {
+            return refused("collaboration-policy-changed", json!({}));
+        }
+    }
     if let Err(error) = mark() {
         log::error!("record applying {}: {error:#}", command.client_command_id);
         return Decided::MarkFailed;
@@ -254,8 +295,14 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     // own: only a manager or someone who may approve permissions sets them
     // (the live `session.configure` needs manage). A driver's send still
     // goes through, without them.
-    let may_configure = access.can_configure();
-    let (outcome, category, extra) = apply(agents, command, &tab.session_id, may_configure);
+    let may_configure = access.can_configure() && agents.collab().is_none_or(|collab|
+        collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), crate::remote::collab::v2::Action::Configure, None).is_ok());
+    let permit = crate::remote::collab::v2::current().or_else(|| agents.collab().map(|collab| crate::remote::collab::v2::Permit::new(
+        collab.clone(), command.actor_id, command.policy_stamp.clone(), action_for(command.kind))));
+    let (outcome, category, extra) = match permit {
+        Some(permit) => permit.with(|| apply(agents, command, &tab.session_id, may_configure)),
+        None => apply(agents, command, &tab.session_id, may_configure),
+    };
     // Only input that reached the agent (or its queue) claims the tab.
     if let (Some(collab), true, "applied", "send" | "steer") = (agents.collab(), command.leases, outcome, command.kind) {
         let _ = collab.claim(command.tab_id, command.actor_id, now_ms(), busy_before, false);
@@ -296,12 +343,12 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
     };
     let result = match command.kind {
         "send" | "steer" => {
-            // Images ride with a prompt, never with a steer into a running turn.
-            let image_ids = match attachments::named(plaintext) {
-                Some(ids) if ids.is_empty() || command.kind == "send" => ids,
+            // Images and files ride with a prompt, never with a steer into a running turn.
+            let (image_ids, file_ids) = match (attachments::named(plaintext), attachments::named_files(plaintext)) {
+                (Some(images), Some(files)) if (images.is_empty() && files.is_empty()) || command.kind == "send" => (images, files),
                 _ => return ("rejected", Some("payload-invalid"), json!({})),
             };
-            let Some(text) = text(!image_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
+            let Some(text) = text(!image_ids.is_empty() || !file_ids.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
             // Uploaded by the sender, in full, before the message: checked
             // before anything about the tab changes.
             let images = match agents.attachments.load(command.actor_id, &image_ids) {
@@ -314,6 +361,9 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                     )
                 }
             };
+            if agents.attachments.check_files(command.actor_id, &file_ids).is_err() {
+                return ("rejected", Some(ATTACHMENT_MISSING), json!({ "message": FILE_MISSING_MESSAGE }));
+            }
             let settings = match Settings::from_json(plaintext) {
                 Ok(settings) => settings,
                 Err(_) => return ("rejected", Some("payload-invalid"), json!({})),
@@ -339,13 +389,22 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                 extra
             };
             let queue = command.kind == "send" && (ops.busy(session_id, tab_id) || !agents.follow_ups.list(tab_id).is_empty());
+            // Into the session's attachments folder here, queued or not: the
+            // agent is handed their paths on this computer (PRO-407).
+            let files = match agents.attachments.take_files(command.actor_id, session_id, &file_ids) {
+                Ok(files) => files,
+                Err(attachments::FilesError::Missing(_)) => return ("rejected", Some(ATTACHMENT_MISSING), json!({ "message": FILE_MISSING_MESSAGE })),
+                Err(attachments::FilesError::Failed(error)) => return failed(error),
+            };
             if queue {
                 let follow_up = FollowUp {
+                    policy_stamp: command.policy_stamp.clone(),
                     client_command_id: command.client_command_id.to_string(),
                     session_id: session_id.to_string(),
                     text,
                     actor_id: command.actor_id.to_string(),
                     images: image_ids,
+                    files,
                 };
                 if let Err(error) = agents.follow_ups.push(tab_id, follow_up) {
                     return failed(error);
@@ -354,7 +413,7 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                 agents.nudge_follow_ups(tab_id);
                 ("applied", None, mark(json!({ "queued": true })))
             } else {
-                let sent = ops.send_with_images(session_id, tab_id, &text, images);
+                let sent = ops.send_attached(session_id, tab_id, &text, images, files);
                 // Typed or not, this message is settled: its uploads are done with.
                 agents.attachments.remove(&image_ids);
                 match sent {
@@ -451,3 +510,22 @@ fn finish(agents: &CloudAgents, lease: &Lease, outcome: &str, category: Option<&
 #[cfg(test)]
 #[path = "mailbox_tests.rs"]
 mod tests;
+
+fn action_for(kind: &str) -> crate::remote::collab::v2::Action {
+    if kind == "permission-decision" { crate::remote::collab::v2::Action::Approve } else { crate::remote::collab::v2::Action::Drive }
+}
+
+fn lease_provenance(collab: &crate::remote::collab::Collaboration, lease: &Lease) -> anyhow::Result<crate::remote::collab::v2::Stamp> {
+    use anyhow::Context;
+    use crate::remote::collab::v2::Member;
+    let actor = &lease.actor;
+    let revision = actor.collaboration_revision.as_deref().context("missing lease revision")?;
+    let role = actor.role.as_ref().context("missing lease role")?;
+    let role = serde_json::from_value(serde_json::Value::String(role.clone()))?;
+    let member = Member {
+        user_id: actor.user_id.clone(), role,
+        can_approve: actor.can_approve.context("missing independent lease approval")?,
+        write_source: actor.write_source.context("missing lease drive source")?,
+    };
+    collab.runtime_policy.lease_stamp(revision, lease.runtime_generation, member)
+}

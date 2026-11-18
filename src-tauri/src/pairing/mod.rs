@@ -10,31 +10,41 @@ mod direct;
 use crate::pairing_fingerprint as fingerprint;
 mod guest;
 mod host_poll;
+mod machine_grants;
 mod machine_route;
-mod mobile;
+use crate::phone::rpc as mobile;
 use crate::local_runtime::mobile::model;
-use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+use crate::machine_name::{computer_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+#[cfg(test)]
+use crate::machine_name::presentable_name;
 #[cfg(test)]
 use crate::machine_name::{COMPUTER_NAME_MAX_CHARS, UNNAMED_HOST};
 mod registry;
 mod relay;
-mod send_ids;
 pub(crate) mod sharing;
-mod wire;
+use crate::phone::wire;
+use crate::phone::{
+    allowed_method, decode_canonical_base64, error_response, host_description, pairing_refused,
+    pairing_websocket_config, request_id, send_encrypted_text, static_rpc_response, ConnectionSignal, E2eeAuth,
+    PhoneHost,
+};
+#[cfg(test)]
+use crate::phone::disconnected_notification;
+#[cfg(test)]
+use self::crypto::PayloadKind;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
-use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::Message,
     WebSocketStream,
 };
 use uuid::Uuid;
@@ -45,12 +55,12 @@ use crate::sink::EventSink;
 
 use self::crypto::{
     begin_e2ee_session, encode_pairing_offer, random_token, seal_account_offer, token_hash,
-    E2eeHello, HostKeypair, PayloadKind,
+    E2eeHello, HostKeypair,
 };
 use self::model::{
     AccountMirror, AccountPairingGrant, DeviceEntry, DeviceProvenance, DeviceScope,
     HostBindingPayload, HostMetadata, PairedDeviceConnection, PairingApprovalRequest, PairingCode,
-    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, CAPABILITY, OFFER_TTL_MS,
+    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, OFFER_TTL_MS,
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
@@ -58,7 +68,6 @@ use crate::direct_endpoints::advertised_endpoints;
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
-const PAIRING_MESSAGE_BYTES_LIMIT: usize = 10 * 1024 * 1024;
 
 #[derive(Default)]
 struct Inner {
@@ -118,7 +127,8 @@ pub struct PairingManager {
     /// manager is taken, as `keep_awake` is.
     connections: Mutex<HashMap<String, Vec<LiveConnection>>>,
     connection_serial: AtomicU64,
-    mobile: Arc<mobile::MobileRuntime>,
+    /// The phone protocol this window serves (`crate::phone`).
+    phone: Arc<PhoneHost>,
     /// `APPROVAL_TTL_MS` in the app; fixtures wait less.
     approval_ttl_ms: i64,
     /// This Mac's public key once it was read, so a status can show the
@@ -148,14 +158,6 @@ struct PendingApproval {
     outcome: tokio::sync::watch::Sender<Approval>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConnectionSignal {
-    /// Revoked, signed out or stopping: close at once.
-    Cancel,
-    /// Disconnected on the Mac: tell the phone, then close; the pairing stays.
-    Disconnect,
-}
-
 struct LiveConnection {
     serial: u64,
     signal: mpsc::UnboundedSender<ConnectionSignal>,
@@ -183,11 +185,6 @@ struct KeepAwake {
     assertion: Option<crate::power::Assertion>,
 }
 
-/// What a phone is sent on each of its connections before the Mac closes them.
-fn disconnected_notification() -> serde_json::Value {
-    serde_json::json!({ "method": "pairing.disconnected", "params": { "reason": "disconnected-on-mac" } })
-}
-
 #[derive(Clone, Debug)]
 enum PairingConnectionContext {
     Direct {
@@ -202,12 +199,16 @@ enum PairingConnectionContext {
 
 impl PairingManager {
     pub fn new(account: Arc<AccountManager>) -> Self {
+        let phone = Arc::new(PhoneHost::new({
+            let account = account.clone();
+            move || account.current_generation()
+        }));
         Self {
             guest: guest::GuestClient::default(),
             account,
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
-            registry: DeviceRegistry::default(),
+            registry: DeviceRegistry,
             direct_port: direct::PORT,
             sink: OnceLock::new(),
             sessions: OnceLock::new(),
@@ -220,7 +221,7 @@ impl PairingManager {
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
             connection_serial: AtomicU64::new(1),
-            mobile: Arc::new(mobile::MobileRuntime::new()),
+            phone,
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
             keep_awake: Mutex::new(KeepAwake::default()),
@@ -254,10 +255,10 @@ impl PairingManager {
         self.sink
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
-        self.mobile.configure(sink.clone())?;
+        self.phone.configure(sink.clone())?;
         let settings = self.clone();
         sink.listen("settings_file_changed", Box::new(move |_| {
-            settings.mobile.broadcast_settings_changed();
+            settings.phone.mobile.broadcast_settings_changed();
             settings.reload_keep_awake();
         }));
         let machine = Arc::downgrade(self);
@@ -269,11 +270,15 @@ impl PairingManager {
                 }
             }),
         );
-        let events = self.clone();
+        // The relay's hint on the runtime's registration (PRO-368), as on the
+        // window's own: the account pairing grants changed.
+        let hinted = Arc::downgrade(self);
         sink.listen(
-            "agent_event",
-            Box::new(move |payload| {
-                events.mobile.capture_agent_event(&events, payload);
+            crate::machine_wire::RELAY_HINT_EVENT,
+            Box::new(move |_| {
+                if let Some(relay) = hinted.upgrade().and_then(|manager| manager.current_relay()) {
+                    relay.signals.hint_pairing_changed();
+                }
             }),
         );
         if !self.registry.list()?.is_empty() {
@@ -302,14 +307,14 @@ impl PairingManager {
 
     /// A phone starting a session chooses from the models the desktop offers.
     pub fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
-        self.mobile.attach_models(cache);
+        self.phone.mobile.attach_models(cache);
     }
 
     pub(crate) fn attach_runtime(self: &Arc<Self>, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
-        *self.runtime.lock().unwrap() = Some(runtime);
+        *self.runtime.lock().unwrap() = Some(runtime.clone());
         // What a phone may be offered is the attached runtime's (#730), and
         // the connections the previous attachment admitted are done.
-        self.mobile.broadcast_capabilities_changed();
+        self.phone.set_owner(Some(runtime));
         // A runtime that hosts operating computers owns the port (PRO-341).
         self.reconcile_machine_soon();
     }
@@ -603,7 +608,7 @@ impl PairingManager {
                 display_name: named.name.clone(),
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities: self.host_capabilities(),
             };
             tokio::task::spawn_blocking(move || cloud::register_host(&context, &payload)).await??;
         }
@@ -665,6 +670,36 @@ impl PairingManager {
     fn machine_name_for(user_id: Option<&str>) -> MachineName {
         let saved = user_id.and_then(|user_id| saved_host_name(registry::load_account_mirror().ok().flatten().as_ref(), user_id));
         resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_secrets_for_test(identifier: &str, store: Arc<dyn crate::keychain::SecretStore>) -> Arc<Self> {
+        let mut manager = Self::new(Arc::new(AccountManager::default()));
+        manager.secrets = PairingSecrets::with_store(store);
+        manager.secrets.configure(identifier).unwrap();
+        Arc::new(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
+        self.phone.set_owner(Some(owner));
+    }
+
+    /// The machine's host key, with which this window proves to the
+    /// runtime's pairing guard that it is the window (`serve_cli::consent`).
+    /// Blocking: a Keychain read. Only macOS registers a proof provider.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn consent_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let keypair = self
+            .secrets
+            .host_key(false)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t read the pairing key from Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The TerminalX pairing key is missing from Keychain. Restart TerminalX and try again. If the key is still missing, contact support.")
+            })?;
+        Ok(zeroize::Zeroizing::new(*keypair.secret()))
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
@@ -817,6 +852,7 @@ impl PairingManager {
             self.set_error(format!("Could not save host binding fence: {error:#}"));
             return;
         }
+        let capabilities = self.host_capabilities();
         let payload = HostBindingPayload {
             host_id: keypair.host_id(),
             host_public_key_b64: keypair.public_key_b64(),
@@ -824,7 +860,7 @@ impl PairingManager {
             display_name: display_name.clone(),
             platform: "darwin".into(),
             environment_kind: "native".into(),
-            capabilities: vec![CAPABILITY.into()],
+            capabilities: capabilities.clone(),
         };
         let context_for_bind = context.clone();
         let bind =
@@ -845,7 +881,7 @@ impl PairingManager {
                 display_name,
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities,
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
@@ -866,7 +902,7 @@ impl PairingManager {
         generation: u64,
         grant: AccountPairingGrant,
     ) {
-        if !valid_grant(&grant, context, &relay.relay_host_id, generation) {
+        if !valid_grant(&grant, context, &relay.relay_host_id, generation, "mobile") {
             return;
         }
         let result = self
@@ -1133,15 +1169,7 @@ impl PairingManager {
             .next()
             .await
             .ok_or_else(|| anyhow!("device closed before E2EE authentication"))??;
-        let frame = text_frame_bytes(auth_frame)?;
-        let auth_plaintext = session.open(&frame, PayloadKind::Text)?;
-        let auth: E2eeAuth = serde_json::from_slice(&auth_plaintext)?;
-        if auth.kind != "e2ee_auth"
-            || auth.v != Some(2)
-            || auth.transcript_hash_b64.as_deref() != Some(&session.transcript_hash_b64)
-        {
-            bail!("E2EE authentication was not bound to the handshake");
-        }
+        let auth = E2eeAuth::open(auth_frame, &mut session)?;
         let generation = registry::load_account_mirror()
             .ok()
             .flatten()
@@ -1153,8 +1181,7 @@ impl PairingManager {
             }
         };
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
-            let authenticated = serde_json::json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
-            send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+            crate::phone::send_authenticated(&mut socket, &mut session).await?;
             mark_logged_in();
             return self.share_socket(socket, session, session_id, link_id).await;
         }
@@ -1189,8 +1216,7 @@ impl PairingManager {
         {
             // Said in so many words, so the phone can tell a refusal from a
             // dropped connection it should retry (docs/PAIRING-APPROVAL.md).
-            let refused = serde_json::json!({ "type": "pairing_refused", "v": 1, "reason": reason });
-            let _ = send_encrypted_text(&mut socket, &mut session, &refused.to_string()).await;
+            let _ = send_encrypted_text(&mut socket, &mut session, &pairing_refused(reason).to_string()).await;
             let _ = socket.close(None).await;
             return Err(anyhow!(diagnostics::Category::Authentication)
                 .context(format!("the pairing was refused on this Mac ({reason})")));
@@ -1204,87 +1230,21 @@ impl PairingManager {
                 inner.active_pairing = None;
             }
         }
-        let authenticated = serde_json::json!({
-            "type": "e2ee_authenticated",
-            "v": 2,
-            "transcriptHashB64": session.transcript_hash_b64,
-        });
-        send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+        crate::phone::send_authenticated(&mut socket, &mut session).await?;
         mark_logged_in();
         // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
-        let (_tracked, mut signal_rx) = self.track_connection(&device.id, transport);
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let (_tracked, signal_rx) = self.track_connection(&device.id, transport);
+        let (outbound_tx, outbound_rx) = mpsc::channel(8);
         let mobile_connection = Arc::new(
-            mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
+            mobile::MobileConnection::open(&self.phone, &device, outbound_tx, wire_transport)
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
-        let mut reassembly = wire::Reassembly::default();
-        let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _ = stream_health.tick() => { mobile_connection.check_buffer()?; }
-                signal = signal_rx.recv() => {
-                    if signal == Some(ConnectionSignal::Disconnect) {
-                        let _ = send_message(&mut socket, &mut session, &disconnected_notification(), mobile_connection.wire()).await;
-                    }
-                    mobile_connection.close(self);
-                    let _ = socket.close(None).await;
-                    return Ok(());
-                }
-                outgoing = outbound_rx.recv() => {
-                    let Some(outgoing) = outgoing else {
-                        mobile_connection.close(self);
-                        return Ok(());
-                    };
-                    mobile_connection.check_off_runtime(self).await?;
-                    send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
-                }
-                incoming = socket.next() => {
-                    let Some(incoming) = incoming else {
-                        mobile_connection.close(self);
-                        return Ok(());
-                    };
-                    let plaintext = match incoming? {
-                        Message::Text(text) => {
-                            let bytes = decode_canonical_base64(&text)?;
-                            session.open(&bytes, PayloadKind::Text)?
-                        }
-                        Message::Binary(bytes) => {
-                            // Binary frames carry only the fragments of a request too
-                            // large for one frame (#669). Other binary application streams
-                            // are deliberately not attached to a workspace in this
-                            // foundation; authentication and framing still fail closed.
-                            let frame = session.open(&bytes, PayloadKind::Binary)?;
-                            match reassembly.push(&frame)? {
-                                Some(message) => message,
-                                None => continue,
-                            }
-                        }
-                        Message::Close(_) => {
-                            mobile_connection.close(self);
-                            return Ok(());
-                        },
-                        Message::Ping(bytes) => {
-                            socket.send(Message::Pong(bytes)).await?;
-                            continue;
-                        }
-                        Message::Pong(_) | Message::Frame(_) => continue,
-                    };
-                    let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                    mobile_connection.check_off_runtime(self).await?;
-                    let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
-                    // Revalidate after asynchronous work: queued replies must not
-                    // disclose session data after revocation or account replacement.
-                    // Successful self-unpairing deliberately revokes this connection;
-                    // its acknowledgement contains no session data.
-                    let forgot_self = request["method"] == "pairing.forget"
-                        && response["ok"] == true;
-                    if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
-                    send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
-                }
-            }
-        }
+        crate::phone::serve_connection(&mut socket, &mut session, &self.phone, &mobile_connection, outbound_rx, signal_rx, |request| {
+            let (connection, device, mobile_connection) = (&connection, &device, &mobile_connection);
+            async move { self.rpc_response(&request, device, connection, mobile_connection).await }
+        })
+        .await
     }
 
     async fn rpc_response(
@@ -1297,11 +1257,7 @@ impl PairingManager {
         if device.scope == DeviceScope::Session {
             return serde_json::json!({ "id": request["id"], "ok": false, "error": { "code": "forbidden", "message": "Session credentials require the scoped session router." } });
         }
-        let id = request
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let id = request_id(request);
         let method = request
             .get("method")
             .and_then(serde_json::Value::as_str)
@@ -1318,7 +1274,7 @@ impl PairingManager {
             // What the phone calls this computer (PRO-87). Asked on every
             // connection, so a computer renamed in System Settings, and a
             // phone paired before names were sent, both catch up.
-            "host.describe" if allowed_method(device.scope, method) => Ok(serde_json::json!({ "name": computer_name() })),
+            "host.describe" if allowed_method(device.scope, method) => Ok(host_description(computer_name(), true)),
             // The phone unpairs itself: only ever the device this connection
             // authenticated as, so it is removed from this computer's paired
             // devices too instead of lingering after the phone forgot it.
@@ -1334,7 +1290,7 @@ impl PairingManager {
                 let dispatched = mobile::off_runtime({
                     let (manager, connection) = (self.clone(), mobile_connection.clone());
                     let (request, device) = (request.clone(), device.clone());
-                    move || Ok(mobile::dispatch(&manager, &connection, &request, &device))
+                    move || Ok(mobile::dispatch(&manager.phone, &connection, &request, &device))
                 })
                 .await;
                 match dispatched {
@@ -1347,12 +1303,7 @@ impl PairingManager {
         };
         match result {
             Ok(result) => mobile::success_response(&id, result),
-            Err(error) => serde_json::json!({
-                "id": id,
-                "ok": false,
-                "error": { "code": "unavailable", "message": error.to_string() },
-                "_meta": { "runtimeId": "desktop" }
-            }),
+            Err(error) => error_response(&id, &error),
         }
     }
 
@@ -1884,15 +1835,8 @@ impl PairingManager {
     /// `device.describe`: what the phone calls itself, cleaned as a name
     /// shown on another device is.
     fn describe_device(&self, device: &DeviceEntry, params: Option<&serde_json::Value>) -> Result<serde_json::Value> {
-        let params: DeviceDescribeParams =
-            serde_json::from_value(params.cloned().unwrap_or_else(|| serde_json::json!({})))
-                .context("invalid device.describe params")?;
-        let label = presentable_name(&params.label)
-            .ok_or_else(|| anyhow!("device.describe label must contain 1 to 64 visible characters"))?;
-        if !matches!(params.platform.as_str(), "ios" | "android") {
-            bail!("device.describe platform must be \"ios\" or \"android\"");
-        }
-        self.registry.describe(&device.id, &label, &params.platform)?;
+        let (label, platform) = crate::phone::device_description(params)?;
+        self.registry.describe(&device.id, &label, &platform)?;
         self.emit();
         Ok(serde_json::json!({ "ok": true }))
     }
@@ -1908,24 +1852,6 @@ impl PairingManager {
 
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct E2eeAuth {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    v: Option<u8>,
-    #[serde(default)]
-    transcript_hash_b64: Option<String>,
-    device_token: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceDescribeParams {
-    label: String,
-    platform: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1950,13 +1876,14 @@ fn valid_grant(
     context: &AccountContext,
     host_id: &str,
     generation: u64,
+    scope: &str,
 ) -> bool {
     grant.user_id == context.user_id
         && grant.host_id == host_id
         && grant.binding_generation == generation
         && grant.installation_generation > 0
         && grant.associated_data_version == 1
-        && grant.requested_scope == "mobile"
+        && grant.requested_scope == scope
         && grant.state == "pending"
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
@@ -1983,33 +1910,6 @@ fn chosen_host_name(name: &str) -> Result<String> {
 }
 
 
-pub(super) fn pairing_websocket_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .read_buffer_size(64 * 1024)
-        .write_buffer_size(64 * 1024)
-        // A 5 MB image is base64 encoded in JSON, then the encrypted frame is
-        // base64 encoded for the text websocket. Keep the authenticated
-        // pairing channel bounded while leaving room for that expansion.
-        .max_write_buffer_size(PAIRING_MESSAGE_BYTES_LIMIT)
-        .max_message_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
-        .max_frame_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
-}
-
-fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {
-    match message {
-        Message::Text(text) => decode_canonical_base64(&text),
-        _ => bail!("encrypted authentication frame was not text"),
-    }
-}
-
-fn decode_canonical_base64(value: &str) -> Result<Vec<u8>> {
-    let bytes = general_purpose::STANDARD.decode(value)?;
-    if general_purpose::STANDARD.encode(&bytes) != value {
-        bail!("encrypted text frame was not canonical base64");
-    }
-    Ok(bytes)
-}
-
 fn validate_opaque_id(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 128 {
         bail!("request id must contain 1 to 128 characters");
@@ -2026,171 +1926,6 @@ fn validate_base64url_32(value: &str) -> Result<()> {
         bail!("resume token hash must be unpadded base64url for 32 bytes");
     }
     Ok(())
-}
-
-async fn send_encrypted_text<S>(
-    socket: &mut WebSocketStream<S>,
-    session: &mut crypto::E2eeSession,
-    plaintext: &str,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let frame = session.seal(plaintext.as_bytes(), PayloadKind::Text)?;
-    socket
-        .send(Message::Text(
-            general_purpose::STANDARD.encode(frame).into(),
-        ))
-        .await?;
-    Ok(())
-}
-
-/// One application message to the phone: one encrypted text frame, or binary
-/// fragments when it is too large for the transport and the phone reassembles
-/// them. A message neither can carry never reaches the socket, where it would
-/// close the connection (#669): a reply becomes its request's error, and a
-/// notification, which the phone can read again, is dropped.
-async fn send_message<S>(
-    socket: &mut WebSocketStream<S>,
-    session: &mut crypto::E2eeSession,
-    message: &serde_json::Value,
-    wire: &wire::Wire,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let text = message.to_string();
-    match wire.delivery(text.len()) {
-        wire::Delivery::Frame => send_encrypted_text(socket, session, &text).await,
-        wire::Delivery::Fragments => {
-            for fragment in wire.fragments_of(text.as_bytes()) {
-                let frame = session.seal(&fragment, PayloadKind::Binary)?;
-                socket.send(Message::Binary(frame.into())).await?;
-            }
-            Ok(())
-        }
-        wire::Delivery::TooLarge => {
-            let Some(id) = message.get("id").and_then(serde_json::Value::as_str) else {
-                return Ok(());
-            };
-            let refusal = wire.too_large_response(id, text.len());
-            send_encrypted_text(socket, session, &refusal.to_string()).await
-        }
-    }
-}
-
-fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde_json::Value {
-    let id = request
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let method = request
-        .get("method")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if method == "status.get" && allowed_method(scope, method) {
-        return serde_json::json!({
-            "id": id,
-            "ok": true,
-            "result": { "protocolVersion": 2, "product": "TerminalX", "deviceScope": scope },
-            "_meta": { "runtimeId": "desktop" }
-        });
-    }
-    let (code, message) = if allowed_method(scope, method) {
-        (
-            "unavailable",
-            "This paired-device method is not connected to a workspace yet".into(),
-        )
-    } else {
-        (
-            "forbidden",
-            format!("Method '{method}' is not available to this paired device"),
-        )
-    };
-    serde_json::json!({
-        "id": id,
-        "ok": false,
-        "error": { "code": code, "message": message },
-        "_meta": { "runtimeId": "desktop" }
-    })
-}
-
-fn allowed_method(scope: DeviceScope, method: &str) -> bool {
-    if scope == DeviceScope::Session {
-        return crate::local_sharing::scoped_method(method);
-    }
-    const VIEWER: &[&str] = &[
-        "status.get",
-        "presence.join",
-        "presence.leave",
-        "presence.heartbeat",
-        "presence.list",
-        "chat.post",
-        "chat.list",
-        "sessions.summaries",
-        "session.tail",
-        // A prompt's image, from the session's own attachments.
-        "session.image",
-        "session.sync",
-        "sync.capabilities",
-        "transport.negotiate",
-        "session.subscribe",
-        "session.unsubscribe",
-        "session.status",
-        "session.roster",
-        "session.tabs.list",
-        "terminal.read",
-        "terminal.subscribe",
-        "terminal.unsubscribe",
-        // What a tab runs, the models to pick from, and the context a
-        // continuation would carry: reads, as the transcript is.
-        "session.markRead",
-        "session.tab",
-        "models.list",
-        "session.prepareContinuation",
-        "notifications.missedSince",
-        "notifications.subscribe",
-        "notifications.unsubscribe",
-        "host.describe",
-        "pairing.forget",
-        // What a new session can be started with, and this Mac's phone-visible settings.
-        "sessions.options",
-        "mac.settings",
-    ];
-    const DRIVER: &[&str] = &[
-        // What the phone calls itself (PRO-314).
-        "device.describe",
-        "pairing.getEndpoints",
-        "pairing.provisionRelay",
-        "terminal.send",
-        // Starts the tab's agent, and moves a native Codex tab to its terminal.
-        "terminal.open",
-        "terminal.control.get",
-        "terminal.control.acquire",
-        "terminal.control.release",
-        "steerLease.get",
-        "steerLease.acquire",
-        "steerLease.release",
-        "steerLease.queueInput",
-        "chat.promoteToAgent",
-        "session.send",
-        "permission.respond",
-        // Answering an agent's question, as the desktop's question card does (#979).
-        "questions.respond",
-        "sessions.create",
-        "mac.setSettings",
-        // The session controls a phone has as the desktop does (#706).
-        "session.stop",
-        "session.interrupt",
-        "session.resendUnsent",
-        "session.setModel",
-        "session.setEffort",
-        "session.setMode",
-        "session.continue",
-        // Closing a tab as the desktop's tab strip does.
-        "session.closeTab",
-    ];
-    VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
 
 #[cfg(test)]
@@ -2338,7 +2073,7 @@ mod tests {
             let pairing = pairing.clone();
             async move {
                 let (outbound, inbound) = mpsc::channel(64);
-                (Arc::new(mobile::MobileConnection::open(&pairing, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
+                (Arc::new(mobile::MobileConnection::open(&pairing.phone, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
             }
         };
         let ((phone, _phone_inbound), (tablet, _tablet_inbound)) = (connect(driver.clone()).await, connect(viewer.clone()).await);

@@ -23,9 +23,13 @@ export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
 /** The capability flag of a server that knows `wake: false`; an older one rejects the key. */
 const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
 
+// Ask for every registered provider. The names are for servers that predate
+// the described-provider contract (PRO-415).
+export const SUPPORTED_PROVIDERS = "described,machine0,box,terminalx-cloud";
+
 const CONTRACT_HEADERS = {
   "X-TerminalX-Cloud-Workspace-Contract": "providers-v1",
-  "X-TerminalX-Cloud-Workspace-Providers": "machine0,box",
+  "X-TerminalX-Cloud-Workspace-Providers": SUPPORTED_PROVIDERS,
   "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
 } as const;
 
@@ -54,6 +58,7 @@ const workspaceSchema = z
     orgId: z.string().min(1),
     name: z.string(),
     provider: z.string(),
+    providerDescriptor: z.object({ label: z.string().trim().min(1) }).nullish().catch(undefined),
     state: z.string(),
     accessMode: z.string().optional(),
     authority: z.string().nullish(),

@@ -12,7 +12,7 @@ name: Cloud (22.06)
     stopApp: true
     arguments: { fixtureScenario: connected }
 - tapOn: "Cloud"
-- assertVisible: "Checkout redesign,.*"
+- assertVisible: "Checkout redesign,.*fixture-compute"
 - assertVisible: "5 organizations with no workspaces.*"
 - takeScreenshot: 22.06-2-cloud-list
 - tapOn: "Warm-up run, (?!five issues).*"

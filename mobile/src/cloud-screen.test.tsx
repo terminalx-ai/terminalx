@@ -30,7 +30,7 @@ vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.cat
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole, accessibilityLabel, testID }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : undefined} aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
   return {
-    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null,
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
     Alert: { alert: mocks.alert },
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
@@ -92,7 +92,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   };
   const release = vi.fn();
   const unwatch = vi.fn();
-  const listed = state === null ? null : item("ws-1", { name: "fix-login", state }).workspace;
+  const listed = state === null ? null : item(mocks.params.workspaceId, { name: "fix-login", state }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
@@ -139,24 +139,24 @@ describe("the Cloud tab", () => {
   const listing = (organizations: unknown[], fields: Record<string, unknown> = {}) => { mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, saved: false, titles: {}, organizations, ...fields }); };
   const organization = (orgId: string, name: string, workspaces: unknown[], error: string | null = null) => ({ organization: { orgId, name, role: "member" }, error, loaded: true, workspaces });
 
-  it("lists each workspace as the Sessions list does: mark, title, status with its time, then repository and branch; and only reads", async () => {
+  it("lists each workspace with its status, provider, repository and branch, and only reads", async () => {
     world();
     const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
     listing([
       organization("org-1", "Acme", [
-        item("fix-login", { runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
-        item("old-work", { state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+        item("fix-login", { provider: "new-compute", providerDescriptor: { label: "New Compute" }, runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
+        item("old-work", { provider: "unlabelled-compute", providerDescriptor: { label: 42 }, state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
         item("warm-up", { state: "suspended", lastActivityAt: minutesAgo(2 * 24 * 60 + 5) }),
       ]),
       organization("org-2", "Beta", [], "cloud_provider_unavailable"),
     ]);
     await show(<CloudScreen />);
     expect(text()).toContain("Acme");
-    const row = button("fix-login, Needs your answer, Can send");
-    expect(row.textContent).toBe("fix-loginNeeds your answer · 6macme/web · tx/fix-login");
-    expect(button("old-work, Stopped, View only, Shared with 3").textContent).toBe("old-workStopped");
+    const row = button("fix-login, Needs your answer, Can send, New Compute");
+    expect(row.textContent).toBe("fix-loginNeeds your answer · 6mNew Compute · acme/web · tx/fix-login");
+    expect(button("old-work, Stopped, View only, Shared with 3, unlabelled-compute").textContent).toBe("old-workStoppedunlabelled-compute");
     // Days, where the status has room for them, as 22.06 says them.
-    expect(button("warm-up, Stopped, Can send").textContent).toBe("warm-upStopped · 2 days ago");
+    expect(button("warm-up, Stopped, Can send, box").textContent).toBe("warm-upStopped · 2 days agobox");
     expect(text()).toContain("The cloud provider is not answering right now.");
     // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
     const leave = mocks.focus.at(-1)!();
@@ -165,7 +165,7 @@ describe("the Cloud tab", () => {
     expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(mocks.catalog.retain).not.toHaveBeenCalled();
     expect(mocks.catalog.start).not.toHaveBeenCalled();
-    await click("old-work, Stopped, View only, Shared with 3");
+    await click("old-work, Stopped, View only, Shared with 3, unlabelled-compute");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "old-work", orgId: "org-1", title: "old-work" } });
   });
 
@@ -219,9 +219,9 @@ describe("the Cloud tab", () => {
     listing([organization("org-1", "Acme", [item("ws-9", { state: "suspended" })])], { loading: true, refreshedAt: null, saved: true, titles: { "org-1/ws-9": "Checkout redesign" } });
     await show(<CloudScreen />);
     expect(container.querySelector('[data-testid="cloud-placeholders"]')).toBeNull();
-    expect(button("Checkout redesign, Stopped, Can send")).toBeTruthy();
+    expect(button("Checkout redesign, Stopped, Can send, box")).toBeTruthy();
     expect(text()).not.toContain("ws-9");
-    await click("Checkout redesign, Stopped, Can send");
+    await click("Checkout redesign, Stopped, Can send, box");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
@@ -349,6 +349,54 @@ describe("a cloud workspace screen", () => {
     await click("Start");
     await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
     expect(mocks.catalog.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers managers retry and tells others who can retry when setup failed", async () => {
+    for (const role of ["manager", "driver", "viewer"]) {
+      await show(null);
+      world({ state: "attention-required", role });
+      mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_workspace_runtime_bootstrap_failed" };
+      await show(<CloudWorkspaceScreen />);
+      expect(stateLine().textContent).toContain("Needs attention");
+      expect(container.querySelector("input")).toBeNull();
+      expect(startBar().textContent).toContain("runtime could not be set up");
+      if (role === "manager") {
+        await click("Retry resume");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalled();
+      } else {
+        expect(startBar().textContent).toContain("can retry resume");
+        expect(() => button("Retry resume")).toThrow();
+      }
+    }
+  });
+
+  it("allows a manager to retry a transient failed resume", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" };
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("provider did not answer");
+    await click("Retry resume");
+  });
+
+  it("keeps the composer for an online workspace needing attention", async () => {
+    const { session } = world({ state: "attention-required", role: "manager", connection: "connected" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    await type("continue");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledWith("t1", "continue");
+  });
+
+  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }, { state: "failed", action: "resume", errorCode: "cloud_provider_credential_invalid" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("desktop");
+    expect(startBar().textContent).not.toContain("runtime could not be set up");
+    expect(() => button("Retry resume")).toThrow();
+    expect(container.querySelector("input")).toBeNull();
   });
 
   it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {

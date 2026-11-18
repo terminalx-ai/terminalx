@@ -38,26 +38,29 @@ try {
     await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "General", exact: true }).click();
     const editor = page.locator('[data-setting-id="general.layeredConfiguration"]');
     await editor.getByLabel("Repository", { exact: true }).selectOption("/repos/p0");
-    await editor.getByLabel("Branch prefix", { exact: true }).waitFor();
-    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input')?.value === "team/");
+    // PRO-374 (design 09.23): the prefix is a radio choice with a next-branch preview.
+    await editor.getByRole("radiogroup", { name: "Branch prefix" }).waitFor();
+    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input[aria-label="Custom prefix"]')?.value === "team/");
     const checks = {
       "defaults writes to user": await editor.getByLabel("Save to", { exact: true }).inputValue() === "user",
-      "shows shared source": await editor.getByText("Source: Repository shared", { exact: true }).count() === 1,
+      "a custom prefix is the Custom choice": await editor.getByRole("radio", { name: "Custom" }).isChecked(),
+      "previews the next branch": (await editor.getByText(/^Next branch:/).textContent()) === "Next branch: team/fix-login-bug",
       "shows managed environment lock without revealing values": await editor.getByRole("table").getByText("Locked", { exact: true }).count() === 1,
     };
     await editor.getByRole("button", { name: "Review repository trust" }).click();
     await editor.getByText("Not trusted. Nothing was started.").waitFor();
     checks["declining leaves trust required"] = await editor.getByRole("button", { name: "Review repository trust" }).isVisible();
     await editor.getByLabel("Save to", { exact: true }).selectOption("repositoryLocal");
-    await editor.getByLabel("Branch prefix", { exact: true }).fill("mine/");
-    await editor.getByRole("button", { name: "Save prefix", exact: true }).click();
+    await editor.getByLabel("Custom prefix", { exact: true }).fill("mine/");
+    await editor.getByLabel("Custom prefix", { exact: true }).press("Enter");
     await editor.getByText("Saved to Repository local.").waitFor();
     checks["writes only the chosen layer"] = await page.evaluate(() => window.__PW_CONFIG_WRITES__.length === 1 && window.__PW_CONFIG_WRITES__[0].layer === "repositoryLocal" && window.__PW_CONFIG_WRITES__[0].value === "mine/");
-    checks["reloads the effective local source"] = await editor.getByText("Source: Repository local", { exact: true }).count() === 1;
+    checks["reloads the effective local value"] = await editor.getByText("Next branch: mine/fix-login-bug", { exact: true }).count() === 1;
     checks["no horizontal overflow"] = await editor.evaluate((element) => element.scrollWidth <= element.clientWidth + 1);
     await page.evaluate(() => window.__PW_CONFIG_CHANGE__());
-    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input')?.value === "admin/");
-    checks["watched policy change refreshes and locks the editor"] = await editor.getByLabel("Branch prefix", { exact: true }).isDisabled();
+    await page.waitForFunction(() => document.querySelector('[aria-label="Layered configuration"] input[aria-label="Custom prefix"]')?.value === "admin/");
+    checks["watched policy change refreshes and locks the editor"] = await editor.getByLabel("Custom prefix", { exact: true }).isDisabled() && await editor.getByRole("radio", { name: "None" }).isDisabled();
+    checks["labels are 13px like the rows around them"] = await editor.getByText("Repository", { exact: true }).evaluate((element) => getComputedStyle(element).fontSize === "13px");
     if (shots) await editor.screenshot({ path: join(shots, `configuration-${mode}.png`) });
     failed += report(`configuration ${mode}`, checks);
     await page.close();

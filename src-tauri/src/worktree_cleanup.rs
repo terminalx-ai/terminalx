@@ -699,6 +699,9 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         if let Some(why) = roots.protection(repository, &path) {
             return (Verdict::Protected, Some(why));
         }
+        if let Err(reason) = session_ops::ensure_workspace_identity(all_sessions, &path) {
+            return (Verdict::Unverifiable, Some(reason));
+        }
         if entry.bare {
             return (Verdict::Protected, Some("This is the repository itself. It is never removed.".into()));
         }
@@ -945,12 +948,13 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
         // Not removed by a clean-up: git would have dropped its record.
         return result(item, Outcome::Skipped, "Its folder is missing, but Git still lists it as a worktree. Nothing was changed.".to_string());
     }
-    let left: Vec<SessionEntry> = sessions
+    if let Err(reason) = session_ops::ensure_workspace_identity(&sessions, &spelled) {
+        return result(item, Outcome::Skipped, reason);
+    }
+    let left: Vec<SessionEntry> = session_ops::sessions_within(sessions, &spelled)
         .into_iter()
-        .filter(|session| {
-            let cwd = Path::new(&session.cwd);
-            session.worktree_name.is_some() && !session.worktree_removed && (cwd.starts_with(target) || cwd.starts_with(&spelled)) && canonical(Path::new(&session.project_path)) == repository.root
-        })
+        .filter(|session| !session.worktree_removed
+            && canonical(Path::new(&session.project_path)) == repository.root)
         .collect();
     if left.is_empty() {
         return result(item, Outcome::Skipped, "Nothing is at that path. If an earlier clean-up removed it, there is nothing left to do.".to_string());

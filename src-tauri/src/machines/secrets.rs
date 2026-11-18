@@ -5,6 +5,8 @@
 //!   client key on every connection to every machine. Each machine pins it.
 //! - `machine:<machineId>`: the device token that machine paired this computer with.
 //! - `relay:<machineId>`: the relay resume token for that machine (PRO-345).
+//! - `account-installation`: this installation's identity for pairing through
+//!   the account (PRO-349): user, installation id and P-256 private key.
 //!
 //! Tests keep them in memory (`keychain::tests::MemorySecrets`), never in the real Keychain.
 
@@ -17,6 +19,7 @@ use zeroize::Zeroizing;
 use crate::keychain::SecretStore;
 
 const CLIENT_KEY_ACCOUNT: &str = "client-e2ee-key";
+const INSTALLATION_ACCOUNT: &str = "account-installation";
 
 pub struct MachineSecrets {
     service: OnceLock<String>,
@@ -71,6 +74,10 @@ impl MachineSecrets {
         self.load_text(&machine_account(machine_id)).context("read the machine's device token from the Keychain")
     }
 
+    pub fn delete_token(&self, machine_id: &str) -> Result<()> {
+        self.store.delete(self.service()?, &machine_account(machine_id)).context("delete the machine's device token from the Keychain")
+    }
+
     pub fn save_relay_token(&self, machine_id: &str, token: &str) -> Result<()> {
         self.store.set(self.service()?, &relay_account(machine_id), token.as_bytes()).context("save the machine's relay credential to the Keychain")
     }
@@ -81,6 +88,15 @@ impl MachineSecrets {
 
     pub fn delete_relay_token(&self, machine_id: &str) -> Result<()> {
         self.store.delete(self.service()?, &relay_account(machine_id)).context("delete the machine's relay credential from the Keychain")
+    }
+
+    /// The account installation's identity as saved (`machines::account`). Blocking.
+    pub fn load_installation(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        Ok(self.store.get(self.service()?, INSTALLATION_ACCOUNT).context("read the account installation from the Keychain")?.map(Zeroizing::new))
+    }
+
+    pub fn save_installation(&self, identity: &[u8]) -> Result<()> {
+        self.store.set(self.service()?, INSTALLATION_ACCOUNT, identity).context("save the account installation to the Keychain")
     }
 
     fn load_text(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
@@ -115,6 +131,10 @@ mod tests {
         secrets.save_token("cs1uhCLEB_ttCYaQ", "token").unwrap();
         assert_eq!(store.get("ai.terminalx.app.machines", "machine:cs1uhCLEB_ttCYaQ").unwrap().unwrap(), b"token");
         assert_eq!(secrets.load_token("cs1uhCLEB_ttCYaQ").unwrap().unwrap().as_str(), "token");
+        secrets.save_token("dYd7tB05O1-4RVzm", "other").unwrap();
+        secrets.delete_token("dYd7tB05O1-4RVzm").unwrap();
+        assert!(secrets.load_token("dYd7tB05O1-4RVzm").unwrap().is_none(), "removed");
+        secrets.delete_token("dYd7tB05O1-4RVzm").unwrap();
         assert!(secrets.load_token("dYd7tB05O1-4RVzm").unwrap().is_none());
         assert!(secrets.load_relay_token("cs1uhCLEB_ttCYaQ").unwrap().is_none());
         secrets.save_relay_token("cs1uhCLEB_ttCYaQ", "resume").unwrap();
@@ -122,6 +142,10 @@ mod tests {
         assert_eq!(secrets.load_relay_token("cs1uhCLEB_ttCYaQ").unwrap().unwrap().as_str(), "resume");
         secrets.delete_relay_token("cs1uhCLEB_ttCYaQ").unwrap();
         assert!(secrets.load_relay_token("cs1uhCLEB_ttCYaQ").unwrap().is_none());
+        assert!(secrets.load_installation().unwrap().is_none());
+        secrets.save_installation(b"{}").unwrap();
+        assert_eq!(store.get("ai.terminalx.app.machines", "account-installation").unwrap().unwrap(), b"{}");
+        assert_eq!(secrets.load_installation().unwrap().unwrap().as_slice(), b"{}");
         assert!(secrets.configure("another.app").is_err());
     }
 }

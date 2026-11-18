@@ -15,6 +15,7 @@ import { createRoot } from 'react-dom/client';
 import '/src/styles/app.css';
 import { Composer } from '/src/components/chat/Composer.tsx';
 import { Toasts } from '/src/components/ui/Toasts.tsx';
+import { ToastCorner } from '/src/components/ui/ToastCorner.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
 const tab = { id: 'tab-1', harness: 'claude', model: 'default', permissionMode: 'default', status: 'idle', created: '', modified: '' };
 const noop = () => {};
@@ -27,7 +28,7 @@ function App() {
         onSend={(text, images, alternate, files) => { window.__sent.push({ text, images: images.map(i => i.name), files: (files ?? []).map(f => f.name) }); }}
         onStop={noop} onSetModel={noop} onSetEffort={noop} onSetMode={noop}/>
     </div>
-    <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"><Toasts/></div>
+    <ToastCorner className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2"><Toasts/></ToastCorner>
   </TooltipProvider>;
 }
 createRoot(document.getElementById('root')).render(<App/>);

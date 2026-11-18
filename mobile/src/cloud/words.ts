@@ -44,6 +44,18 @@ export function whoCanStart(creator: string | null): string {
   return `${starters} Anyone who can send to it starts it by sending a message.`;
 }
 
+/** The failure the service reported, with a safe fallback for codes this app does not know. */
+export function attentionDetail(code: string | null | undefined): string {
+  switch (code) {
+    case "cloud_workspace_runtime_bootstrap_failed": return "The workspace’s runtime could not be set up on its machine.";
+    case "cloud_provider_credential_invalid": return "The provider credential is no longer valid. An admin can repair it.";
+    case "cloud_provider_permission_denied": return "The provider refused the action. Check its permissions.";
+    case "cloud_provider_unavailable": return "The provider did not answer.";
+    case "cloud_provider_rate_limited": return "The provider is rate limiting requests.";
+    default: return "This workspace needs attention.";
+  }
+}
+
 /**
  * A workspace in the Cloud list, as the Sessions list says a session: what
  * it is doing in words, and its mark (working bars, a dot that needs you,
@@ -68,6 +80,7 @@ const CODES: Record<string, string> = {
   cloud_workspace_collaboration_forbidden: "Your role in this workspace does not allow that.",
   cloud_workspace_transcript_unreadable: "The saved conversation could not be read.",
   cloud_workspace_invalid_response: "Update the app to use this workspace.",
+  "needs-attention": "This workspace needs attention.",
   cloud_workspace_stopped: "This workspace has stopped.",
   cloud_workspace_archived: "This workspace is archived.",
   cloud_workspace_rate_limited: "Too many requests just now. Try again in a moment.",
@@ -118,6 +131,7 @@ export function codeText(code: string | null | undefined): string | null {
  * the banner says so instead of "Live".
  */
 export function connectionLine(connection: WorkspaceConnectionState, listedState: string | null, problem: CloudLinkProblem, starting = false, access: { role: CloudRole | null; checking: boolean } = { role: null, checking: false }): { tone: "live" | "idle" | "warn"; text: string; short: string } {
+  if (listedState === "attention-required") return { tone: "warn", text: "This workspace needs attention.", short: "Needs attention" };
   if (connection.state === "connected") {
     if (access.checking) return { tone: "idle", text: "Checking your access…", short: "Checking access…" };
     if (access.role === "none") return { tone: "warn", text: "No access: this workspace is not shared with you.", short: "No access" };

@@ -129,7 +129,12 @@ fn states_serialise_as_the_ui_reads_them() {
     let reconnecting = MachineConnectionState::Reconnecting { lost_at: 9, attempt: 2, retry_in_ms: 500, trying: vec![RouteKind::Lan, RouteKind::Relay], local_network_denied: false };
     assert_eq!(serde_json::to_value(&reconnecting).unwrap(), json!({ "state": "reconnecting", "lostAt": 9, "attempt": 2, "retryInMs": 500, "trying": ["lan", "relay"] }));
     assert_eq!(serde_json::to_value(MachineConnectionState::Offline { last_seen_at: None, retry_in_ms: 10_000, local_network_denied: false }).unwrap(), json!({ "state": "offline", "lastSeenAt": null, "retryInMs": 10000 }));
-    assert_eq!(serde_json::to_value(MachineConnectionState::NeedsUpdate { version: Some("0.2.30".into()) }).unwrap(), json!({ "state": "needsUpdate", "version": "0.2.30" }));
+    assert_eq!(
+        serde_json::to_value(MachineConnectionState::NeedsUpdate { version: Some("0.2.30".into()), side: MachineUpdateSide::Machine }).unwrap(),
+        json!({ "state": "needsUpdate", "version": "0.2.30", "side": "machine" })
+    );
+    assert_eq!(serde_json::to_value(MachineConnectionState::NeedsUpdate { version: None, side: MachineUpdateSide::ThisMac }).unwrap(), json!({ "state": "needsUpdate", "version": null, "side": "thisMac" }));
+    assert_eq!(serde_json::to_value(MachineConnectionState::Updating { version: "0.2.34".into(), since: 7 }).unwrap(), json!({ "state": "updating", "version": "0.2.34", "since": 7 }));
     assert_eq!(serde_json::to_value(MachineConnectionState::AccessRemoved).unwrap(), json!({ "state": "accessRemoved" }));
     assert_eq!(serde_json::to_value(MachineConnectionState::Idle).unwrap(), json!({ "state": "idle" }));
     let view = MachineConnectionView { machine_id: MACHINE.into(), state: MachineConnectionState::Connecting { trying: vec![RouteKind::Lan], local_network_denied: false } };
@@ -261,7 +266,7 @@ impl Dialer for Script {
                         }
                         let _ = events.send((link, LinkEvent::Closed(Closed { code: None, reason: "stopped".into() })));
                     });
-                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None })
+                    Ok(Established { hello: hello(), described: json!({ "machineId": MACHINE }), rtt_ms: Some(4), frames, relay_access: None, rotated_token: None })
                 }
             }
         })
@@ -282,6 +287,8 @@ impl Dialer for Script {
 
 struct Env {
     target: Mutex<Target>,
+    /// The version the record last saw.
+    recorded: Mutex<Option<String>>,
     user: Mutex<Option<String>>,
     described: Mutex<Vec<RouteUsed>>,
     dropped: AtomicUsize,
@@ -289,7 +296,7 @@ struct Env {
 
 impl Env {
     fn new(target: Target, user: Option<&str>) -> Arc<Self> {
-        Arc::new(Self { target: Mutex::new(target), user: Mutex::new(user.map(str::to_string)), described: Mutex::new(Vec::new()), dropped: AtomicUsize::new(0) })
+        Arc::new(Self { target: Mutex::new(target), recorded: Mutex::new(None), user: Mutex::new(user.map(str::to_string)), described: Mutex::new(Vec::new()), dropped: AtomicUsize::new(0) })
     }
 }
 
@@ -311,6 +318,9 @@ impl MachineEnv for Env {
     fn drop_relay(&self) {
         self.dropped.fetch_add(1, Ordering::SeqCst);
         self.target.lock().unwrap().relay = None;
+    }
+    fn recorded_version(&self) -> Option<String> {
+        self.recorded.lock().unwrap().clone()
     }
 }
 
@@ -525,10 +535,10 @@ async fn a_refused_credential_ends_in_access_removed_and_nothing_retries_until_t
 
 #[tokio::test]
 async fn a_runtime_without_machine_1_needs_an_update_and_a_refused_relay_credential_is_forgotten() {
-    let script = Script::new(Duration::from_millis(1), &[("relay", Answer::Fail(DialFailure::RelayCredentialRefused)), (LAN, Answer::Fail(DialFailure::NeedsUpdate { version: Some("0.2.20".into()) }))]);
+    let script = Script::new(Duration::from_millis(1), &[("relay", Answer::Fail(DialFailure::RelayCredentialRefused)), (LAN, Answer::Fail(DialFailure::NeedsUpdate { version: Some("0.2.20".into()), offered: vec![] }))]);
     let env = Env::new(target(&[LAN], MachineRoute::RelayAndNearby, Some(RouteUsed { kind: RouteKind::Relay, endpoint: None }), Some("user-1")), Some("user-1"));
     let (supervisor, mut watch) = start(env.clone(), script.clone());
-    watch.until("needs update", |said| machine_state(said, |state| *state == MachineConnectionState::NeedsUpdate { version: Some("0.2.20".into()) })).await;
+    watch.until("needs update", |said| machine_state(said, |state| *state == MachineConnectionState::NeedsUpdate { version: Some("0.2.20".into()), side: MachineUpdateSide::Machine })).await;
     assert_eq!(script.dialed(), vec![Route::Relay, direct(LAN)]);
     assert_eq!(env.dropped.load(Ordering::SeqCst), 1, "the refused relay credential is deleted");
     assert!(env.target().unwrap().relay.is_none());
@@ -740,4 +750,120 @@ async fn a_closed_window_lets_go_so_turning_machines_off_in_the_last_one_stops_t
     // Machines off in the main window: the last hold goes, and the owner stops.
     assert!(owner.release(Some("main")));
     assert!(owner.is_stopped());
+}
+
+// ------------------------------------------------------------------ (5) versions and updates (PRO-354)
+
+#[test]
+fn the_older_side_updates_by_version_else_by_what_the_machine_offers() {
+    let none: Vec<String> = Vec::new();
+    // The machine is older, the same, or unknown: the machine updates.
+    assert_eq!(update_side(Some("0.2.27"), &none, "0.2.33"), MachineUpdateSide::Machine);
+    assert_eq!(update_side(Some("0.2.33"), &none, "0.2.33"), MachineUpdateSide::Machine);
+    assert_eq!(update_side(None, &none, "0.2.33"), MachineUpdateSide::Machine);
+    assert_eq!(update_side(Some("not a version"), &none, "0.2.33"), MachineUpdateSide::Machine);
+    // The machine is newer: this Mac updates.
+    assert_eq!(update_side(Some("0.2.35"), &none, "0.2.33"), MachineUpdateSide::ThisMac);
+    assert_eq!(update_side(Some("v0.3.0"), &none, "0.2.33"), MachineUpdateSide::ThisMac);
+    // No version, but it offers namespaces this desktop does not know: it is the newer one.
+    assert_eq!(update_side(None, &["machine/9".to_string()], "0.2.33"), MachineUpdateSide::ThisMac);
+    assert_eq!(update_side(None, &["session/1".to_string()], "0.2.33"), MachineUpdateSide::Machine);
+    // A version, when there is one, decides over the namespaces.
+    assert_eq!(update_side(Some("0.2.20"), &["machine/9".to_string()], "0.2.33"), MachineUpdateSide::Machine);
+}
+
+#[test]
+fn update_required_carries_the_runtime_version_and_what_it_offers() {
+    let refused = json!({ "code": "update_required", "message": "no shared namespace", "data": { "runtimeVersion": "0.2.40", "offered": ["machine/4", "session/9"] } });
+    assert_eq!(update_required_failure(&refused), DialFailure::NeedsUpdate { version: Some("0.2.40".into()), offered: vec!["machine/4".into(), "session/9".into()] });
+    // An older runtime sends no data.
+    assert_eq!(update_required_failure(&json!({ "code": "update_required" })), DialFailure::NeedsUpdate { version: None, offered: vec![] });
+    assert!(wanted_capabilities().contains(&crate::remote::machine::MACHINE_3), "this desktop asks for machine/3");
+    assert!(wanted_capabilities().contains(&crate::remote::machine::MACHINE_6), "this desktop asks for machine/6 (PRO-351)");
+}
+
+#[test]
+fn update_changed_says_when_the_machine_hands_over() {
+    let changed = |progress: Value| json!({ "event": "machine.updateChanged", "params": { "status": { "method": "installer", "current": "0.2.33", "progress": progress } } });
+    assert_eq!(handing_over(&changed(json!({ "phase": "handingOver", "version": "0.2.34", "since": 99 }))), Some(Some(("0.2.34".into(), 99))));
+    assert_eq!(handing_over(&changed(json!({ "phase": "trial", "version": "0.2.34", "since": 99 }))), Some(None));
+    assert_eq!(handing_over(&changed(json!({ "phase": "idle" }))), Some(None));
+    assert_eq!(handing_over(&json!({ "event": "machine.changed", "params": {} })), None);
+}
+
+#[tokio::test]
+async fn update_required_from_a_newer_machine_says_this_mac_updates() {
+    let newer = DialFailure::NeedsUpdate { version: Some("99.0.0".into()), offered: vec!["machine/9".into()] };
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Fail(newer))]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    let (supervisor, mut watch) = start(env, script);
+    let said = watch.until("needs update", |said| machine_state(said, |state| matches!(state, MachineConnectionState::NeedsUpdate { .. }))).await;
+    assert!(said.iter().any(|said| matches!(said, Said::Web(ClientState::UpdateRequired))), "the web view hears update required");
+    assert!(matches!(said.last(), Some(Said::Machine(MachineConnectionState::NeedsUpdate { version: Some(version), side: MachineUpdateSide::ThisMac })) if version == "99.0.0"));
+    supervisor.stop();
+}
+
+#[tokio::test]
+async fn an_older_runtime_without_data_is_judged_by_the_recorded_version() {
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Fail(DialFailure::NeedsUpdate { version: None, offered: vec![] }))]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    *env.recorded.lock().unwrap() = Some("0.2.27".into());
+    let (supervisor, mut watch) = start(env, script);
+    watch
+        .until("needs update with the recorded version", |said| {
+            machine_state(said, |state| *state == MachineConnectionState::NeedsUpdate { version: Some("0.2.27".into()), side: MachineUpdateSide::Machine })
+        })
+        .await;
+    supervisor.stop();
+}
+
+#[tokio::test]
+async fn a_link_lost_while_the_machine_hands_over_is_updating_until_it_answers_again() {
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Connect)]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    let (supervisor, mut watch) = start(env, script.clone());
+    watch.until("connected", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    let link = script.link_of(&direct(LAN));
+
+    // The machine says it hands over; the notification still reaches the web view.
+    let changed = json!({ "event": "machine.updateChanged", "params": { "status": { "progress": { "phase": "handingOver", "version": "0.2.34", "since": 1234 } } } });
+    script.say(link, changed.clone());
+    watch.until("the notification", |said| matches!(said, Said::Message(message) if *message == changed)).await;
+
+    // The runtime execs: the link drops and nothing answers for a while.
+    script.answer(LAN, Answer::Fail(DialFailure::unreachable("restarting")));
+    script.close(link);
+    let said = watch.until("updating", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Updating { .. }))).await;
+    assert!(
+        said.iter().all(|said| !matches!(said, Said::Machine(MachineConnectionState::Reconnecting { .. } | MachineConnectionState::Offline { .. }))),
+        "updating, not reconnecting: {said:#?}"
+    );
+    assert!(matches!(said.last(), Some(Said::Machine(MachineConnectionState::Updating { version, since: 1234 })) if version == "0.2.34"));
+
+    // The new runtime answers: connected, and a later loss is a plain reconnect.
+    script.answer(LAN, Answer::Connect);
+    supervisor.nudge();
+    watch.until("connected again", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    script.answer(LAN, Answer::Fail(DialFailure::unreachable("down")));
+    script.close(script.link_of(&direct(LAN)));
+    watch.until("reconnecting", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Reconnecting { .. }))).await;
+    supervisor.stop();
+}
+
+#[tokio::test]
+async fn a_handover_that_ends_otherwise_leaves_a_plain_reconnect() {
+    let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Connect)]);
+    let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
+    let (supervisor, mut watch) = start(env, script.clone());
+    watch.until("connected", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Direct { .. }))).await;
+    let link = script.link_of(&direct(LAN));
+    script.say(link, json!({ "event": "machine.updateChanged", "params": { "status": { "progress": { "phase": "handingOver", "version": "0.2.34", "since": 1 } } } }));
+    let failed = json!({ "event": "machine.updateChanged", "params": { "status": { "progress": { "phase": "failed", "version": "0.2.34", "at": 2, "message": "trial", "running": "0.2.33", "rolledBack": false } } } });
+    script.say(link, failed.clone());
+    watch.until("the failure", |said| matches!(said, Said::Message(message) if *message == failed)).await;
+    script.answer(LAN, Answer::Fail(DialFailure::unreachable("down")));
+    script.close(link);
+    let said = watch.until("reconnecting", |said| machine_state(said, |state| matches!(state, MachineConnectionState::Reconnecting { .. }))).await;
+    assert!(said.iter().all(|said| !matches!(said, Said::Machine(MachineConnectionState::Updating { .. }))), "no longer updating: {said:#?}");
+    supervisor.stop();
 }

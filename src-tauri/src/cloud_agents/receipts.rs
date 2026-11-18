@@ -190,6 +190,10 @@ fn append_file(path: &Path) -> Result<File> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FollowUp {
+    /// Native-only admission provenance, persisted with the queue. Absent on
+    /// legacy work; missing stamps never acquire v2 authority on restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) policy_stamp: Option<crate::remote::collab::v2::Stamp>,
     pub client_command_id: String,
     pub session_id: String,
     pub text: String,
@@ -200,6 +204,11 @@ pub struct FollowUp {
     /// The uploads it carries (`attachments`), by id, read when it is typed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// Its files other than images (PRO-407), already stored in the
+    /// session's attachments folder when it was queued: typed with it, by
+    /// their paths on this computer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<crate::events::FileRef>,
 }
 
 /// Follow-ups per tab, in order, rewritten durably on every change so an
@@ -370,7 +379,7 @@ mod tests {
     fn follow_ups_are_ordered_per_tab_and_durable() {
         let dir = tempfile::tempdir().unwrap();
         let queue = FollowUps::open(dir.path()).unwrap();
-        let item = |id: &str| FollowUp { client_command_id: id.into(), session_id: "s".into(), text: id.into(), actor_id: String::new(), images: Vec::new() };
+        let item = |id: &str| FollowUp { policy_stamp: None, client_command_id: id.into(), session_id: "s".into(), text: id.into(), actor_id: String::new(), images: Vec::new(), files: Vec::new() };
         queue.push("t1", item("a")).unwrap();
         queue.push("t1", item("b")).unwrap();
         queue.push("t2", item("c")).unwrap();

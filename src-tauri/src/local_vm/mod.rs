@@ -21,8 +21,8 @@ mod artifact_import;
 mod legacy_route;
 pub mod linux_profile;
 pub(crate) mod linux_install;
-#[cfg(target_os = "macos")]
 pub(crate) mod guest_account;
+mod guest_worker;
 mod guest_key;
 pub(crate) mod stdio_exit;
 

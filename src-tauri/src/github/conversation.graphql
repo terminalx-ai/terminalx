@@ -4,16 +4,20 @@ query PullRequestConversation($owner: String!, $name: String!, $number: Int!,
   $readThreads: Boolean! = true, $readTimeline: Boolean! = true) {
   viewer { login }
   repository(owner: $owner, name: $name) {
+    viewerDefaultMergeMethod mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed
     pullRequest(number: $number) {
       url title body state author { login } viewerCanUpdate
+      baseRefName mergedAt mergedBy { login } headRef { id }
+      mergeCommit { oid parents(first: 2) { totalCount } }
+      commits { totalCount }
       reviews(first: 100, after: $reviews) @include(if: $readReviews) {
-        nodes { id state submittedAt author { login __typename } }
+        nodes { id state submittedAt author { login __typename ... on User { name } } }
         pageInfo { hasNextPage endCursor }
       }
       reviewRequests(first: 100, after: $requests) @include(if: $readRequests) {
         nodes { requestedReviewer {
           __typename
-          ... on User { login }
+          ... on User { login name }
           ... on Bot { login }
           ... on Team { slug organization { login } }
         } }
@@ -24,13 +28,19 @@ query PullRequestConversation($owner: String!, $name: String!, $number: Int!,
         pageInfo { hasNextPage endCursor }
       }
       timelineItems(first: 100, after: $timeline,
-        itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT]) @include(if: $readTimeline) {
+        itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT]) @include(if: $readTimeline) {
         nodes {
           __typename
           ... on IssueComment { id body createdAt url author { login } }
           ... on PullRequestReview { id body submittedAt state url author { login } }
           ... on PullRequestCommit { id commit { oid messageHeadline committedDate url author { name user { login } } } }
           ... on HeadRefForcePushedEvent { id createdAt actor { login } beforeCommit { oid } afterCommit { oid } }
+          ... on ReviewRequestedEvent { id createdAt requestedReviewer {
+            __typename
+            ... on User { login }
+            ... on Bot { login }
+            ... on Team { slug organization { login } }
+          } }
         }
         pageInfo { hasNextPage endCursor }
       }

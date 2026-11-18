@@ -52,7 +52,7 @@ export function StepPage({
     <div className={cn("flex min-w-0 gap-[60px]", wide ? "max-w-[1100px]" : "max-w-[1020px]")}>
       <section className={cn("min-w-0 flex-1", wide ? "max-w-[640px]" : "max-w-[660px]")} aria-labelledby="cloud-setup-step-title">
         {eyebrow && <div className="text-[12.5px] text-muted-foreground">{eyebrow}</div>}
-        <h1 id="cloud-setup-step-title" ref={heading} tabIndex={-1} className={cn("text-[26px] font-semibold tracking-[-0.01em] outline-none", eyebrow && "mt-1")}>
+        <h1 id="cloud-setup-step-title" ref={heading} tabIndex={-1} className={cn("text-[26px] leading-8 font-semibold tracking-[-0.01em] outline-none", eyebrow && "mt-1")}>
           {title}
         </h1>
         <div className="mt-1.5 text-[13.5px] leading-[21px] text-muted-foreground">{description}</div>
@@ -74,7 +74,7 @@ export function PrimaryButton({ busy = false, children, className, ...props }: B
     <Button data-cloud-setup-primary="" className={cn("h-9 px-3 text-[12.5px]", className)} {...props}>
       {busy && <Loader2 className="animate-spin" />}
       {children}
-      <kbd aria-hidden className="ml-1 rounded border border-current/25 px-1 text-[10px] leading-4 opacity-70">
+      <kbd aria-hidden className="ml-1 rounded border border-current/25 px-1 text-xs leading-4 opacity-70">
         ↵
       </kbd>
     </Button>

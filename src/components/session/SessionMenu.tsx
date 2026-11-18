@@ -1,5 +1,8 @@
+import { openPairPhone } from "@/lib/pairing";
+import { copyText } from "@/lib/clipboard";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
-import { Archive, CircleDot, Ellipsis, FolderSync, GitBranch, Link, Pencil, SquareTerminal, Target, Unplug, UserPlus } from "@/icons";
+import { Archive, CircleDot, Copy, Ellipsis, FolderOpen, FolderSync, GitBranch, Link, Pencil, SessionContinue, Smartphone, SquareTerminal, Target, Unplug, UserPlus } from "@/icons";
 import { message } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -36,13 +39,14 @@ function failed(title: string) {
  * (the sidebar's menus, the Changes panel, the tab's view switch); a row
  * with a shortcut shows the keys the keymap has for it now.
  */
-export function SessionMenu({ session, branch, cloud = false, terminalView }: {
+export function SessionMenu({ session, branch, cloud = false, terminalView, onContinue }: {
   session: SessionEntry;
   /** The branch checked out in the session's folder, or null when detached. */
   branch: string | null;
   /** A cloud session has no branch, share link or repo mirror on this Mac. */
   cloud?: boolean;
   terminalView: SessionMenuTerminalView | null;
+  onContinue: (() => void) | null;
 }) {
   // The crumb has no room for another control: starting a mirror is a row
   // here, and a running one shows in the title bar, where it can be stopped.
@@ -68,13 +72,10 @@ export function SessionMenu({ session, branch, cloud = false, terminalView }: {
     if (next && !cloud && !chosen) void api.workStatus(session.cwd).then((status) => setDefaultBranch(status.defaultBranch)).catch(() => undefined);
   };
   const target = chosen ?? defaultBranch;
-  const canLinkIssue = !quick && !session.issue;
-  const canShare = !cloud && !privacy.enabled;
   const linkIssue = () => openLinkIssue(session.id);
   const copyLink = () => void copyShareLink(session.id).catch(failed("Could not copy a link to the session"));
-  // The rows' own keys work with the menu closed, as the keymap has them (Settings → Shortcuts).
-  useShortcut("session.linkIssue", linkIssue, { enabled: canLinkIssue });
-  useShortcut("session.copyLink", copyLink, { enabled: canShare });
+  useShortcut("session.linkIssue", linkIssue, { enabled: !quick && !session.issue });
+  useShortcut("session.copyLink", copyLink, { enabled: !cloud && !privacy.enabled });
   return (
     <>
       {mirror.on && <RepoMirrorButton mirror={mirror} />}
@@ -148,6 +149,11 @@ export function SessionMenu({ session, branch, cloud = false, terminalView }: {
               </DropdownMenuItem>
             </>
           )}
+          <DropdownMenuSeparator />
+          {branch && <DropdownMenuItem onSelect={() => void copyText(branch).catch(failed("Could not copy the branch name"))}><Copy /> Copy branch name</DropdownMenuItem>}
+          <DropdownMenuItem onSelect={() => void revealItemInDir(session.cwd).catch(failed("Could not reveal the workspace"))}><FolderOpen /> Reveal in Finder</DropdownMenuItem>
+          {onContinue && <DropdownMenuItem onSelect={onContinue}><SessionContinue /> Continue in New Session…</DropdownMenuItem>}
+          <DropdownMenuItem onSelect={() => openPairPhone()}><Smartphone /> Pair a phone…</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem data-row="terminal-view" disabled={!terminalView?.available} onSelect={() => terminalView?.toggle()}>
             <SquareTerminal /> {terminalView?.label ?? "Open in terminal view"}

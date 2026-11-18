@@ -53,12 +53,34 @@ function fakeSource(key: string): GitSource & { changesBetween: ReturnType<typeo
   } as never;
 }
 
+
+const SCOPES: Record<string, RegExp> = { all: /^All changes/, uncommitted: /^Uncommitted changes/, turn: /^(Latest turn|This turn)(\s?In progress)?$/, history: /^All commits/ };
+/** Pick a scope from the "All changes ▾" popover: a scope's key, or a row's name. */
+function pickScope(scope: string | RegExp) {
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(screen.getByRole("button", { name: typeof scope === "string" ? SCOPES[scope] : scope }));
+}
+async function pickCommit(name: RegExp) {
+  fireEvent.click(screen.getByRole("button", { name: "Changes scope" }));
+  fireEvent.click(await screen.findByRole("button", { name }));
+}
+const scopeShown = () => screen.getByRole("button", { name: "Changes scope" }).textContent;
+const comparing = () => screen.queryByRole("button", { name: "Comparison target" })?.textContent;
+const comparesWith = (name: string) => waitFor(() => expect(comparing()).toBe(`vs ${name}`));
+/** Type a branch into "vs main ▾" and take it with Enter. */
+function compareWith(name: string) {
+  if (!screen.queryByLabelText("Branch to compare against")) fireEvent.click(screen.getByRole("button", { name: "Comparison target" }));
+  const input = screen.getByLabelText("Branch to compare against");
+  fireEvent.change(input, { target: { value: name } });
+  fireEvent.submit(input.closest("form")!);
+}
+
 afterEach(() => { cleanup(); for (const toast of getErrorToasts()) dismissError(toast.id); localStorage.clear(); invoke.mockClear(); patchTab.mockClear(); sessions.value = []; });
 
 it("diffs the turn's range and reads both sides through the given source", async () => {
   const source = fakeSource("cloud:w1|repo");
   render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
+  pickScope("turn");
   fireEvent.click(await screen.findByRole("button", { name: /turn.ts/ }));
   expect((await screen.findByTestId("diff")).textContent).toBe("src/turn.ts:old->new");
   expect(source.changesBetween).toHaveBeenCalledWith("base-tree", "head-tree", false);
@@ -69,7 +91,7 @@ it("diffs the turn's range and reads both sides through the given source", async
 it("shows the source's working tree against its head", async () => {
   const source = fakeSource("cloud:w2|repo");
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  pickScope("uncommitted");
   fireEvent.click(await screen.findByRole("button", { name: /dirty.ts/ }));
   await waitFor(() => expect(source.fileContentsAt).toHaveBeenCalledWith("dirty.ts", "work-head", null));
   expect(invoke).not.toHaveBeenCalled();
@@ -93,12 +115,12 @@ for (const cloud of [false, true]) {
     ]);
     const props = { source, events, version: 2, active: true, live: false };
     const view = render(<ChangesPanel {...props} />);
-    expect(await screen.findByText("All changes · 3 files")).toBeTruthy();
+    expect(await screen.findByText("0 of 3 viewed")).toBeTruthy();
     expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot", false);
-    expect(screen.getByText(/Against main/)).toBeTruthy();
+    expect(comparing()).toBe("vs main");
     view.rerender(<ChangesPanel {...props} events={[]} version={3} />);
     expect(source.changesBetween).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("All changes · 3 files")).toBeTruthy();
+    expect(screen.getByText("0 of 3 viewed")).toBeTruthy();
   });
 }
 
@@ -106,22 +128,20 @@ it("persists explicit scope and target per repository across reopening", async (
   const source = fakeSource("remember");
   const props = { source, events, version: 2, active: true, live: false };
   const view = render(<ChangesPanel {...props} />);
-  await screen.findByText(/Against main/);
-  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "release" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText(/Against release/);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  await comparesWith("main");
+  compareWith("release");
+  await comparesWith("release");
+  pickScope("uncommitted");
   await screen.findByRole("button", { name: /dirty.ts/ });
   view.unmount();
   const reopened = render(<ChangesPanel {...props} />);
-  expect((screen.getByLabelText("Changes scope") as HTMLSelectElement).value).toBe("uncommitted");
+  expect(scopeShown()).toBe("Uncommitted changes");
   await screen.findByRole("button", { name: /dirty.ts/ });
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
-  await screen.findByText(/Against release/);
+  pickScope("all");
+  await comparesWith("release");
   reopened.rerender(<ChangesPanel {...props} source={fakeSource("different-repo")} />);
-  expect((screen.getByLabelText("Comparison target") as HTMLInputElement).value).toBe("");
-  expect(screen.queryByText(/Against release/)).toBeNull();
-  await screen.findByText(/Against main/);
+  expect(comparing()).not.toBe("vs release");
+  await comparesWith("main");
 });
 
 it("distinguishes loading, unavailable data, clean workspaces and missing turn snapshots", async () => {
@@ -130,13 +150,14 @@ it("distinguishes loading, unavailable data, clean workspaces and missing turn s
   const props = { source, events: [], version: 0, active: true, live: false };
   render(<ChangesPanel {...props} />);
   expect(screen.getByText("Loading changes…")).toBeTruthy();
-  await screen.findByText("No changes in this scope.");
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
+  await screen.findByText("No file changes yet");
+  pickScope("turn");
   await screen.findByText(/No turn snapshots are available/);
-  source.changesBetween.mockRejectedValueOnce("offline");
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
+  // The scope popover reads its counts too: every read fails while offline.
+  source.changesBetween.mockRejectedValue("offline");
+  pickScope("all");
   await screen.findByText("source: offline");
-  expect(screen.queryByText("No changes in this scope.")).toBeNull();
+  expect(screen.queryByText("No file changes yet")).toBeNull();
 });
 
 it("reads a rename's original path and surfaces file errors", async () => {
@@ -174,7 +195,7 @@ it("does not reuse a previous turn when the latest prompt has no snapshot", asyn
   const source = fakeSource("missing-latest");
   const latest: AgentEvent = { ...events[0], seq: 3, payload: { type: "user_message", text: "Status?", queued: false } };
   render(<ChangesPanel source={source} events={[...events, latest]} version={3} active live />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
+  pickScope("turn");
   await screen.findByText(/No turn snapshots are available/);
   expect(screen.queryByText(/Last turn ·/)).toBeNull();
 });
@@ -183,11 +204,10 @@ it("keeps comparing against the previous branch when the new one can't be used, 
   const source = fakeSource("invalid-target");
   render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
   await screen.findByRole("button", { name: /turn.ts/ });
-  await screen.findByText(/Against main/);
+  await comparesWith("main");
   const gitError = "git rev-parse --verify --end-of-options origin/release/0.9^{commit}: fatal: Needed a single revision";
   vi.mocked(source.reviewRange).mockRejectedValueOnce(gitError);
-  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "origin/release/0.9" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  compareWith("origin/release/0.9");
 
   const toast = await screen.findByRole("alert");
   expect(within(toast).getByText("Couldn't switch to origin/release/0.9")).toBeTruthy();
@@ -198,7 +218,7 @@ it("keeps comparing against the previous branch when the new one can't be used, 
   expect(within(toast).getAllByRole("button").map((button) => button.textContent)).toEqual(["Choose another branch", "Copy error", ""]);
   // The comparison stayed where it was: same files, same target, and the typed name is still there to fix.
   expect(screen.getByRole("button", { name: /turn.ts/ })).toBeTruthy();
-  expect(screen.getByText(/Against main/)).toBeTruthy();
+  expect(comparing()).toBe("vs main");
   expect(Object.values({ ...localStorage }).join(" ")).not.toContain("release/0.9");
 
   invoke.mockClear();
@@ -207,46 +227,43 @@ it("keeps comparing against the previous branch when the new one can't be used, 
   expect(within(toast).getByRole("button", { name: "Copied" })).toBeTruthy();
 
   await act(async () => fireEvent.click(within(toast).getByRole("button", { name: "Choose another branch" })));
-  const input = screen.getByLabelText("Comparison target") as HTMLInputElement;
+  const input = screen.getByLabelText("Branch to compare against") as HTMLInputElement;
   expect(document.activeElement).toBe(input);
   expect([input.selectionStart, input.selectionEnd]).toEqual([0, "origin/release/0.9".length]);
   expect(screen.queryByRole("alert")).toBeNull();
 
   // A branch that can be used is switched to.
-  fireEvent.change(input, { target: { value: "release" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText(/Against release/);
+  compareWith("release");
+  await comparesWith("release");
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
 it("keeps a scope picked while Apply checks the branch (PRO-367)", async () => {
   const source = fakeSource("scope-during-check");
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} workingTree />);
-  await screen.findByText(/Against main/);
+  await comparesWith("main");
   let pass!: () => void;
   const check = new Promise<void>((resolve) => { pass = resolve; });
   vi.mocked(source.reviewRange).mockImplementationOnce(async (target) => { await check; return { target: target ?? "main", base: "merge-base", head: "snapshot" }; });
-  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "release" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  expect(screen.getByRole("button", { name: "Apply" }).getAttribute("aria-busy")).toBe("true");
+  compareWith("release");
+  expect(screen.getByRole("button", { name: "Comparison target" }).getAttribute("aria-busy")).toBe("true");
   // The person moves on to Uncommitted before the check comes back.
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  pickScope("uncommitted");
   await screen.findByRole("button", { name: /dirty.ts/ });
   await act(async () => { pass(); await check; });
   // The check passed: the scope they picked stays, and All changes now compares against the new branch.
-  expect((screen.getByLabelText("Changes scope") as HTMLSelectElement).value).toBe("uncommitted");
+  expect(scopeShown()).toBe("Uncommitted changes");
   expect(screen.getByRole("button", { name: /dirty.ts/ })).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "all" } });
-  await screen.findByText(/Against release/);
+  pickScope("all");
+  await comparesWith("release");
 });
 
 it("says a local name that names nothing is not here", async () => {
   const source = fakeSource("missing-local");
   render(<><ChangesPanel source={source} events={[]} version={0} active live={false} /><Toasts /></>);
-  await screen.findByText(/Against main/);
+  await comparesWith("main");
   vi.mocked(source.reviewRange).mockRejectedValueOnce("fatal: Needed a single revision");
-  fireEvent.change(screen.getByLabelText("Comparison target"), { target: { value: "missing" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  compareWith("missing");
   const toast = await screen.findByRole("alert");
   expect(toast.textContent).toContain("There's no branch or commit by that name here. Changes still compare against main.");
 });
@@ -298,7 +315,7 @@ function merging(key: string, conflicted = ["CHANGELOG.md"], counts: Record<stri
 it("lists unresolved files with their conflict counts apart from what the merge brought in, and says what aborting keeps", async () => {
   const source = merging("merge-split", ["CHANGELOG.md", "src/deep/seats.ts"], { "CHANGELOG.md": 2, "src/deep/seats.ts": 1 });
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  pickScope("uncommitted");
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
   expect(within(banner).getByText("Merge in progress")).toBeTruthy();
   expect(within(banner).getByText("origin/main → raccoon/teams-billing")).toBeTruthy();
@@ -388,10 +405,11 @@ it("says what is being merged in every scope, with the merge's own uncommitted l
   source.changesBetween.mockImplementation(async (base: string) => base === "work-head" ? mergeFiles.slice(0, 3) : mergeFiles);
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
   const banner = await screen.findByRole("region", { name: "Merge in progress" });
-  expect(within(banner).getByText(/Until it is committed, this counts what the merge brings in as the branch's own work/)).toBeTruthy();
-  expect(await screen.findByText("All changes · 5 files")).toBeTruthy();
-  // The merge's lists are what is uncommitted, read against HEAD.
+  expect(within(banner).queryByText(/Until it is committed/)).toBeNull();
+  // The merge's lists are what is uncommitted, read against HEAD, and nothing is listed again under them.
   expect(await screen.findByText("Brought in by the merge · 1")).toBeTruthy();
+  expect(screen.queryByText(/of 5 viewed/)).toBeNull();
+  expect(screen.queryByRole("checkbox")).toBeNull();
   expect(source.changesBetween).toHaveBeenCalledWith("work-head", "work", false);
 });
 
@@ -445,17 +463,17 @@ it("shows no merge for a source that cannot tell, and a merge that cannot be rea
   local.unfinishedMerge.mockRejectedValue("index.lock exists");
   render(<ChangesPanel source={local} events={[]} version={0} active live={false} />);
   expect((await screen.findByRole("alert")).textContent).toBe("Whether a merge is in progress could not be read: source: index.lock exists");
-  expect(screen.getByText("All changes · 5 files")).toBeTruthy();
+  expect(screen.getByText("0 of 5 viewed")).toBeTruthy();
 });
 
-it("opens local Changes rows in centre tabs with the chosen range and rename path", async () => {
+it("opens local Changes rows in the scope's one review tab with the chosen range (PRO-392)", async () => {
   const source = fakeSource("local:/repo");
   source.cloud = false;
   source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 1, deletions: 1 }]);
   render(<ChangesPanel source={source} cwd="/repo" sessionId="centre" events={[]} version={0} active live={false} />);
   fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
   expect(getEditors().editors.find((e) => e.sessionId === "centre")).toMatchObject({
-    kind: "diff", rel: "new.ts", name: "new.ts · All changes", diff: { range: { base: "merge-base", head: "snapshot" }, oldPath: "old.ts" },
+    kind: "diff", rel: "new.ts", name: "Review · All changes", diff: { stack: true, range: { base: "merge-base", head: "snapshot" } },
   });
   expect(screen.queryByTestId("diff")).toBeNull();
   expect(source.fileContentsAt).not.toHaveBeenCalled();
@@ -488,11 +506,11 @@ it("refetches file statistics with the whitespace choice in every scope", async 
   const source = fakeSource("whitespace-stats");
   const view = render(<ChangesPanel source={source} events={events} version={2} active live={false} />);
   await screen.findByRole("button", { name: /turn.ts/ });
-  fireEvent.click(screen.getByLabelText("Hide whitespace changes"));
+  act(() => setPrefs({ diffHideWhitespace: true }));
   await waitFor(() => expect(source.changesBetween).toHaveBeenLastCalledWith("merge-base", "snapshot", true));
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "turn" } });
+  pickScope("turn");
   await waitFor(() => expect(source.changesBetween).toHaveBeenLastCalledWith("base-tree", "head-tree", true));
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  pickScope("uncommitted");
   await waitFor(() => expect(source.workingChanges).toHaveBeenLastCalledWith(true));
   view.unmount();
   setPrefs({ diffHideWhitespace: false });
@@ -506,45 +524,40 @@ it("selects and restores a commit's exact range and returns to the saved workspa
   vi.mocked(source.logCommits).mockImplementation(async (from) => from === parentSha ? [{ ...selectedCommit, sha: parentSha, parent: null, tree: "parent-tree" }] : [selectedCommit]);
   const props = { source, events, version: 2, active: true, live: false };
   const view = render(<ChangesPanel {...props} />);
-  await screen.findByText(/Against main/);
-  const target = screen.getByRole("combobox", { name: "Comparison target" });
-  const suggestions = document.getElementById(target.getAttribute("list")!)!;
-  expect([...suggestions.querySelectorAll("option")].map((option) => option.value)).toEqual(["main", "origin/release"]);
-  fireEvent.change(target, { target: { value: "origin/release" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await screen.findByText(/Against origin\/release/);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
-  await screen.findByText("Choose a commit to review its changes.");
-  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
-  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
-  await screen.findByText("Commit changes · 1 file");
+  await comparesWith("main");
+  fireEvent.click(screen.getByRole("button", { name: "Comparison target" }));
+  const branches = within(screen.getByRole("dialog", { name: "Branches to compare against" }));
+  expect(branches.getAllByRole("button").map((button) => button.textContent)).toEqual(["AutomaticThe branch this one started from", "mainLocal branch", "origin/releaseRemote branch"]);
+  fireEvent.click(branches.getByRole("button", { name: /^origin\/release/ }));
+  await comparesWith("release");
+  await pickCommit(/^aaaaaaa\s*A selected commit/);
+  await screen.findByText("0 of 1 viewed");
+  expect(scopeShown()).toBe("Commit aaaaaaa");
   expect(source.changesBetween).toHaveBeenLastCalledWith("parent-tree", "commit-tree", false);
   fireEvent.click(screen.getByRole("button", { name: /turn.ts/ }));
   await screen.findByTestId("diff");
   expect(source.fileContentsAt).toHaveBeenLastCalledWith("src/turn.ts", "parent-tree", "commit-tree");
   view.unmount();
   render(<ChangesPanel {...props} />);
-  expect(screen.getByLabelText("Changes scope")).toHaveProperty("value", "commit");
-  await screen.findByText("Commit changes · 1 file");
-  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
-  await screen.findByText(/Against origin\/release/);
-  expect(screen.getByLabelText("Comparison target")).toHaveProperty("value", "origin/release");
+  expect(scopeShown()).toBe("Commit aaaaaaa");
+  await screen.findByText("0 of 1 viewed");
+  pickScope("all");
+  await comparesWith("release");
+  expect(screen.getByRole("button", { name: "Comparison target" }).title).toBe("Compare against origin/release");
 });
 
 it("discards an in-flight commit response when the scope changes", async () => {
   const source = fakeSource("commit-race");
   let resolve!: (value: typeof selectedCommit[]) => void;
-  vi.mocked(source.logCommits).mockImplementation((from) => from ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
+  vi.mocked(source.logCommits).mockImplementation((from) => from === selectedCommit.sha ? new Promise((done) => { resolve = done; }) : Promise.resolve([selectedCommit]));
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "commit" } });
-  await screen.findByRole("option", { name: "aaaaaaa · A selected commit" });
-  fireEvent.change(screen.getByLabelText("Commit to review"), { target: { value: commitSha } });
+  await pickCommit(/^aaaaaaa\s*A selected commit/);
   await waitFor(() => expect(resolve).toBeDefined());
-  fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
-  await screen.findByText(/Against main/);
+  pickScope("all");
+  await comparesWith("main");
   await act(async () => resolve([{ ...selectedCommit, parent: null }]));
-  expect(screen.queryByText("Commit changes · 1 file")).toBeNull();
-  expect(screen.getByText(/Against main/)).toBeTruthy();
+  expect(scopeShown()).toBe("All changes");
+  expect(comparing()).toBe("vs main");
 });
 
 it("refreshes viewed identities in Uncommitted after a terminal edit", async () => {
@@ -552,7 +565,7 @@ it("refreshes viewed identities in Uncommitted after a terminal edit", async () 
   const dirty = { path: "dirty.ts", status: "modified", additions: 1, deletions: 0, blobHash: "old" };
   source.workingChanges.mockResolvedValue({ head: "work-head", files: [dirty] });
   render(<ChangesPanel source={source} events={[]} version={0} active live={false} />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: "uncommitted" } });
+  pickScope("uncommitted");
   fireEvent.click(await screen.findByLabelText("Viewed dirty.ts"));
   expect(screen.getByText("1 of 1 viewed")).toBeTruthy();
   source.workingChanges.mockResolvedValue({ head: "work-head", files: [{ ...dirty, blobHash: "new" }] });
@@ -582,17 +595,16 @@ it("reviews only an earlier checkpoint's files and lines, persists its selection
   source.fileContentsAt.mockImplementation(async (_path, base, head) => ({ before: base, after: head }));
   const props = { source, events: retainedEvents, version: 6, active: true, live: false };
   const view = render(<ChangesPanel {...props} />);
-  const option = screen.getByRole("option", { name: "Turn · Go" }) as HTMLOptionElement;
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: option.value } });
+  pickScope(/^Turn 1 · Go/);
   fireEvent.click(await screen.findByRole("button", { name: /earlier.ts/ }));
   expect((await screen.findByTestId("diff")).textContent).toBe("earlier.ts:first-base->first-head");
   expect(screen.queryByRole("button", { name: /latest.ts/ })).toBeNull();
-  expect(source.changesBetween).toHaveBeenLastCalledWith("first-base", "first-head", false);
+  expect(source.changesBetween).toHaveBeenCalledWith("first-base", "first-head", false);
   expect(screen.queryByRole("button", { name: /Discard/ })).toBeNull();
   view.unmount();
   const reopened = render(<ChangesPanel {...props} />);
   await screen.findByRole("button", { name: /earlier.ts/ });
-  expect(screen.getByLabelText("Changes scope")).toHaveProperty("value", option.value);
+  expect(scopeShown()).toBe("Turn 1");
   source.changesBetween.mockClear();
   reopened.rerender(<ChangesPanel {...props} events={retainedEvents.map((event) => ({ ...event, tabId: "other-tab" }))} version={7} />);
   await screen.findByRole("alert");
@@ -600,7 +612,7 @@ it("reviews only an earlier checkpoint's files and lines, persists its selection
   expect(source.changesBetween).not.toHaveBeenCalled();
   expect(invoke).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Back to all changes" }));
-  await screen.findByText(/Against main/);
+  await comparesWith("main");
 });
 
 it("reports an expired earlier checkpoint without falling back to workspace lines", async () => {
@@ -610,9 +622,9 @@ it("reports an expired earlier checkpoint without falling back to workspace line
     return [];
   });
   render(<ChangesPanel source={source} events={retainedEvents} version={6} active live={false} />);
-  fireEvent.change(screen.getByLabelText("Changes scope"), { target: { value: (screen.getByRole("option", { name: "Turn · Go" }) as HTMLOptionElement).value } });
+  pickScope(/^Turn 1 · Go/);
   expect(await screen.findByRole("alert")).toHaveProperty("textContent", "source: Error: checkpoint tree is unavailable");
-  expect(source.changesBetween).toHaveBeenLastCalledWith("first-base", "first-head", false);
+  expect(source.changesBetween).toHaveBeenCalledWith("first-base", "first-head", false);
 });
 
 it("keeps the current discard dialog and Viewed controls together in All changes", async () => {
@@ -630,5 +642,32 @@ it("keeps the current discard dialog and Viewed controls together in All changes
   source.changesBetween.mockResolvedValue([]);
   fireEvent.click(within(dialog).getByRole("button", { name: /^Discard$/ }));
   await waitFor(() => expect(source.discard).toHaveBeenCalledWith("edited.ts", "merge-base", undefined));
-  await screen.findByText("All changes · 0 files");
+  await screen.findByText("No file changes yet");
+});
+
+it("passes revision byte sizes and the host's open action through the real Changes panel", async () => {
+  const source = fakeSource("large-revision");
+  source.changesBetween.mockResolvedValue([{ path: "new.ts", oldPath: "old.ts", status: "renamed", additions: 0, deletions: 0 }]);
+  source.fileContentsAt.mockImplementation(async (path) => path === "old.ts"
+    ? { before: "<file too large to show>", after: null, beforeSize: 6 * 1024 * 1024 }
+    : { before: null, after: "small", afterSize: 5 });
+  const open = vi.fn();
+  render(<ChangesPanel source={source} openFileAction={(path) => () => open(path)} events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /new.ts/ }));
+  expect(await screen.findByText("6.0 MB")).toBeTruthy();
+  expect(screen.getByTestId("changes-empty-state").textContent).toContain("6.0 MB, over the text preview limit");
+  fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+  expect(open).toHaveBeenCalledWith("new.ts");
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("keeps missing size metadata unknown and never opens a deleted file", async () => {
+  const source = fakeSource("large-deleted");
+  source.changesBetween.mockResolvedValue([{ path: "gone.ts", status: "deleted", additions: 0, deletions: 0 }]);
+  source.fileContentsAt.mockResolvedValue({ before: "<file too large to show>", after: null });
+  render(<ChangesPanel source={source} openFileAction={() => vi.fn()} events={[]} version={0} active live={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: /gone.ts/ }));
+  expect((await screen.findByTestId("changes-empty-state")).textContent).toContain("size unknown");
+  expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  expect(screen.queryByText("0 B")).toBeNull();
 });

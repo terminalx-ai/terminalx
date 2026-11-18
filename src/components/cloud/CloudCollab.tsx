@@ -12,6 +12,7 @@ import { LinkedText } from "@/components/chat/LinkedText";
 import { useFeatureFlag, featureFlags } from "@/lib/featureFlags";
 import { MemberProfile, memberName } from "@/components/people/MemberProfile";
 import { readOrganizationRoster, useOrganizationRoster } from "@/lib/organizationRoster";
+import { cloudKeyOrgId } from "@/lib/multiOrg";
 
 const ROLE_BADGE: Record<string, string> = { manager: "Admin", driver: "Driver", viewer: "Viewer", none: "No access" };
 
@@ -35,7 +36,8 @@ export function useNowUntil(until: number | null | undefined): number {
 /** Who else is in the workspace, what they look at, and whether they are typing. */
 export function ParticipantsBar({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel: (tabId: string) => string | null }) {
   const collab = useCollab(collabKey);
-  const orgId = collabKey.startsWith("cloud:") ? collabKey.split(":")[1] : undefined;
+  // A cloud workspace's organization; a machine's view (`machine:…`) has none.
+  const orgId = cloudKeyOrgId(collabKey) ?? undefined;
   const profiles = useFeatureFlag(featureFlags.teamRoster, orgId);
   const fallbackName = usePeople(!profiles);
   const { roster } = useOrganizationRoster(orgId, profiles);
@@ -86,7 +88,8 @@ const HEADER_FACES = 3;
  */
 export function PresenceAvatars({ collabKey, you, tabLabel }: { collabKey: string; you: WorkspaceYou | null; tabLabel?: (tabId: string) => string | null }) {
   const collab = useCollab(collabKey);
-  const orgId = collabKey.startsWith("cloud:") ? collabKey.split(":")[1] : undefined;
+  // A cloud workspace's organization; a machine's view (`machine:…`) has none.
+  const orgId = cloudKeyOrgId(collabKey) ?? undefined;
   const profiles = useFeatureFlag(featureFlags.teamRoster, orgId);
   const fallbackName = usePeople(!profiles);
   const { roster } = useOrganizationRoster(orgId, profiles);

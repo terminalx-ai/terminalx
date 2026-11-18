@@ -201,6 +201,7 @@ impl PairingManager {
             blocked: HashSet::new(),
             approved: HashSet::new(),
             used_by: None,
+            access: Default::default(),
         };
         let result = (|| {
             if self.is_stopped() || !self.account.is_current(&context)
@@ -348,6 +349,12 @@ impl PairingManager {
                     }
                 }
                 "remove" => share.remove(link, user, now())?,
+                "access" => share.set_role(
+                    link,
+                    user,
+                    serde_json::from_value(params["role"].clone())?,
+                    now(),
+                )?,
                 "approve" => share.approve(
                     link,
                     user,

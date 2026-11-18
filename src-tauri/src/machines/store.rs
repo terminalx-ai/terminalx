@@ -40,6 +40,10 @@ pub struct PairedMachine {
     /// credential, which is in the Keychain (`relay:<machineId>`).
     #[serde(default)]
     pub relay: Option<RelayInfo>,
+    /// Renamed on this computer (PRO-350): `name` is this computer's, and
+    /// the name the machine describes itself with no longer replaces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_here: bool,
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
@@ -135,6 +139,15 @@ impl MachineStore {
         })
     }
 
+    /// Forget a machine (Settings → Machines → Remove). The record it had,
+    /// or `None` when it was not paired. Its sessions stay on the machine.
+    pub fn remove(&self, machine_id: &str) -> Result<Option<PairedMachine>> {
+        self.rewrite(|file| {
+            let Some(index) = file.machines.iter().position(|machine| machine.machine_id == machine_id) else { return Ok(None) };
+            Ok(Some(file.machines.remove(index)))
+        })
+    }
+
     /// Change how a machine is reached. `None` when it is not paired.
     pub fn set_route(&self, machine_id: &str, route: MachineRoute) -> Result<Option<PairedMachine>> {
         self.rewrite(|file| {
@@ -163,6 +176,7 @@ mod tests {
             last_seen_at: None,
             last_route: None,
             relay: None,
+            named_here: false,
             other: Default::default(),
         }
     }
@@ -192,6 +206,17 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(dir.path().join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn removing_a_machine_drops_only_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MachineStore::in_dir(dir.path());
+        store.put(machine("m1")).unwrap();
+        store.put(machine("m2")).unwrap();
+        assert_eq!(store.remove("m1").unwrap().unwrap().machine_id, "m1");
+        assert!(store.remove("m1").unwrap().is_none(), "already gone");
+        assert_eq!(store.list().unwrap().iter().map(|machine| machine.machine_id.as_str()).collect::<Vec<_>>(), vec!["m2"]);
     }
 
     #[test]
