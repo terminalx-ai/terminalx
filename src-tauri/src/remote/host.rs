@@ -409,6 +409,19 @@ fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
 /// The relay's replies to them, each naming the request's `reqId`.
 const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
 
+#[cfg(test)]
+pub(crate) struct PhoneTestControl(mpsc::UnboundedReceiver<ControlCommand>);
+
+#[cfg(test)]
+impl PhoneTestControl {
+    pub(crate) fn take(&mut self) -> Option<(Value, std::sync::mpsc::Sender<Result<Value>>)> {
+        match self.0.try_recv().ok()? {
+            ControlCommand::Forward { frame, respond, .. } => Some((frame, respond)),
+            _ => panic!("expected a forwarded phone control request"),
+        }
+    }
+}
+
 /// A live registration, as the window needs it to use it (PRO-368).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
@@ -435,8 +448,8 @@ pub struct RelayInvite {
 
 /// What a machine adds to its relay host (docs/MACHINES.md, "How PRO-341
 /// builds it"): the computers it paired are admitted by their relay device id
-/// and token, and a connection for any other device is a phone, which goes
-/// to the window.
+/// and token. Other devices go to the phone host: the window while its
+/// route is current, otherwise the runtime's authenticated phone service.
 /// The machine refused a paired computer's device token or key on the relay.
 /// The `pairing_refused` reason: `code-inactive` (a token it does not know,
 /// a revoked or expired one) or `disconnected` (held off by the person, PRO-357).
@@ -464,8 +477,9 @@ pub trait MachineRoutes: Send + Sync + 'static {
     fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>>;
     /// The connection ended.
     fn release_computer(&self, computer_id: &str, tracked: u64);
-    /// Pass a phone's relay connection to the window. Whether one took it.
-    fn forward_phone(&self, forwarded: crate::machine_wire::Forwarded) -> bool;
+    /// Route a phone to the window or runtime. `cancel` fences the complete
+    /// runtime connection when the relay registration retires, including admission.
+    fn forward_phone(&self, forwarded: crate::machine_wire::Forwarded, cancel: mpsc::UnboundedReceiver<()>) -> bool;
 }
 
 impl RelayHost {
@@ -547,6 +561,65 @@ impl RelayHost {
         self.routes.lock().unwrap().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn phone_test_registration(rpc: Arc<WorkspaceRpc>, cell_url: String, secret: [u8; 32]) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+        struct Link([u8; 32]);
+        impl RuntimeLink for Link {
+            fn host_secret(&self) -> [u8; 32] { self.0 }
+            fn session(&self) -> Result<RelaySession> { bail!("test registration") }
+            fn complete_attachment(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+            fn complete_revocation(&self, _: &str) -> Result<()> { Ok(()) }
+        }
+        let host = Self::new(Arc::new(Link(secret)), rpc, None);
+        let (commands, mut receive) = mpsc::unbounded_channel();
+        let (sent, observed) = mpsc::unbounded_channel();
+        *host.registered.lock().unwrap() = Some((Live { commands, cell_url, assignment_epoch: 2, relay_generation: 37 }, "http://127.0.0.1:1".into()));
+        host.status.send_replace(HostStatus::Registered { relay_host_id: host.keypair.host_id(), runtime_generation: 11 });
+        tokio::spawn(async move {
+            while let Some(command) = receive.recv().await {
+                match command {
+                    ControlCommand::Forward { frame, req_id, respond } => {
+                        sent.send(frame.clone()).unwrap();
+                        let kind = match frame["type"].as_str().unwrap() {
+                            "device-credential-install" => "device-credential-installed",
+                            "device-credential-install-status" => "device-credential-install-status-result",
+                            "device-resume-confirm" => "device-resume-confirmed",
+                            _ => "device-revoked",
+                        };
+                        let _ = respond.send(Ok(json!({"type":kind, "v":1, "reqId":req_id, "currentVersion":1})));
+                    }
+                    ControlCommand::Revoke { device_id } => { let _ = sent.send(json!({"type":"device-revoke", "relayDeviceId":device_id})); }
+                    ControlCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+        (host, observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phone_test_hold_control(&self) -> PhoneTestControl {
+        let (commands, receive) = mpsc::unbounded_channel();
+        let mut registered = self.registered.lock().unwrap();
+        let live = &mut registered.as_mut().unwrap().0;
+        live.commands = commands;
+        live.relay_generation += 1;
+        PhoneTestControl(receive)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phone_test_forward(&self, connection: crate::machine_wire::RelayConnection) {
+        let live = self.registered.lock().unwrap().as_ref().unwrap().0.clone();
+        let open = ConnectionOpen { conn_id:connection.conn_id, conn_ticket:connection.conn_ticket, kind:connection.kind, relay_device_id:connection.relay_device_id, attach_deadline_ms:connection.attach_deadline_ms };
+        self.forward_phone(&self.routes().unwrap(), &live, &open);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phone_test_retire(&self) {
+        *self.registered.lock().unwrap() = None;
+        self.close_all_connections();
+    }
+
     /// Whether the relay registration is live now.
     pub fn is_registered(&self) -> bool {
         self.registered.lock().unwrap().is_some()
@@ -554,6 +627,7 @@ impl RelayHost {
 
     /// The live registration, while there is one.
     pub fn registration(&self) -> Option<Registration> {
+        if self.is_stopped() { return None; }
         let (live, director_url) = self.registered.lock().unwrap().clone()?;
         let runtime_generation = match &*self.status.borrow() {
             HostStatus::Registered { runtime_generation, .. } => *runtime_generation,
@@ -638,12 +712,16 @@ impl RelayHost {
     }
 
     /// End a device's relay credentials (`device-revoke`) and close its
-    /// relay connections. Nothing to send while not registered: the relay
-    /// then admits nobody for this host anyway.
+    /// relay connections. Phone cleanup uses `forward_control` instead to
+    /// retain its revocation until the relay acknowledges it.
     pub fn revoke_device(&self, relay_device_id: &str) {
         if let Some((live, _)) = self.registered.lock().unwrap().as_ref() {
             let _ = live.commands.send(ControlCommand::Revoke { device_id: relay_device_id.to_string() });
         }
+        self.close_device_connections(relay_device_id);
+    }
+
+    pub(crate) fn close_device_connections(&self, relay_device_id: &str) {
         for cancel in self.state.lock().unwrap().connections.remove(relay_device_id).unwrap_or_default() {
             let _ = cancel.send(());
         }
@@ -1154,7 +1232,7 @@ impl RelayHost {
         Ok(())
     }
 
-    /// Pass a phone's relay connection to the window: it opens the data leg.
+    /// Route a phone's relay data leg to the current phone host.
     fn forward_phone(&self, routes: &Arc<dyn MachineRoutes>, live: &Live, connection: &ConnectionOpen) {
         let forwarded = crate::machine_wire::Forwarded::Relay {
             cell_url: live.cell_url.clone(),
@@ -1168,8 +1246,21 @@ impl RelayHost {
                 attach_deadline_ms: connection.attach_deadline_ms,
             },
         };
-        if !routes.forward_phone(forwarded) {
-            log::debug!("relay host: no window takes phones; a phone connection is dropped");
+        // Keep forwarded phones in the same cancellation set as computers:
+        // loss of the registration fences both idle and handshaking phones.
+        let (sender, cancel) = mpsc::unbounded_channel();
+        {
+            let registered = self.registered.lock().unwrap();
+            if !registered.as_ref().is_some_and(|(current, _)| current.relay_generation == live.relay_generation && current.cell_url == live.cell_url) || self.is_stopped() {
+                return;
+            }
+            let mut state = self.state.lock().unwrap();
+            let open = state.connections.entry(connection.relay_device_id.clone()).or_default();
+            open.retain(|sender| !sender.is_closed());
+            open.push(sender);
+        }
+        if !routes.forward_phone(forwarded, cancel) {
+            log::debug!("relay host: no phone host takes this connection");
         }
     }
 
@@ -1729,7 +1820,7 @@ mod tests {
                 Ok((relay_device_id == "relay-desk" && token == "desk-token" && client_key_b64 == "desk-key").then(|| ("desk".to_string(), 1)).ok_or("code-inactive"))
             }
             fn release_computer(&self, _: &str, _: u64) {}
-            fn forward_phone(&self, _: crate::machine_wire::Forwarded) -> bool {
+            fn forward_phone(&self, _: crate::machine_wire::Forwarded, _: mpsc::UnboundedReceiver<()>) -> bool {
                 false
             }
         }

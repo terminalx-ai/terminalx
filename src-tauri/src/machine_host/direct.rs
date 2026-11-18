@@ -380,13 +380,11 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
 /// the port as a forwarded phone does, so it closes with the listener.
 #[cfg(unix)]
 async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S) -> Result<()> {
-    let phones = host.phones().cloned().ok_or_else(|| anyhow!("no window takes phones and this runtime serves none"))?;
-    let keypair = host.keypair().context("the machine host key is not loaded")?;
-    let port = host.listening_port().context("the machine host is not listening")?;
+    let (phones, keypair, port, stopped, epoch) = host.phone_admission().context("the runtime no longer owns phone admission")?;
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
     let Some(tracked) = host.track_phone(cancel_tx) else { bail!("the machine host is off") };
     let result = tokio::select! {
-        served = phones.serve(keypair, Prefixed::new(head, stream), port) => served,
+        served = phones.serve(keypair, Prefixed::new(head, stream), port, stopped, epoch) => served,
         _ = cancel.recv() => Ok(()),
     };
     host.untrack_phone(tracked);
