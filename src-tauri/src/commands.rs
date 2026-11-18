@@ -6030,9 +6030,17 @@ pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) 
 
 /// Check what the lead committed for a piece it took over, and make it done when its checks pass.
 #[tauri::command]
-pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+/// `accept`: the files outside a held piece's own the person confirmed adding to it.
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String, accept: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece, "accept": accept.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// The files outside a held piece's own that Check and finish would add to it, as the lead's checkout stands.
+#[tauri::command]
+pub async fn orchestration_finish_widens(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finishWidens", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
 /// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.

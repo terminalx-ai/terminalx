@@ -3283,7 +3283,9 @@ export const orchestration = {
   /** A blocked piece (PRO-361, 18.03): the lead takes it over and finishes it in its own checkout. */
   takeOver: (id: string, piece: string) => invoke<Run>("orchestration_take_over", { id, piece }),
   /** Check what the lead committed for a piece it took over; done once its checks pass there. */
-  finish: (id: string, piece: string) => invoke<Run>("orchestration_finish", { id, piece }),
+  finish: (id: string, piece: string, accept: string[] = []) => invoke<Run>("orchestration_finish", { id, piece, accept }),
+  /** The files outside a held piece's own that its Check and finish would add to it: shown and confirmed first. */
+  finishWidens: (id: string, piece: string) => invoke<string[]>("orchestration_finish_widens", { id, piece }),
   /** Give a blocked piece more files (its report's outside files when `own` is empty) and a fresh worker. */
   widen: (id: string, piece: string, own: string[] = []) => invoke<Run>("orchestration_widen", { id, piece, own }),
   /** Send a blocked piece's worker a note: its try opens again. */

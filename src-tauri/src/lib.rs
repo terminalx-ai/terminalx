@@ -1133,6 +1133,7 @@ pub fn run() {
             commands::orchestration_resolve_in_lead,
             commands::orchestration_take_over,
             commands::orchestration_finish,
+            commands::orchestration_finish_widens,
             commands::orchestration_widen,
             commands::orchestration_note,
             commands::orchestration_skip,
