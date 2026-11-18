@@ -1,7 +1,9 @@
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Button } from "./button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./dialog";
-import { answerConfirm, usePendingConfirm } from "@/lib/confirm";
+import { answerConfirm, chooseInApp, usePendingConfirm, type ConfirmRequest } from "@/lib/confirm";
 import { cn } from "@/lib/cn";
 
 /**
@@ -58,10 +60,31 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
 /**
  * Draws the question `confirmInApp` is waiting on. Mounted once per window.
  *
- * Quit is asked natively even with a window; tray quit may have no window (PRO-455). See docs/CONFIRMATIONS.md.
  * Cloud control's agreement is a system alert on purpose: an agent driving this web view must not be able to give it.
  */
 export function ConfirmDialogHost() {
+  useEffect(() => {
+    if (!isTauri()) return;
+    const window = getCurrentWebviewWindow();
+    if (window.label !== "main") return;
+    let stopped = false;
+    const unlisten = window.listen<[string, ConfirmRequest]>("quit-prompt", async ({ payload: [id, request] }) => {
+      if (stopped) return;
+      try {
+        const accepted = await invoke<boolean>("reply_to_quit_prompt", { id, reply: "opened" });
+        if (!accepted) return;
+        const reply = stopped ? "cancel" : await chooseInApp(request);
+        await invoke("reply_to_quit_prompt", { id, reply });
+      } catch (error) {
+        console.error("Quit confirmation failed", error);
+      }
+    }).catch((error) => console.error("Quit confirmation listener failed", error));
+    return () => {
+      stopped = true;
+      void unlisten.then((stop) => stop?.());
+    };
+  }, []);
+
   const pending = usePendingConfirm();
   if (!pending) return null;
   const { id, request } = pending;

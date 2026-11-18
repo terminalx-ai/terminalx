@@ -1,10 +1,8 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * An in-app confirmation (design 17.01). Quit is a native-dialog exception
- * tracked by PRO-455; see docs/CONFIRMATIONS.md. The title is the question,
- * the body says what happens, the safe choice is on the left and the action
- * on the right.
+ * An in-app confirmation (design 17.01). The title is the question, the body
+ * says what happens, the safe choice is on the left and the action on the right.
  */
 export interface ConfirmRequest {
   /** The question, e.g. `Delete "Fix the build"?`. */

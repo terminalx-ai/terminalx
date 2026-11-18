@@ -10,11 +10,13 @@
 //! without asking it. A restart for an update is not held back either.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
+use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use crate::store::settings::{self, QuitBehavior};
-use tauri_plugin_dialog::MessageDialogResult;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
 /// The app menu's own Quit item, see [`own_quit_item`].
 pub const MENU_ID: &str = "app-quit";
@@ -27,6 +29,132 @@ static EXPLICIT_STOP: AtomicBool = AtomicBool::new(false);
 
 const QUIT: &str = "Quit Anyway";
 const STAY: &str = "Keep Running";
+
+#[derive(Serialize)]
+struct Question {
+    title: String,
+    body: String,
+    action: &'static str,
+    cancel: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alternative: Option<&'static str>,
+    destructive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptReply {
+    Opened,
+    Action,
+    Alternative,
+    Cancel,
+}
+
+struct PendingPrompt {
+    id: String,
+    opened: bool,
+    replies: mpsc::Sender<PromptReply>,
+}
+
+static PROMPT: Mutex<Option<PendingPrompt>> = Mutex::new(None);
+
+/// Acknowledge delivery before drawing the card, then report the selected button.
+/// A late acknowledgment cannot open a card once the native fallback has taken over.
+#[tauri::command]
+pub fn reply_to_quit_prompt(window: WebviewWindow, id: String, reply: PromptReply) -> bool {
+    if window.label() != "main" {
+        return false;
+    }
+    let mut pending = PROMPT.lock().unwrap();
+    let Some(prompt) = pending.as_mut().filter(|prompt| prompt.id == id) else {
+        return false;
+    };
+    if let PromptReply::Opened = reply {
+        if prompt.opened {
+            return false;
+        }
+        prompt.opened = true;
+        return prompt.replies.send(reply).is_ok();
+    }
+    if !prompt.opened {
+        return false;
+    }
+    pending.take().unwrap().replies.send(reply).is_ok()
+}
+
+/// A navigation or destruction invalidates the old card and wakes the quit worker.
+pub fn main_view_lost() {
+    PROMPT.lock().unwrap().take();
+}
+
+impl Question {
+    fn ask(self, app: &AppHandle) -> PromptReply {
+        if let Some(answer) = self.ask_in_app(app) {
+            return answer;
+        }
+        let dialog = app.dialog().message(&self.body).title(&self.title);
+        let dialog = if self.destructive { dialog.kind(MessageDialogKind::Warning) } else { dialog };
+        let buttons = if let Some(alternative) = self.alternative {
+            MessageDialogButtons::YesNoCancelCustom(self.action.into(), alternative.into(), self.cancel.into())
+        } else {
+            MessageDialogButtons::OkCancelCustom(self.action.into(), self.cancel.into())
+        };
+        self.native_reply(dialog.buttons(buttons).blocking_show_with_result())
+    }
+
+    fn ask_in_app(&self, app: &AppHandle) -> Option<PromptReply> {
+        let window = app.get_webview_window("main")?;
+        if !window.is_visible().ok()? || window.is_minimized().ok()? {
+            return None;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let (sender, replies) = mpsc::channel();
+        *PROMPT.lock().unwrap() = Some(PendingPrompt { id: id.clone(), opened: false, replies: sender });
+        if let Err(error) = app.emit_to(tauri::EventTarget::webview_window("main"), "quit-prompt", (&id, self)) {
+            log::warn!("Could not deliver the in-app quit prompt: {error}");
+            main_view_lost();
+            return None;
+        }
+
+        // Allow two seconds for the view to claim the card. Claiming it and
+        // falling back use the same lock, even at the timeout boundary.
+        if replies.recv_timeout(Duration::from_secs(2)).is_err() {
+            let mut pending = PROMPT.lock().unwrap();
+            if pending.as_ref().is_some_and(|prompt| !prompt.opened) {
+                pending.take();
+                return None;
+            }
+            // A claim may already have won the race. Consume its acknowledgment.
+            drop(pending);
+            replies.recv().ok()?;
+        }
+        let _ = window.set_focus();
+        replies.recv().ok()
+    }
+
+    fn native_reply(&self, pressed: MessageDialogResult) -> PromptReply {
+        match pressed {
+            MessageDialogResult::Custom(label) if label == self.action => PromptReply::Action,
+            MessageDialogResult::Custom(label) if self.alternative == Some(label.as_str()) => PromptReply::Alternative,
+            _ => PromptReply::Cancel,
+        }
+    }
+}
+
+fn guarded_question(title: String, body: String) -> Question {
+    Question { title, body, action: QUIT, cancel: STAY, alternative: None, destructive: true }
+}
+
+fn runtime_question() -> Question {
+    Question {
+        title: "Keep work running?".into(),
+        body: "Agents and terminal commands can keep working after TerminalX quits. Choose what quitting should do. You can change this in Settings.".into(),
+        action: KEEP_WORK,
+        alternative: Some(STOP_WORK),
+        cancel: CANCEL,
+        destructive: false,
+    }
+}
 
 /// What quitting now would cut short.
 #[derive(Default)]
@@ -59,12 +187,6 @@ impl QuitGuard {
     }
 }
 
-/// Only the explicit button quits. A dismissal (Escape, the close box) is
-/// reported as the other one.
-fn agreed(pressed: &MessageDialogResult) -> bool {
-    matches!(pressed, MessageDialogResult::Custom(label) if label == QUIT)
-}
-
 /// The web view names the work that quitting would cut short, or clears it.
 #[tauri::command]
 pub fn set_quit_warning(warning: Option<String>) {
@@ -76,6 +198,22 @@ pub fn set_quit_warning(warning: Option<String>) {
 /// quits.
 pub fn held(app: &AppHandle) -> bool {
     if EXIT_READY.load(Ordering::SeqCst) { return false; }
+    if GUARD.asking.load(Ordering::SeqCst) {
+        // A tray or menu retry can bring back a card the person hid or minimized.
+        let card_open = PROMPT.lock().unwrap().as_ref().is_some_and(|prompt| prompt.opened);
+        if card_open {
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_minimized().unwrap_or(false) {
+                    let _ = window.unminimize();
+                }
+                if !window.is_visible().unwrap_or(false) {
+                    let _ = window.show();
+                }
+                let _ = window.set_focus();
+            }
+        }
+        return true;
+    }
     let runtime = app.try_state::<crate::AppState>().and_then(|state| state.runtime());
     let warning = GUARD.pending();
     if runtime.is_none() && warning.is_none() && !requires_stop(EXPLICIT_STOP.load(Ordering::SeqCst), settings::load().quit_behavior) { return false; }
@@ -83,14 +221,9 @@ pub fn held(app: &AppHandle) -> bool {
     let stop_all = EXPLICIT_STOP.swap(false, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
         if let Some(warning) = warning {
-            let pressed = app.dialog().message(warning)
-                .title(format!("Quit {}?", app.package_info().name))
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom(QUIT.into(), STAY.into()))
-                .blocking_show_with_result();
-            if !agreed(&pressed) {
+            let question = guarded_question(format!("Quit {}?", app.package_info().name), warning);
+            if question.ask(&app) != PromptReply::Action {
                 GUARD.asking.store(false, Ordering::SeqCst);
                 return;
             }
@@ -99,12 +232,7 @@ pub fn held(app: &AppHandle) -> bool {
             if let Some(runtime) = runtime {
                 let saved = settings::load().quit_behavior;
                 let policy = if stop_all { QuitBehavior::StopAll } else if let Some(saved) = saved { saved } else {
-                    let pressed = app.dialog()
-                        .message("Agents and terminal commands can keep working after TerminalX quits. Choose what quitting should do. You can change this in Settings.")
-                        .title("Keep work running?")
-                        .buttons(MessageDialogButtons::YesNoCancelCustom(KEEP_WORK.into(), STOP_WORK.into(), CANCEL.into()))
-                        .blocking_show_with_result();
-                    let Some(chosen) = choice(&pressed) else { return Ok(false) };
+                    let Some(chosen) = choice(runtime_question().ask(&app)) else { return Ok(false) };
                     // Read again after the dialog, preserving changes made while it was open.
                     let mut settings = settings::load();
                     settings.quit_behavior = Some(chosen);
@@ -152,11 +280,11 @@ pub fn stop_all_and_quit(app: &AppHandle) {
     app.exit(0);
 }
 
-fn choice(pressed: &MessageDialogResult) -> Option<QuitBehavior> {
-    match pressed {
-        MessageDialogResult::Custom(label) if label == KEEP_WORK => Some(QuitBehavior::KeepRunning),
-        MessageDialogResult::Custom(label) if label == STOP_WORK => Some(QuitBehavior::StopAll),
-        _ => None,
+fn choice(reply: PromptReply) -> Option<QuitBehavior> {
+    match reply {
+        PromptReply::Action => Some(QuitBehavior::KeepRunning),
+        PromptReply::Alternative => Some(QuitBehavior::StopAll),
+        PromptReply::Opened | PromptReply::Cancel => None,
     }
 }
 
@@ -216,20 +344,22 @@ mod tests {
 
     #[test]
     fn dismissing_the_first_choice_never_stops_or_saves_a_preference() {
-        assert_eq!(choice(&MessageDialogResult::Custom(KEEP_WORK.into())), Some(QuitBehavior::KeepRunning));
-        assert_eq!(choice(&MessageDialogResult::Custom(STOP_WORK.into())), Some(QuitBehavior::StopAll));
+        let question = runtime_question();
+        assert_eq!(choice(question.native_reply(MessageDialogResult::Custom(KEEP_WORK.into()))), Some(QuitBehavior::KeepRunning));
+        assert_eq!(choice(question.native_reply(MessageDialogResult::Custom(STOP_WORK.into()))), Some(QuitBehavior::StopAll));
         for result in [MessageDialogResult::Cancel, MessageDialogResult::No, MessageDialogResult::Yes,
             MessageDialogResult::Ok, MessageDialogResult::Custom(CANCEL.into()), MessageDialogResult::Custom("unknown".into())] {
-            assert_eq!(choice(&result), None);
+            assert_eq!(choice(question.native_reply(result)), None);
         }
     }
 
     #[test]
     fn only_the_explicit_button_quits() {
-        assert!(agreed(&MessageDialogResult::Custom(QUIT.into())));
+        let question = guarded_question("Quit TerminalX?".into(), "A worktree clean-up is still running.".into());
+        assert_eq!(question.native_reply(MessageDialogResult::Custom(QUIT.into())), PromptReply::Action);
         // Escape and the close box come back as the other button.
         for other in [MessageDialogResult::Custom(STAY.into()), MessageDialogResult::Cancel, MessageDialogResult::No, MessageDialogResult::Ok, MessageDialogResult::Yes] {
-            assert!(!agreed(&other), "{other:?}");
+            assert_eq!(question.native_reply(other), PromptReply::Cancel);
         }
     }
 }
