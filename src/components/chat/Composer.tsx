@@ -5,7 +5,7 @@ import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getPrefs, subscribePrefs } from "@/lib/prefs";
-import { ArrowUp, AtSign, Bookmark, ChevronDown, CircleAlert, FileText, MessageSquare, Settings2, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
+import { ArrowUp, AtSign, Bookmark, ChevronDown, CircleAlert, FileText, MessageSquare, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { showError } from "@/lib/errorToasts";
 import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { openSettingRow } from "@/lib/settingsLinks";
@@ -31,15 +31,16 @@ import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, useModels } from "@/lib/models";
+import { BYPASS_MODE, EFFORT_LABEL, PERMISSION_MODES, aliasRuns, effortChoices, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, requestAgentSettings, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import { ModelPickerEmpty } from "@/components/chat/ModelPickerEmpty";
+import { TranscriptionInputSubmenu } from "./TranscriptionInputPicker";
+import { ModelSwitchConfirm, ModelSwitchNotice } from "./ModelSwitch";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type FileInput, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
-import { TranscriptionInputSubmenu } from "./TranscriptionInputPicker";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, DropHint, useAttachments } from "./useImageAttachments";
 import { AttachmentChips } from "./ComposerAttachments";
@@ -82,6 +83,10 @@ const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Cod
 const agentName = (id: string) => AGENT_NAMES[id] ?? id;
 /** The account an agent signs in with, where it is not the agent's own. */
 const SIGN_INS: Record<string, string> = { codex: "ChatGPT" };
+/** The picker's Model row when the agent answered with no models. Never the button's label. */
+const NONE_FOUND = "None found";
+/** The permission chip's word for a mode, shorter than the menu's. */
+const shortMode = (mode: string | null | undefined) => (mode === "manual" ? "Ask" : mode === BYPASS_MODE ? "Bypass" : null);
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -221,7 +226,8 @@ export function Composer({
     setRetryingModels(true);
     void Promise.resolve(refreshPickerModels()).finally(() => setRetryingModels(false));
   };
-  const noModels = models.length === 0;
+  // The agent listed nothing: the session's own model is still named, but there is nothing to choose.
+  const noModels = listed.length === 0;
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
   const firstLoad = useRef<ComposerCommands | null>(null);
@@ -246,7 +252,10 @@ export function Composer({
   }, []);
   // The model and permission pickers open on a click and an accessibility press too.
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
-  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  // A model picked mid-chat waits for the reader's word (the prompt cache is rebuilt); once given, it can be undone.
+  const [confirmModel, setConfirmModel] = useState<string | null>(null);
+  const [switched, setSwitched] = useState<{ to: string; from: string } | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
@@ -476,6 +485,7 @@ export function Composer({
     // is free for the next one (#727): what was set aside to send a recalled
     // message comes back, or nothing. Failing, the message comes back here.
     const reviewSend = captureReviewSend(tab.id, text);
+    setSwitched(null);
     const completeHistory = recall.captureSend();
     // Bind this send's learnable correction before the draft is cleared.
     const learnOnSuccess = dictation.prepareSend(text);
@@ -534,7 +544,7 @@ export function Composer({
       }
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
-    if (!pickerOpen && !prMention.open && !modelMenu.open && !optionsOpen && !dictation.dictating && recall.onKeyDown(e)) return;
+    if (!pickerOpen && !prMention.open && !modelMenu.open && !modeMenuOpen && !dictation.dictating && recall.onKeyDown(e)) return;
     if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
@@ -560,21 +570,50 @@ export function Composer({
   const placeholder = heldReason ? heldReason : busy ? (followUps === "hold" ? "Hold a follow-up until the turn ends" : "Send a follow-up — it waits until the agent pauses") : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
-  // The agent answered and named no model: the button says so, as the menu does.
   const noModelsFound = noModels && modelsLoaded && !retryingModels;
-  const modelName = model ? runningModelName(model, reportedModel) : noModelsFound ? "None found" : tab.model ? prettyModelId(tab.model) : "Model";
+  // It keeps the session's own model when the agent lists none: "None found" is said in the menu, not here.
+  const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
   const runs = model ? aliasRuns(model, reportedModel) : null;
-  const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
+  const effortName = tab.effort && (noModels || model?.efforts.length) ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   // A level the agent reported that this model's list does not carry is still the one in use.
   const efforts = effortChoices(model, tab.effort);
   // The pickers show what the agent is running. A choice it has not confirmed yet is said beside them, not shown as made.
-  const pendingNote = pendingSettingsNote(tab, models, busy);
+  // A switch said with its Undo below is not said twice.
+  const pendingNote = pendingSettingsNote(switched && tab.requestedModel === switched.to ? { ...tab, requestedModel: null } : tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
   const modelLock = settingsLockedReason ?? modelLockedReason;
   const modeLock = settingsLockedReason ?? modeLockedReason;
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
+  // Once there is a conversation, a new model rebuilds the prompt cache: asked first. Before the first turn it applies at once.
+  const midChat = hasConversation || history.length > 0 || busy;
+  const labelOf = (id: string) => models.find((m) => m.id === id)?.label ?? prettyModelId(id);
+  const pickModel = (id: string) => {
+    if (id === model?.id) return;
+    if (midChat) setConfirmModel(id);
+    else onSetModel(id);
+  };
+  const confirmSwitch = () => {
+    if (!confirmModel) return;
+    setSwitched({ to: confirmModel, from: model?.id ?? tab.model ?? "" });
+    setConfirmModel(null);
+    onSetModel(confirmModel);
+  };
+  const undoSwitch = () => {
+    if (switched?.from) onSetModel(switched.from);
+    setSwitched(null);
+  };
+  // A model set from elsewhere ends the offer to undo this one.
+  useEffect(() => {
+    setSwitched((was) => (was && tab.model !== was.from ? null : was));
+  }, [tab.model]);
+  useEffect(() => {
+    setConfirmModel(null);
+    setSwitched(null);
+  }, [tab.id]);
+  const modelRowValue = noModels ? (noModelsFound ? NONE_FOUND : "Loading…") : modelName;
+  const percent = contextUsed != null && contextMax != null && contextMax > 0 ? Math.min(100, Math.max(0, Math.round(contextUsed / contextMax * 100))) : null;
 
   // Review comments added from a diff wait in the draft (PRO-392): said above the box until they are sent or removed.
   const reviewsReady = pendingReviewCount(tab.id, draft);
@@ -591,6 +630,7 @@ export function Composer({
         </div>
       )}
       {reviewReceiptError && <div role="alert" className="mb-2 text-xs text-warning">Message accepted, but review comments could not be marked Sent: {reviewReceiptError.message} <button type="button" onClick={() => void reviewReceiptError.retry().then(() => setReviewReceiptError(null), (error) => setReviewReceiptError({ ...reviewReceiptError, message: String(error) }))}>Retry marking Sent</button></div>}
+      {confirmModel && <ModelSwitchConfirm model={labelOf(confirmModel)} onCancel={() => setConfirmModel(null)} onConfirm={confirmSwitch} />}
       <div
         className={cn(
           "relative rounded-2xl bg-composer p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
@@ -660,112 +700,149 @@ export function Composer({
           className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
         <div className="mt-1 flex items-center gap-1" data-composer-toolbar>
-          {/* Nothing can be sent: attaching and dictating into it are off too. */}
-          <AttachButton attach={attach} disabled={disabled} />
-
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
-                <span className={cn("min-w-0 truncate", noModelsFound ? "text-destructive" : "text-foreground")}>{modelName}</span>
-                {/* The effort is a setting of its own: set apart from the model, a step brighter than the tag. */}
-                {effortName ? <><span aria-hidden className="h-3 w-px shrink-0 bg-hairline-strong" /><span className="min-w-0 truncate text-muted-foreground">{effortName}</span></> : null}
+                <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                {/* The effort is a setting of its own, a step quieter than the model. */}
+                {effortName ? <span className="min-w-0 truncate text-muted-foreground">{effortName}</span> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[14rem]">
-              {(hasConversation || history.length > 0 || busy) && (
-                <p className="max-w-72 px-2 py-1.5 text-xs text-muted-foreground" role="note">
-                  Changing model or effort can rebuild the prompt cache. The next response may take longer and use more tokens.
-                </p>
-              )}
-              <DropdownMenuLabel>Model</DropdownMenuLabel>
-              {noModels ? (
-                <ModelPickerEmpty
-                  agent={agentName(tab.harness)}
-                  signIn={SIGN_INS[tab.harness]}
-                  other={agentHandoff?.name}
-                  loading={!modelsLoaded}
-                  retrying={retryingModels}
-                  onRetry={retryModels}
-                  onOpenSettings={requestAgentSettings}
-                />
-              ) : null}
-              <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
-                {modelGroups(models).map((group) => (
-                  <Fragment key={group.title ?? "models"}>
-                    {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
-                    {group.models.map((m) => {
-                      // The ticked alias says what this session reported; the rest, what the CLI listed.
-                      const note = m.id === tab.requestedModel ? "switching…" : m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
-                      return (
-                        <DropdownMenuRadioItem key={m.id} value={m.id} disabled={!modelsAreLocal && !listed.some((choice) => choice.id === m.id)}>
-                          {m.label}
-                          {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
-                        </DropdownMenuRadioItem>
-                      );
-                    })}
-                  </Fragment>
-                ))}
-              </DropdownMenuRadioGroup>
-              {model && efforts.length ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Effort</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={tab.effort ?? model.defaultEffort ?? ""} onValueChange={(v) => onSetEffort(v)}>
-                    {efforts.map((e) => (
-                      <DropdownMenuRadioItem key={e} value={e}>
-                        {EFFORT_LABEL[e] ?? e}
-                        {e === tab.requestedEffort ? <span className="ml-1.5 text-faint">switching…</span> : null}
-                      </DropdownMenuRadioItem>
-                    ))}
+            <DropdownMenuContent align="start" className="min-w-[15rem]">
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger data-testid="model-picker-agent">
+                  <span className="flex-1">Agent</span>
+                  <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{agentName(tab.harness)}</span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="min-w-[15rem]">
+                  <DropdownMenuLabel>Agent</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup value={tab.harness}>
+                    <DropdownMenuRadioItem value={tab.harness}>
+                      <AgentMark id={tab.harness} decorative />
+                      {agentName(tab.harness)}
+                    </DropdownMenuRadioItem>
                   </DropdownMenuRadioGroup>
-                </>
+                  {agentHandoff && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onSelect={agentHandoff.run}>
+                        <AgentMark id={agentHandoff.id} decorative />
+                        <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger data-testid="model-picker-model">
+                  <span className="flex-1">Model</span>
+                  <span className={cn("ml-auto max-w-[10rem] truncate pl-3 text-[12px]", noModelsFound ? "text-destructive" : "text-faint")} data-testid="model-picker-model-value">{modelRowValue}</span>
+                </DropdownMenuSubTrigger>
+                {noModels ? (
+                  // The card stands beside the Model row, where the models would be.
+                  <DropdownMenuSubContent className="w-80 p-0">
+                    <ModelPickerEmpty
+                      agent={agentName(tab.harness)}
+                      signIn={SIGN_INS[tab.harness]}
+                      other={agentHandoff?.name}
+                      loading={!modelsLoaded}
+                      retrying={retryingModels}
+                      onRetry={retryModels}
+                      onOpenSettings={requestAgentSettings}
+                    />
+                  </DropdownMenuSubContent>
+                ) : (
+                  <DropdownMenuSubContent className="min-w-[14rem] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+                    <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={pickModel}>
+                      {modelGroups(models).map((group) => (
+                        <Fragment key={group.title ?? "models"}>
+                          {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
+                          {group.models.map((m) => {
+                            // The ticked alias says what this session reported; the rest, what the CLI listed.
+                            const note = m.id === tab.requestedModel ? "switching…" : m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
+                            return (
+                              <DropdownMenuRadioItem key={m.id} value={m.id} disabled={!modelsAreLocal && !listed.some((choice) => choice.id === m.id)}>
+                                {m.label}
+                                {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
+                              </DropdownMenuRadioItem>
+                            );
+                          })}
+                        </Fragment>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuSubContent>
+                )}
+              </DropdownMenuSub>
+              {model && efforts.length ? (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger data-testid="model-picker-effort">
+                    <span className="flex-1">Effort</span>
+                    <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{effortName ?? (model.defaultEffort ? (EFFORT_LABEL[model.defaultEffort] ?? model.defaultEffort) : "Default")}</span>
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="min-w-[12rem]">
+                    <DropdownMenuRadioGroup value={tab.effort ?? model.defaultEffort ?? ""} onValueChange={(v) => onSetEffort(v)}>
+                      {efforts.map((e) => (
+                        <DropdownMenuRadioItem key={e} value={e}>
+                          {EFFORT_LABEL[e] ?? e}
+                          {e === tab.requestedEffort ? <span className="ml-1.5 text-faint">switching…</span> : null}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
               ) : null}
-              {agentHandoff && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={agentHandoff.run}>
-                    <AgentMark id={agentHandoff.id} decorative />
-                    <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
-                  </DropdownMenuItem>
-                </>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
 
+          <PermissionChip
+            onOpen={setModeMenuOpen}
+            microphone={dictation.available === true}
+            permissions={{
+              label: permissionLabel,
+              tone: modeIsUnguarded(tab.permissionMode) ? "danger" : pickedMode === "plan" ? "plan" : null,
+              lock: modeLock,
+              picked: pickedMode ?? null,
+              reported: tab.permissionMode,
+              requested: tab.requestedPermissionMode ?? null,
+              onChoose: (mode) => chooseMode(tab.harness, mode, onSetMode),
+            }}
+          />
 
-          <div className="ml-auto flex shrink-0 items-center gap-1.5">
-            {/* Dictation and the less used controls sit with Send, out of the way of the pickers. */}
-            <MicButton dictation={dictation} disabled={disabled} />
-            <ComposerOptions
-              onMention={fileSource ? () => {
-                const sep = draft && !/\s$/.test(draft) ? " " : "";
-                const next = draft + sep + "@";
-                onDraftChange(next);
-                setDismissedToken(null);
-                requestAnimationFrame(() => {
-                  ref.current?.focus({ preventScroll: true });
-                  ref.current?.setSelectionRange(next.length, next.length);
-                  setCaret(next.length);
-                });
-              } : null}
-              microphone={dictation.available === true}
-              onOpen={setOptionsOpen}
-              permissions={{
-                label: permissionLabel,
-                tone: modeIsUnguarded(tab.permissionMode) ? "danger" : pickedMode === "plan" ? "plan" : null,
-                lock: modeLock,
-                picked: pickedMode ?? null,
-                reported: tab.permissionMode,
-                requested: tab.requestedPermissionMode ?? null,
-                onChoose: (mode) => chooseMode(tab.harness, mode, onSetMode),
-              }}
-            />
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             <ContextPopover tab={tab} used={contextUsed} max={contextMax} reportedModel={reportedModel} local={modelsAreLocal && !remote}
               turns={turns} compacting={compacting} compactDisabled={disabled || !!heldReason || busy || sending}
               onCompact={() => onSend("/compact", [])} />
+            {percent != null && <span aria-hidden className="-ml-1 pr-1 text-[11.5px] tabular-nums text-muted-foreground" data-testid="context-percent">{percent}%</span>}
+            {fileSource && (
+              <WithTooltip label="Mention a file" keys={["@"]}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0"
+                  aria-label="Mention a file"
+                  disabled={disabled}
+                  onClick={() => {
+                    const sep = draft && !/\s$/.test(draft) ? " " : "";
+                    const next = draft + sep + "@";
+                    onDraftChange(next);
+                    setDismissedToken(null);
+                    requestAnimationFrame(() => {
+                      ref.current?.focus({ preventScroll: true });
+                      ref.current?.setSelectionRange(next.length, next.length);
+                      setCaret(next.length);
+                    });
+                  }}
+                >
+                  <AtSign />
+                </Button>
+              </WithTooltip>
+            )}
+            {/* Nothing can be sent: attaching and dictating into it are off too. */}
+            <AttachButton attach={attach} disabled={disabled} />
+            <MicButton dictation={dictation} disabled={disabled} />
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
             {!sending && busy && canStop && !draft.trim() && !sendable.length ? (
@@ -817,6 +894,7 @@ export function Composer({
           <button type="button" className="underline-offset-2 hover:text-muted-foreground hover:underline" onClick={() => openSettingRow("agents.followUps")}>Settings › Agents › Follow-ups</button>
         </div>
       ) : null}
+      {switched && tab.requestedModel === switched.to && <ModelSwitchNotice model={labelOf(switched.to)} onUndo={undoSwitch} />}
       {setupRunning && <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status">Setup running</div>}
       {pendingNote && (
         <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-pending">
@@ -832,7 +910,7 @@ export function Composer({
   );
 }
 
-/** The permission mode, as the options menu shows and changes it. */
+/** The permission mode, as its chip shows and changes it. */
 interface PermissionChoice {
   label: string;
   /** A mode worth seeing without opening the menu: one that asks nothing (danger), or plan. */
@@ -854,58 +932,30 @@ function PermissionIcon({ tone }: { tone: PermissionChoice["tone"] }) {
 }
 
 /**
- * The composer's less used controls, behind one button so the toolbar keeps
- * to what most turns touch: the permission mode, mentioning a file (typing
- * `@` does the same) and the microphone dictation records from. The mode in
- * force is named in the button's tooltip.
+ * The permission mode as a chip beside the model (`Ask ⌄`): the mode in force
+ * is always on screen, and its menu picks another.
  */
-function ComposerOptions({ onMention, microphone, permissions, onOpen }: { onMention: (() => void) | null; microphone: boolean; permissions: PermissionChoice; onOpen: (open: boolean) => void }) {
-  // A mention goes on in the text box: the menu must not hand focus back to its button as it closes.
-  const mentioning = useRef(false);
+function PermissionChip({ permissions: p, onOpen, microphone }: { permissions: PermissionChoice; onOpen: (open: boolean) => void; microphone: boolean }) {
   // Opens on a click and an accessibility press too, like the model picker.
   const menu = useRowMenu({ onOpenChange: onOpen });
+  const short = shortMode(p.picked) ?? p.label;
   return (
     <DropdownMenu {...menu.root}>
-      <WithTooltip label={`More options · ${permissions.label}`}>
-        <DropdownMenuTrigger asChild {...menu.trigger}>
-          <Button variant="ghost" size="icon-sm" className="relative shrink-0" aria-label="More options" data-testid="composer-options">
-            <Settings2 />
-          </Button>
-        </DropdownMenuTrigger>
-      </WithTooltip>
-      <DropdownMenuContent
-        align="end"
-        className="min-w-[14rem]"
-        onCloseAutoFocus={(event) => {
-          if (mentioning.current) event.preventDefault();
-          mentioning.current = false;
-        }}
-      >
-        <PermissionSubmenu permissions={permissions} />
-        {(onMention || microphone) && <DropdownMenuSeparator />}
-        {onMention && (
-          <DropdownMenuItem onSelect={() => { mentioning.current = true; onMention(); }}>
-            <AtSign /> Mention a file
-            <span className="ml-auto pl-3 text-faint">@</span>
-          </DropdownMenuItem>
-        )}
-        {microphone && <TranscriptionInputSubmenu />}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }) {
-  return (
-    <DropdownMenuSub>
-      <DropdownMenuSubTrigger disabled={!!p.lock} title={p.lock ?? `Permission mode: ${p.label}`} aria-label={`Permission mode: ${p.lock ?? p.label}`} data-testid="permission-mode">
-        <PermissionIcon tone={p.tone} />
-        Permissions
-        <span className="ml-auto max-w-48 truncate pl-3 text-faint" data-testid="permission-mode-label">
-          {p.label}
-        </span>
-      </DropdownMenuSubTrigger>
-      <DropdownMenuSubContent className="min-w-[16rem]">
+      <DropdownMenuTrigger asChild {...menu.trigger} disabled={!!p.lock}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn("shrink-0 gap-1.5 px-2", p.tone === "danger" ? "text-destructive" : p.tone === "plan" ? "text-info" : "text-muted-foreground")}
+          title={p.lock ?? `Permission mode: ${p.label}`}
+          aria-label={`Permission mode: ${p.lock ?? p.label}`}
+          data-testid="permission-mode"
+        >
+          <PermissionIcon tone={p.tone} />
+          <span className="max-w-40 truncate" data-testid="permission-mode-label">{short}</span>
+          <ChevronDown className="size-3 text-faint" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[16rem]">
         <DropdownMenuLabel>Permissions</DropdownMenuLabel>
         <DropdownMenuRadioGroup value={p.picked ?? p.reported} onValueChange={p.onChoose}>
           {/* A mode set in the terminal that the picker does not offer is still the one in force. */}
@@ -925,8 +975,9 @@ function PermissionSubmenu({ permissions: p }: { permissions: PermissionChoice }
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
-      </DropdownMenuSubContent>
-    </DropdownMenuSub>
+        {microphone && <><DropdownMenuSeparator /><TranscriptionInputSubmenu /></>}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
