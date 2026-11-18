@@ -1148,8 +1148,9 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
-- **A headless server** has no host binding until PRO-368, so it is not listed
-  on the account; it pairs from its terminal (PRO-353).
+- **A headless server** has no host binding, so it is not listed on the
+  account; it pairs from its terminal (PRO-353). Relay registration does not
+  create that binding.
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -2047,9 +2048,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Discovery.** A headless machine can be listed on the phone from the account
-  when it registers with the relay; a phone can also list it after pairing from
-  its terminal. The account list shows Linux and SSH machines as servers.
+- **Discovery.** Relay registration alone does not make a headless machine
+  discoverable on a phone through the account: the headless runtime does not
+  create a host binding or run the window's host-binding poll. A phone can list
+  the machine after pairing from its terminal. The account list shows Linux and
+  SSH machines as servers when they are listed.
 
 ## Session feature parity
 
