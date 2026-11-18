@@ -255,6 +255,9 @@ struct AccountRelay {
     watch: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(unix)]
+type PhoneAdmission = (Arc<phones::Phones>, HostKeypair, u16, tokio::sync::watch::Receiver<u64>, u64);
+
 pub struct MachineHost {
     data_dir: PathBuf,
     keys: key::KeyStore,
@@ -635,7 +638,7 @@ impl MachineHost {
 
     /// Capture the admission fence with route selection, before any handshake.
     #[cfg(unix)]
-    pub(crate) fn phone_admission(&self) -> Option<(Arc<phones::Phones>, HostKeypair, u16, tokio::sync::watch::Receiver<u64>, u64)> {
+    pub(crate) fn phone_admission(&self) -> Option<PhoneAdmission> {
         let state = self.state.lock().unwrap();
         if !state.enabled || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) { return None; }
         let phones = self.phones.get()?.clone();
