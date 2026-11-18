@@ -13,6 +13,8 @@ use crate::store::index::SessionEntry;
 pub(crate) const CREATED_EVENT: &str = "workspace_created";
 
 const EVENT: &str = "workspace_setup_changed";
+/// What follows the session in a setup attempt's pane id.
+const SETUP_PANE: &str = "workspace-setup-";
 const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_CONCURRENT: usize = 2;
 static RUN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
@@ -99,7 +101,7 @@ fn script(entry: &SessionEntry) -> Result<Option<String>> {
     Ok((!command.trim().is_empty()).then_some(command))
 }
 fn attempt(entry: &SessionEntry, command: String) -> Setup {
-    Setup { privacy: Some(crate::github_process::ticket()), session_id: entry.id.clone(), pane_id: format!("{}:workspace-setup-{}", entry.id, uuid::Uuid::now_v7()),
+    Setup { privacy: Some(crate::github_process::ticket()), session_id: entry.id.clone(), pane_id: format!("{}:{SETUP_PANE}{}", entry.id, uuid::Uuid::now_v7()),
         command, status: Status::Pending, exit_code: None, error: None, log: String::new(), has_pane: false, local_script: true }
 }
 
@@ -257,6 +259,29 @@ pub fn list(manager: &SessionManager) -> Result<Vec<Setup>> {
         }
     }
     Ok(setups)
+}
+
+/// One session's setup attempt, as [`list`] reports each: none when the
+/// workspace never had one (a project's own folder, or no script saved).
+pub fn current(manager: &SessionManager, session: &str) -> Result<Option<Setup>> {
+    let _run = RUN_LOCK.lock();
+    store::index::get(session)?;
+    let Some(mut setup) = read(session)? else { return Ok(None) };
+    setup.has_pane = manager.terminals().shell(&setup.pane_id).is_some();
+    Ok(Some(setup))
+}
+
+/// The session a setup attempt's pane belongs to: its id is
+/// `<session>:workspace-setup-<attempt>` ([`attempt`]).
+pub fn pane_session(pane: &str) -> Option<&str> {
+    let (session, rest) = pane.split_once(':')?;
+    (!session.is_empty() && rest.strip_prefix(SETUP_PANE).is_some_and(|attempt| !attempt.is_empty())).then_some(session)
+}
+
+/// The project's setup script as this runtime would run it now; none when
+/// none is saved (or it cannot be read).
+pub fn saved_script(project_path: &str) -> Option<String> {
+    store::configuration::setup_script(Path::new(project_path)).ok().filter(|command| !command.trim().is_empty())
 }
 
 pub fn log(manager: &SessionManager, session: &str, pane: &str) -> Result<String> {

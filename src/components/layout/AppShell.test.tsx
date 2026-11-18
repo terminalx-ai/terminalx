@@ -10,6 +10,8 @@ vi.mock("@/lib/dataPrivacy", () => ({
 import "@testing-library/dom";
 import type { ComponentProps, ReactNode } from "react";
 import type { Project } from "@/types/session";
+import type { PairedDevice } from "@/types/pairing";
+import { device } from "@/components/pairing/pairingFixtures.test-utils";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
@@ -115,6 +117,7 @@ vi.mock("@/lib/machineDashboard", () => ({}));
 vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
 vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
 vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
+vi.mock("@/components/session/CloudSessionHost", () => ({ CloudSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="cloud-session" data-key={sessionKey} /> }));
 vi.mock("@/components/cloud/CloudWorkspaceMain", () => ({ CloudWorkspaceMain: ({ workspaceKey }: { workspaceKey: string }) => <main data-testid="cloud-workspace-main" data-key={workspaceKey} /> }));
 vi.mock("@/lib/orchestration", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/orchestration")>()),
@@ -168,7 +171,18 @@ vi.mock("@/lib/cloudPresence", () => ({ bootCloudPresence: vi.fn() }));
 vi.mock("@/components/layout/WorkspaceReassignedNotices", () => ({ WorkspaceReassignedNotices: () => null }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
-vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
+const pairing = vi.hoisted(() => ({ devices: [] as PairedDevice[] }));
+vi.mock("@/lib/pairing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/pairing")>();
+  return {
+    ...actual,
+    bootPairing: vi.fn(),
+    usePairing: () => {
+      const state = actual.usePairing();
+      return { ...state, status: { ...state.status, devices: pairing.devices } };
+    },
+  };
+});
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
 vi.mock("@/components/ui/tooltip", () => ({ KbdGroup: () => null, WithTooltip: ({ children }: { children: ReactNode }) => children }));
@@ -251,6 +265,7 @@ const { openSettingRow } = await import("@/lib/settingsLinks");
 const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
+  pairing.devices = [];
   scriptSettings.real = false;
   scriptSettings.step.mockClear();
   scriptSettings.update.mockReset();
@@ -323,6 +338,22 @@ describe("machine sessions (PRO-346)", () => {
     expect(machineSessions.archiveLocal.mock.calls).toEqual(where === "local" ? [[key, true]] : []);
     expect(machineSessions.update.mock.calls).toEqual(where === "machine" ? [[key, { archived: true }]] : []);
   });
+});
+
+it.each([
+  ["cloud:org:w1:s1", "cloud-session"],
+  ["machine:m1:P1:s1", "machine-session"],
+])("shows local phone access while viewing %s with its right panel open", (key, view) => {
+  sessionStore.selectedSessionId = key as never;
+  pairing.devices = [device({ connection: { transport: "relay", since: "2026-11-17T00:00:00Z" } })];
+  render(<AppShell />);
+
+  expect(screen.getByTestId(view)).toBeTruthy();
+  expect(getPrefs().panelOpen).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Device · 1 connected phone" }));
+  const details = screen.getByRole("dialog", { name: "Device" });
+  expect(details.textContent).toContain("Connected phones can see and drive sessions on this Mac.");
+  expect(screen.getByRole("button", { name: "Disconnect Priya's iPhone" })).toBeTruthy();
 });
 
 describe("new-session right panel", () => {

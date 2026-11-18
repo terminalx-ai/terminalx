@@ -82,7 +82,7 @@ fn stamp(rt: &mut TabRuntime, evidence: CompactionEvidence, confirmed_start: boo
         // A retained operation may belong to the provider before this tab
         // switched harnesses. Keep its validated scope and envelope aligned.
         id: uuid::Uuid::now_v7().to_string(), session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), harness: evidence.scope.provider.clone(),
-        seq: rt.seq, ts: index::now(), message_ts: None,
+        seq: rt.seq, ts: index::now(), message_ts: None, prompt_request_id: None,
         subagent: evidence.scope.subagent_id.clone().map(|id| SubagentRef { id, label: None }),
         payload: Payload::ContextCompactionLifecycle { evidence, confirmed_start, persisted },
     }

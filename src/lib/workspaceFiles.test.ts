@@ -112,3 +112,48 @@ describe("a machine session's files, rooted at its worktree (PRO-347)", () => {
     files.dispose();
   });
 });
+
+describe("a machine session's files in a worktree outside its project (PRO-405)", () => {
+  const worktree = "/Users/me/worktrees/read";
+  const asked: { method: string; params: Record<string, unknown> }[] = [];
+  const source = () =>
+    cloudFileSource(
+      `machine:m:p/${worktree}`,
+      client((method, params) => {
+        asked.push({ method, params });
+        // The runtime names paths in an outside worktree absolutely, as it lists the worktree.
+        if (method === "fs.list") return { path: params.path, entries: [{ name: "src", path: `${params.path}/src`, kind: "directory" }, { name: "x", path: "elsewhere/x", kind: "file" }] };
+        if (method === "fs.read") return { path: params.path, size: 2, version: "v1", offset: 0, eof: true, etag: "e1", text: "hi" };
+        if (method === "fs.search") return { searchId: params.searchId, hits: [{ path: `${worktree}/src/a.ts`, line: 1, col: 0, text: "hi", matches: [[0, 2]] }, { path: "README.md", line: 1, col: 0, text: "hi", matches: [[0, 2]] }], files: 2, capped: false, cancelled: false };
+        if (method === "git.status") return { repository: true, repo: params.repo, files: [file("src/a.ts")] };
+        throw { code: "method_not_found" };
+      }),
+      false,
+      worktree,
+    );
+
+  it("asks for the worktree's absolute paths and gives back paths relative to it", async () => {
+    asked.length = 0;
+    const files = source();
+    const top = await files.listDir("");
+    await files.listDir("src");
+    expect(asked.filter((call) => call.method === "fs.list").map((call) => call.params.path)).toEqual([worktree, `${worktree}/src`]);
+    expect(top.map((entry) => entry.path)).toEqual(["src", "x"]);
+    expect((await files.readText("src/a.ts")).content).toBe("hi");
+    expect(asked.find((call) => call.method === "fs.read")?.params.path).toBe(`${worktree}/src/a.ts`);
+    // Nothing relative to the worktree may climb out of it.
+    await expect(files.readText("../other/a.ts")).rejects.toThrow();
+    files.dispose();
+  });
+
+  it("searches the worktree only and reads its Git badges from its own repository", async () => {
+    asked.length = 0;
+    const files = source();
+    const found = await files.search!({ query: "hi", regex: false, caseSensitive: false, wholeWord: false }, new AbortController().signal);
+    expect(asked.find((call) => call.method === "fs.search")?.params.path).toBe(worktree);
+    expect(found.hits.map((hit) => hit.path)).toEqual(["src/a.ts"]);
+    expect(await files.changes!()).toEqual([{ path: "src/a.ts", status: "modified" }]);
+    expect(asked.filter((call) => call.method === "git.status").map((call) => call.params.repo)).toEqual([worktree]);
+    files.dispose();
+  });
+});

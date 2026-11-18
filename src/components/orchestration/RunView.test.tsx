@@ -1392,7 +1392,8 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     expect(detail().textContent).toContain("With the lead");
     fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("is not done: `cargo t` exited 1 in the lead's checkout"));
-    expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]);
+    expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store", accept: [] }]);
+    expect(calls("orchestration_finish_widens")).toEqual([]);
     fireEvent.click(within(detail()).getByRole("button", { name: "Open lead chat" }));
     expect(onShowChat).toHaveBeenCalled();
     expect(within(detail()).getByRole("button", { name: "Skip piece" })).toBeTruthy();
@@ -1404,14 +1405,47 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     const store = run.pieces[1];
     const held = { ...store, state: "lead" as const, note: "Taken over by the lead: it finishes the piece in its own checkout.", tries: [...(store.tries ?? []), { step: "lead" as const, model: "opus", fromCommit: "4d1c0e7", heldToOwns: true }] };
     const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
+    answers.orchestration_finish_widens = () => Promise.resolve(["src/store/projects.rs"]);
+    // The lead committed another file outside it after the list was shown: the person is asked again.
+    answers.orchestration_finish = (args: unknown) => (args as { accept: string[] }).accept.includes("src/store/index.rs")
+      ? Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] })
+      : Promise.reject(new Error(JSON.stringify({ code: "confirm_widening", message: "Finishing piece store adds files outside the files it owns to it.", details: { piece: "store", files: ["src/store/projects.rs", "src/store/index.rs"] } })));
+    await open(heldRun);
+    pick("store", "Typed store module");
+    expect(within(detail()).getByTestId("piece-held-to-owns").textContent).toBe("The lead is held to this piece's files. Check and finish lists any it changed outside them and asks before adding them to the piece.");
+    // Check and finish lists what it would add, and runs nothing until the person confirms.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(within(detail()).getByTestId("finish-widens")).toBeTruthy());
+    expect([...within(detail()).getByTestId("finish-widens").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["src/store/projects.rs"]);
+    expect(calls("orchestration_finish_widens")).toEqual([{ id: "run-1", piece: "store" }]);
+    expect(calls("orchestration_finish")).toEqual([]);
+    // Cancel leaves it as it was.
+    fireEvent.click(within(detail()).getByRole("button", { name: "Cancel" }));
+    expect(within(detail()).queryByTestId("finish-widens")).toBeNull();
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(within(detail()).getByTestId("finish-widens")).toBeTruthy());
+    fireEvent.click(within(detail()).getByRole("button", { name: "Add and finish" }));
+    await waitFor(() => expect([...within(detail()).getByTestId("finish-widens").querySelectorAll("li")].map((item) => item.textContent)).toEqual(["src/store/projects.rs", "src/store/index.rs"]));
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(within(detail()).getByRole("button", { name: "Add and finish" }));
+    await waitFor(() => expect(calls("orchestration_finish")).toEqual([
+      { id: "run-1", piece: "store", accept: ["src/store/projects.rs"] },
+      { id: "run-1", piece: "store", accept: ["src/store/projects.rs", "src/store/index.rs"] },
+    ]));
+  });
+
+  it("finishes a held piece at once when the lead changed nothing outside it", async () => {
+    const run = blockedRun();
+    const store = run.pieces[1];
+    const held = { ...store, state: "lead" as const, tries: [...(store.tries ?? []), { step: "lead" as const, model: "opus", fromCommit: "4d1c0e7", heldToOwns: true }] };
+    const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
+    answers.orchestration_finish_widens = () => Promise.resolve([]);
     answers.orchestration_finish = () => Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] });
     await open(heldRun);
     pick("store", "Typed store module");
-    expect(within(detail()).getByTestId("piece-held-to-owns").textContent).toBe("The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.");
-    const finish = within(detail()).getByRole("button", { name: "Check and finish" });
-    expect(finish.getAttribute("title")).toContain("files it changed outside the piece become the piece's");
-    fireEvent.click(finish);
-    await waitFor(() => expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store" }]));
+    fireEvent.click(within(detail()).getByRole("button", { name: "Check and finish" }));
+    await waitFor(() => expect(calls("orchestration_finish")).toEqual([{ id: "run-1", piece: "store", accept: [] }]));
+    expect(within(detail()).queryByTestId("finish-widens")).toBeNull();
   });
 
   it("lets a piece title wrap rather than cut it short", async () => {

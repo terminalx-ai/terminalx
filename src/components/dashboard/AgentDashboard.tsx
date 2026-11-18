@@ -43,6 +43,7 @@ import type { SessionEntry } from "@/types/session";
 import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
+import { useSessionRowFacts } from "@/lib/sessionRowStatus";
 
 /** A card: a local session, a cloud one (PRO-23 CS-19) or one on a paired machine (PRO-346), in the same columns. */
 type CardSession = (SessionEntry | CloudDashboardSession | MachineDashboardSession) & { ownerId?: string | null };
@@ -104,11 +105,12 @@ export function AgentDashboard() {
   const showWhere = pairedMachines.length > 0;
   const [placeChoice, setPlace] = useState<Place>("all");
   const place: Place = showWhere && (placeChoice === "all" || placeChoice === "local" || placeChoice === "cloud" || pairedMachines.some((m) => machineSectionKey(m.machineId) === placeChoice)) ? placeChoice : "all";
+  const localFacts = useSessionRowFacts(store.sessions);
   const everywhere = useMemo<CardSession[]>(() => [
-    ...store.sessions.map((session) => ({ ...session, ownerId: localOwner })),
+    ...store.sessions.map((session) => ({ ...session, ownerId: localOwner, rowStatus: localFacts[session.id] ?? session.rowStatus })),
     ...visibleCloud,
     ...(showWhere ? machineSessions : []),
-  ], [store.sessions, visibleCloud, showWhere, machineSessions, localOwner]);
+  ], [store.sessions, visibleCloud, showWhere, machineSessions, localOwner, localFacts]);
   const sessions = useMemo(() => (place === "all" ? everywhere : everywhere.filter((session) => placeOf(session) === place)), [everywhere, place]);
   // The menu's counts: sessions with an agent that are not archived, wherever the other filters stand.
   const placeCounts = useMemo(() => {
@@ -160,6 +162,15 @@ export function AgentDashboard() {
     [sessions, query, pathFilters, projectName],
   );
   const team = useTeamOverview(baseFiltered, selectedOrganization ?? null, owners);
+  const hiddenWorkingAutomations = (filters.automations ?? "hide") === "hide" && bucketSessions(everywhere).working.some((session) => !!session.automation);
+  const scoped = !!query.trim() || hasFilters(filters) || preferences.owners.length > 0 || place !== "all" || team.scoped || filters.automations === "only" || filters.archived === "only" || hiddenWorkingAutomations;
+  const clearScope = () => {
+    setQuery("");
+    setFilters({ ...NO_FILTERS, automations: "show", archived: "show" });
+    setPreferences({ ...preferences, owners: [] });
+    setPlace("all");
+    team.clearScope();
+  };
   const filtered = team.rows;
   const buckets = useMemo(() => ({
     ...bucketSessions(filtered),
@@ -402,7 +413,7 @@ export function AgentDashboard() {
       ) : <div className="min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-thin px-4 pt-3 pb-4 @min-[1000px]:overflow-x-auto @min-[1000px]:overflow-y-hidden">
         <div className="flex flex-col gap-4 @min-[1000px]:h-full @min-[1000px]:flex-row @min-[1000px]:gap-3">
           {boardColumns.map((c) => (
-            <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading}>
+            <Column key={c.id} id={c.id} label={c.label} count={buckets[c.id].length} loading={loading} clearScope={c.id === "working" && scoped ? clearScope : undefined}>
               {shown[c.id].map((s) =>
                 isMachineDashboardSession(s) ? (
                   <MachineAgentCard
@@ -498,12 +509,14 @@ function Column({
   count,
   loading,
   children,
+  clearScope,
 }: {
   id: DashboardState;
   label: string;
   count: number;
   loading: boolean;
   children: ReactNode;
+  clearScope?: () => void;
 }) {
   const empty = count === 0 && !loading;
   return (
@@ -531,7 +544,7 @@ function Column({
             <AgentCardSkeleton />
           </>
         ) : empty ? (
-          <div className="rounded-lg px-2 py-3 text-[12px] text-faint">{EMPTY[id]}</div>
+          <div className="rounded-lg px-2 py-3 text-[12px] text-faint">{clearScope ? <>No running sessions in the current view. <button type="button" className="underline" onClick={clearScope}>Show all sessions</button></> : EMPTY[id]}</div>
         ) : (
           children
         )}

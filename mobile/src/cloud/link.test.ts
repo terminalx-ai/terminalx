@@ -108,7 +108,6 @@ describe("the phone's connection to a cloud workspace", () => {
     ["suspended", "suspended"],
     ["archived", "suspended"],
     [null, "stopped"],
-    ["attention-required", "stopped"],
   ] as const)("never asks to open a workspace the list calls %s: it parks, and nothing resumes", async (listed, expected) => {
     const h = harness(listed);
     h.link.start();
@@ -117,6 +116,13 @@ describe("the phone's connection to a cloud workspace", () => {
     expect(h.link.state.state).toBe(expected);
     expect(h.open).not.toHaveBeenCalled();
     expect(h.runtimes).toEqual([]);
+  });
+
+  it("opens an attention-required workspace without waking it when its runtime is online", async () => {
+    const h = harness("attention-required");
+    h.link.start();
+    await connected(h);
+    expect(h.open).toHaveBeenCalled();
   });
 
   it("connects once the list says a parked workspace is running", async () => {

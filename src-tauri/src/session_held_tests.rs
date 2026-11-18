@@ -327,7 +327,7 @@ fn an_idle_send_that_meets_a_new_terminal_turn_is_held_at_the_final_send_lock() 
     let rig = started();
     let admission = crate::issue_pipeline::admission::lock_for(SESSION, TAB);
     let outcome = rig.manager.send_admitted(&admission, SESSION, TAB,
-        PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: Some(false), mobile: None, shared_connection: None, author: None,
+        PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: Some(false), mobile: None, shared_connection: None, author: None,
             agent: "arrived during turn".into(), display: "arrived during turn".into() },
         Vec::new(), None, crate::recovery_log::Origin::Composer).unwrap();
     assert!(outcome.queued);

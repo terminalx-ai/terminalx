@@ -1,13 +1,24 @@
 import { Smartphone } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/cn";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
-import { disconnectDevice } from "@/lib/pairing";
+import { disconnectDevice, usePairing } from "@/lib/pairing";
 import type { PairedDevice } from "@/types/pairing";
+import { pairedDevices } from "./PairedDevices";
 
-export function ConnectedDevices({ devices, busy, error }: { devices: PairedDevice[]; busy: boolean; error: string | null }) {
+export function useConnectedDevices() {
+  const { status, busy } = usePairing();
+  return {
+    devices: pairedDevices(status.devices).filter((device) => device.connection),
+    busy,
+    error: status.lastError,
+  };
+}
+
+export function ConnectedDevices({ devices, busy, error, className }: { devices: PairedDevice[]; busy: boolean; error: string | null; className?: string }) {
   const privacy = useDataPrivacy();
   return (
-    <div className="flex h-full flex-col gap-2 overflow-auto px-3 py-2.5">
+    <div className={cn("flex h-full flex-col gap-2 overflow-auto px-3 py-2.5", className)}>
       {devices.length === 0 ? (
         <p className="text-xs text-muted-foreground">No devices connected</p>
       ) : (

@@ -30,6 +30,8 @@ const stateLabel = (state: string) => labels[state] ?? state.toLowerCase().repla
 type ConversationProps = {
   source: Pick<GitSource, "conversation" | "cloud" | "canWrite" | "errorMessage">; row: SessionPr; active: boolean; refresh: number;
   onEdited: (title: string, body: string) => void;
+  /** Who reviews it and how many threads are open, for the PR's header line (PRO-394). */
+  onSummary?: (summary: { reviewers: PrReviewer[]; unresolvedThreads: number }) => void;
   /** The CHECKS section, placed between REVIEW and DESCRIPTION (design 05.08). */
   checks?: ReactNode;
   /**
@@ -58,8 +60,13 @@ export function PrConversation(props: ConversationProps) {
   return <ConversationContent key={selected.current.generation} {...props} access={access} />;
 }
 
-function ConversationContent({ source, row, active, refresh, onEdited, access, checks, merged, whatNext, onRead }: ConversationProps & { access: ConversationAccess }) {
+function ConversationContent({ source, row, active, refresh, onEdited, onSummary, access, checks, merged, whatNext, onRead }: ConversationProps & { access: ConversationAccess }) {
   const [data, setData] = useState<Conversation | null>(null);
+  const summarise = useRef(onSummary);
+  summarise.current = onSummary;
+  useEffect(() => {
+    if (data) summarise.current?.({ reviewers: data.reviewers, unresolvedThreads: data.unresolvedThreads });
+  }, [data?.reviewers, data?.unresolvedThreads]);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

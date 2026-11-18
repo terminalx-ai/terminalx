@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
 import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
+import { bucketSessions } from "@terminalx/portable/dashboard";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
   id, title: `Chat ${id}`, project: "terminalx", worktree: `branch-${id}`, modified: "2026-11-07T10:00:00Z",
@@ -83,6 +84,20 @@ describe("a row's status", () => {
 });
 
 describe("the session list", () => {
+  it("agrees with the desktop board on outstanding background work as it clears", () => {
+    const active = reported("active", [{ status: "in_progress" }]);
+    const background = reported("background", [{ status: "completed", activity: "background" }]);
+    const compare = (items: SessionSummary[]) => {
+      const rows = chatRows(items);
+      const desktop = items.map((item) => ({ ...item, projectPath: "/project", cwd: "/project", archived: false }));
+      const working = bucketSessions(desktop).working.map((item) => item.id).sort();
+      expect(filterCounts(rows).working).toBe(working.length);
+      expect(listSections(rows, "working").flatMap((section) => section.data.map((row) => row.session.id)).sort()).toEqual(working);
+      return working;
+    };
+    expect(compare([active, background])).toEqual(["active", "background"]);
+    expect(compare([active, reported("background", [{ status: "completed" }])])).toEqual(["active"]);
+  });
   it("puts sessions that wait on the person first, then by last activity", () => {
     const rows = chatRows([
       session("old", { modified: "2026-11-01T10:00:00Z" }),
