@@ -485,10 +485,14 @@ pub fn run() {
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             // Pairing codes and approvals from this window prove it is the
             // window, which has no terminal (PRO-369).
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
             {
                 let keys = Arc::downgrade(&pairing);
-                serve_cli::consent::speak_as_window(Box::new(move || keys.upgrade()?.consent_key()));
+                serve_cli::consent::speak_as_window(Box::new(move || {
+                    keys.upgrade()
+                        .ok_or_else(|| anyhow::anyhow!("TerminalX pairing is unavailable. Restart TerminalX and try again."))?
+                        .consent_key()
+                }));
             }
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
