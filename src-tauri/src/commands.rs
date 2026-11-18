@@ -2807,6 +2807,7 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             if let Some(provenance) = &mut wt.worktree_base { provenance.from = None; }
         }
         entry.cwd = wt.path.clone();
+        entry.set_checkout_root(Some(&wt.path));
         entry.worktree_name = Some(wt.name.clone());
         entry.branch = Some(wt.branch.clone());
         entry.base_ref = Some(wt.base_tree.clone());
@@ -4927,6 +4928,9 @@ mod command_tests {
         assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
         assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
         let sink = crate::sink::BroadcastSink::new(16);
+        std::fs::remove_dir_all(&dest.cwd).unwrap();
+        assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
+        assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
         session_ops::delete_session_blocking(&sink, &companion.id, &|_| {}).unwrap();
         let path = session_ops::sole_workspace_of(&dest.id).unwrap().unwrap();
         assert_eq!(std::path::Path::new(&path), fork_root);
