@@ -17,7 +17,7 @@ import { api, type PullRequest } from "@/lib/api";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { noteChangesCount, useChangesCount, useChecksMark } from "@/lib/panelMarks";
 import { openFile } from "@/lib/editors";
-import type { FileSource } from "@/lib/workspaceFiles";
+import { pathInFileRoot, type FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
@@ -189,11 +189,10 @@ export function RightPanel({
     };
   }, [cwd, gitSource, branch, labelMode, refreshTick, isGit]);
 
-  // A machine's file source can be rooted at its worktree, below the Git workspace.
+  // Git paths are relative to the selected repository, which can differ from the Files root.
   const [gitWorkspace, gitRepository] = gitSource?.cloud ? gitSource.key.split("|") : [];
   const fileBase = fileSource?.key === gitWorkspace ? "" : gitWorkspace && fileSource?.key.startsWith(`${gitWorkspace}/`) ? fileSource.key.slice(gitWorkspace.length + 1) : null;
   const repository = gitRepository === "." ? "" : gitRepository;
-  const filePrefix = fileBase === null || repository === undefined ? null : !fileBase ? repository : repository === fileBase ? "" : repository.startsWith(`${fileBase}/`) ? repository.slice(fileBase.length + 1) : null;
 
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : tab === "changes" && labelMode === "base" ? null : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
@@ -339,8 +338,9 @@ export function RightPanel({
                 key={refreshTick}
                 cwd={cwd}
                 source={gitSource}
-                onOpenFile={fileSource && filePrefix !== null ? (path) => {
-                  openFile(sessionId ?? `checkout:${cwd}`, cwd, filePrefix ? `${filePrefix}/${path}` : path, undefined, cwd, fileSource.key);
+                openFileAction={fileSource && fileBase !== null && repository !== undefined ? (path) => {
+                  const relative = pathInFileRoot(fileBase, repository ? `${repository}/${path}` : path);
+                  return relative ? () => openFile(sessionId ?? `checkout:${cwd}`, cwd, relative, undefined, cwd, fileSource.key) : undefined;
                 } : undefined}
                 events={events}
                 version={version}

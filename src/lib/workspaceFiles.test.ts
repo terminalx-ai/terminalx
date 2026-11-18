@@ -77,6 +77,51 @@ describe("Git badges of a cloud workspace's file tree", () => {
 });
 
 describe("a machine session's files, rooted at its worktree (PRO-347)", () => {
+  it.each([
+    ["src", ".", "src", ["."]],
+    ["trees/topic/src", "trees/topic", "src", [".", "trees", "trees/topic", "trees/topic/src-sibling"]],
+    ["/outside/topic/src", "/outside/topic", "src", [".", "/outside/topic"]],
+  ] as const)("scopes change badges for %s to its containing repository", async (base, repo, prefix, repositories) => {
+    const source = cloudFileSource(
+      `machine:m:p/${base}`,
+      client((method, params) => {
+        if (method === "git.repositories") return { repositories: repositories.map((name) => ({ repo: name })) };
+        expect(method).toBe("git.status");
+        expect(params).toEqual({ repo });
+        return { repository: true, repo, files: [file(`${prefix}/nested/main.ts`), file(`${prefix}-sibling/other.ts`), file("outside.ts")] };
+      }),
+      false,
+      base,
+    );
+    expect(await source.changes!()).toEqual([{ path: "nested/main.ts", status: "modified" }]);
+  });
+
+  it("includes nested worktrees' badges when Files is rooted at their parent folder", async () => {
+    const root = ".raccoon/worktrees";
+    const requested: unknown[] = [];
+    const source = cloudFileSource(
+      `machine:m:p/${root}`,
+      client((method, params) => {
+        if (method === "git.repositories") {
+          return { repositories: [".", `${root}/topic`, `${root}/removed`, `${root}-other/topic`].map((repo) => ({ repo })) };
+        }
+        requested.push(params.repo);
+        if (params.repo === `${root}/removed`) throw { code: "not_found" };
+        return {
+          repository: true,
+          files: params.repo === "." ? [file(`${root}/notes.txt`), file("README.md")] : [file("src/main.ts")],
+        };
+      }),
+      false,
+      root,
+    );
+    expect(await source.changes!()).toEqual([
+      { path: "notes.txt", status: "modified" },
+      { path: "topic/src/main.ts", status: "modified" },
+    ]);
+    expect(requested).toEqual([".", `${root}/topic`, `${root}/removed`]);
+  });
+
   const asked: { method: string; params: Record<string, unknown> }[] = [];
   const source = () =>
     cloudFileSource(
@@ -84,6 +129,7 @@ describe("a machine session's files, rooted at its worktree (PRO-347)", () => {
       client((method, params) => {
         asked.push({ method, params });
         if (method === "fs.list") return { path: params.path, entries: [{ name: "src", path: `${params.path}/src`, kind: "directory" }, { name: "x", path: "elsewhere/x", kind: "file" }] };
+        if (method === "git.repositories") return { repositories: [{ repo: "." }, { repo: "wt/read" }] };
         if (method === "git.status") return { repository: true, repo: params.repo, files: [file("src/a.ts")] };
         throw { code: "method_not_found" };
       }),
@@ -125,6 +171,7 @@ describe("a machine session's files in a worktree outside its project (PRO-405)"
         if (method === "fs.list") return { path: params.path, entries: [{ name: "src", path: `${params.path}/src`, kind: "directory" }, { name: "x", path: "elsewhere/x", kind: "file" }] };
         if (method === "fs.read") return { path: params.path, size: 2, version: "v1", offset: 0, eof: true, etag: "e1", text: "hi" };
         if (method === "fs.search") return { searchId: params.searchId, hits: [{ path: `${worktree}/src/a.ts`, line: 1, col: 0, text: "hi", matches: [[0, 2]] }, { path: "README.md", line: 1, col: 0, text: "hi", matches: [[0, 2]] }], files: 2, capped: false, cancelled: false };
+        if (method === "git.repositories") return { repositories: [{ repo: "." }, { repo: worktree }] };
         if (method === "git.status") return { repository: true, repo: params.repo, files: [file("src/a.ts")] };
         throw { code: "method_not_found" };
       }),
