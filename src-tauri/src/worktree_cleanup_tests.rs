@@ -703,7 +703,13 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     let f = Fixture::new();
     let alpha = f.alpha();
     let wt = f.pushed(&alpha, "half-done");
-    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let mut session = f.session(&alpha, &wt, TabStatus::Idle);
+    session.set_checkout_root(wt.to_str());
+    index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
+    let mut companion = f.session(&alpha, &wt, TabStatus::Idle);
+    companion.worktree_name = None;
+    companion.set_checkout_root(wt.to_str());
+    index::update_session(&companion.id, |entry| { *entry = companion.clone(); Ok(()) }).unwrap();
     let main = f.session(&alpha, &alpha, TabStatus::Idle);
     let item = f.item(&f.find(&wt));
     // The first attempt removed the worktree and died before its sessions were filed.
@@ -713,7 +719,8 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     assert_eq!(done.outcome, Outcome::AlreadyRemoved, "{:?}", done.reason);
     assert_eq!(done.freed_bytes, 0);
     // Its conversation is kept even though deletion was asked for: nothing was reviewed this time.
-    assert_eq!(done.sessions_kept, vec![session.id.clone()]);
+    assert_eq!(done.sessions_kept, vec![session.id.clone(), companion.id.clone()]);
+    assert!(index::get(&companion.id).unwrap().worktree_removed);
     assert!(index::get(&session.id).unwrap().worktree_removed);
     assert_eq!(index::get(&main.id).unwrap(), main);
 
@@ -734,7 +741,9 @@ fn a_reconciled_removal_stops_its_sessions_agents_before_filing_them() {
     let f = Fixture::new();
     let alpha = f.alpha();
     let wt = f.pushed(&alpha, "cut-short");
-    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let mut session = f.session(&alpha, &wt, TabStatus::Idle);
+    session.set_checkout_root(wt.to_str());
+    index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
     let main = f.session(&alpha, &alpha, TabStatus::Idle);
     let item = f.item(&f.find(&wt));
     sh(&alpha, &["worktree", "remove", wt.to_str().unwrap()]);
@@ -1003,4 +1012,47 @@ fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
     assert_eq!(run(f.item(&f.find(&grows)))[0].outcome, Outcome::Skipped);
     assert!(grows.join(".env").exists());
     terminals.kill_all();
+}
+
+#[test]
+fn cleanup_refuses_a_parent_with_an_unidentified_pruned_legacy_checkout() {
+    let fixture = Fixture::new();
+    let project = fixture.alpha();
+    let parent = fixture.worktree(&project, "parent-legacy");
+    let nested = parent.join("nested");
+    sh(&project, &["worktree", "add", "-q", "-b", "nested-legacy", nested.to_str().unwrap()]);
+    let sub = nested.join("src");
+    std::fs::create_dir(&sub).unwrap();
+    let legacy = fixture.session(&project, &sub, TabStatus::Idle);
+    let companion = fixture.session(&project, &nested, TabStatus::Idle);
+    std::fs::remove_dir_all(&nested).unwrap();
+    sh(&project, &["worktree", "prune"]);
+    let candidate = fixture.find(&parent);
+    assert_eq!(candidate.verdict, Verdict::Unverifiable);
+    assert!(candidate.reason.as_deref().unwrap().contains("Cannot establish the checkout"));
+    let result = fixture.remove(&[fixture.item(&candidate)]);
+    assert_eq!(result[0].outcome, Outcome::Skipped);
+    assert!(parent.exists());
+    assert!(index::get(&legacy.id).is_ok());
+    assert!(index::get(&companion.id).is_ok());
+}
+
+#[test]
+fn cleanup_does_not_reconcile_an_unidentified_pruned_shared_checkout() {
+    let fixture = Fixture::new();
+    let project = fixture.alpha();
+    let root = fixture.worktree(&project, "shared-legacy");
+    let sub = root.join("src");
+    std::fs::create_dir(&sub).unwrap();
+    let fork = fixture.session(&project, &sub, TabStatus::Idle);
+    let companion = fixture.session(&project, &root, TabStatus::Idle);
+    let item = fixture.item(&fixture.find(&root));
+    std::fs::remove_dir_all(&root).unwrap();
+    sh(&project, &["worktree", "prune"]);
+    let result = fixture.remove(&[item]);
+    assert_eq!(result[0].outcome, Outcome::Skipped);
+    assert!(result[0].reason.as_deref().unwrap().contains("Cannot establish the checkout"));
+    assert!(index::get(&fork.id).is_ok());
+    assert!(index::get(&companion.id).is_ok());
+    assert!(fixture.stopped.lock().unwrap().is_empty());
 }

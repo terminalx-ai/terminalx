@@ -1136,7 +1136,7 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path).map_err(ControlError::internal)?;
             self.manager.annotate_row_statuses_among(&mut held, &stored);
             let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
@@ -1851,7 +1851,7 @@ impl ControlService {
                 .map_err(ControlError::internal)?;
             let mut listed = Vec::with_capacity(worktrees.len());
             for worktree in worktrees {
-                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path).map_err(ControlError::internal)?;
                 let mut value = serde_json::to_value(&worktree).map_err(ControlError::internal)?;
                 value["sessionCount"] = json!(held.len());
                 if !worktree.is_main {
