@@ -807,6 +807,9 @@ impl WorkspaceRpc {
         let mut value = json!(session);
         if let (Some(ids), Some(fields)) = (ids, value.as_object_mut()) {
             fields.insert("projectId".into(), json!(ids.get(&session.project_path)));
+            // Git and fs name external worktrees by canonical path. Keep the
+            // stored cwd for display, since it can use a symlinked parent.
+            fields.insert("fileRoot".into(), json!(machine::session_file_root(session)));
         }
         if let Some(accounts) = accounts {
             super::machine_session::account_labels(&mut value, session, accounts);

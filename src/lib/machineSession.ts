@@ -66,12 +66,18 @@ export function worktreeInProject(projectPath: string | null | undefined, cwd: s
   return rel.split("/").some((part) => !part || part === "." || part === "..") ? null : rel;
 }
 
-/** The closest repository containing the session cwd; else the project's own. */
+/** The closest repository containing the session folder, or the default before a session is known. */
 export function sessionRepository(repositories: readonly RemoteRepository[], project: MachineProject | null, session: RuntimeSession | null): string | null {
-  const rel = worktreeInProject(project?.path, session?.cwd);
-  const wanted = rel ?? session?.cwd ?? null;
+  const wanted = sessionFilePath(project, session);
   const containing = containingRepository(repositories, wanted);
+  if (wanted === null || wanted.startsWith("/")) return containing;
   return containing ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
+}
+
+function sessionFilePath(project: MachineProject | null, session: RuntimeSession | null): string | null {
+  if (session?.fileRoot !== undefined) return session.fileRoot;
+  const relative = worktreeInProject(project?.path, session?.cwd);
+  return relative === "." ? "" : relative ?? session?.cwd?.replace(/\/+$/, "") ?? "";
 }
 
 function containingRepository(repositories: readonly RemoteRepository[], cwd: string | null | undefined): string | null {
@@ -88,19 +94,13 @@ function containingRepository(repositories: readonly RemoteRepository[], cwd: st
  * Where Files, the editor and search are rooted for the session, as its
  * project's `fs/1` names the folder: "" for the project's own folder, a
  * relative path for a cwd inside it, or an absolute path under a listed
- * external worktree (PRO-405). An external cwd waits for discovery (null).
+ * external worktree (PRO-405). An external cwd waits for a matching repository.
  */
 export function sessionFilesBase(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
-  const inside = worktreeInProject(project?.path, session?.cwd);
-  if (inside !== null) return inside === "." ? "" : inside;
-  if (session?.cwd && project?.path) {
-    if (repositories === null) return null;
-    const cwd = session.cwd.replace(/\/+$/, "");
-    if (cwd.startsWith("/") && containingRepository(repositories, cwd)?.startsWith("/")) return cwd;
-    return "";
-  }
-  const repo = repositories && sessionRepository(repositories, project, session);
-  return repo && repo !== "." ? repo : "";
+  if (!session) return null;
+  const path = sessionFilePath(project, session);
+  if (!path?.startsWith("/")) return path;
+  return repositories && containingRepository(repositories, path) ? path : null;
 }
 
 /** The header's connection word for a machine: what its chip says (21.09). */
@@ -182,6 +182,9 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const { entry } = useMachineProjects(machineId);
   const project = entry?.projects.find((candidate) => candidate.projectId === projectId) ?? null;
   const runtimeSession = entry?.sessions.find((candidate) => candidate.id === runtimeSessionId) ?? null;
+  const ownSession = runtimeSession && (!runtimeSession.projectId || runtimeSession.projectId === projectId) ? runtimeSession : null;
+  const ownSessionId = ownSession?.id;
+  const sessionFileRoot = sessionFilePath(project, ownSession);
 
   // Agent tabs: the shared store (no cache or checkpoints for a machine), then the machine's own list on each connect.
   const agents = useCloudAgents(scope);
@@ -220,28 +223,28 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const manage = connected && state.state === "connected" && state.authority === "manage";
 
   // Git: the project's repositories; the session's worktree first.
-  const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
   const discoverRepositories = useMemo(() => {
-    if (!generation || !projectClient) return undefined;
+    if (!generation || !projectClient || !ownSessionId) return undefined;
     // Changes and Files share discovery for this connection, independent of the file source's root.
     let request: Promise<RemoteRepository[]> | undefined;
     return () => request ??= listRepositories(projectClient).catch((error: unknown) => {
       request = undefined;
       throw error;
     });
-  }, [generation, projectClient]);
+  }, [generation, projectClient, ownSessionId, sessionFileRoot]);
+  const [discovery, setDiscovery] = useState<{ load: NonNullable<typeof discoverRepositories>; repositories: RemoteRepository[] } | null>(null);
+  const repositories = discovery?.load === discoverRepositories ? discovery?.repositories ?? null : null;
   useEffect(() => {
     if (!discoverRepositories) return;
     let cancelled = false;
     discoverRepositories()
-      .then((found) => !cancelled && setRepositories(found))
-      .catch(() => !cancelled && setRepositories([]));
+      .then((found) => !cancelled && setDiscovery({ load: discoverRepositories, repositories: found }))
+      .catch(() => !cancelled && setDiscovery({ load: discoverRepositories, repositories: [] }));
     return () => {
       cancelled = true;
     };
   }, [discoverRepositories]);
-  const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
   const gitSource = useMemo(

@@ -2119,11 +2119,12 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
   beside it, or one that climbs or links out is `path_forbidden`
   (`remote::machine_tests`, `machines_e2e`). No `sessionId` scope is needed:
   the runtime's check is against the project's worktrees either way.
-- **Files and Changes agree.** `sessionFilesBase` roots Files, the editor and
-  search at the repository `sessionRepository` picks for Changes: `""`, a
-  relative worktree, or that absolute path. A worktree inside the project is
-  rooted before the list arrives; one outside waits for it. A
-  `cloudFileSource` with an absolute base opts in to absolute paths
+- **Files and Changes agree.** The runtime reports the session's canonical
+  `fileRoot` in project-relative or absolute coordinates. Files, the editor,
+  search and the default Changes repository use this path even when the
+  session's saved `cwd` uses a symlinked parent. An external checkout waits
+  for its repository to be listed, and the panel reports when the checkout
+  is unavailable. A `cloudFileSource` with an absolute base opts in to absolute paths
   (`remoteFilePath(path, true)`, no `.` or `..` part); every other source
   still sends only workspace-relative ones.
 - **Live commands.** The machine's agent scope (no organization) sends

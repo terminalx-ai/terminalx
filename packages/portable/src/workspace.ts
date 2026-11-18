@@ -684,6 +684,8 @@ export interface RuntimeSession {
   id: string;
   projectPath: string;
   cwd: string;
+  /** Machine fs/1 path for the cwd. Null means unavailable, absent on older runtimes. */
+  fileRoot?: string | null;
   worktreeName?: string | null;
   branch?: string | null;
   title: string;

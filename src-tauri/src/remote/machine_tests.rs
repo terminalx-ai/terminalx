@@ -212,6 +212,7 @@ async fn a_new_session_is_cut_from_the_chosen_branch_once() {
     // Without a worktree there is nothing to cut, and the base is not used.
     let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
     assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);
+    assert_eq!(here["session"]["fileRoot"], "");
     // Never something git could read as an option or a revision expression.
     for bad in ["-x", "main..feature", "feature@{1}", "a b", "", "HEAD~1"] {
         let refused = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": bad, "clientRequestId": format!("create-bad-{}", bad.len()) })).await;
@@ -284,6 +285,23 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let found = call(&m.rpc, &peer, "fs.search", json!({ "projectId": api_id, "searchId": "search-0001", "query": "worktree", "path": shared.join("api-one") })).await.unwrap();
     let hits: Vec<&str> = found["hits"].as_array().unwrap().iter().filter_map(|hit| hit["path"].as_str()).collect();
     assert_eq!(hits, vec![api_worktree.as_str()], "{found}");
+    #[cfg(unix)]
+    {
+        let alias = m.path("worktree-alias");
+        std::os::unix::fs::symlink(&shared, &alias).unwrap();
+        let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": api_id, "clientRequestId": "session-aliased-worktree" })).await.unwrap();
+        let session_id = made["sessionId"].as_str().unwrap();
+        let cwd = alias.join("api-one");
+        crate::store::index::update_session(session_id, |session| {
+            session.cwd = cwd.to_string_lossy().into_owned();
+            Ok(())
+        }).unwrap();
+        let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+        assert_eq!(session["session"]["cwd"], json!(cwd));
+        assert_eq!(session["session"]["fileRoot"], json!(api_one));
+        let listing = call(&m.rpc, &peer, "fs.list", json!({ "projectId": api_id, "path": session["session"]["fileRoot"] })).await.unwrap();
+        assert!(listing["entries"].as_array().unwrap().iter().any(|entry| entry["path"] == api_worktree));
+    }
     // A file call names its project.
     assert_eq!(code(call(&m.rpc, &peer, "fs.read", json!({ "path": "README.md" })).await), "invalid_params");
     assert_eq!(code(call(&m.rpc, &peer, "fs.read", json!({ "projectId": "AAAAAAAAAAAAAAAA", "path": "README.md" })).await), "not_found");

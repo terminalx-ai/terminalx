@@ -170,7 +170,9 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
           {cloud.machine
-            ? `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
+            ? cloud.connected
+              ? cloud.repositories ? "This session’s checkout is unavailable." : "Finding this session’s checkout…"
+              : `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
             : cloud.locked === "deleted"
             ? "This workspace was deleted. Its changes, files and Git went with it, and any previews that were open ended."
             : cloud.locked

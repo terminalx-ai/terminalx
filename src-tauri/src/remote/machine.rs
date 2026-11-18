@@ -213,17 +213,40 @@ pub fn ids_by_path() -> HashMap<String, String> {
 /// when that is outside it. A worktree made somewhere else by hand is not one
 /// TerminalX serves.
 pub fn worktrees(project: &Path) -> Vec<PathBuf> {
-    let Ok(listed) = crate::git::run(project, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
+    let (listed, separator) = match crate::git::run(project, &["worktree", "list", "--porcelain", "-z"]) {
+        Ok(listed) => (listed, '\0'),
+        Err(_) => {
+            // Older Git supports --porcelain without -z.
+            let Ok(listed) = crate::git::run(project, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
+            (listed, '\n')
+        }
+    };
     let home = std::fs::canonicalize(crate::git::worktree_root(project)).ok();
     let mut found: Vec<PathBuf> = listed
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
+        .split(separator)
+        .filter_map(|field| field.strip_prefix("worktree "))
+        .skip(1) // The main checkout can be elsewhere when the project is itself a linked worktree.
         .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|path| path != project && (path.starts_with(project) || home.as_ref().is_some_and(|home| path.starts_with(home))))
+        .filter(|path| {
+            path != project && (path.starts_with(project) || home.as_ref().is_some_and(|home| {
+                path != home && path.starts_with(home) && crate::git::is_worktree_of(project, path)
+            }))
+        })
         .collect();
     found.sort();
     found.dedup();
     found
+}
+
+/// A session folder in the project's fs/1 coordinates. The file service
+/// checks absolute paths against the project's worktree allowlist.
+pub fn session_file_root(session: &crate::store::index::SessionEntry) -> Option<PathBuf> {
+    if session.worktree_removed {
+        return None;
+    }
+    let project = std::fs::canonicalize(&session.project_path).ok()?;
+    let cwd = std::fs::canonicalize(&session.cwd).ok()?;
+    Some(cwd.strip_prefix(&project).unwrap_or(&cwd).to_path_buf())
 }
 
 /// One project as the calls that name it are served: its canonical folder,
