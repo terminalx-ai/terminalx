@@ -25,6 +25,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+pub(crate) mod directory;
+
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only, as for the desktop (`account.rs`): an HTTPS origin or a
 /// loopback HTTP one, e.g. a local terminalx-saas stack.
@@ -324,7 +326,11 @@ impl Api {
     }
 
     fn post(&self, path: &str, body: Value, bearer: Option<&str>) -> Result<std::result::Result<Value, Answered>> {
-        let mut request = self.agent.post(&format!("{}{path}", self.base)).set("content-type", "application/json");
+        self.request("POST", path, body, bearer, REQUEST_TIMEOUT)
+    }
+
+    fn request(&self, method: &str, path: &str, body: Value, bearer: Option<&str>, timeout: Duration) -> Result<std::result::Result<Value, Answered>> {
+        let mut request = self.agent.request(method, &format!("{}{path}", self.base)).timeout(timeout).set("content-type", "application/json");
         if let Some(token) = bearer {
             request = request.set("authorization", &format!("Bearer {token}"));
         }
@@ -497,6 +503,64 @@ mod tests {
 
     fn authorization(interval: u64) -> Value {
         json!({ "deviceCode": "device-secret", "userCode": "BCDF-GHJK", "verificationUri": "https://console.example/device", "verificationUriComplete": "https://console.example/device?code=BCDF-GHJK", "expiresIn": 600, "interval": interval })
+    }
+
+    #[test]
+    fn headless_host_binding_registers_heartbeats_and_rebinds_after_sign_out() {
+        let (base, seen, handle) = service(vec![(201, json!({})), (200, json!({})), (200, json!({})), (201, json!({}))]);
+        let api = Api::new(&base);
+        let data = tempfile::tempdir().unwrap();
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        let mut binding = None;
+        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        let (_, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
+        unbound.unwrap();
+        assert!(load(data.path()).unwrap().is_none());
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        handle.join().unwrap();
+
+        let seen = seen.lock().unwrap();
+        let root = "/v1/desktop/host-account-bindings";
+        let host_id = key.host_id();
+        assert_eq!(seen[0].0, root);
+        assert_eq!(seen[0].1["hostId"], host_id);
+        assert_eq!(seen[0].1["hostPublicKeyB64"], key.public_key_b64());
+        assert_eq!(seen[0].1["capabilities"], json!(["headless-phone-pairing.v1"]));
+        assert_eq!(seen[0].1["bindingGeneration"], 1);
+        assert_eq!(seen[1].0, format!("{root}/{host_id}/heartbeat"));
+        assert_eq!(seen[1].1, json!({"bindingGeneration": 1, "reachability": "live"}));
+        assert_eq!(seen[2].0, format!("{root}/{host_id}"));
+        assert_eq!(seen[2].1, json!({"bindingGeneration": 2, "reason": "host-sign-out"}));
+        assert_eq!(seen[3].0, root);
+        assert_eq!(seen[3].1["bindingGeneration"], 3);
+        assert!(seen.iter().all(|(_, _, bearer)| bearer.as_deref() == Some("Bearer access-1")));
+    }
+
+    #[test]
+    fn an_offline_sign_out_can_reuse_the_surviving_binding() {
+        let (base, seen, handle) = service(vec![
+            (201, json!({})), (503, json!({})),
+            (409, json!({"error": "host_binding_generation_conflict"})), (201, json!({})),
+        ]);
+        let api = Api::new(&base);
+        let data = tempfile::tempdir().unwrap();
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        let mut binding = None;
+        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        let (_, unbound) = directory::sign_out(&api, data.path()).unwrap().unwrap();
+        assert!(unbound.is_err());
+        assert!(load(data.path()).unwrap().is_none());
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
+        handle.join().unwrap();
+        let generations: Vec<_> = seen.lock().unwrap().iter().map(|(_, body, _)| body["bindingGeneration"].as_u64().unwrap()).collect();
+        assert_eq!(generations, [1, 2, 3, 1]);
     }
 
     #[test]

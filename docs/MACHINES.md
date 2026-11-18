@@ -1148,9 +1148,8 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
-- **A headless server** has no host binding, so it is not listed on the
-  account; it pairs from its terminal (PRO-353). Relay registration does not
-  create that binding.
+- **A headless server** pairs computers from its terminal (PRO-353). Its
+  account listing advertises terminal QR pairing for phones (PRO-359).
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -1419,9 +1418,9 @@ Retaining registration cancellation through window forwarding remains open in
 [#1239](https://github.com/terminalx-ai/terminalx/issues/1239) (the #1236 review).
 
 **Capability.** The window's host binding advertises `machine-operating.v1`
-only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
-headless machine has no host binding yet: it is reachable by its paired
-computers, and is not listed in the account directory.
+only while the switch is on (PRO-349, `PairingManager::host_capabilities`).
+A standalone runtime advertises `headless-phone-pairing.v1` for the account
+directory (PRO-359).
 
 **Not yet.** A pairing code still carries no `relay`, so a computer pairs with
 a machine over a direct route first and gets its relay credential from
@@ -2048,11 +2047,15 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Discovery.** Relay registration alone does not make a headless machine
-  discoverable on a phone through the account: the headless runtime does not
-  create a host binding or run the window's host-binding poll. A phone can list
-  the machine after pairing from its terminal. The account list shows Linux and
-  SSH machines as servers when they are listed.
+- **Discovery.** A standalone runtime with hosting enabled and a signed-in
+  account creates its directory entry once the relay registers its host key.
+  It sends a live heartbeat every 30 seconds while that registration is
+  active. The Machines screen uses `headless-phone-pairing.v1` to show a
+  server icon and open the QR scanner from that row. Scan the server's
+  `terminalx-serve pair --phone` QR on a network that can reach the server
+  directly, then compare the fingerprint and allow the phone in the terminal.
+  After pairing, the phone lists the server once under its paired machines.
+  Signing out stops heartbeats and attempts to remove the account listing.
 
 ## Session feature parity
 

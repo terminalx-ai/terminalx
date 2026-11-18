@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::machine_account::{self, Api, Refused};
 
@@ -75,21 +75,29 @@ fn login(data: &Path) -> Result<i32> {
             return Ok(1);
         }
     };
-    machine_account::save(data, &session)?;
+    machine_account::locked(data, || {
+        if machine_account::load(data)?.is_some() {
+            return Err(anyhow!("This machine signed in while the code was pending."));
+        }
+        machine_account::save(data, &session)
+    })?;
     println!("Signed in as {}.", session.who());
     Ok(0)
 }
 
 fn logout(data: &Path) -> Result<i32> {
-    let Some(session) = machine_account::load(data)? else {
+    let api = Api::new(&machine_account::api_base_url());
+    let Some((session, unbound)) = machine_account::directory::sign_out(&api, data)? else {
         println!("This machine is not signed in.");
         return Ok(0);
     };
     // Forgotten here whatever the service says: a machine that cannot reach
     // it must still be able to sign out. The session then lapses there.
-    let told = Api::new(&machine_account::api_base_url()).logout(&session);
-    machine_account::remove(data)?;
+    let told = api.logout(&session);
     println!("Signed out {} on this machine.", session.who());
+    if let Err(error) = unbound {
+        eprintln!("warning: could not remove this machine from the account directory ({error:#}).");
+    }
     if let Err(error) = told {
         eprintln!("warning: the account service was not told ({error:#}); the session ends there when it expires.");
     }

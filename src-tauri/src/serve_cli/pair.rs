@@ -41,6 +41,9 @@ for an agent or a terminal TerminalX runs.
 /// How long `pair` waits for hosting to start once it is on.
 const LISTEN_WAIT: Duration = Duration::from_secs(30);
 
+/// The control socket can answer a little before the local machine host.
+const HOST_START_WAIT: Duration = Duration::from_secs(5);
+
 /// How often the status is read while waiting.
 const POLL: Duration = Duration::from_millis(250);
 
@@ -82,7 +85,15 @@ fn pair(args: &[String]) -> Result<i32> {
     let canonical = std::fs::canonicalize(&data).with_context(|| format!("resolve {}", data.display()))?;
     std::env::set_var("TERMINALX_HOME", &canonical);
 
-    let mut status = runtime.status()?;
+    let deadline = Instant::now() + HOST_START_WAIT;
+    let mut status = loop {
+        match runtime.status() {
+            Err(error) if refusal_code(&error) == Some("unsupported") && Instant::now() < deadline => {
+                std::thread::sleep(POLL);
+            }
+            result => break result?,
+        }
+    };
     // Before anything is turned on: a window pairs this Mac's phones.
     if phone && (status.phone_route || status.phones.window_open) {
         eprintln!("terminalx-serve pair: TerminalX is open on this Mac, so its window pairs phones: Settings → Devices.");
@@ -91,11 +102,11 @@ fn pair(args: &[String]) -> Result<i32> {
     if !status.enabled {
         if phone {
             // Phones reach a server through the same listener computers use.
-            println!("This server does not take connections now. Phones and other computers you pair");
+            println!("This server does not take connections now. Phones you pair can view sessions and respond to agents.");
         } else {
-            println!("Other computers may not operate this server now. A computer you pair can run");
+            println!("Other computers may not operate this server now.");
         }
-        println!("agents, terminals and Git here, and read and change files, as {}.", user_label());
+        println!("A computer you pair can run agents, terminals and Git here, and read and change files, as {}.", user_label());
         match terminal::ask("Let other computers operate this server? [y/N] ", None)? {
             terminal::Answer::Line(line) if allows(&line) => {}
             terminal::Answer::Interrupted => return Ok(130),

@@ -253,6 +253,7 @@ struct AccountRelay {
     link: Arc<crate::remote::account_link::AccountLink>,
     /// Wakes the supervisor on each change of the registration.
     watch: tokio::task::JoinHandle<()>,
+    directory: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(unix)]
@@ -813,7 +814,12 @@ impl MachineHost {
 
     /// Register with the relay as `secret`'s host, serving `rpc`.
     fn start_relay(self: &Arc<Self>, secret: [u8; 32], rpc: Arc<WorkspaceRpc>) {
-        let link = Arc::new(crate::remote::account_link::AccountLink::new(self.data_dir.clone(), secret, self.account_window()));
+        let window = self.account_window();
+        #[cfg(unix)]
+        let publish_directory = std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() != Ok("1") && self.phones.get().is_some();
+        #[cfg(not(unix))]
+        let publish_directory = false;
+        let link = Arc::new(crate::remote::account_link::AccountLink::new(self.data_dir.clone(), secret, window));
         let host = crate::remote::host::RelayHost::new(link.clone(), rpc, None);
         // Before it registers, so no connection is answered without them.
         host.set_routes(self.clone());
@@ -831,8 +837,11 @@ impl MachineHost {
                 machine.wake.notify_one();
             }
         });
+        let directory = publish_directory.then(|| tokio::spawn(crate::machine_account::directory::publish(
+            self.data_dir.clone(), secret, link.clone(), host.clone(),
+        )));
         tokio::spawn(host.clone().run());
-        *self.account_relay.lock().unwrap() = Some(AccountRelay { host, link, watch });
+        *self.account_relay.lock().unwrap() = Some(AccountRelay { host, link, watch, directory });
         log::info!("machine host: registering with the relay for the signed-in account");
     }
 
@@ -842,6 +851,9 @@ impl MachineHost {
         let Some(relay) = self.account_relay.lock().unwrap().take() else { return };
         relay.watch.abort();
         relay.host.stop();
+        if let Some(directory) = relay.directory {
+            directory.abort();
+        }
         *self.relay.lock().unwrap() = None;
         log::info!("machine host: no relay registration ({why})");
     }
