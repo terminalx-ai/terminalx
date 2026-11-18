@@ -1294,7 +1294,7 @@ pub fn is_own_worktree(path: &Path) -> bool {
 }
 
 /// A repository's shared git directory, resolved.
-fn common_dir(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(cwd: &Path) -> Option<PathBuf> {
     let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
     let dir = out.trim();
     let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };

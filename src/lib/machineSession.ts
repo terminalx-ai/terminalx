@@ -66,32 +66,41 @@ export function worktreeInProject(projectPath: string | null | undefined, cwd: s
   return rel.split("/").some((part) => !part || part === "." || part === "..") ? null : rel;
 }
 
-/** The repository `git.repositories` lists for the session's worktree; else the project's own. */
+/** The closest repository containing the session cwd; else the project's own. */
 export function sessionRepository(repositories: readonly RemoteRepository[], project: MachineProject | null, session: RuntimeSession | null): string | null {
-  if (!repositories.length) return null;
   const rel = worktreeInProject(project?.path, session?.cwd);
   const wanted = rel ?? session?.cwd ?? null;
-  return repositories.find((repo) => repo.repo === wanted)?.repo ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0].repo;
+  const containing = containingRepository(repositories, wanted);
+  return containing ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
+}
+
+function containingRepository(repositories: readonly RemoteRepository[], cwd: string | null | undefined): string | null {
+  let closest: string | null = null;
+  for (const { repo } of repositories) {
+    if (worktreeInProject(repo, cwd) !== null && (closest === null || repo.length > closest.length)) {
+      closest = repo;
+    }
+  }
+  return closest;
 }
 
 /**
  * Where Files, the editor and search are rooted for the session, as its
  * project's `fs/1` names the folder: "" for the project's own folder, a
- * relative path for a worktree inside it, or the absolute path of a worktree
- * outside it (PRO-405). Once the repositories are known it is the one Changes
- * shows for the session (`sessionRepository`), so the two always agree; before
- * that, a worktree inside the project is rooted at once, and one outside it
- * waits for the list (null), since only `git.repositories` names it.
+ * relative path for a cwd inside it, or an absolute path under a listed
+ * external worktree (PRO-405). An external cwd waits for discovery (null).
  */
 export function sessionFilesBase(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
   const inside = worktreeInProject(project?.path, session?.cwd);
-  if (!repositories?.length) {
-    // Not listed yet: a worktree outside the project has no name to use until it is.
-    if (repositories === null && inside === null && project?.path && session?.cwd) return null;
-    return inside && inside !== "." ? inside : "";
+  if (inside !== null) return inside === "." ? "" : inside;
+  if (session?.cwd && project?.path) {
+    if (repositories === null) return null;
+    const cwd = session.cwd.replace(/\/+$/, "");
+    if (cwd.startsWith("/") && containingRepository(repositories, cwd)?.startsWith("/")) return cwd;
+    return "";
   }
-  const repo = sessionRepository(repositories, project, session);
-  return !repo || repo === "." ? "" : repo;
+  const repo = repositories && sessionRepository(repositories, project, session);
+  return repo && repo !== "." ? repo : "";
 }
 
 /** The header's connection word for a machine: what its chip says (21.09). */
@@ -213,16 +222,25 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   // Git: the project's repositories; the session's worktree first.
   const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const discoverRepositories = useMemo(() => {
+    if (!generation || !projectClient) return undefined;
+    // Changes and Files share discovery for this connection, independent of the file source's root.
+    let request: Promise<RemoteRepository[]> | undefined;
+    return () => request ??= listRepositories(projectClient).catch((error: unknown) => {
+      request = undefined;
+      throw error;
+    });
+  }, [generation, projectClient]);
   useEffect(() => {
-    if (!generation || !projectClient) return;
+    if (!discoverRepositories) return;
     let cancelled = false;
-    listRepositories(projectClient)
+    discoverRepositories()
       .then((found) => !cancelled && setRepositories(found))
       .catch(() => !cancelled && setRepositories([]));
     return () => {
       cancelled = true;
     };
-  }, [generation, projectClient]);
+  }, [discoverRepositories]);
   const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
@@ -231,7 +249,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     [connected, projectClient, repository, projectKey, manage],
   );
 
-  // Files: the session's worktree, as a local session's files are its `cwd`: the repository Changes shows for it.
+  // Files use the session's cwd, just as they do for a local session.
   // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
   const filesBase = sessionFilesBase(repositories, project, ownSession);
   const base = filesBase ?? "";
@@ -240,8 +258,8 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const fileKey = base ? `${projectKey}/${base}` : projectKey;
   const filesReady = filesBase !== null;
   const fileSource = useMemo(
-    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base) : undefined),
-    [connected, projectClient, filesReady, fileKey, manage, base],
+    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base, discoverRepositories) : undefined),
+    [connected, projectClient, filesReady, fileKey, manage, base, discoverRepositories],
   );
   useEffect(() => {
     if (!fileSource) return;
