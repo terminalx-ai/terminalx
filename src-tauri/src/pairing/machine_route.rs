@@ -302,7 +302,7 @@ impl PairingManager {
 
     /// One phone the runtime passed on: its header line, then the phone.
     #[cfg(unix)]
-    async fn routed_phone(self: Arc<Self>, mut stream: tokio::net::UnixStream) -> Result<()> {
+    pub(crate) async fn routed_phone(self: Arc<Self>, mut stream: tokio::net::UnixStream) -> Result<()> {
         let header = read_header(&mut stream).await?;
         match wire::decode_header(&header)? {
             // The phone's own bytes follow, from its HTTP upgrade request.

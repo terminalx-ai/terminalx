@@ -513,9 +513,21 @@ async fn retiring_the_relay_cancels_idle_and_pre_auth_phone_connections() {
     );
 }
 
+#[cfg(feature = "desktop")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
-    use tokio::io::AsyncReadExt;
+    use crate::keychain::SecretStore;
+    use crate::local_runtime::client::{AttachmentIdentity, Build};
+    use crate::local_runtime::mobile::Actor;
+    struct TestOwner { build: Build }
+    impl crate::phone::Owner for TestOwner {
+        fn attachment(&self) -> Result<AttachmentIdentity> {
+            Ok(AttachmentIdentity { epoch: "test-epoch".into(), lease: "test-lease".into() })
+        }
+        fn mobile(&self, _: &Actor, _: &str, _: Value) -> Result<Value> { Ok(json!({})) }
+        fn build(&self) -> &Build { &self.build }
+        fn disconnect(&self) {}
+    }
     let mut rig = Rig::new().await;
     rig.pair("phone", "token", false, true);
     rig.pair("replacement", "replacement-token", false, true);
@@ -527,24 +539,18 @@ async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
         lease,
         socket: path,
     }).unwrap();
-    let phones = rig.phones.clone();
-    let key = rig.key.clone();
+    let secrets = Arc::new(crate::keychain::testing::MemorySecrets::default());
+    secrets.set("test.forwarded-relay.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
+    let manager = crate::pairing::PairingManager::with_secrets_for_test("test.forwarded-relay", secrets);
+    manager.set_phone_owner_for_test(Arc::new(TestOwner { build: Build {
+        version: None, mobile: Default::default(), handover: None,
+    }}));
     let window = tokio::spawn(async move {
         loop {
-            let (mut route, _) = listener.accept().await.unwrap();
-            let phones = phones.clone();
-            let key = key.clone();
+            let (route, _) = listener.accept().await.unwrap();
+            let manager = manager.clone();
             tokio::spawn(async move {
-                let mut header = Vec::new();
-                loop {
-                    let byte = route.read_u8().await.unwrap();
-                    header.push(byte);
-                    if byte == b'\n' { break; }
-                }
-                let forwarded = wire::decode_header(&header).unwrap();
-                let stopped = phones.stopped();
-                let epoch = *stopped.borrow();
-                let _ = wire::with_relay_route(route, phones.serve_relay(key, forwarded, 6768, epoch)).await;
+                let _ = manager.routed_phone(route).await;
             });
         }
     });
