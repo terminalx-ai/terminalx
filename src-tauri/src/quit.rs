@@ -29,6 +29,8 @@ static EXPLICIT_STOP: AtomicBool = AtomicBool::new(false);
 
 const QUIT: &str = "Quit Anyway";
 const STAY: &str = "Keep Running";
+const PROMPT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PROMPT_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 struct Question {
@@ -45,6 +47,7 @@ struct Question {
 #[serde(rename_all = "camelCase")]
 pub enum PromptReply {
     Opened,
+    Heartbeat,
     Action,
     Alternative,
     Cancel,
@@ -56,42 +59,121 @@ struct PendingPrompt {
     replies: mpsc::Sender<PromptReply>,
 }
 
-static PROMPT: Mutex<Option<PendingPrompt>> = Mutex::new(None);
+#[derive(Default)]
+struct PromptChannel {
+    pending: Mutex<Option<PendingPrompt>>,
+}
 
-/// Acknowledge delivery before drawing the card, then report the selected button.
-/// A late acknowledgment cannot open a card once the native fallback has taken over.
-#[tauri::command]
-pub fn reply_to_quit_prompt(window: WebviewWindow, id: String, reply: PromptReply) -> bool {
-    if window.label() != "main" {
-        return false;
-    }
-    let mut pending = PROMPT.lock().unwrap();
-    let Some(prompt) = pending.as_mut().filter(|prompt| prompt.id == id) else {
-        return false;
-    };
-    if let PromptReply::Opened = reply {
-        if prompt.opened {
+static PROMPT: PromptChannel = PromptChannel { pending: Mutex::new(None) };
+
+impl PromptChannel {
+    fn reply(&self, window: &str, id: &str, reply: PromptReply) -> bool {
+        if window != "main" {
             return false;
         }
-        prompt.opened = true;
-        return prompt.replies.send(reply).is_ok();
+        let mut pending = self.pending.lock().unwrap();
+        let Some(prompt) = pending.as_mut().filter(|prompt| prompt.id == id) else {
+            return false;
+        };
+        match reply {
+            PromptReply::Opened if !prompt.opened => {
+                prompt.opened = true;
+                prompt.replies.send(reply).is_ok()
+            }
+            PromptReply::Opened => false,
+            _ if !prompt.opened => false,
+            PromptReply::Heartbeat => prompt.replies.send(reply).is_ok(),
+            _ => pending.take().unwrap().replies.send(reply).is_ok(),
+        }
     }
-    if !prompt.opened {
-        return false;
+
+    fn receive(
+        &self,
+        replies: &mpsc::Receiver<PromptReply>,
+        timeout: Duration,
+    ) -> Option<PromptReply> {
+        match replies.recv_timeout(timeout) {
+            Ok(reply) => Some(reply),
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // The wait and the IPC handler agree on who won at the deadline.
+                let mut pending = self.pending.lock().unwrap();
+                match replies.try_recv() {
+                    Ok(reply) => Some(reply),
+                    Err(_) => {
+                        pending.take();
+                        None
+                    }
+                }
+            }
+        }
     }
-    pending.take().unwrap().replies.send(reply).is_ok()
+
+    // The quit guard permits one call at a time. A responsive card renews
+    // the wait while the person decides. Once they choose, the wait expires
+    // unless their answer reaches Rust.
+    fn ask(
+        &self,
+        delivery_timeout: Duration,
+        reply_timeout: Duration,
+        deliver: impl FnOnce(&str) -> bool,
+        focus: impl FnOnce(),
+        withdraw: impl FnOnce(&str),
+    ) -> Option<PromptReply> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (sender, replies) = mpsc::channel();
+        *self.pending.lock().unwrap() = Some(PendingPrompt {
+            id: id.clone(),
+            opened: false,
+            replies: sender,
+        });
+        if deliver(&id) && self.receive(&replies, delivery_timeout) == Some(PromptReply::Opened) {
+            focus();
+            while let Some(reply) = self.receive(&replies, reply_timeout) {
+                if reply != PromptReply::Heartbeat {
+                    return Some(reply);
+                }
+            }
+        }
+        self.clear();
+        withdraw(&id);
+        None
+    }
+
+    fn clear(&self) {
+        self.pending.lock().unwrap().take();
+    }
+
+    fn is_open(&self) -> bool {
+        self.pending.lock().unwrap().as_ref().is_some_and(|prompt| prompt.opened)
+    }
+}
+
+/// Only the main web view can claim a quit card and answer for its ID.
+#[tauri::command]
+pub fn reply_to_quit_prompt(window: WebviewWindow, id: String, reply: PromptReply) -> bool {
+    PROMPT.reply(window.label(), &id, reply)
 }
 
 /// A navigation or destruction invalidates the old card and wakes the quit worker.
 pub fn main_view_lost() {
-    PROMPT.lock().unwrap().take();
+    PROMPT.clear();
 }
 
 impl Question {
     fn ask(self, app: &AppHandle) -> PromptReply {
-        if let Some(answer) = self.ask_in_app(app) {
-            return answer;
-        }
+        self.ask_with(|| self.ask_in_app(app), || self.ask_native(app))
+    }
+
+    fn ask_with(
+        &self,
+        in_app: impl FnOnce() -> Option<PromptReply>,
+        native: impl FnOnce() -> MessageDialogResult,
+    ) -> PromptReply {
+        in_app().unwrap_or_else(|| self.native_reply(native()))
+    }
+
+    fn ask_native(&self, app: &AppHandle) -> MessageDialogResult {
         let dialog = app.dialog().message(&self.body).title(&self.title);
         let dialog = if self.destructive { dialog.kind(MessageDialogKind::Warning) } else { dialog };
         let buttons = if let Some(alternative) = self.alternative {
@@ -99,7 +181,7 @@ impl Question {
         } else {
             MessageDialogButtons::OkCancelCustom(self.action.into(), self.cancel.into())
         };
-        self.native_reply(dialog.buttons(buttons).blocking_show_with_result())
+        dialog.buttons(buttons).blocking_show_with_result()
     }
 
     fn ask_in_app(&self, app: &AppHandle) -> Option<PromptReply> {
@@ -107,29 +189,22 @@ impl Question {
         if !window.is_visible().ok()? || window.is_minimized().ok()? {
             return None;
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        let (sender, replies) = mpsc::channel();
-        *PROMPT.lock().unwrap() = Some(PendingPrompt { id: id.clone(), opened: false, replies: sender });
-        if let Err(error) = app.emit_to(tauri::EventTarget::webview_window("main"), "quit-prompt", (&id, self)) {
-            log::warn!("Could not deliver the in-app quit prompt: {error}");
-            main_view_lost();
-            return None;
-        }
-
-        // Allow two seconds for the view to claim the card. Claiming it and
-        // falling back use the same lock, even at the timeout boundary.
-        if replies.recv_timeout(Duration::from_secs(2)).is_err() {
-            let mut pending = PROMPT.lock().unwrap();
-            if pending.as_ref().is_some_and(|prompt| !prompt.opened) {
-                pending.take();
-                return None;
-            }
-            // A claim may already have won the race. Consume its acknowledgment.
-            drop(pending);
-            replies.recv().ok()?;
-        }
-        let _ = window.set_focus();
-        replies.recv().ok()
+        let target = tauri::EventTarget::webview_window("main");
+        PROMPT.ask(
+            PROMPT_DELIVERY_TIMEOUT,
+            PROMPT_REPLY_TIMEOUT,
+            |id| match app.emit_to(target.clone(), "quit-prompt", (id, Some(self))) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("Could not deliver the in-app quit prompt: {error}");
+                    false
+                }
+            },
+            || { let _ = window.set_focus(); },
+            |id| {
+                let _ = app.emit_to(target.clone(), "quit-prompt", (id, None::<&Question>));
+            },
+        )
     }
 
     fn native_reply(&self, pressed: MessageDialogResult) -> PromptReply {
@@ -200,8 +275,7 @@ pub fn held(app: &AppHandle) -> bool {
     if EXIT_READY.load(Ordering::SeqCst) { return false; }
     if GUARD.asking.load(Ordering::SeqCst) {
         // A tray or menu retry can bring back a card the person hid or minimized.
-        let card_open = PROMPT.lock().unwrap().as_ref().is_some_and(|prompt| prompt.opened);
-        if card_open {
+        if PROMPT.is_open() {
             if let Some(window) = app.get_webview_window("main") {
                 if window.is_minimized().unwrap_or(false) {
                     let _ = window.unminimize();
@@ -284,7 +358,7 @@ fn choice(reply: PromptReply) -> Option<QuitBehavior> {
     match reply {
         PromptReply::Action => Some(QuitBehavior::KeepRunning),
         PromptReply::Alternative => Some(QuitBehavior::StopAll),
-        PromptReply::Opened | PromptReply::Cancel => None,
+        PromptReply::Opened | PromptReply::Heartbeat | PromptReply::Cancel => None,
     }
 }
 
@@ -313,6 +387,73 @@ pub fn own_quit_item<R: tauri::Runtime>(app: &AppHandle<R>, menu: &tauri::menu::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_card_claims_and_answers_for_its_own_id() {
+        let channel = PromptChannel::default();
+        let question = runtime_question();
+        let answer = question.ask_with(
+            || channel.ask(
+                Duration::ZERO,
+                Duration::ZERO,
+                |id| {
+                    assert!(!channel.reply("chat-1", id, PromptReply::Opened));
+                    assert!(!channel.reply("main", id, PromptReply::Action));
+                    assert!(channel.reply("main", id, PromptReply::Opened));
+                    assert!(!channel.reply("main", id, PromptReply::Opened));
+                    assert!(!channel.reply("main", "a different ID", PromptReply::Cancel));
+                    assert!(channel.reply("main", id, PromptReply::Heartbeat));
+                    assert!(channel.reply("main", id, PromptReply::Alternative));
+                    assert!(!channel.reply("main", id, PromptReply::Action));
+                    true
+                },
+                || {},
+                |_| panic!("an answered card must not be withdrawn"),
+            ),
+            || panic!("an answered card must not open a native alert"),
+        );
+        assert_eq!(choice(answer), Some(QuitBehavior::StopAll));
+        assert!(!channel.is_open());
+    }
+
+    #[test]
+    fn a_missing_claim_or_lost_answer_withdraws_the_card_before_native_fallback() {
+        use std::cell::Cell;
+
+        let channel = PromptChannel::default();
+        let question = runtime_question();
+        for claimed in [false, true] {
+            let withdrawn = Cell::new(false);
+            let native_shown = Cell::new(false);
+            let answer = question.ask_with(
+                || channel.ask(
+                    Duration::ZERO,
+                    Duration::ZERO,
+                    |id| {
+                        if claimed {
+                            assert!(channel.reply("main", id, PromptReply::Opened));
+                            assert!(channel.reply("main", id, PromptReply::Heartbeat));
+                        }
+                        true
+                    },
+                    || assert!(claimed),
+                    |id| {
+                        assert!(!channel.reply("main", id, PromptReply::Opened));
+                        assert!(!channel.reply("main", id, PromptReply::Action));
+                        withdrawn.set(true);
+                    },
+                ),
+                || {
+                    assert!(withdrawn.get());
+                    assert!(!native_shown.replace(true));
+                    MessageDialogResult::Cancel
+                },
+            );
+            assert!(native_shown.get());
+            assert_eq!(answer, PromptReply::Cancel);
+            assert!(!channel.is_open());
+        }
+    }
 
     #[test]
     fn a_quit_is_asked_about_only_while_something_is_under_way() {

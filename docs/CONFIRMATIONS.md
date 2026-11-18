@@ -4,9 +4,9 @@ Design 17.01 uses the in-app confirmation card for ordinary app actions. The
 question is the title, the consequences are described, and the safe choice is
 available alongside the action. Quit uses the same card when the main window
 is visible and can receive the question. Rust asks with a native alert if the
-window is missing, hidden, or minimized, or if its web view cannot receive the
-question. Cloud control consent uses a native alert so an agent driving the web
-view cannot approve it.
+window is missing, hidden, or minimized, or if its web view stops responding
+before Rust receives an answer. Cloud control consent uses a native alert so
+an agent driving the web view cannot approve it.
 
 ## Quit acceptance criteria
 

@@ -42,10 +42,16 @@ const same = (one: ConfirmRequest, other: ConfirmRequest) =>
  * asks the same thing again. A question already waiting is not queued a second time: the repeat is answered
  * "cancel" at once and the first asker alone acts on the answer, so nothing is asked about, or done, twice.
  */
-export function chooseInApp(request: ConfirmRequest): Promise<ConfirmAnswer> {
-  if (queue.some((entry) => same(entry.request, request))) return Promise.resolve("cancel");
+export function chooseInApp(request: ConfirmRequest, signal?: AbortSignal): Promise<ConfirmAnswer> {
+  if (signal?.aborted || queue.some((entry) => same(entry.request, request))) return Promise.resolve("cancel");
   return new Promise((resolve) => {
-    queue = [...queue, { id: ++nextId, request, settle: resolve }];
+    const id = ++nextId;
+    const withdraw = () => answerConfirm(id, "cancel");
+    signal?.addEventListener("abort", withdraw, { once: true });
+    queue = [...queue, { id, request, settle: (answer) => {
+      signal?.removeEventListener("abort", withdraw);
+      resolve(answer);
+    } }];
     emit();
   });
 }

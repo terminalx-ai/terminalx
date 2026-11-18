@@ -8,7 +8,7 @@ const desktop = vi.hoisted(() => ({
   invoke: vi.fn(),
   listen: vi.fn<(
     event: string,
-    receive: (event: { payload: [string, ConfirmRequest] }) => Promise<void>,
+    receive: (event: { payload: [string, ConfirmRequest | null] }) => Promise<void>,
   ) => Promise<() => void>>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: desktop.isTauri, invoke: desktop.invoke }));
@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.resetAllMocks();
 });
 
@@ -98,10 +99,13 @@ describe("the app's confirmation dialog", () => {
     expect(await second).toBe(false);
   });
 
-  it("returns the selected quit choice to Rust and ignores a prompt replaced by the native alert", async () => {
+  it("retries a failed quit reply with the same ID and ignores a rejected claim", async () => {
     desktop.isTauri.mockReturnValue(true);
     desktop.listen.mockResolvedValue(() => {});
-    desktop.invoke.mockResolvedValueOnce(false).mockResolvedValue(true);
+    desktop.invoke.mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new Error("lost IPC reply"))
+      .mockResolvedValue(true);
     render(<ConfirmDialogHost />);
     const [event, receive] = desktop.listen.mock.calls[0];
     expect(event).toBe("quit-prompt");
@@ -124,6 +128,31 @@ describe("the app's confirmation dialog", () => {
       ["reply_to_quit_prompt", { id: "expired", reply: "opened" }],
       ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
       ["reply_to_quit_prompt", { id: "current", reply: "alternative" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "alternative" }],
+    ]);
+  });
+
+  it("renews a waiting quit card and stops when Rust withdraws it", async () => {
+    vi.useFakeTimers();
+    desktop.isTauri.mockReturnValue(true);
+    desktop.listen.mockResolvedValue(() => {});
+    desktop.invoke.mockResolvedValue(true);
+    render(<ConfirmDialogHost />);
+    const [, receive] = desktop.listen.mock.calls[0];
+    const { answer } = await asking(() => receive({
+      payload: ["current", { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" }],
+    }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    await act(() => receive({ payload: ["older", null] }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(() => receive({ payload: ["current", null] }));
+    await answer;
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(4_000));
+    expect(desktop.invoke.mock.calls).toEqual([
+      ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "heartbeat" }],
     ]);
   });
 });
