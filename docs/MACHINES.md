@@ -1,12 +1,9 @@
 # Machines: operating TerminalX on another computer (PRO-338)
 
-Status: architecture note for the Machines epic. The nine decisions below were
-confirmed by the owner on 2026-11-13. Written against `main` at `46c6250f`
-(TerminalX 0.2.32) on 2026-11-14. Since PRO-360 Machines is on for everyone:
-there is no Settings → Experimental → Machines switch. Where an "As built"
-section below says a part sat behind it, that is how the part first shipped
-([As built (PRO-360)](#as-built-pro-360-machines-for-everyone)). The person's
-guide is [MACHINES-GUIDE.md](MACHINES-GUIDE.md).
+The owner confirmed the nine decisions below on 2026-11-13. This note was
+originally written against TerminalX 0.2.32 at `46c6250f`. Machines became
+available by default in 0.2.35 ([PRO-360](#as-built-pro-360-machines-for-everyone)).
+Start with the [Machines guide](MACHINES-GUIDE.md) for setup instructions.
 
 A **machine** is another computer that runs TerminalX: a second Mac, a Mac mini,
 or a headless Linux server running `terminalx-serve`. From this desktop a person
@@ -1415,8 +1412,9 @@ window registers its phone route whenever the runtime is registered, whoever
 holds the direct port. When that route takes over, runtime-served phones are
 disconnected and reconnect through the window. When the runtime's registration
 ends or changes, the window's use of it ends and the supervisor picks again.
-Retaining registration cancellation through window forwarding remains open in
-[#1239](https://github.com/terminalx-ai/terminalx/issues/1239) (the #1236 review).
+Window forwarding retains registration cancellation, so an expired phone
+registration also ends a forwarded connection
+([#1243](https://github.com/terminalx-ai/terminalx/pull/1243)).
 
 **Capability.** The window's host binding advertises `machine-operating.v1`
 only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
@@ -2605,22 +2603,29 @@ Previous-release compatibility is the `machine-compat` job (PRO-354,
   [MACHINES-GUIDE.md](MACHINES-GUIDE.md), linked under the page's lead
   (`MACHINES_GUIDE_URL`).
 
-## Release readiness (PRO-360)
+## Release and verification (PRO-338)
 
-Checked against the epic's scope (PRO-338) on 2026-11-17, at `main`
-`d7f0b901`. The release ticket turns Machines on; this is what stands behind
-that, and what is still open. "Two-machine CI" is `machines-e2e`
-(`tests/machines_e2e.rs`, `tests/machine_routes.rs`), whose "Mac mini" is a
-desktop-mode runtime (`TERMINALX_LOCAL_DESKTOP=1`) on the `ubuntu-latest`
-runner and whose dev-server is a Linux container. `machine-compat` runs on
-`macos-latest`.
+TerminalX 0.2.35 made Machines available in Settings and kept hosting opt-in.
+That release includes account relay registration (PRO-368), runtime phone
+access (PRO-359) and the security controls from PRO-357. PRO-369 added proof of
+window identity for macOS pairing consent. PRO-403 through PRO-408 subsequently
+merged the machine session follow-ups for project scripts, branch and PR
+controls, files and changes, worktree removal, attachments, cost, account
+labels, continuation and check failures. [Release notes](../CHANGELOG.md#0235)
+
+On 2026-11-18, the two-machine CI job passed on main at `ef16107d5`, including
+the Linux container scenarios and relay fallback. The job runs the desktop
+pairing client and supervisor against a desktop-mode runtime on Ubuntu and
+a second runtime in a Linux container. The separate `machine-compat` job
+runs on macOS against previous runtime releases.
+[Two-machine CI run](https://github.com/terminalx-ai/terminalx/actions/runs/44326914428/job/134880556994)
 
 ### In scope
 
-| Item | Mac to Mac | Mac to Linux | Other evidence |
+| Item | Desktop-mode runtime | Headless Linux container | Other evidence |
 | --- | --- | --- | --- |
 | Pair by code, fingerprint, Allow | Two-machine CI (the window approves) | Two-machine CI (`terminalx-serve pair`, answered `y`) | `pairing_tests`, `security_tests` |
-| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; the relay registration for a signed-in machine is PRO-368 (in review) |
+| Pair through the account | Host grant test | First pairing uses a direct code | `pairing_tests::a_computer_paired_through_a_grant…`; PRO-368 registers signed-in hosts for relay access |
 | Sessions and chat (create, send, read) | Two-machine CI | Two-machine CI | |
 | Approvals, stop | Two-machine CI (`session.decide`, `session.interrupt`) | Two-machine CI | |
 | Terminals (create, resize, reconnect, replay) | Two-machine CI | Two-machine CI | |
@@ -2645,26 +2650,14 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
 | Sharing a machine with other people | `collab/1` not served; sharing, presence and notes hidden |
 | A Windows host | Not built: no Windows runtime |
 
-### Open before the release commit
+### Remaining coverage and route limits
 
-- **Two-machine CI on main.** No `machines-e2e` run has passed on a commit
-  that holds every Machines ticket: PR #1084 (PRO-356) merged with it failing
-  (the fake agent's control socket refused a connection in
-  `a_computer_pairs_with_two_machines_and_operates_each_in_its_own_projects`),
-  and #1054's green run did not include #1084. Every main CI run since
-  2026-11-16 12:30 UTC has stayed queued. The release commit needs a green
-  `machines-e2e` on main (PRO-360 acceptance).
-- **No real macOS host in two-machine CI.** "Mac mini" there is a
-  desktop-mode runtime on Linux. Pairing two real Macs, and a Mac with a
-  Linux server, by hand before the release is the check that remains.
-- **Covered on one side only:** pull requests, ports, projects from the
-  desktop, agents and sign-in, the account route and the command line have
-  their own tests but no two-machine scenario.
-- **Security review (PRO-357).** Every threat has a mitigation and a test, or
-  is an accepted risk above. The one open finding, telling the window from a
-  detached process during consent, is closed on a Mac by PRO-369.
-  The agent control changed in PRO-360 (pairing instead of the switch) by the
-  owner's decision.
-- **Still open in the epic:** PRO-368 (relay registration for a signed-in
-  machine) and PRO-359 (the phone), both in review; session follow-ups
-  PRO-403 to PRO-407, in Backlog.
+- The two-machine job uses simulated machine roles. A manual pairing and
+  session run from the macOS desktop to another Mac and to a Linux server
+  still needs separate verification.
+- Pull requests, ports, project management from the desktop, agent sign-in,
+  account pairing and CLI operations have focused tests. The two-machine
+  job exercises the paths listed in the table.
+- A headless host needs a direct route for first pairing. Once paired and
+  signed in, it can reconnect over the relay. Headless hosts do not appear
+  in the account picker.

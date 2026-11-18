@@ -87,8 +87,8 @@ server then appears under Machines on your computer, with its projects.
   computer connects to the server directly (TCP port 6768), so that port must
   be reachable from your computer: on the same network, over Tailscale, or
   through your firewall.
-- **From anywhere, with no inbound port:** through the TerminalX relay, once
-  the server is signed in to your TerminalX account:
+- **Relay after pairing:** once the server is paired, sign it in to the same
+  TerminalX account as your Mac to reconnect without an inbound port:
 
   ```sh
   terminalx-serve login
@@ -98,13 +98,8 @@ server then appears under Machines on your computer, with its projects.
   TerminalX, check that it shows the same code as the server's terminal, and
   approve. `terminalx-serve logout` signs the server out again. The server
   keeps its session in `~/.terminalx/data/account/session.json`, readable by
-  you only. The relay carries end-to-end encrypted traffic only, and pairing
-  still needs the code and `Allow? [y/N]` on the server.
-
-  Relay access comes with PRO-368, which registers a signed-in server with
-  the relay using this session. Until then, signing in does not make the
-  server reachable through the relay: reach it on the same network or over
-  Tailscale.
+  you only. The relay carries end-to-end encrypted traffic. First pairing
+  uses the direct route, the one-time code and `Allow? [y/N]` on the server.
 
 ## Add a project
 
