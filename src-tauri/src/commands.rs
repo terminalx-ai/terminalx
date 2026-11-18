@@ -2779,6 +2779,15 @@ fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) 
     Ok(ForkedTurn { session, tab_id: new_tab.id, note: None })
 }
 
+/// Resolve the existing prefix of a path while retaining its missing suffix.
+fn resolve_missing_path(path: &Path) -> Result<std::path::PathBuf, String> {
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err("Cannot verify a source path containing relative components.".into());
+    }
+    let ancestor = path.ancestors().find(|part| part.exists()).ok_or("Missing path ancestor")?;
+    Ok(std::fs::canonicalize(ancestor).map_err(err)?.join(path.strip_prefix(ancestor).map_err(err)?))
+}
+
 /// Allocate and restore the fork's checkout under the same rollback guard as its conversation.
 fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, at: Option<u64>, allocation: &mut crate::fork_allocation::ForkAllocation) -> Result<Option<String>, String> {
     let project_path = Path::new(&src.project_path);
@@ -2797,33 +2806,38 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
             let source_root = std::fs::canonicalize(source_root.trim()).map_err(err)?;
             source_cwd.strip_prefix(source_root).map_err(err)?.to_path_buf()
         } else if let Some(name) = &src.worktree_name {
-            // A missing cwd cannot answer Git queries. Recover only from the
-            // managed path and a still-existing local branch.
+            // Git's worktree records retain the original location even after
+            // the configured worktree directory changes or the checkout vanishes.
             if !matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [std::path::Component::Normal(_)]) {
                 return Err("Cannot verify the source worktree name.".into());
             }
-            let managed = git::worktree_path(project_path, name);
-            let parent = managed.parent().ok_or("Missing worktree parent")?;
-            let ancestor = parent.ancestors().find(|path| path.exists()).ok_or("Missing worktree ancestor")?;
-            let root = std::fs::canonicalize(ancestor).map_err(err)?.join(parent.strip_prefix(ancestor).map_err(err)?).join(name);
-            let relative = source_cwd.strip_prefix(&root).map_err(err)?;
-            if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)))
-                || project_repo.is_none()
-                || !src.branch.as_deref().is_some_and(|branch| git::branch_exists(project_path, branch)) {
-                return Err("Cannot verify the source worktree and branch.".into());
-            }
-            if std::fs::symlink_metadata(&root).is_ok() {
-                if !git::is_worktree_of(project_path, &root) {
-                    return Err("The source worktree belongs to a different repository.".into());
+            let branch = src.branch.as_deref().filter(|branch| git::branch_exists(project_path, branch))
+                .ok_or("Cannot verify the source worktree and branch.")?;
+            if project_repo.is_none() { return Err("Cannot verify the source repository.".into()); }
+            let resolved_cwd = resolve_missing_path(source_cwd)?;
+            let mut candidates = git::list_worktrees(project_path).map_err(err)?.into_iter()
+                .filter(|(path, recorded_branch)| (recorded_branch.as_deref() == Some(branch) || Path::new(path).exists())
+                    && Path::new(path).file_name() == Some(std::ffi::OsStr::new(name)))
+                .map(|(path, _)| std::path::PathBuf::from(path)).collect::<Vec<_>>();
+            candidates.push(git::worktree_path(project_path, name));
+            let mut found = None;
+            for candidate in candidates {
+                let root = resolve_missing_path(&candidate)?;
+                let Ok(relative) = resolved_cwd.strip_prefix(&root) else { continue };
+                if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) { continue; }
+                if std::fs::symlink_metadata(&root).is_ok() {
+                    if !git::is_worktree_of(project_path, &root) {
+                        return Err("The source worktree belongs to a different repository.".into());
+                    }
+                    let ancestor = source_cwd.ancestors().find(|path| path.exists()).ok_or("Missing source ancestor")?;
+                    if git::common_dir(ancestor) != project_repo {
+                        return Err("The source working directory escapes its worktree.".into());
+                    }
                 }
-                // Reject symlinks in the surviving prefix that escape the checkout.
-                let ancestor = source_cwd.ancestors().find(|path| path.exists()).ok_or("Missing source ancestor")?;
-                if !std::fs::canonicalize(ancestor).map_err(err)?.starts_with(std::fs::canonicalize(&root).map_err(err)?)
-                    || git::common_dir(ancestor) != project_repo {
-                    return Err("The source working directory escapes its worktree.".into());
-                }
+                found = Some(relative.to_path_buf());
+                break;
             }
-            relative.to_path_buf()
+            found.ok_or("Cannot verify the source worktree location.")?
         } else {
             return Err("The source working directory is unavailable.".into());
         });
@@ -5074,6 +5088,16 @@ mod command_tests {
         src.project_path = root.to_str().unwrap().into();
         src.worktree_name = Some(wt.name);
         src.branch = Some(wt.branch.clone());
+        // The stored cwd can use an alias, and settings can move on after the
+        // source was created. Git's record still identifies its original root.
+        #[cfg(unix)]
+        {
+            let alias = root.join("project-alias");
+            std::os::unix::fs::symlink(root, &alias).unwrap();
+            src.cwd = alias.join(worktree.strip_prefix(root).unwrap()).join("sub").to_string_lossy().into_owned();
+        }
+        let settings = store::settings::Settings { worktree_dir: ".raccoon/new-worktrees".into(), ..Default::default() };
+        store::settings::save(&settings).unwrap();
         std::fs::remove_dir_all(worktree.join("sub")).unwrap();
         for removed_worktree in [false, true] {
             if removed_worktree { std::fs::remove_dir_all(worktree).unwrap(); }
