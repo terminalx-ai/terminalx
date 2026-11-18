@@ -30,6 +30,16 @@ describe("cloudTabRows", () => {
     expect(cloudTabRows(row).find((tab) => tab.tabId === "tab-claude")?.label).toBe(label);
   });
 
+  it.each([
+    { harness: "constructor", title: null, label: "constructor" },
+    { harness: "__proto__", title: null, label: "__proto__" },
+    { harness: "constructor", title: "My explicit title", label: "My explicit title" },
+  ])("labels a tab with harness $harness and title $title", ({ harness, title, label }) => {
+    const row = live();
+    row.tabs = row.tabs.map((tab) => tab.tabId === "tab-claude" ? { ...tab, harness, title } : tab);
+    expect(cloudTabRows(row).find((tab) => tab.tabId === "tab-claude")?.label).toBe(label);
+  });
+
   it("shows no tab of a stopped workspace's cached list as working", () => {
     const [row] = buildCloudSessions({ item: threeAgentWorkspace({ state: "suspended" }), cached: { sessions: [threeAgentSession()], capabilities: [], at: 1 } });
     expect(row.source).toBe("cache");
