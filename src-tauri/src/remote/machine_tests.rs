@@ -341,6 +341,16 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let files = m.rpc.project(&peer, &json!({ "projectId": api_id })).unwrap().files.clone();
     let request = json!({ "path": api_worktree });
     assert!(files.read(&request).is_ok());
+    let admin = crate::git::run(&api_one, &["rev-parse", "--absolute-git-dir"]).unwrap();
+    let common_file = Path::new(admin.trim()).join("commondir");
+    let common = std::fs::read(&common_file).unwrap();
+    std::fs::write(&common_file, format!("{}\n", web.join(".git").display())).unwrap();
+    assert_eq!(files.read(&request).unwrap_err().code, "path_forbidden");
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await), "not_found");
+    std::fs::write(&common_file, common).unwrap();
+    // Warm the authorization cache again after restoring the checkout.
+    assert!(call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.is_ok());
+    assert!(files.read(&request).is_ok());
     std::fs::rename(&api_one, shared.join("saved-api-one")).unwrap();
     std::fs::create_dir(&api_one).unwrap();
     std::fs::write(&api_worktree, "replacement").unwrap();
@@ -356,6 +366,107 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     // A project removed from the machine is no longer served.
     crate::store::projects::remove(&web.to_string_lossy()).unwrap();
     assert_eq!(code(read(&web_id, "secret.txt").await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_project_does_not_inherit_its_enclosing_repository() {
+    let m = machine_rpc();
+    let parent = m.path("unregistered");
+    std::fs::create_dir(&parent).unwrap();
+    crate::cloud_agents::launch::init_blank_repository(&parent, "main").unwrap();
+    let folder = parent.join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("local.txt"), "in the registered folder").unwrap();
+    let project = crate::store::projects::add(folder.to_str().unwrap()).unwrap();
+    let id = machine::project_id(&project.path);
+    let external = m.path("parent-worktree");
+    git(&parent, &["worktree", "add", "--quiet", "--detach", external.to_str().unwrap()]);
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    let projects = call(&m.rpc, &peer, "machine.projects", json!({})).await.unwrap();
+    assert_eq!(projects["projects"][0]["kind"], "folder");
+    assert!(projects["projects"][0]["defaultBranch"].is_null());
+    let listed = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": id })).await.unwrap();
+    assert_eq!(listed["repositories"], json!([]));
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": id, "repo": "." })).await), "not_found");
+    assert_eq!(code(call(&m.rpc, &peer, "fs.list", json!({ "projectId": id, "path": external })).await), "path_forbidden");
+    let visible = call(&m.rpc, &peer, "fs.read", json!({ "projectId": id, "path": "local.txt" })).await.unwrap();
+    assert_eq!(visible["text"], "in the registered folder");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_mutations_preserve_contained_checkouts_and_projects() {
+    let m = machine_rpc();
+    let (api, id) = project(&m.path("code"), "api");
+    let outer = m.path("outer");
+    git(&api, &["worktree", "add", "--quiet", "--detach", outer.to_str().unwrap()]);
+    let (peer, _events, _) = computer(&m.rpc).await;
+    // Establish the scope before the nested checkout appears.
+    call(&m.rpc, &peer, "fs.list", json!({ "projectId": id, "path": outer })).await.unwrap();
+    let container = outer.join("container");
+    let inner = container.join("inner");
+    std::fs::create_dir(&container).unwrap();
+    git(&api, &["worktree", "add", "--quiet", "--detach", inner.to_str().unwrap()]);
+    let registered_parent = outer.join("registered");
+    let registered = registered_parent.join("folder");
+    std::fs::create_dir_all(&registered).unwrap();
+    crate::store::projects::add(registered.to_str().unwrap()).unwrap();
+
+    for (index, path) in [&container, &registered_parent].into_iter().enumerate() {
+        let refused = call(&m.rpc, &peer, "fs.delete", json!({
+            "projectId": id, "path": path, "recursive": true, "clientRequestId": format!("delete-protected-{index}")
+        })).await;
+        assert_eq!(code(refused), "path_forbidden");
+        let refused = call(&m.rpc, &peer, "fs.rename", json!({
+            "projectId": id, "from": path, "to": outer.join("moved"), "clientRequestId": format!("move-protected-{index}")
+        })).await;
+        assert_eq!(code(refused), "path_forbidden");
+    }
+    assert!(inner.join(".git").is_file());
+    assert!(registered.is_dir());
+
+    let linked = crate::store::projects::add(inner.to_str().unwrap()).unwrap();
+    let linked_id = machine::project_id(&linked.path);
+    call(&m.rpc, &peer, "fs.list", json!({ "projectId": linked_id, "path": outer })).await.unwrap();
+    let refused = call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": linked_id, "path": container, "recursive": true, "clientRequestId": "delete-linked-project"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    assert!(inner.join(".git").is_file());
+
+    let ordinary = outer.join("ordinary");
+    std::fs::create_dir(&ordinary).unwrap();
+    call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": id, "path": ordinary, "recursive": true, "clientRequestId": "delete-ordinary"
+    })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_start_directory_keeps_its_saved_checkout() {
+    let m = machine_rpc();
+    let (api, id) = project(&m.path("code"), "api");
+    let checkout = m.path("worktree");
+    git(&api, &["worktree", "add", "--quiet", "--detach", checkout.to_str().unwrap()]);
+    let cwd = checkout.join("src");
+    std::fs::create_dir(&cwd).unwrap();
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "clientRequestId": "session-saved-checkout" })).await.unwrap();
+    let session_id = made["sessionId"].as_str().unwrap();
+    index::update_session(session_id, |session| {
+        session.cwd = cwd.to_string_lossy().into_owned();
+        session.set_checkout_root(checkout.to_str());
+        Ok(())
+    }).unwrap();
+    std::fs::remove_dir(&cwd).unwrap();
+
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(session["session"]["cwd"], json!(cwd));
+    assert_eq!(session["session"]["fileRoot"], json!(checkout));
+    assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    git(&api, &["worktree", "remove", checkout.to_str().unwrap()]);
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert!(session["session"]["fileRoot"].is_null());
+    assert!(session["session"]["fileRepository"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -184,7 +184,7 @@ pub fn projects() -> Result<Value, RpcError> {
 /// One project as `machine.projects` lists it, and as `machine/6` returns
 /// the one it added.
 pub fn project_row(project: &Project) -> Value {
-    let git = project.kind == ProjectKind::Git;
+    let git = owns_git_checkout(Path::new(&project.path));
     json!({
         "projectId": project_id(&project.path),
         "name": project.name,
@@ -213,14 +213,34 @@ pub fn ids_by_path() -> HashMap<String, String> {
 pub(super) struct WorktreeRegistration {
     pub path: PathBuf,
     admin: PathBuf,
+    project_marker: Arc<Path>,
 }
 
 impl WorktreeRegistration {
-    /// Recheck both Git pointers before authorizing a cached checkout.
+    /// Recheck the Git pointers and their repository before authorizing a
+    /// cached checkout.
     pub fn is_current(&self) -> bool {
+        let Some(registry) = self.admin.parent() else { return false };
+        let Some(common) = registry.parent() else { return false };
         let marker = self.path.join(".git");
         git_link(&marker, "gitdir: ") == Some(self.admin.clone())
             && git_link(&self.admin.join("gitdir"), "") == Some(marker)
+            && git_link(&self.admin.join("commondir"), "").as_deref() == Some(common)
+            && self.project_uses_registry(registry, common)
+    }
+
+    fn project_uses_registry(&self, registry: &Path, common: &Path) -> bool {
+        let marker = self.project_marker.as_ref();
+        let git_dir = if marker.is_dir() {
+            std::fs::canonicalize(marker).ok()
+        } else {
+            git_link(marker, "gitdir: ")
+        };
+        git_dir.is_some_and(|dir| {
+            dir == common || (dir.parent() == Some(registry)
+                && git_link(&dir.join("gitdir"), "").as_deref() == Some(marker)
+                && git_link(&dir.join("commondir"), "").as_deref() == Some(common))
+        })
     }
 }
 
@@ -243,8 +263,12 @@ fn git_link(file: &Path, prefix: &str) -> Option<PathBuf> {
 /// Linked worktrees registered in this project's Git repository. A settings
 /// change only affects where future worktrees are created.
 pub(super) fn worktrees(project: &Path) -> Vec<WorktreeRegistration> {
+    if !owns_git_checkout(project) {
+        return Vec::new();
+    }
     let Some(registry) = crate::git::common_dir(project).map(|common| common.join("worktrees")) else { return Vec::new() };
     let Ok(entries) = std::fs::read_dir(&registry) else { return Vec::new() };
+    let project_marker: Arc<Path> = Arc::from(project.join(".git"));
     let mut found: Vec<_> = entries.filter_map(Result::ok).filter_map(|entry| {
         let admin = entry.path();
         if !entry.file_type().ok()?.is_dir() || std::fs::canonicalize(&admin).ok()? != admin {
@@ -255,11 +279,17 @@ pub(super) fn worktrees(project: &Path) -> Vec<WorktreeRegistration> {
             return None;
         }
         let path = marker.parent()?.to_path_buf();
-        let registration = WorktreeRegistration { path, admin };
+        let registration = WorktreeRegistration { path, admin, project_marker: project_marker.clone() };
         (registration.path != project && registration.is_current()).then_some(registration)
     }).collect();
     found.sort_by(|a, b| a.path.cmp(&b.path));
     found
+}
+
+/// A registered folder within an enclosing repository has only its own
+/// filesystem scope. Git's upward discovery cannot give it a registry.
+pub(super) fn owns_git_checkout(project: &Path) -> bool {
+    project.join(".git").exists() && crate::git::is_own_worktree(project)
 }
 
 /// One project as the calls that name it are served: its canonical folder,
@@ -281,7 +311,7 @@ impl ServedProject {
     }
 
     fn machine(id: String, root: PathBuf) -> Self {
-        let files = Arc::new(WorkspaceFiles::new(root.clone()));
+        let files = Arc::new(WorkspaceFiles::for_machine_project(root.clone()));
         Self { id: Some(id), git: WorkspaceGit::for_project(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None) }
     }
 
@@ -305,21 +335,28 @@ impl ServedProject {
         if session.worktree_removed {
             return None;
         }
-        let cwd = std::fs::canonicalize(&session.cwd).ok()?;
-        if !cwd.is_dir() {
+        let (path, exact) = match std::fs::canonicalize(&session.cwd) {
+            Ok(cwd) => (cwd, false),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                (std::fs::canonicalize(session.checkout_root()?).ok()?, true)
+            }
+            Err(_) => return None,
+        };
+        if !path.is_dir() {
             return None;
         }
-        let mut checkout = self.files.containing_worktree(&cwd);
-        if checkout.is_none() && cwd != self.root && (session.worktree_name.is_some() || !cwd.starts_with(&self.root)) {
+        let mut checkout = self.files.containing_worktree(&path);
+        if checkout.is_none() && path != self.root && (exact || session.worktree_name.is_some() || !path.starts_with(&self.root)) {
             // A newly created checkout can arrive before the next discovery.
             self.files.set_worktrees(worktrees(&self.root));
-            checkout = self.files.containing_worktree(&cwd);
+            checkout = self.files.containing_worktree(&path);
         }
-        if let Some(checkout) = checkout {
+        if let Some(checkout) = checkout.filter(|checkout| !exact || *checkout == path) {
             let name = self.files.relative(&checkout);
             return Some((name.clone(), Some(name)));
         }
-        cwd.starts_with(&self.root).then(|| (String::new(), self.git.project_has_git().then(|| ".".into())))
+        (path == self.root || (!exact && path.starts_with(&self.root)))
+            .then(|| (String::new(), self.git.project_has_git().then(|| ".".into())))
     }
 }
 

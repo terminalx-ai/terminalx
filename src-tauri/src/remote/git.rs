@@ -455,7 +455,7 @@ impl WorkspaceGit {
     }
 
     pub(super) fn project_has_git(&self) -> bool {
-        self.root.join(".git").exists() || crate::git::is_repo(&self.root)
+        super::machine::owns_git_checkout(&self.root)
     }
 
     fn limit_project_repositories(mut found: Vec<String>, preferred: Option<&str>) -> (Vec<String>, bool) {
