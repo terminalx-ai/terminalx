@@ -2,7 +2,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { cloudGitSource } from "@/lib/gitSource";
-import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
+import { act, cleanup, fireEvent, render as rtlRender, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrAssociation, PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
@@ -84,6 +85,7 @@ function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: (
 
 afterEach(() => {
   cleanup();
+  closeWorkspaceRemove();
   vi.useRealTimers();
   mocks.invoke.mockReset();
 });
@@ -112,6 +114,43 @@ it.each([false, true])("once merged shows the merged card and summaries, not the
 });
 
 describe("merged workspace action", () => {
+  it.each([
+    { uncommitted: 0, unpushed: 0 },
+    { uncommitted: 1, unpushed: 0 },
+    { uncommitted: 0, unpushed: 1 },
+  ])("uses only the machine's verdict (uncommitted=$uncommitted, unpushed=$unpushed)", async (counts) => {
+    const projectKey = "machine:mini:project";
+    const sessionId = `${projectKey}:session`;
+    mocks.invoke.mockImplementation(async (command: string, args: { additions: unknown[] }) => {
+      if (command === "pr_associations") return args.additions;
+      throw Error(command);
+    });
+    const call = vi.fn(async (method: string) => {
+      if (method === "git.status") return workStatus(mergedPr.head, 0);
+      if (method === "git.prs") return { prs: [mergedPr] };
+      if (method === "git.prAssociations") return { associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
+      if (method === "git.prConversation") return { ...mergedPr, reviewers: [], activity: [] };
+      throw Error(method);
+    });
+    const source = cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+    const workspace = {
+      projectPath: projectKey, path: cwd, name: "feature",
+      host: { key: "machine:mini|session", disposition: vi.fn(async () => ({ ...cleanMerged, ...counts })), remove: vi.fn(), turnRunning: () => false },
+    };
+    const { result } = renderHook(useDialogs);
+    render(<PrPanel cwd={`machine://mini:project/worktree`} source={source} sessionId={sessionId} branch={mergedPr.head} active busy={false} inline machineWorkspace={workspace} />);
+    await screen.findByTestId("pr-merged-card");
+    expect(workspace.host.disposition).toHaveBeenCalled();
+    if (counts.uncommitted || counts.unpushed) {
+      expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Delete workspace" }));
+      expect(result.current.workspaceRemove).toEqual({ ...workspace, mode: "delete" });
+    }
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).not.toContain("workspace_disposition");
+    expect(workspace.host.remove).not.toHaveBeenCalled();
+  });
+
   it("offers guarded workspace deletion when a managed workspace is merged and clean", async () => {
     mockBackend(cleanMerged);
     const openDelete = vi.fn();

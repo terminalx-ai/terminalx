@@ -2239,8 +2239,10 @@ none of the rest.
   machine runs the checks a local removal runs (uncommitted work, unpushed
   commits, the pull request, the second confirmation's digest). Nothing on
   this computer is read or removed; the machine's path is only shown.
-- **Where it is offered.** As for a cloud session: once the PR merged, the
-  chat's Delete workspace opens the standard removal dialog with this host.
+- **Where it is offered.** The machine session's Git actions menu opens the
+  standard removal dialog through the machine host. The chat and the merged
+  PR's What next section also offer Delete workspace once the machine verifies
+  the worktree is clean and its PR has merged.
   The sessions that went with the worktree leave the sidebar at once
   (`forgetMachineSessions`); a lost answer counts as removed only when the
   machine no longer lists the session.

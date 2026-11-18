@@ -21,7 +21,8 @@ import { getMergedCleanup, holdMergedWorkspace, LOCAL_HOST, mergedCleanupOn, req
 import { noteMerge } from "@/lib/mergeMethods";
 import { useSessionStore } from "@/lib/sessions";
 import { pipelineSettings } from "@/lib/issuePipeline";
-import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
+import { openWorkspaceDelete } from "@/lib/dialogs";
+import { canDeleteMergedWorkspace, offersWorkspaceDelete, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { Deployments, PrChecks, webUrl } from "./PrChecks";
 import { actionsRuns, checkCounts, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
@@ -96,6 +97,7 @@ export function PrPanel({
   busy,
   onSettle,
   workspace,
+  machineWorkspace,
   inline = false,
   held = false,
   selectedPr,
@@ -117,6 +119,7 @@ export function PrPanel({
   onSettle?: () => void;
   /** A managed workspace that can use the guarded workspace cleanup flow. */
   workspace?: WorkspaceCleanup;
+  machineWorkspace?: RemovableWorkspace;
   /** A section of the Branch tab, scrolled with it, rather than a panel of its own. */
   inline?: boolean;
   /**
@@ -177,7 +180,9 @@ export function PrPanel({
   const store = useSessionStore();
   const project = store.projects.find((entry) => entry.path === store.sessions.find((entry) => entry.id === sessionId)?.projectPath);
   const shortcutMethod = project ? pipelineSettings(project).mergeMethod : null;
-  const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
+  const workspaceKey = machineWorkspace
+    ? `${machineWorkspace.host.key}\0${machineWorkspace.path}\0${selection}`
+    : workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => { setLoginSource(null); }, [source]);
   // A pull request linked or unlinked from the session's menu shows at once.
@@ -211,9 +216,11 @@ export function PrPanel({
     let cancelled = false;
     setLoading(true);
     setCheckedWorkspace(null);
-    const dispositionRequest = workspace && workspaceKey
-      ? api.workspaceDisposition(workspace.projectPath, cwd ?? "").then((disposition) => ({ key: workspaceKey, disposition }))
-      : Promise.resolve(null);
+    const dispositionRequest = machineWorkspace && workspaceKey
+      ? machineWorkspace.host.disposition().then((disposition) => ({ key: workspaceKey, disposition })).catch(() => null)
+      : workspace && workspaceKey
+        ? api.workspaceDisposition(workspace.projectPath, cwd ?? "").then((disposition) => ({ key: workspaceKey, disposition }))
+        : Promise.resolve(null);
     Promise.all([
       source.workStatus().then(async (workStatus) => {
         const pullRequests: { rows: SessionPr[]; error?: string } = selectedPr
@@ -446,9 +453,13 @@ export function PrPanel({
   const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
-  const canDelete = !!workspaceKey && checkedWorkspace?.key === workspaceKey
+  const disposition = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
-    && canDeleteMergedWorkspace(checkedWorkspace.disposition);
+    ? checkedWorkspace.disposition : null;
+  const canDelete = canDeleteMergedWorkspace(disposition);
+  const deleteOnMachine = machineWorkspace && fresh && open.length === 0 && offersWorkspaceDelete(
+    disposition, busy || machineWorkspace.host.turnRunning(disposition?.sessionIds ?? []),
+  ) ? () => openWorkspaceDelete(machineWorkspace.projectPath, machineWorkspace.path, machineWorkspace.name, machineWorkspace.host) : undefined;
 
   return (
     <div className={cn("flex flex-col", inline ? "gap-2" : "h-full min-h-0 overflow-y-auto scrollbar-thin")}>
@@ -510,8 +521,12 @@ export function PrPanel({
           onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
         const isMerged = pr.state === "MERGED";
         // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
-        const whatNext = isMerged && inline && row.current && cwd && !source.cloud
-          ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+        const whatNext = isMerged && inline && row.current
+          ? deleteOnMachine && pr.url === latestCurrent?.url
+            ? <Button size="xs" variant="outline" className="self-start" onClick={deleteOnMachine}>Delete workspace</Button>
+            : cwd && !source.cloud
+              ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+              : undefined
           : undefined;
         // This owns the description as well as its editor, including in a PR tab.
         const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh}
