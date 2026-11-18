@@ -684,8 +684,10 @@ export interface RuntimeSession {
   id: string;
   projectPath: string;
   cwd: string;
-  /** Machine fs/1 path for the cwd. Null means unavailable, absent on older runtimes. */
+  /** Machine fs/1 path of the checkout. Null means unavailable. */
   fileRoot?: string | null;
+  /** Exact Git checkout for fileRoot. Null for a folder or unavailable checkout, absent on older runtimes. */
+  fileRepository?: string | null;
   worktreeName?: string | null;
   branch?: string | null;
   title: string;
