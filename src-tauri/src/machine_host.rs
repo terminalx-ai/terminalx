@@ -255,6 +255,9 @@ struct AccountRelay {
     watch: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(unix)]
+type PhoneAdmission = (Arc<phones::Phones>, HostKeypair, u16, tokio::sync::watch::Receiver<u64>, u64);
+
 pub struct MachineHost {
     data_dir: PathBuf,
     keys: key::KeyStore,
@@ -635,7 +638,7 @@ impl MachineHost {
 
     /// Capture the admission fence with route selection, before any handshake.
     #[cfg(unix)]
-    pub(crate) fn phone_admission(&self) -> Option<(Arc<phones::Phones>, HostKeypair, u16, tokio::sync::watch::Receiver<u64>, u64)> {
+    pub(crate) fn phone_admission(&self) -> Option<PhoneAdmission> {
         let state = self.state.lock().unwrap();
         if !state.enabled || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) { return None; }
         let phones = self.phones.get()?.clone();
@@ -1753,15 +1756,20 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         let route = route.unwrap();
         #[cfg(unix)]
         tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let sent = async {
                 let mut window = tokio::net::UnixStream::connect(&route).await?;
                 window.write_all(&wire::encode_header(&forwarded)?).await?;
-                window.shutdown().await?;
+                let mut byte = [0; 1];
+                let _ = window.read(&mut byte).await;
                 anyhow::Ok(())
             };
-            if let Err(error) = sent.await {
-                log::debug!("machine host: pass a phone's relay connection to the window: {error:#}");
+            tokio::select! {
+                biased;
+                _ = relay_cancel.recv() => {},
+                result = sent => if let Err(error) = result {
+                    log::debug!("machine host: pass a phone's relay connection to the window: {error:#}");
+                },
             }
         });
         #[cfg(not(unix))]
