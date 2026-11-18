@@ -59,6 +59,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+ALL.push("machine/7");
+
 describe("a machine's version view", () => {
   it("says Needs update on the chip when a connected machine hides a feature, and names the side", () => {
     const machine = pairedMachine({ machineId: "m1", name: "ci-box", version: "0.2.27" });

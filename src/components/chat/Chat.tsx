@@ -88,6 +88,7 @@ export function visibleTurns(tops: number[], top: number, viewport: number, tail
  */
 export function Chat({
   sessionId,
+  tabId,
   checkpointTabId,
   transcript,
   active = true,
@@ -120,6 +121,7 @@ export function Chat({
   onEditGoal,
 }: {
   sessionId: string;
+  tabId?: string;
   checkpointTabId?: string;
   transcript: Transcript;
   /** A kept chat can be hidden behind another workspace view. */
@@ -494,6 +496,7 @@ export function Chat({
                 turn={t}
                 cwd={cwd}
                 sessionId={sessionId}
+                tabId={tabId}
                 checkpointTabId={checkpointTabId}
                 stream={isLast && live ? stream : NO_STREAM}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
