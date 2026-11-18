@@ -672,12 +672,17 @@ impl PairingManager {
         resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     pub(crate) fn with_secrets_for_test(identifier: &str, store: Arc<dyn crate::keychain::SecretStore>) -> Arc<Self> {
         let mut manager = Self::new(Arc::new(AccountManager::default()));
         manager.secrets = PairingSecrets::with_store(store);
         manager.secrets.configure(identifier).unwrap();
         Arc::new(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
+        self.phone.set_owner(Some(owner));
     }
 
     /// The machine's host key, with which this window proves to the

@@ -1148,8 +1148,9 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
-- **A headless server** has no host binding until PRO-368, so it is not listed
-  on the account; it pairs from its terminal (PRO-353).
+- **A headless server** has no host binding, so it is not listed on the
+  account; it pairs from its terminal (PRO-353). Relay registration does not
+  create that binding.
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -1327,8 +1328,8 @@ host key is ready and someone is signed in on the machine, its runtime
 registers with the relay under its relay host id (`machineId`), through the
 same `RelayHost` as `--relay-link` (`MachineHost::start_relay`,
 `src-tauri/src/machine_host.rs`). It serves the machine's one `WorkspaceRpc`,
-admits paired computers by their relay device id and passes every other
-device to the window's phone route, as PRO-341 built. Its link is
+admits paired computers by their relay device id and routes other devices to
+the window's phone route when present, or to the runtime's phone host. Its link is
 `remote::account_link::AccountLink`:
 
 - The token comes from `POST /v1/desktop/machine-host/relay-session`
@@ -1411,9 +1412,11 @@ each frame on its control socket and answers the relay's reply to its `reqId`
 `account-pairing-changed` hint on the runtime's registration reaches the window
 as `machine_host_relay_hint`, so account grants are answered as promptly. The
 window registers its phone route whenever the runtime is registered, whoever
-holds the direct port, so phones' relay connections reach it as before. When
-the runtime's registration ends or changes, the window's use of it ends and the
-supervisor picks again.
+holds the direct port. When that route takes over, runtime-served phones are
+disconnected and reconnect through the window. When the runtime's registration
+ends or changes, the window's use of it ends and the supervisor picks again.
+Retaining registration cancellation through window forwarding remains open in
+[#1239](https://github.com/terminalx-ai/terminalx/issues/1239) (the #1236 review).
 
 **Capability.** The window's host binding advertises `machine-operating.v1`
 only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
@@ -1984,8 +1987,8 @@ Why the protocol changed: a phone could not reach a Mac whose window was
 closed, or a server with no window at all. The runtime that already holds the
 direct port now answers phones too, with nothing new on the phone's wire.
 
-- **Who serves a phone.** The direct listener (`machine_host/direct.rs`) passes
-  a phone to the window while one has registered `phoneRoute`, as since PRO-341.
+- **Who serves a phone.** The direct listener (`machine_host/direct.rs`) and
+  runtime relay pass a phone to the window while one has registered `phoneRoute`.
   Without one, the runtime serves it (`machine_host/phones.rs`). It uses the same
   E2EE v2 handshake with the machine's one host key, the same `devices.json`
   records and the same RPC. The RPC moved from the desktop-only `pairing` module
@@ -2014,11 +2017,21 @@ direct port now answers phones too, with nothing new on the phone's wire.
   false on a runtime no desktop app launched (`TERMINALX_LOCAL_DESKTOP`), and
   the phone shows such a machine with the server icon. Older phones read only
   `name`; older computers send only `name`, and the phone keeps what it had.
-- **The runtime answers phones** with `pairing.getEndpoints` as
-  `{ v: 1, directEndpoints, relay: null }`, and refuses
-  `pairing.provisionRelay`: it has no relay route for phones until PRO-368
-  registers a signed-in machine with the relay. A phone keeps any relay bundle
-  it has and uses its direct route.
+- **Relay discovery and provisioning.** `pairing.getEndpoints` returns
+  `{ v: 1, directEndpoints, relay }` to an authenticated phone. While the
+  runtime has a registered relay, `relay` describes its current director, cell,
+  assignment, host id and E2EE framing; otherwise it is `null`. Registration
+  depends on hosting being enabled, a ready host key, a signed-in account and
+  a working relay link, with the debug-build restriction and failure states
+  described under PRO-368 above. Direct endpoints remain available when the
+  relay is absent; a phone can retain an existing relay bundle for later.
+  `pairing.provisionRelay` installs a phone's resume-token hash through the
+  current registration, authorized by its authenticated direct connection or
+  an invite-based relay connection. It is unavailable on other relay
+  connections or without active relay control. Control requests fail if the
+  registration changes during the request or the relay refuses or fails to
+  answer. Endpoint requests can also ask for install status or, on a resume
+  connection, resume confirmation (`machine_host/phones.rs`).
 - **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
   window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
   no relay; the strict offer schema is unchanged). It prints the link as a
@@ -2035,10 +2048,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Not yet.** A headless machine is listed on the phone from the account only
-  once it registers with the relay (PRO-368). Until then the phone lists it once
-  paired from its terminal. The account list already shows Linux and SSH
-  machines as servers.
+- **Discovery.** Relay registration alone does not make a headless machine
+  discoverable on a phone through the account: the headless runtime does not
+  create a host binding or run the window's host-binding poll. A phone can list
+  the machine after pairing from its terminal. The account list shows Linux and
+  SSH machines as servers when they are listed.
 
 ## Session feature parity
 

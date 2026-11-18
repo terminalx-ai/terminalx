@@ -302,7 +302,7 @@ impl PairingManager {
 
     /// One phone the runtime passed on: its header line, then the phone.
     #[cfg(unix)]
-    async fn routed_phone(self: Arc<Self>, mut stream: tokio::net::UnixStream) -> Result<()> {
+    pub(crate) async fn routed_phone(self: Arc<Self>, mut stream: tokio::net::UnixStream) -> Result<()> {
         let header = read_header(&mut stream).await?;
         match wire::decode_header(&header)? {
             // The phone's own bytes follow, from its HTTP upgrade request.
@@ -314,10 +314,10 @@ impl PairingManager {
             }
             // The window opens the relay data leg itself.
             Forwarded::Relay { cell_url, relay_host_id, generation, connection } => {
-                drop(stream);
                 let connection = super::relay::ConnectionOpen::forwarded(connection)?;
                 let keypair = self.host_key(false)?;
-                self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection).await
+                wire::with_relay_route(stream, self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection))
+                    .await.unwrap_or(Ok(()))
             }
         }
     }
