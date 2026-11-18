@@ -479,9 +479,13 @@ async fn window_takeover_fences_pre_auth_and_routes_until_its_lease_ends() {
         .await
         .unwrap()
         .unwrap();
-    use tokio::io::AsyncReadExt;
     let mut bytes = Vec::new();
-    window.read_to_end(&mut bytes).await.unwrap();
+    use tokio::io::AsyncReadExt;
+    loop {
+        let byte = window.read_u8().await.unwrap();
+        bytes.push(byte);
+        if byte == b'\n' { break; }
+    }
     assert!(String::from_utf8(bytes).unwrap().contains("relayDeviceId"));
     rig.lifetime.release(&lease);
     let mut runtime = rig.connect("phone", "token", "resume", [7; 32]).await;
@@ -507,6 +511,63 @@ async fn retiring_the_relay_cancels_idle_and_pre_auth_phone_connections() {
             .unwrap()
             .is_none_or(|frame| frame.is_err() || matches!(frame, Ok(Message::Close(_))))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
+    use tokio::io::AsyncReadExt;
+    let mut rig = Rig::new().await;
+    rig.pair("phone", "token", false, true);
+    rig.pair("replacement", "replacement-token", false, true);
+    let path = rig._data.path().join("window-relay.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let lease = rig.lifetime.hold().unwrap();
+    rig.host.register_phone_route(PhoneRoute {
+        attachment: rig.lifetime.attachment(rig.lifetime.epoch(), &lease).unwrap(),
+        lease,
+        socket: path,
+    }).unwrap();
+    let phones = rig.phones.clone();
+    let key = rig.key.clone();
+    let window = tokio::spawn(async move {
+        loop {
+            let (mut route, _) = listener.accept().await.unwrap();
+            let phones = phones.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let mut header = Vec::new();
+                loop {
+                    let byte = route.read_u8().await.unwrap();
+                    header.push(byte);
+                    if byte == b'\n' { break; }
+                }
+                let forwarded = wire::decode_header(&header).unwrap();
+                let stopped = phones.stopped();
+                let epoch = *stopped.borrow();
+                let _ = wire::with_relay_route(route, phones.serve_relay(key, forwarded, 6768, epoch)).await;
+            });
+        }
+    });
+    let mut old = rig.connect("phone", "token", "resume", [7; 32]).await;
+    old.authenticated().await;
+    assert_eq!(old.call("host.describe", json!({})).await["ok"], true);
+    rig.open("phone", "resume");
+    let mut pending = rig.socket().await;
+
+    let rpc = match &*rig.host.rpc.lock().unwrap() { Rpc::Ready(rpc) => rpc.clone(), _ => unreachable!() };
+    let (replacement, _commands) = crate::remote::host::RelayHost::phone_test_registration(
+        rpc, format!("http://{}", rig.cell.local_addr().unwrap()), [9; 32]);
+    replacement.set_routes(rig.host.clone());
+    rig.host.use_relay(&replacement);
+    let original = std::mem::replace(&mut rig.relay, replacement);
+    let mut current = rig.connect("replacement", "replacement-token", "resume", [8; 32]).await;
+    current.authenticated().await;
+    original.phone_test_retire();
+    assert!(old.read().await.is_none());
+    assert!(tokio::time::timeout(Duration::from_secs(5), pending.next()).await.unwrap()
+        .is_none_or(|frame| frame.is_err() || matches!(frame, Ok(Message::Close(_)))));
+    assert_eq!(current.call("host.describe", json!({})).await["ok"], true);
+    window.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

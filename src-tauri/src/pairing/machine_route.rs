@@ -314,10 +314,10 @@ impl PairingManager {
             }
             // The window opens the relay data leg itself.
             Forwarded::Relay { cell_url, relay_host_id, generation, connection } => {
-                drop(stream);
                 let connection = super::relay::ConnectionOpen::forwarded(connection)?;
                 let keypair = self.host_key(false)?;
-                self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection).await
+                wire::with_relay_route(stream, self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection))
+                    .await.unwrap_or(Ok(()))
             }
         }
     }

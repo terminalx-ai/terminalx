@@ -16,12 +16,25 @@
 //! else. For [`Forwarded::Direct`] the phone's own bytes follow, from the
 //! first byte of its HTTP upgrade request, in both directions until either
 //! side closes. For [`Forwarded::Relay`] nothing follows: the window opens
-//! the relay data leg itself with what the header names.
+//! the relay data leg itself with what the header names. The Unix connection
+//! stays open for that leg's lifetime; either side closing it cancels the leg.
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// Keep a forwarded relay leg only while its runtime route remains open.
+#[cfg(unix)]
+pub async fn with_relay_route<F: std::future::Future>(mut route: tokio::net::UnixStream, leg: F) -> Option<F::Output> {
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0; 1];
+    tokio::select! {
+        biased;
+        _ = route.read(&mut byte) => None,
+        result = leg => Some(result),
+    }
+}
 
 /// The WebSocket path an operating computer connects to on the direct
 /// listener: `ws://<address>:6768/machine/1`. Phones connect to `/`.
