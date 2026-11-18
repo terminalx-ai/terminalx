@@ -623,12 +623,17 @@ async fn each_connection_is_told_of_changes_without_itself_as_another_computer()
         ..Record::default()
     };
     updates::write_record(&updates::status_path(&m.path("data")), &failed).unwrap();
-    // A change announced before the record was written (the connection's own setup, under load)
-    // carries no progress yet: wait for the one that reports the rolled-back update.
-    let changed = loop {
-        let changed = next_event(&mut events, "machine.updateChanged").await;
-        if changed["status"]["progress"] != Value::Null { break changed; }
-    };
+    // A notification from connection setup can still report idle progress.
+    let changed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let changed = next_event(&mut events, "machine.updateChanged").await;
+            if changed["status"]["progress"]["phase"] == "failed" {
+                break changed;
+            }
+        }
+    })
+    .await
+    .expect("no failed machine update notification");
     assert_eq!(changed["status"]["progress"]["rolledBack"], true, "{changed}");
     assert_eq!(changed["status"]["otherComputers"], json!([{ "id": "studio", "label": "Studio" }]), "{changed}");
     assert!(tokio::time::timeout(Duration::from_millis(300), async {
