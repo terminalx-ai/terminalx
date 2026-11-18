@@ -1027,6 +1027,9 @@ fn cleanup_refuses_a_parent_with_an_unidentified_pruned_legacy_checkout() {
     let companion = fixture.session(&project, &nested, TabStatus::Idle);
     std::fs::remove_dir_all(&nested).unwrap();
     sh(&project, &["worktree", "prune"]);
+    // Recreated ordinary directories resolve through Git to the parent.
+    std::fs::create_dir_all(&sub).unwrap();
+    assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), parent.to_str().unwrap());
     let candidate = fixture.find(&parent);
     assert_eq!(candidate.verdict, Verdict::Unverifiable);
     assert!(candidate.reason.as_deref().unwrap().contains("Cannot establish the checkout"));
