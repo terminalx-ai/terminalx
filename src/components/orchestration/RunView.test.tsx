@@ -1407,7 +1407,7 @@ describe("a blocked piece, a worker's report, and the buttons a run offers (PRO-
     const heldRun = { ...run, pieces: [run.pieces[0], held, run.pieces[2]] };
     answers.orchestration_finish_widens = () => Promise.resolve(["src/store/projects.rs"]);
     // The lead committed another file outside it after the list was shown: the person is asked again.
-    answers.orchestration_finish = (args) => (args as { accept: string[] }).accept.includes("src/store/index.rs")
+    answers.orchestration_finish = (args: unknown) => (args as { accept: string[] }).accept.includes("src/store/index.rs")
       ? Promise.resolve({ ...heldRun, pieces: [run.pieces[0], { ...held, state: "done" as const }, run.pieces[2]] })
       : Promise.reject(new Error(JSON.stringify({ code: "confirm_widening", message: "Finishing piece store adds files outside the files it owns to it.", details: { piece: "store", files: ["src/store/projects.rs", "src/store/index.rs"] } })));
     await open(heldRun);
