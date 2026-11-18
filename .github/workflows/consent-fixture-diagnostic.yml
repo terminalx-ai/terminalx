@@ -1,0 +1,57 @@
+name: Consent fixture diagnostic
+on:
+  push:
+    branches: [diagnostics/1214-consent-libtest]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reproduce detached helper stdout framing
+        shell: bash
+        run: |
+          rustc --version
+          cat > /tmp/consent.rs <<'RUST'
+          #[test]
+          fn detached_helper() {
+              match std::env::var("STAGE").as_deref() {
+                  Ok("1") => {
+                      std::process::Command::new("setsid")
+                          .arg(std::env::current_exe().unwrap())
+                          .args(["--exact", "detached_helper", "--nocapture", "--test-threads=1"])
+                          .env("STAGE", "2")
+                          .stdin(std::process::Stdio::null())
+                          .spawn().unwrap();
+                      std::process::exit(0);
+                  }
+                  Ok("2") => {
+                      if std::env::var_os("SEPARATE_LINE").is_some() {
+                          println!();
+                      }
+                      println!("CONSENT fixture-report");
+                      std::process::exit(0);
+                  }
+                  _ => {}
+              }
+          }
+          RUST
+          rustc --test /tmp/consent.rs -o /tmp/consent
+          for mode in original repaired; do
+              if [[ "$mode" == repaired ]]; then export SEPARATE_LINE=1; fi
+              status=0
+              STAGE=1 timeout 10s /tmp/consent --exact detached_helper --nocapture --test-threads=1 > "/tmp/$mode.out" 2> "/tmp/$mode.err" || status=$?
+              echo "$mode launcher exit=$status"
+              echo "$mode stdout"
+              cat "/tmp/$mode.out"
+              echo "$mode stderr"
+              cat "/tmp/$mode.err"
+              test "$status" -eq 0
+              if [[ "$mode" == original ]]; then
+                  grep -q 'CONSENT fixture-report' "/tmp/$mode.out"
+                  ! grep -q '^CONSENT ' "/tmp/$mode.out"
+              else
+                  grep -q '^CONSENT fixture-report$' "/tmp/$mode.out"
+              fi
+          done
