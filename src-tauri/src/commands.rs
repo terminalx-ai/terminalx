@@ -2812,10 +2812,16 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
         let recovery_branch = if missing {
             let unavailable = "The source working directory is unavailable and its checkout could not be verified.";
             let branch = src.branch.as_deref().filter(|branch| !branch.is_empty()).ok_or(unavailable)?;
-            let root = Path::new(src.checkout_root().ok_or(unavailable)?);
             let common = project_repo.as_deref().ok_or(unavailable)?;
-            relative_cwd = Some(src.checkout_identity().ok_or(unavailable)?
-                .missing_cwd(common, root, source_cwd, branch).ok_or(unavailable)?);
+            let (root, relative) = if let Some(identity) = src.checkout_identity() {
+                let root = Path::new(src.checkout_root().ok_or(unavailable)?);
+                (root.to_path_buf(), identity.missing_cwd(common, root, source_cwd, branch).ok_or(unavailable)?)
+            } else if src.unknown.contains_key("checkoutIdentity") {
+                return Err(unavailable.into());
+            } else {
+                crate::checkpoints::legacy_fork_workspace(src, project_path, common, branch).ok_or(unavailable)?
+            };
+            relative_cwd = Some(relative);
             if git::run(project_path, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err() {
                 return Err("The source worktree branch is unavailable.".into());
             }
@@ -2834,7 +2840,7 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
         let taken = git::taken_worktree_names(project_path, &taken);
         let name = names::unclaimed(&taken);
-        if let Some(source_root) = recovered_checkout {
+        if let Some(source_root) = recovered_checkout.as_deref() {
             let destination = resolve_missing_path(&git::worktree_path(project_path, &name))?;
             if destination.starts_with(source_root) || source_root.starts_with(&destination) {
                 return Err("The fork destination overlaps the source worktree.".into());
@@ -2868,7 +2874,7 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
     }
     let mut note = if let Some(end_seq) = at {
         if entry.worktree_name.is_some() {
-            let verified_checkout = recovered_checkout.map(|root| (root, Path::new(&entry.cwd)));
+            let verified_checkout = recovered_checkout.as_deref().map(|root| (root, Path::new(&entry.cwd)));
             match crate::checkpoints::turn_end(&src.id, &tab.id, end_seq, verified_checkout) {
                 Err(error) => Some(format!("The new worktree has the branch's latest files: {error:#}")),
                 Ok((tree, index)) => allocation.checkpoint(&tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index))
@@ -5121,9 +5127,11 @@ mod command_tests {
         src.project_path = root.to_str().unwrap().into();
         src.worktree_name = Some(wt.name);
         src.branch = Some(wt.branch.clone());
-        src.bind_checkout_root(&wt.path);
+        src.set_checkout_root(Some(&wt.path));
         store::index::save(&[src.clone()]).unwrap();
-        let src = store::index::get(&src.id).unwrap();
+        let legacy = store::index::get(&src.id).unwrap();
+        assert!(legacy.checkout_identity().is_none());
+        src.bind_checkout_root(&wt.path);
         assert!(src.checkout_identity().is_some());
         let tab = &src.tabs[0];
         let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
@@ -5162,11 +5170,15 @@ mod command_tests {
             let registered = git::list_worktrees(&root).unwrap();
             assert!(registered.contains(&(wt.path.clone(), Some(wt.branch.clone()))));
             let mut forks = Vec::new();
-            for at in [None, Some(0), Some(2)] {
-                let mut dest = src.clone();
+            let mut no_root_record = legacy.clone();
+            no_root_record.set_checkout_root(None);
+            for (source, at) in [&src, &legacy, &no_root_record].into_iter()
+                .flat_map(|source| [None, Some(0), Some(2)].map(|at| (source, at)))
+            {
+                let mut dest = source.clone();
                 dest.worktree_name = None;
                 let mut allocation = crate::fork_allocation::ForkAllocation::default();
-                let note = super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).unwrap();
+                let note = super::fork_workspace(source, tab, &mut dest, at, &mut allocation).unwrap();
                 if at == Some(0) {
                     assert!(note.unwrap().contains("no saved file checkpoint"));
                 } else {
@@ -5197,7 +5209,7 @@ mod command_tests {
             }
             assert_eq!(git::run(&root, &["rev-parse", &format!("refs/heads/{}", wt.branch)]).unwrap(), head);
             assert_eq!(std::fs::read_to_string(root.join("sub/file")).unwrap(), "main");
-            assert_eq!(store::index::get(&src.id).unwrap(), src);
+            assert_eq!(store::index::get(&src.id).unwrap(), legacy);
         }
 
         let reference = git::checkpoints::reference(&src.id, &format!("{}-1", tab.id), "end-index").unwrap();
@@ -5215,11 +5227,11 @@ mod command_tests {
                 git::run(&root, &["worktree", "add", "-q", &wt.path, &wt.branch]).unwrap();
                 std::fs::remove_dir_all(&sub).unwrap();
             }
-            for at in [None, Some(0)] {
-                let mut dest = src.clone();
+            for (source, at) in [&src, &legacy].into_iter().flat_map(|source| [None, Some(0)].map(|at| (source, at))) {
+                let mut dest = source.clone();
                 let mut allocation = crate::fork_allocation::ForkAllocation::default();
                 let before = git::list_worktrees(&root).unwrap();
-                assert!(super::fork_workspace(&src, tab, &mut dest, at, &mut allocation).is_err());
+                assert!(super::fork_workspace(source, tab, &mut dest, at, &mut allocation).is_err());
                 assert_eq!(allocation.rollback("refused".into()), "refused");
                 assert_eq!(git::list_worktrees(&root).unwrap(), before);
             }

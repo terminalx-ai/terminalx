@@ -72,53 +72,108 @@ impl WorktreeIdentity {
         cwd: &Path,
         branch: &str,
     ) -> Option<PathBuf> {
-        let relative = cwd.strip_prefix(root).ok()?;
-        if !root.is_absolute()
-            || cwd.components().any(|part| part == Component::ParentDir)
-            || directory_identity(common)? != self.repository
-        {
+        if directory_identity(common)? != self.repository {
             return None;
         }
         let mut parts = Path::new(&self.registration_name).components();
         if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() {
             return None;
         }
-        let registrations = common.join("worktrees");
-        let admin = registrations.join(&self.registration_name);
-        if std::fs::canonicalize(&registrations).ok()? != registrations
-            || directory_identity(&admin)? != self.registration
-            || Path::new(record_value(&admin.join("gitdir"))?.as_str()) != root.join(".git")
-            || record_value(&admin.join("HEAD"))? != format!("ref: refs/heads/{branch}")
-            || record_value(&admin.join("commondir"))? != "../.."
+        let admin = registrations(common)?.join(&self.registration_name);
+        if directory_identity(&admin)? != self.registration || !matches_registration(&admin, root, branch) {
+            return None;
+        }
+        missing_relative_cwd(root, cwd, &admin, |identity| *identity == self.checkout)
+    }
+}
+
+fn registrations(common: &Path) -> Option<PathBuf> {
+    let path = common.join("worktrees");
+    (std::fs::canonicalize(&path).ok()? == path).then_some(path)
+}
+
+fn matches_registration(admin: &Path, root: &Path, branch: &str) -> bool {
+    record_value(&admin.join("gitdir")).is_some_and(|path| Path::new(&path) == root.join(".git"))
+        && record_value(&admin.join("HEAD")).as_deref() == Some(&format!("ref: refs/heads/{branch}"))
+        && record_value(&admin.join("commondir")).as_deref() == Some("../..")
+}
+
+#[cfg(unix)]
+fn recorded_before(path: &Path, observed: std::time::SystemTime) -> Option<bool> {
+    use std::{os::unix::fs::MetadataExt, time::{Duration, UNIX_EPOCH}};
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let changed = UNIX_EPOCH.checked_add(Duration::new(meta.ctime().try_into().ok()?, meta.ctime_nsec().try_into().ok()?))?;
+    Some(meta.is_file() && changed < observed && meta.modified().ok()? < observed)
+}
+
+#[cfg(not(unix))]
+fn recorded_before(_: &Path, _: std::time::SystemTime) -> Option<bool> {
+    None
+}
+
+/// A legacy checkpoint proves where the session ran. Require the Git directories
+/// and the registration's backlink to predate that observation so a later
+/// replacement or re-registration cannot acquire the checkpoint's identity.
+pub(crate) fn legacy_missing_cwd(
+    common: &Path, root: &Path, cwd: &Path, branch: &str, observed: std::time::SystemTime,
+) -> Option<PathBuf> {
+    if directory_identity(common)?.created >= observed {
+        return None;
+    }
+    let mut matching = None;
+    for entry in std::fs::read_dir(registrations(common)?).ok()? {
+        let admin = entry.ok()?.path();
+        if !std::fs::symlink_metadata(&admin).ok()?.is_dir() {
+            return None;
+        }
+        let backlink = admin.join("gitdir");
+        if Path::new(&record_value(&backlink)?) != root.join(".git") {
+            continue;
+        }
+        if matching.is_some()
+            || directory_identity(&admin)?.created >= observed
+            || !recorded_before(&backlink, observed)?
+            || !matches_registration(&admin, root, branch)
         {
             return None;
         }
+        matching = Some(admin);
+    }
+    missing_relative_cwd(root, cwd, &matching?, |identity| identity.created < observed)
+}
 
-        let mut prefix = PathBuf::new();
-        for part in cwd.components() {
-            prefix.push(part);
-            match std::fs::symlink_metadata(&prefix) {
-                Ok(meta) if meta.is_dir() => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Some(relative.to_path_buf());
-                }
+fn missing_relative_cwd(
+    root: &Path, cwd: &Path, admin: &Path, matches_checkout: impl Fn(&DirectoryIdentity) -> bool,
+) -> Option<PathBuf> {
+    let relative = cwd.strip_prefix(root).ok()?;
+    if !root.is_absolute() || cwd.components().any(|part| part == Component::ParentDir) {
+        return None;
+    }
+
+    let mut prefix = PathBuf::new();
+    for part in cwd.components() {
+        prefix.push(part);
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) if meta.is_dir() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Some(relative.to_path_buf());
+            }
+            _ => return None,
+        }
+        if prefix == root {
+            if !matches_checkout(&directory_identity(root)?)
+                || record_value(&root.join(".git"))?.strip_prefix("gitdir: ")? != admin.to_str()?
+            {
+                return None;
+            }
+        } else if prefix.starts_with(root) {
+            match std::fs::symlink_metadata(prefix.join(".git")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 _ => return None,
             }
-            if prefix == root {
-                if directory_identity(root)? != self.checkout
-                    || record_value(&root.join(".git"))?.strip_prefix("gitdir: ")? != admin.to_str()?
-                {
-                    return None;
-                }
-            } else if prefix.starts_with(root) {
-                match std::fs::symlink_metadata(prefix.join(".git")) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return None,
-                }
-            }
         }
-        None
     }
+    None
 }
 
 // Git's registration files are short, single-line values. Refuse symlinks and

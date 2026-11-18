@@ -813,6 +813,43 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
     })
 }
 
+/// An older session can prove its workspace through its own saved checkpoint
+/// and the matching pinned ref. A path or branch name alone proves no history.
+pub(crate) fn legacy_fork_workspace(
+    src: &index::SessionEntry, project: &Path, common: &Path, branch: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let cwd = Path::new(&src.cwd);
+    let mut verified = None;
+    for tab in &src.tabs {
+        let Ok(state) = load(&src.id, &tab.id) else { continue };
+        if state.repository.as_deref().map(Path::new) != Some(common) {
+            continue;
+        }
+        for turn in state.turns.iter().rev() {
+            let root = Path::new(&turn.cwd);
+            if turn.abandoned
+                || src.checkout_root().is_some_and(|recorded| Path::new(recorded) != root)
+                || verified.as_ref().is_some_and(|(previous, _): &(PathBuf, PathBuf)| previous == root)
+            {
+                continue;
+            }
+            let Some(observed) = turn.started_at.and_then(chrono::DateTime::from_timestamp_micros) else { continue };
+            let Some(relative) = git::worktree_identity::legacy_missing_cwd(common, root, cwd, branch, observed.into()) else { continue };
+            let id = format!("{}-{}", tab.id, turn.seq);
+            let reference = trees::reference(&src.id, &id, "start").ok()?;
+            let pinned = git::run(project, &["rev-parse", "--verify", "--quiet", &reference]).ok();
+            if pinned.as_deref().map(str::trim) != Some(turn.start.as_str()) {
+                continue;
+            }
+            if verified.as_ref().is_some_and(|(previous, _): &(PathBuf, PathBuf)| previous != root) {
+                return None;
+            }
+            verified = Some((root.to_path_buf(), relative));
+        }
+    }
+    verified
+}
+
 /// The checkout's files and staging at the end of the turn a fork starts from
 /// (PRO-379), as tree ids in the session's repository, while they are kept.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
