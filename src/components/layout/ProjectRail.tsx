@@ -12,6 +12,7 @@ import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
+import { useSessionRowFacts } from "@/lib/sessionRowStatus";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
@@ -64,7 +65,11 @@ export function AppDestinations({
   // The overview's totals count cloud sessions too (PRO-23 CS-19), like the overview itself.
   const cloudSessions = useCloudDashboard();
   const cloud = useOrganizationVisibility();
-  const dashboardBuckets = useMemo(() => bucketSessions([...store.sessions, ...visibleDashboardSessions(cloudSessions, cloud.visibleIds)]), [store.sessions, cloudSessions, cloud.visibleIds]);
+  const localFacts = useSessionRowFacts(store.sessions);
+  const dashboardBuckets = useMemo(() => bucketSessions([
+    ...store.sessions.map((session) => ({ ...session, rowStatus: localFacts[session.id] ?? session.rowStatus })),
+    ...visibleDashboardSessions(cloudSessions, cloud.visibleIds),
+  ]), [store.sessions, localFacts, cloudSessions, cloud.visibleIds]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.

@@ -5,8 +5,11 @@ import { DEFAULT_DASHBOARD_PREFERENCES, tableColumns } from "@terminalx/portable
 import { setPrefs, getPrefs } from "@/lib/prefs";
 import { AgentDashboard } from "./AgentDashboard";
 import { api } from "@/lib/api";
+import { AppDestinations } from "@/components/layout/ProjectRail";
 
 const state = vi.hoisted(() => ({ sessions: [] as SessionEntry[], select: vi.fn() }));
+vi.mock("@/components/layout/SessionSidebar", () => ({ SessionSidebar: () => null }));
+vi.mock("@/components/layout/ChatListSidebar", () => ({ ChatListSidebar: () => null }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ sessions: state.sessions, loaded: true, projects: [], harnesses: [] }), selectSession: state.select, openNewSession: vi.fn() }));
 vi.mock("@/lib/summaries", () => ({ useSessionSummaries: () => ({ get: () => undefined, loading: false }) }));
 vi.mock("@/lib/cloudDashboard", () => ({ useCloudDashboard: () => [], isCloudDashboardSession: () => false }));
@@ -88,24 +91,35 @@ it("updates live cards and counts across team views, with waiting taking priorit
   expect(column("Working").getByText("2")).toBeTruthy();
 });
 
-it("updates local background work from the runtime status poll", async () => {
+it("keeps Overview rail counts and working dot in sync with the board during local background work", async () => {
   vi.useFakeTimers();
-  const active = session("Active");
-  const background = session("Background", { tabs: [{ ...active.tabs[0], id: "background", status: "completed" }] });
-  let backgroundActive = true;
-  const fetch = vi.spyOn(api, "sessionRowStatuses").mockImplementation(async () => ({ Background: { tabs: [{ status: "completed", activity: backgroundActive ? "background" : null }] } }));
-  state.sessions = [active, background];
-  render(<AgentDashboard />);
-  const working = () => within(screen.getByRole("region", { name: "Working" }));
-  expect(working().getByText("1")).toBeTruthy();
+  const local = session("Local session");
+  state.sessions = [{ ...local, tabs: [{ ...local.tabs[0], status: "completed" }] }];
+  const fetch = vi.spyOn(api, "sessionRowStatuses").mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: null }] } });
+  const open = vi.fn();
+  const rail = <AppDestinations onOpenHome={open} onNewSession={open} onSearch={open} onOpenIssues={open} onOpenAgents={open} onOpenAutomations={open} />;
+  const overview = render(<div>{rail}</div>);
+  // Let the rail subscribe before opening the board, as it does elsewhere in the app.
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(fetch).toHaveBeenCalledWith(expect.arrayContaining(["Active", "Background"]));
-  expect(working().getByText("2")).toBeTruthy();
-  expect(working().getByText("Background")).toBeTruthy();
-  backgroundActive = false;
+  expect(fetch).toHaveBeenCalledWith([local.id]);
+  overview.rerender(<div>{rail}<AgentDashboard /></div>);
+
+  const expectActivity = (working: boolean) => {
+    const activeColumn = within(screen.getByRole("region", { name: working ? "Working" : "Done" }));
+    const emptyColumn = within(screen.getByRole("region", { name: working ? "Done" : "Working" }));
+    expect(activeColumn.getByText(local.title)).toBeTruthy();
+    expect(activeColumn.getByText("1")).toBeTruthy();
+    expect(emptyColumn.queryByText(local.title)).toBeNull();
+    const button = screen.getByRole("button", { name: `Overview, 0 needs you, ${working ? 1 : 0} working, ${working ? 0 : 1} done, 0 not started` });
+    expect(Boolean(button.querySelector(".bg-info.animate-pulse-soft"))).toBe(working);
+  };
+  expectActivity(false);
+  fetch.mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: "background" }] } });
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-  expect(working().getByText("1")).toBeTruthy();
-  expect(within(screen.getByRole("region", { name: "Done" })).getByText("Background")).toBeTruthy();
+  expectActivity(true);
+  fetch.mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: null }] } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expectActivity(false);
 });
 
 it("explains when hidden automations are the only running sessions", async () => {
