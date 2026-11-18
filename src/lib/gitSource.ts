@@ -46,7 +46,7 @@ export interface GitSource {
   branches(): Promise<BranchInfo[]>;
   /** Resolves to a notice worth showing (e.g. what a reconciled push found), or null. */
   commit(message: string): Promise<string | null>;
-  push(): Promise<string | null>;
+  push(branch?: string): Promise<string | null>;
   pull(): Promise<string | null>;
   fetch?(): Promise<string | null>;
   /** Local only: discarding in a cloud workspace is left to its terminal. */
@@ -81,7 +81,7 @@ export interface GitSource {
     merge(method: "merge" | "squash" | "rebase" | "queue"): Promise<void>;
   };
   conversation?(pr: PullRequest, association?: PrAssociation): PrConversationAccess;
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string }): Promise<string | null>;
+  createPr(input: { title: string; body: string; base: string | null; draft: boolean; sessionId?: string; branch?: string }): Promise<string | null>;
   readyPr(number: number): Promise<void>;
   /** `head`, where given, pins the merge to that commit (a machine's or workspace's `git.prMerge`). */
   mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<void>;
@@ -236,8 +236,8 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       await remote.commit(message, author);
       return null;
     },
-    push: async () => {
-      const result = await remote.push();
+    push: async (branch) => {
+      const result = await remote.push(branch);
       if (!result.pushed) return `GitHub already has ${result.branch} at ${result.head.slice(0, 7)}; nothing was pushed again.`;
       return result.reconciled ? `Pushed ${result.branch} (confirmed with GitHub after the connection faltered).` : null;
     },
@@ -282,8 +282,8 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey || !association.scope.repo) throw new Error("Reconnect this PR's workspace to read its conversation.");
       return new RemoteGit(remote.client, association.scope.repo).prConversation(pr.url);
     },
-    createPr: async ({ title, body, base, draft, sessionId }) => {
-      const result = await remote.createPr({ title, body, base, draft });
+    createPr: async ({ title, body, base, draft, sessionId, branch }) => {
+      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}) });
       if (sessionId) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);
       if (result.existing) return `Pull request #${result.pr.number} for this branch already exists; it is linked below, not duplicated.`;
       return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;

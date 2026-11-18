@@ -220,7 +220,6 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const manage = connected && state.state === "connected" && state.authority === "manage";
 
   // Git: the project's repositories; the session's worktree first.
-  const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
   const discoverRepositories = useMemo(() => {
     if (!generation || !projectClient) return undefined;
@@ -231,23 +230,35 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       throw error;
     });
   }, [generation, projectClient]);
+  const [repositoryList, setRepositoryList] = useState<{ discover: NonNullable<typeof discoverRepositories>; repos: RemoteRepository[] } | null>(null);
   useEffect(() => {
     if (!discoverRepositories) return;
     let cancelled = false;
     discoverRepositories()
-      .then((found) => !cancelled && setRepositories(found))
-      .catch(() => !cancelled && setRepositories([]));
+      .then((repos) => !cancelled && setRepositoryList({ discover: discoverRepositories, repos }))
+      .catch(() => !cancelled && setRepositoryList({ discover: discoverRepositories, repos: [] }));
     return () => {
       cancelled = true;
     };
   }, [discoverRepositories]);
+  const repositories = repositoryList?.repos ?? null;
   const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
-  const gitSource = useMemo(
-    () => (connected && projectClient && repository ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repository), canWrite: manage, author: desktopGitIdentity }) : undefined),
-    [connected, projectClient, repository, projectKey, manage],
+  const relativeCwd = worktreeInProject(project?.path, ownSession?.cwd);
+  const headerRepository = ownSession && repositoryList?.discover === discoverRepositories && repositories
+    ? containingRepository(repositories, relativeCwd ?? ownSession.cwd)
+      ?? (relativeCwd !== null && !ownSession.worktreeName && repositories.some((repo) => repo.repo === ".") ? "." : null)
+    : null;
+  const gitFor = useCallback(
+    (repo: string | null) => generation && projectClient?.hasCapability("git/1") && repo
+      ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity })
+      : undefined,
+    [generation, projectClient, projectKey, manage],
   );
+  const sessionGit = useMemo(() => gitFor(headerRepository), [gitFor, headerRepository]);
+  const gitSource = useMemo(() => repository === headerRepository ? sessionGit : gitFor(repository), [gitFor, repository, headerRepository, sessionGit]);
+  const sessionRemote = repositories?.find((repo) => repo.repo === headerRepository)?.remote ?? null;
 
   // Files use the session's cwd, just as they do for a local session.
   // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
@@ -438,7 +449,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState },
+    machine: { machineId, projectId, record: machine, name, state: machineState, branchGit: sessionGit && { source: sessionGit, remote: sessionRemote } },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,

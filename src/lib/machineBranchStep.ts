@@ -205,6 +205,6 @@ export async function branchDiffSize(source: GitSource, base: string): Promise<{
 /** The two snapshots describe the same branch state, so an action prepared on one may run on the other. */
 export function sameBranchState(expected: MachineBranchSnapshot, now: MachineBranchSnapshot | null): boolean {
   return !!now && now.branch === expected.branch && now.head === expected.head && now.base === expected.base && now.state === expected.state
-    && (now.pr?.number ?? null) === (expected.pr?.number ?? null) && (now.pr?.headSha ?? null) === (expected.pr?.headSha ?? null)
+    && now.pr?.number === expected.pr?.number && now.pr?.url === expected.pr?.url && now.pr?.headSha === expected.pr?.headSha
     && now.pullNeedsAgent === expected.pullNeedsAgent;
 }

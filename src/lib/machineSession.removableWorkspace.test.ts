@@ -1,6 +1,7 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type RuntimeSession } from "@terminalx/portable/workspace";
+import * as workspaceGit from "@terminalx/portable/workspaceGit";
 import { invoke } from "@tauri-apps/api/core";
 import { removeWorkspace } from "@/lib/sessions";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
@@ -97,6 +98,27 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+it("keeps header Git on the session checkout when Changes selects another repository", async () => {
+  const { mini } = machines();
+  mini.runtime.capabilities.push("git/1");
+  const remote = "https://github.com/owner/repo";
+  vi.spyOn(workspaceGit, "listRepositories").mockResolvedValue([
+    { repo: ".", remote, branch: "main", head: null, defaultBranch: "main" },
+    { repo: firstPath, remote, branch: "first", head: null, defaultBranch: "main" },
+  ]);
+  mini.runtime.connect();
+  const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
+  await waitFor(() => expect(result.current?.machine?.branchGit?.source.key).toBe(`machine:mini:project|${firstPath}`));
+  const headerGit = result.current!.machine!.branchGit!.source;
+
+  act(() => result.current!.selectRepository("."));
+  expect(result.current?.gitSource?.key).toBe("machine:mini:project|.");
+  expect(result.current?.machine?.branchGit?.source).toBe(headerGit);
+
+  rerender("machine:mini:project:second");
+  expect(result.current?.machine?.branchGit).toBeUndefined();
 });
 
 describe("useMachineSession removable workspace", () => {
