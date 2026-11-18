@@ -155,6 +155,26 @@ impl PhoneConnection {
     fn wire_transport(&self) -> phone::wire::Transport { if self.host_id().is_some() { phone::wire::Transport::Relay } else { phone::wire::Transport::Direct } }
 }
 
+/// Runtime-owned journal: identities survive external deletion, and pending
+/// revocations survive process death even when the relay has not answered.
+/// Only the runtime writes this file; the window still owns devices.json.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct RelayCleanup {
+    known: HashSet<String>,
+    pending: HashSet<String>,
+}
+
+impl RelayCleanup {
+    fn save(&self) -> Result<()> {
+        let root = crate::store::root()?;
+        crate::store::write_json(&root.join("phone-relay-cleanup.json"), self)?;
+        // write_json fsyncs the temporary file before atomic replacement.
+        // Sync the directory too, so the replacement survives a crash.
+        std::fs::File::open(root)?.sync_all()?;
+        Ok(())
+    }
+}
+
 /// A revocation remains pending until the relay replies to this exact request.
 struct RevocationRequest {
     id: String,
@@ -172,7 +192,7 @@ pub(crate) struct Phones {
     next: AtomicU64,
     /// Device identities outlive their sockets, so external removal still
     /// retires a disconnected phone's relay credential.
-    known_devices: Mutex<HashSet<String>>,
+    cleanup: Mutex<RelayCleanup>,
     pending_revocations: Mutex<HashMap<String, Option<RevocationRequest>>>,
     /// The account generation as last read, each tick: the phone RPC
     /// asks for it on every request and event, which must not read a file.
@@ -200,6 +220,13 @@ impl Phones {
         let host = Arc::new(PhoneHost::new(move || current.load(Ordering::SeqCst)));
         // Its notices stay in this process: the window has its own (`phone::sink`).
         host.configure(Arc::new(crate::phone::sink::NoticesInProcess::new(sink)))?;
+        let mut cleanup: RelayCleanup = crate::store::read_json(&crate::store::root()?.join("phone-relay-cleanup.json"))?.unwrap_or_default();
+        // A crash can occur after recording revoke intent but before changing
+        // devices.json. Complete that local fence before accepting phones.
+        for device in &cleanup.pending { DeviceRegistry.revoke(device)?; }
+        cleanup.known.extend(DeviceRegistry.list()?.into_iter().map(|device| device.id));
+        cleanup.save()?;
+        let pending_revocations = cleanup.pending.iter().cloned().map(|id| (id, None)).collect();
         Ok(Arc::new(Self {
             host,
             sessions,
@@ -207,8 +234,8 @@ impl Phones {
             registry: DeviceRegistry,
             state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
-            known_devices: Mutex::new(DeviceRegistry.list()?.into_iter().map(|device| device.id).collect()),
-            pending_revocations: Mutex::new(HashMap::new()),
+            cleanup: Mutex::new(cleanup),
+            pending_revocations: Mutex::new(pending_revocations),
             generation,
             account_known: AtomicBool::new(first.is_ok()),
             account: Mutex::new(account),
@@ -216,6 +243,12 @@ impl Phones {
             relay: Mutex::new(None),
             stopped: watch::channel(0).0,
         }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn restart_for_test(&self, sink: Arc<dyn EventSink>) -> Arc<Self> {
+        self.stop();
+        Self::new(self.sessions.clone(), sink, self.lifetime.clone(), || {}).unwrap()
     }
 
     pub(crate) fn status(&self) -> PhoneStatus {
@@ -321,13 +354,25 @@ impl Phones {
         };
         let account = self.account.lock().unwrap().clone();
         let candidates = {
-            let mut known = self.known_devices.lock().unwrap();
-            let mut candidates = known.clone();
+            let mut cleanup = self.cleanup.lock().unwrap();
+            let mut candidates = cleanup.known.clone();
             candidates.extend(connected);
             if account_changed {
                 candidates.extend(paired.iter().map(|device| device.id.clone()));
             }
-            *known = paired.iter().filter(|device| account_allows(device, account.as_ref())).map(|device| device.id.clone()).collect();
+            let mut next = cleanup.clone();
+            next.known = paired.iter().filter(|device| account_allows(device, account.as_ref())).map(|device| device.id.clone()).collect();
+            next.pending.extend(candidates.iter().filter(|id| paired.iter().find(|device| device.id == **id)
+                .is_none_or(|device| !account_allows(device, account.as_ref()))).cloned());
+            // Persist the known -> pending transition atomically. If storage
+            // fails, keep the old known set as a restart recovery source and
+            // still cancel local connections below.
+            if next.known != cleanup.known || next.pending != cleanup.pending {
+                match next.save() {
+                    Ok(()) => *cleanup = next,
+                    Err(error) => log::warn!("machine host: persist phone relay cleanup: {error:#}"),
+                }
+            }
             candidates
         };
         for device_id in candidates {
@@ -342,6 +387,27 @@ impl Phones {
         }
     }
 
+    /// Persist before mutating the device registry or sending a revocation.
+    fn queue_revocation(&self, device_id: &str) -> Result<()> {
+        let mut cleanup = self.cleanup.lock().unwrap();
+        if !cleanup.pending.contains(device_id) {
+            let mut next = cleanup.clone();
+            next.pending.insert(device_id.to_string());
+            next.save()?;
+            *cleanup = next;
+        }
+        Ok(())
+    }
+
+    fn acknowledge_revocation(&self, device_id: &str) -> Result<()> {
+        let mut cleanup = self.cleanup.lock().unwrap();
+        let mut next = cleanup.clone();
+        next.pending.remove(device_id);
+        next.save()?;
+        *cleanup = next;
+        Ok(())
+    }
+
     fn revoke_relay(&self, device_id: &str) {
         self.pending_revocations.lock().unwrap().entry(device_id.to_string()).or_insert(None);
         if let Some(relay) = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade) {
@@ -354,16 +420,31 @@ impl Phones {
         use std::sync::mpsc::TryRecvError;
         let relay = self.relay.lock().unwrap().as_ref().and_then(Weak::upgrade);
         let registration = relay.as_ref().and_then(|relay| relay.registration());
-        self.pending_revocations.lock().unwrap().retain(|device, pending| {
+        // A registry write can fail after intent was persisted. Recover that
+        // work on the next tick as well as after a process restart.
+        let durable = self.cleanup.lock().unwrap().pending.clone();
+        let mut requests = self.pending_revocations.lock().unwrap();
+        for device in durable { requests.entry(device).or_insert(None); }
+        requests.retain(|device, pending| {
             if let Some(request) = pending {
                 match request.reply.try_recv() {
-                    Ok(Ok(reply)) if reply["type"] == "device-revoked" && reply["reqId"] == request.id => return false,
+                    Ok(Ok(reply)) if reply["type"] == "device-revoked" && reply["reqId"] == request.id => {
+                        match self.acknowledge_revocation(device) {
+                            Ok(()) => return false,
+                            Err(error) => log::warn!("machine host: persist relay revocation acknowledgment: {error:#}"),
+                        }
+                        *pending = None;
+                    },
                     Err(TryRecvError::Empty) if registration.as_ref() == Some(&request.registration)
                         && request.sent.elapsed() < HANDSHAKE_TIMEOUT => return true,
                     // Closed before send/ack, refused, timed out, or replaced:
                     // retry the idempotent revocation on the next live control.
                     _ => *pending = None,
                 }
+            }
+            if let Err(error) = self.queue_revocation(device) {
+                log::warn!("machine host: persist pending relay revocation: {error:#}");
+                return true;
             }
             if let (Some(relay), Some(registration)) = (&relay, &registration) {
                 let id = uuid::Uuid::new_v4().simple().to_string();
@@ -541,6 +622,7 @@ impl Phones {
     /// Remove a paired phone: its record is revoked, its grants end and its
     /// connections close. Whether it was paired. Blocking.
     pub(crate) fn revoke(&self, device_id: &str) -> Result<bool> {
+        self.queue_revocation(device_id)?;
         let revoked = self.registry.revoke(device_id)?.is_some();
         self.end_grants(device_id);
         self.close(device_id, ConnectionSignal::Cancel);
@@ -571,13 +653,21 @@ impl Phones {
         (self.changed)();
     }
 
-    fn track(&self, device_id: &str) -> (u64, mpsc::UnboundedReceiver<ConnectionSignal>) {
-        self.known_devices.lock().unwrap().insert(device_id.to_string());
+    fn track(&self, device_id: &str) -> Result<(u64, mpsc::UnboundedReceiver<ConnectionSignal>)> {
+        {
+            let mut cleanup = self.cleanup.lock().unwrap();
+            if !cleanup.known.contains(device_id) {
+                let mut next = cleanup.clone();
+                next.known.insert(device_id.to_string());
+                next.save()?;
+                *cleanup = next;
+            }
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::unbounded_channel();
         self.state.lock().unwrap().connections.entry(device_id.to_string()).or_default().push((id, sender));
         (self.changed)();
-        (id, receiver)
+        Ok((id, receiver))
     }
 
     /// Track before rereading credentials and account binding. If a revoke or
@@ -587,7 +677,7 @@ impl Phones {
     /// state lock the tick uses to invalidate it, fencing a tick during the read.
     /// Blocking: admission reads both shared files before acquiring an owner.
     pub(super) fn admit(self: &Arc<Self>, device: &DeviceEntry, client_key: &str, epoch: u64) -> Result<(TrackedPhone, mpsc::UnboundedReceiver<ConnectionSignal>)> {
-        let (id, signals) = self.track(&device.id);
+        let (id, signals) = self.track(&device.id)?;
         let tracked = TrackedPhone { phones: self.clone(), device_id: device.id.clone(), id, revoke_relay_on_close: Arc::new(AtomicBool::new(false)) };
         let account = load_account_mirror().context("reread the account during phone admission")?;
         let current = self.registry.list()?.into_iter().find(|current| current.id == device.id).context("paired device was revoked during admission")?;
@@ -856,6 +946,7 @@ impl Phones {
                 revoke_relay_on_close.store(true, Ordering::SeqCst);
                 let (phones, device_id) = (self.clone(), device.id.clone());
                 rpc::off_runtime(move || {
+                    phones.queue_revocation(&device_id)?;
                     phones.registry.revoke(&device_id)?;
                     phones.end_grants(&device_id);
                     Ok(())

@@ -797,3 +797,86 @@ async fn relay_revocations_retry_control_loss_before_send_or_acknowledgment() {
         assert!(replacement.take().is_none(), "only an acknowledged revocation leaves the retry set");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_revocations_survive_restart_before_send_or_acknowledgment() {
+    for sent_before_restart in [false, true] {
+        let rig = Rig::new().await;
+        rig.pair("phone", "token", false, true);
+        rig.phones.tick(now_ms());
+        let mut control = rig.relay.phone_test_hold_control();
+        DeviceRegistry.revoke("phone").unwrap();
+        rig.phones.tick(now_ms());
+        let old_reply = if sent_before_restart {
+            let (_, reply) = control.take().expect("initial revocation");
+            Some(reply)
+        } else { None };
+        // Fresh Phones loads only the journal and registry, not the old
+        // pending map, response receivers, or known-device cache.
+        let restarted = rig.phones.restart_for_test(rig.sink.clone());
+        drop(control);
+        let mut control = rig.relay.phone_test_hold_control();
+        restarted.use_relay(&rig.relay);
+        restarted.tick(now_ms());
+        let (request, reply) = control.take().expect("restart must recover unacknowledged revocation");
+        assert_eq!(request["type"], "device-revoke");
+        assert_eq!(request["relayDeviceId"], "phone");
+        drop(old_reply);
+        let journal = crate::store::root().unwrap().join("phone-relay-cleanup.json");
+        let saved: Value = crate::store::read_json(&journal).unwrap().unwrap();
+        assert_eq!(saved["pending"], json!(["phone"]), "queue acceptance must not clear durable intent");
+        reply.send(Ok(json!({"type":"device-revoked", "reqId":request["reqId"]}))).unwrap();
+        restarted.tick(now_ms());
+        let saved: Value = crate::store::read_json(&journal).unwrap().unwrap();
+        assert_eq!(saved["pending"], json!([]));
+        let acknowledged = restarted.restart_for_test(rig.sink.clone());
+        acknowledged.use_relay(&rig.relay);
+        acknowledged.tick(now_ms());
+        assert!(control.take().is_none(), "acknowledged cleanup must stay complete after restart");
+        acknowledged.stop();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_recovers_external_deletion_before_a_cleanup_tick_and_offline_pending_work() {
+    let rig = Rig::new().await;
+    rig.pair("phone", "token", false, true);
+    rig.phones.tick(now_ms());
+    // Delete the complete record while the service is stopped. The known
+    // identity must survive independently of both sockets and devices.json.
+    rig.phones.stop();
+    crate::store::write_json(&crate::store::root().unwrap().join("devices.json"), &json!({"devices":[]})).unwrap();
+    let offline = rig.phones.restart_for_test(rig.sink.clone());
+    offline.tick(now_ms());
+    // Restart again before any relay registration exists: durable pending work
+    // must not depend on a previous control queue or its lifetime.
+    let restarted = offline.restart_for_test(rig.sink.clone());
+    let mut control = rig.relay.phone_test_hold_control();
+    restarted.use_relay(&rig.relay);
+    restarted.tick(now_ms());
+    let (request, reply) = control.take().expect("removed identity must survive both restarts");
+    assert_eq!(request["relayDeviceId"], "phone");
+    reply.send(Ok(json!({"type":"device-revoked", "reqId":request["reqId"]}))).unwrap();
+    restarted.tick(now_ms());
+    restarted.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_completes_durable_revocation_intent_before_phone_admission() {
+    let rig = Rig::new().await;
+    rig.pair("phone", "token", false, true);
+    // Simulate process death between the write-ahead intent and the registry
+    // mutation. The old token must not become usable after its relay ack.
+    crate::store::write_json(&crate::store::root().unwrap().join("phone-relay-cleanup.json"),
+        &json!({"known":["phone"], "pending":["phone"]})).unwrap();
+    let restarted = rig.phones.restart_for_test(rig.sink.clone());
+    assert!(DeviceRegistry.find_by_token("token", None).unwrap().is_none());
+    let mut control = rig.relay.phone_test_hold_control();
+    restarted.use_relay(&rig.relay);
+    restarted.tick(now_ms());
+    let (request, reply) = control.take().expect("write-ahead intent must still reach the relay");
+    reply.send(Ok(json!({"type":"device-revoked", "reqId":request["reqId"]}))).unwrap();
+    restarted.tick(now_ms());
+    assert!(DeviceRegistry.find_by_token("token", None).unwrap().is_none());
+    restarted.stop();
+}
