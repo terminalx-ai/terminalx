@@ -359,6 +359,16 @@ fn settings_link_take(pending: tauri::State<'_, desktop_links::PendingSettingsLi
 #[cfg(all(feature = "desktop", unix))]
 static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
 
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+fn install_window_pairing_consent(pairing: &std::sync::Arc<pairing::PairingManager>) {
+    let keys = std::sync::Arc::downgrade(pairing);
+    serve_cli::consent::speak_as_window(Box::new(move || {
+        keys.upgrade()
+            .ok_or_else(|| anyhow::anyhow!("TerminalX pairing is unavailable. Restart TerminalX and try again."))?
+            .consent_key()
+    }));
+}
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -486,14 +496,7 @@ pub fn run() {
             // Pairing codes and approvals from this window prove it is the
             // window, which has no terminal (PRO-369).
             #[cfg(target_os = "macos")]
-            {
-                let keys = Arc::downgrade(&pairing);
-                serve_cli::consent::speak_as_window(Box::new(move || {
-                    keys.upgrade()
-                        .ok_or_else(|| anyhow::anyhow!("TerminalX pairing is unavailable. Restart TerminalX and try again."))?
-                        .consent_key()
-                }));
-            }
+            install_window_pairing_consent(&pairing);
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]

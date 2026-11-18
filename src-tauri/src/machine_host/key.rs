@@ -90,6 +90,12 @@ impl KeyStore {
         Self { location, secrets }
     }
 
+    #[cfg(all(test, feature = "desktop", target_os = "macos"))]
+    pub(super) fn with_secrets_for_test(mut self, secrets: Arc<dyn SecretStore>) -> Self {
+        self.secrets = secrets;
+        self
+    }
+
     /// Whether the window owns the key and must hand it over.
     pub(crate) fn needs_window(&self) -> bool {
         matches!(self.location, Location::Keychain { .. })
