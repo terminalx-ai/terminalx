@@ -2798,97 +2798,124 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
         // own: sharing the parent's would have either one's deletion take the
         // other's files. What the parent had there is copied, since the
         // conversation refers to it.
-        let scratch = if src.is_quick() { Some(store::quick::create(&id).map_err(err)?) } else { None };
-        let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
-        if let (Some(scratch), true) = (&scratch, in_scratch) {
-            let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
-            // The fork's CLI reopens the parent conversation from the new
-            // directory, and Claude Code looks for it under that directory's name.
-            if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
-                let _ = crate::harness::claude::transcript::rehome_in(&projects, &src.cwd, scratch, parent, true);
-            }
-        }
-        let mut entry = SessionEntry {
-            id: id.clone(),
-            kind: src.kind,
-            project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
-            cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
-            worktree_name: None,
-            branch: src.branch.clone(),
-            base_ref: None,
-            worktree_base: None,
-            worktree_removed: false,
-            removed_workspace: None,
-            issue: src.issue.clone(),
-            issue_work: src.issue_work.clone(),
-            automation: src.automation.clone(),
-            title: format!("{} (fork)", src.title),
-            created: now.clone(),
-            modified: now,
-            archived: false,
-            archive: Default::default(),
-            pinned: false,
-            manual_status: Default::default(),
-            tabs: vec![new_tab.clone()],
-            active_tab: Some(new_tab.id.clone()),
-            link: None,
-            parent: None,
-            unknown: BTreeMap::new(),
-        };
-        if src.worktree_name.is_some() && !src.worktree_removed {
-            let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
-            let taken = git::taken_worktree_names(project_path, &taken);
-            let name = names::unclaimed(&taken);
-            let wt = git::create_worktree(project_path, &name, src.branch.as_deref()).map_err(err)?;
-            entry.cwd = wt.path;
-            entry.worktree_name = Some(wt.name);
-            entry.branch = Some(wt.branch);
-            entry.base_ref = Some(wt.base_tree);
-            entry.worktree_base = wt.worktree_base;
-        }
-        let mut note = None;
-        if let (Some(end_seq), Some(conversation)) = (at, &conversation) {
-            if entry.worktree_name.is_some() {
-                let files = crate::checkpoints::turn_end(&src.id, &tab.id, end_seq)
-                    .and_then(|(tree, index)| crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index));
-                if let Err(error) = files {
-                    note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        let result = (|| -> Result<(SessionEntry, Option<String>), String> {
+            let scratch = if src.is_quick() {
+                let path = store::quick::dir(&id).map_err(err)?;
+                allocation.directory(&path).map_err(err)?;
+                Some(std::fs::canonicalize(&path).map_err(err)?.to_string_lossy().into_owned())
+            } else { None };
+            let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
+            if let (Some(scratch), true) = (&scratch, in_scratch) {
+                let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
+                // The fork's CLI reopens the parent conversation from the new
+                // directory, and Claude Code looks for it under that directory's name.
+                if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
+                    allocation.rehome_claude(&projects, &src.cwd, scratch, parent).map_err(err)?;
                 }
-            } else {
-                note = Some("The fork shares this checkout, so its files are as they are now.".into());
             }
-            conversation.write(&entry.cwd, &id, &new_tab.id)?;
-        }
-        // Copy the log, re-stamping envelopes so the new tab owns them.
-        if let (None, Ok(dir)) = (&conversation, store::sessions_dir()) {
-            let from = store::log_path(&src.id, &tab.id).map_err(err)?;
-            if let Ok(text) = std::fs::read_to_string(&from) {
-                let to_dir = dir.join(&id);
-                let _ = std::fs::create_dir_all(&to_dir);
-                let mut out = String::with_capacity(text.len());
-                for line in text.lines() {
-                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
-                        v["sessionId"] = serde_json::Value::String(id.clone());
-                        v["tabId"] = serde_json::Value::String(new_tab.id.clone());
-                        out.push_str(&v.to_string());
-                        out.push('\n');
+            let mut entry = SessionEntry {
+                id: id.clone(),
+                kind: src.kind,
+                project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
+                cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
+                worktree_name: None,
+                branch: src.branch.clone(),
+                base_ref: None,
+                worktree_base: None,
+                worktree_removed: false,
+                removed_workspace: None,
+                issue: src.issue.clone(),
+                issue_work: src.issue_work.clone(),
+                automation: src.automation.clone(),
+                title: format!("{} (fork)", src.title),
+                created: now.clone(),
+                modified: now,
+                archived: false,
+                archive: Default::default(),
+                pinned: false,
+                manual_status: Default::default(),
+                tabs: vec![new_tab.clone()],
+                active_tab: Some(new_tab.id.clone()),
+                link: None,
+                parent: None,
+                unknown: BTreeMap::new(),
+            };
+            if src.worktree_name.is_some() && !src.worktree_removed {
+                let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
+                let taken = git::taken_worktree_names(project_path, &taken);
+                let name = names::unclaimed(&taken);
+                let (wt, created_commit) = git::create_fork_worktree(project_path, &name, src.branch.as_deref()).map_err(err)?;
+                entry.cwd = wt.path.clone();
+                entry.worktree_name = Some(wt.name.clone());
+                entry.branch = Some(wt.branch.clone());
+                entry.base_ref = Some(wt.base_tree.clone());
+                entry.worktree_base = wt.worktree_base.clone();
+                allocation.worktree(project_path, wt, created_commit);
+            }
+            let mut note = None;
+            if let (Some(end_seq), Some(conversation)) = (at, &conversation) {
+                if entry.worktree_name.is_some() {
+                    let files = crate::checkpoints::turn_end(&src.id, &tab.id, end_seq)
+                        .and_then(|(tree, index)| allocation.checkpoint(&tree, &index, || crate::checkpoints::check_out_turn(&entry.cwd, &tree, &index)));
+                    if let Err(error) = files {
+                        note = Some(format!("The new worktree has the branch's latest files: {error:#}"));
                     }
+                } else {
+                    note = Some("The fork shares this checkout, so its files are as they are now.".into());
                 }
-                let _ = std::fs::write(to_dir.join(format!("{}.jsonl", new_tab.id)), out);
+                let native = crate::session::fork_conversation_destination(&conversation.harness, &entry.cwd, &conversation.provider).map_err(err)?;
+                let lines = conversation.events.iter().map(|event| serde_json::to_value(event).map_err(err)).collect::<Result<Vec<_>, String>>()?;
+                let mut out = String::new();
+                for mut value in lines {
+                    value["sessionId"] = serde_json::Value::String(id.clone());
+                    value["tabId"] = serde_json::Value::String(new_tab.id.clone());
+                    out.push_str(&value.to_string());
+                    out.push('\n');
+                }
+                let dir = store::sessions_dir().map_err(err)?.join(&id);
+                allocation.conversation(&native, conversation.native.as_bytes(), &dir, &new_tab.id, out.as_bytes()).map_err(err)?;
             }
-        }
-        if let Ok(root) = store::root() {
-            let from = root.join("attachments").join(&src.id);
-            if from.is_dir() {
-                let to = root.join("attachments").join(&id);
-                let _ = copy_dir(&from, &to);
+            // Copy the log, re-stamping envelopes so the new tab owns them.
+            if let (None, Ok(dir)) = (&conversation, store::sessions_dir()) {
+                let from = store::log_path(&src.id, &tab.id).map_err(err)?;
+                if let Ok(text) = std::fs::read_to_string(&from) {
+                    let to_dir = dir.join(&id);
+                    allocation.directory(&to_dir).map_err(err)?;
+                    let mut out = String::with_capacity(text.len());
+                    for line in text.lines() {
+                        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+                            v["sessionId"] = serde_json::Value::String(id.clone());
+                            v["tabId"] = serde_json::Value::String(new_tab.id.clone());
+                            out.push_str(&v.to_string());
+                            out.push('\n');
+                        }
+                    }
+                    allocation.write(&to_dir.join(format!("{}.jsonl", new_tab.id)), out.as_bytes()).map_err(err)?;
+                }
             }
-        }
-        index::update(|sessions| {
-            sessions.push(entry.clone());
-            Ok(())
-        })
-        .map_err(err)?;
+            if let Ok(root) = store::root() {
+                let from = root.join("attachments").join(&src.id);
+                if from.is_dir() {
+                    let parent = root.join("attachments");
+                    std::fs::create_dir_all(&parent).map_err(err)?;
+                    let to = parent.join(&id);
+                    allocation.directory(&to).map_err(err)?;
+                    copy_dir(&from, &to).map_err(err)?;
+                }
+            }
+            index::update(|sessions| {
+                if sessions.iter().any(|session| session.id == id) { anyhow::bail!("Session id already exists"); }
+                sessions.push(entry.clone());
+                Ok(())
+            })
+            .map_err(err)?;
+            Ok((entry, note))
+        })();
+        let (entry, note) = match result {
+            Ok(result) => { allocation.commit(); result }
+            Err(error) => return Err(allocation.rollback(error)),
+        };
         let _ = app.emit("session_created", &entry);
         // A fork with a worktree always creates it above; other forks share a checkout.
         if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }

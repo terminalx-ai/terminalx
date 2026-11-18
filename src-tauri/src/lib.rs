@@ -101,6 +101,7 @@ mod branch_overview;
 #[cfg(feature = "desktop")]
 mod branch_step;
 mod git;
+mod fork_allocation;
 #[cfg(feature = "desktop")]
 mod repo_mirror;
 mod checkpoints;
