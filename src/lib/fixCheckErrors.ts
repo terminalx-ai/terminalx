@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { agent, errorMessage, gh, type CheckAuthority, type PullRequest } from "./api";
 import { mergeTabEvents } from "./agentEvents";
 import { actionsRuns } from "./checks";
-import { localGitSource } from "./gitSource";
+import { localGitSource, type GitSource } from "./gitSource";
 import { useShortcut } from "./hotkeys";
 import { usePrefs } from "./prefs";
-import { sessionPrs } from "./sessionPrs";
+import { sessionPrs, type SessionPr } from "./sessionPrs";
+import type { SendResult } from "./sessionBackend";
 import { dismissErrorKey } from "./errorToasts";
 import { showFixFailed } from "./checkToasts";
 import { isFailingCheck, webUrl } from "./checks";
@@ -43,12 +44,41 @@ export async function sendFailedChecks(sessionId: string, tabId: string, prUrl: 
   return `${outcome.queued ? "Queued" : "Sent"} failed check logs to the agent${attachment.truncated ? " (trimmed to 256 KiB)" : ""}.`;
 }
 
+/**
+ * The one PR of the session whose GitHub Actions checks failed, among the
+ * rows `sessionPrs` found, or the one at `url` when it is given. A PR linked
+ * from another branch (PRO-294) is shown, not worked on here: Push goes to
+ * this session's branch, so its agent cannot fix it. Undefined when none.
+ */
+export function failingPr(rows: readonly SessionPr[], url?: string): PullRequest | undefined {
+  const candidates = rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length
+    && (url === undefined || row.pr.url === url) ? [row.pr] : []);
+  if (candidates.length > 1) throw new Error("Several pull requests have failing checks. Use Fix errors on the pull request you want in the Branch tab.");
+  return candidates[0];
+}
+
+/**
+ * A machine session's Fix check errors (PRO-408): its PRs are read through
+ * the machine's `git/1`, the failed logs are read there with the machine's
+ * `gh` into a file its agent can open, and the prompt goes to the tab on the
+ * machine. Nothing of this computer's `gh` is used.
+ */
+export interface MachineCheckFix {
+  name: string;
+  /** The machine's Git for the session; absent while it is not connected. */
+  source?: GitSource;
+  /** `session.checkFailures`; `null` while not connected, or on a machine too old to read them. */
+  attach: ((tabId: string, prUrl: string) => Promise<{ path: string; truncated: boolean }>) | null;
+  send(tabId: string, text: string): Promise<SendResult>;
+}
+
 /** Shared by the PR button and the session shortcut, even with the panel closed. */
-export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
+export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled, machine }: {
   sessionId: string; tabId?: string; cwd: string; branch?: string | null; enabled: boolean;
+  machine?: MachineCheckFix;
 }) {
   const prefs = usePrefs();
-  const key = `${sessionId}\0${tabId ?? ""}\0${cwd}\0${branch ?? ""}\0${enabled}`;
+  const key = `${sessionId}\0${tabId ?? ""}\0${cwd}\0${branch ?? ""}\0${enabled}\0${machine?.source?.key ?? ""}`;
   const current = useRef({ key, generation: 0 });
   if (current.current.key !== key) current.current = { key, generation: current.current.generation + 1 };
   const generation = current.current.generation;
@@ -69,20 +99,29 @@ export function useFixCheckErrors({ sessionId, tabId, cwd, branch, enabled }: {
     let found: PullRequest | undefined = typeof given === "string" ? undefined : given;
     dismissErrorKey(`fix-errors:${sessionId}`);
     try {
-      const authority = await gh.checkAuthority();
-      if (!isCurrent()) return;
-      let pr = typeof given === "string" ? undefined : given;
-      if (!pr) {
-        const source = localGitSource(cwd, authority);
+      const lookUp = async (source: GitSource) => {
         const status = await source.workStatus();
         const result = await sessionPrs(source, sessionId, status.branch === status.defaultBranch ? null : status.branch ?? branch ?? null, isCurrent);
         if (result.error) throw new Error(result.error);
-        // A PR linked from another branch (PRO-294) is shown, not worked on here: Push goes to this session's branch, so its agent cannot fix it.
-        const candidates = result.rows.flatMap((row) => row.pr?.state === "OPEN" && (row.current || !row.association?.linked) && actionsRuns(row.pr, true).length
-          && (typeof given !== "string" || row.pr.url === given) ? [row.pr] : []);
-        if (candidates.length > 1) throw new Error("Several pull requests have failing checks. Use Fix errors on the pull request you want in the Branch tab.");
-        pr = candidates[0];
+        return failingPr(result.rows, typeof given === "string" ? given : undefined);
+      };
+      if (machine) {
+        const { source, attach } = machine;
+        if (!source || !attach) throw new Error(attach || source ? `Fix check errors works once ${machine.name} is connected.` : `Fix check errors works once ${machine.name} is connected and up to date.`);
+        const pr = typeof given === "string" || !given ? await lookUp(source) : given;
+        if (!isCurrent()) return;
+        found = pr;
+        if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");
+        const attachment = await attach(tabId, pr.url);
+        // Never send after the reader changes tabs, sessions, or closes this view, and never retry a send automatically.
+        if (!isCurrent()) return;
+        const outcome = await machine.send(tabId, fixErrorsPrompt(pr.url, attachment.path, prefs.fixErrorsInstructions));
+        if (isCurrent()) setState({ key, busy: false, notice: `${outcome.queued ? "Queued" : "Sent"} failed check logs to the agent on ${machine.name}${attachment.truncated ? " (trimmed to 256 KiB)" : ""}.` });
+        return;
       }
+      const authority = await gh.checkAuthority();
+      if (!isCurrent()) return;
+      const pr = typeof given === "string" || !given ? await lookUp(localGitSource(cwd, authority)) : given;
       if (!isCurrent()) return;
       found = pr;
       if (!pr) throw new Error("No failing GitHub Actions checks were found for this session.");

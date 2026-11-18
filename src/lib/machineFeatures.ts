@@ -45,6 +45,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
   { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
   { id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" },
+  { id: "sessionParity", label: "Session cost, Continue in a new tab and Fix check errors", capability: "machine/8", action: "read session costs, continue in a new tab and fix check errors" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {

@@ -19,7 +19,7 @@ import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
 import { openTerminal, selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
 import type { CloudSessionModel } from "@/lib/cloudSession";
-import { MACHINE_LOCAL_ONLY } from "@/components/machines/MachineSession";
+import { MACHINE_LOCAL_ONLY } from "@/components/machines/MachineMessage";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import { tabAccount, type ModelInfo } from "@/lib/api";
 import { LOCAL_ACCOUNT, showsAccounts, type AgentAccount } from "@/lib/agentAccounts";
@@ -42,14 +42,15 @@ export function useTabAccount(tab: Pick<TabEntry, "harness">): AgentAccount | nu
 }
 
 /** The first letter of an account's label, for its mark in the tab strip. */
-function accountInitial(account: AgentAccount): string {
+function accountInitial(account: Pick<AgentAccount, "email" | "label">): string {
   return (account.email ?? account.label).trim().charAt(0).toUpperCase() || "?";
 }
 
-/** A small mark on a tab in the strip: which of its agent's accounts it runs on. Nothing with one account. */
-export function TabAccountMark({ tab }: { tab: TabEntry }) {
-  const account = useTabAccount(tab);
-  if (!account) return null;
+/*
+ * A machine session's tab carries the label its machine names (PRO-408) and
+ * is never looked up in this computer's accounts; a tab of this computer is.
+ */
+function AccountMark({ account }: { account: Pick<AgentAccount, "email" | "label"> }) {
   return (
     <span data-testid="tab-account-mark" role="img" aria-label={`On ${account.label}`} title={account.label}
       className="inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-veil-raised text-[12px] leading-none text-muted-foreground">
@@ -58,11 +59,30 @@ export function TabAccountMark({ tab }: { tab: TabEntry }) {
   );
 }
 
+function AccountLabel({ account, className }: { account: Pick<AgentAccount, "label">; className?: string }) {
+  return <span data-testid="tab-account-label" title={`This tab runs on ${account.label}`} className={className ?? "min-w-0 truncate text-[12px] text-muted-foreground"}>{account.label}</span>;
+}
+
+function LocalTabAccountMark({ tab }: { tab: TabEntry }) {
+  const account = useTabAccount(tab);
+  return account ? <AccountMark account={account} /> : null;
+}
+
+function LocalTabAccountLabel({ tab, className }: { tab: TabEntry; className?: string }) {
+  const account = useTabAccount(tab);
+  return account ? <AccountLabel account={account} className={className} /> : null;
+}
+
+/** A small mark on a tab in the strip: which of its agent's accounts it runs on. Nothing with one account. */
+export function TabAccountMark({ tab }: { tab: TabEntry }) {
+  if (tab.accountLabel === undefined) return <LocalTabAccountMark tab={tab} />;
+  return tab.accountLabel ? <AccountMark account={{ email: null, label: tab.accountLabel }} /> : null;
+}
+
 /** The tab's account by name, for its header. Nothing with one account. */
 export function TabAccountLabel({ tab, className }: { tab: TabEntry; className?: string }) {
-  const account = useTabAccount(tab);
-  if (!account) return null;
-  return <span data-testid="tab-account-label" title={`This tab runs on ${account.label}`} className={className ?? "min-w-0 truncate text-[12px] text-muted-foreground"}>{account.label}</span>;
+  if (tab.accountLabel === undefined) return <LocalTabAccountLabel tab={tab} className={className} />;
+  return tab.accountLabel ? <AccountLabel account={{ label: tab.accountLabel }} className={className} /> : null;
 }
 
 /**
@@ -301,7 +321,7 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
   // A stopped workspace this attachment may manage: Terminal is the one item that wakes it, and only when chosen.
   // Not for a viewer or a driver (PRO-30): terminals are a manager's, so their wake would end in a refusal.
   const wakesForTerminal = cloud.canWakeForTerminal;
-  const run = (action: () => Promise<void>) => {
+  const run = (action: () => Promise<unknown>) => {
     setError(null);
     void action().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   };

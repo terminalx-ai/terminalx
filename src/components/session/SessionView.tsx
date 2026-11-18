@@ -68,6 +68,7 @@ import { PortToasts } from "@/components/cloud/PortToast";
 import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { MachineSessionChip, MachineSessionStrips, MachineTerminalDock } from "@/components/machines/MachineSession";
 import { MachineRunMenu } from "@/components/machines/MachineRunPanes";
+import { MachineContinueDialog } from "@/components/machines/MachineContinueDialog";
 import { selectCloudTerminal } from "@/lib/cloudTerminals";
 import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
@@ -146,9 +147,10 @@ function PanelHost({ session, tab, checkFix }: { session: SessionEntry; tab: Tab
  * A cloud session's right panel: Changes, Repo, PR and Files through the
  * workspace's runtime, with a repository picker when it has several. Until
  * the workspace is connected there is nothing to read, and nothing here
- * connects or wakes it.
+ * connects or wakes it. `checkFix` is a machine session's Fix errors, read
+ * and sent on the machine (PRO-408); a cloud workspace's PR panel offers none.
  */
-function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry }) {
+function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry; checkFix?: ReturnType<typeof useFixCheckErrors> }) {
   const log = useTabLog(cloud.backend.logSessionId, tab?.id ?? "");
   const live = tab?.status === "in_progress" || tab?.status === "waiting";
   // PRO-28: only for someone who may use previews; it never connects or wakes the workspace.
@@ -212,6 +214,8 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       rootName={cloud.workspaceName}
       gitSource={cloud.gitSource}
       fileSource={cloud.fileSource}
+      onFixErrors={checkFix && tab && !isTerminalTab(tab) ? checkFix.fix : undefined}
+      fixBusy={checkFix?.busy}
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
@@ -554,7 +558,19 @@ export function SessionView({
   // agent: its last chat tab, so the log tab's hand-off bar has somewhere to send (PRO-394).
   const fixTab = selected?.kind === "agent" ? activeTab
     : session.tabs.find((tab) => tab.id === session.activeTab && !isTerminalTab(tab)) ?? session.tabs.find((tab) => !isTerminalTab(tab));
-  const checkFix = useFixCheckErrors({ sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch, enabled: local && !cloud && isGit && !!fixTab && !isTerminalTab(fixTab) });
+  // A machine session's checks are read on the machine and sent to its tab there (PRO-408).
+  const machineCheckFix = machine && cloud ? {
+    name: machine.name,
+    source: cloud.gitSource,
+    attach: cloud.client?.hasCapability("machine/8") && cloud.manage ? (tabId: string, prUrl: string) => cloud.client!.checkFailures(cloud.backend.logSessionId, tabId, prUrl) : null,
+    send: (tabId: string, text: string) => cloud.backend.send(tabId, text, []),
+  } : undefined;
+  const checkFix = useFixCheckErrors({
+    sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch,
+    // A machine that cannot read check logs (an older TerminalX, or no manage access) offers none: its strip says to update it.
+    enabled: (machine ? !!cloud?.gitSource && !!machineCheckFix?.attach : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
+    machine: machineCheckFix,
+  });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
@@ -574,7 +590,9 @@ export function SessionView({
   // Sibling sessions share mounted pane bodies. Session-specific dialogs still reset.
   useEffect(() => { setContinuationSource(null); }, [session.id]);
   // The title-bar button and workspace menu carry the open tab into the same continuation dialog.
-  const continueTab = activeTab && local ? () => setContinuationSource(activeTab) : null;
+  // A machine session's continues in a new tab on the machine (PRO-408).
+  const continueTab = activeTab && (local || (machine && cloud?.canAddTabs && cloud.client?.hasCapability("machine/8"))) ? () => setContinuationSource(activeTab) : null;
+  const continueLabel = machine ? "Continue in a new tab…" : "Continue in New Session…";
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
   // The worktree's agent moved it off the branch it was made on: say where it is now.
@@ -647,7 +665,14 @@ export function SessionView({
   });
   // What the session's agents have used, at API list prices (PRO-273), beside
   // where it is; Settings → Experimental → Session cost.
-  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} /> : null;
+  const costChip = local ? <SessionCost session={session} className={HEADER_TIGHT} />
+    // A machine session's are the machine's: its list carries the totals, and it reads them again (PRO-408).
+    : machine && cloud ? <SessionCost session={session} className={HEADER_TIGHT} machine={{
+      name: machine.name,
+      sessionId: cloud.backend.logSessionId,
+      read: cloud.client?.hasCapability("machine/8") ? () => cloud.client!.sessionUsage(cloud.backend.logSessionId) : null,
+    }} />
+    : null;
   return (
     <TerminalChatProvider session={local && !cloud ? session : undefined}>
     <div className="relative flex h-full min-h-0 min-w-0 flex-1">
@@ -749,7 +774,7 @@ export function SessionView({
               </WithTooltip>
             )}
             {/* The account the open tab's agent runs on, only when that agent has several (#980). */}
-            {local && !cloud && activeTab && <TabAccountLabel tab={activeTab} className={cn("ml-1 max-w-40 shrink-0 truncate text-[12px] text-muted-foreground", HEADER_TIGHT)} />}
+            {((local && !cloud) || machine) && activeTab && <TabAccountLabel tab={activeTab} className={cn("ml-1 max-w-40 shrink-0 truncate text-[12px] text-muted-foreground", HEADER_TIGHT)} />}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
             {/* Autopilot is set up in the Branch tab; the header shows it only while it runs (docs/AUTOPILOT-PLACEMENT.md). */}
@@ -872,8 +897,8 @@ export function SessionView({
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
-              <WithTooltip label="Continue in New Session…">
-                <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={continueTab}>
+              <WithTooltip label={continueLabel}>
+                <Button variant="ghost" size="icon-sm" aria-label={continueLabel} onClick={continueTab}>
                   <SessionContinue />
                 </Button>
               </WithTooltip>
@@ -950,14 +975,16 @@ export function SessionView({
             selected={selected}
             readOnlyReason={backend.readOnlyReason}
             hideSingle={compact}
-            accounts={local && !cloud}
+            accounts={(local && !cloud) || !!machine}
             trailing={compact ? undefined : <TabActions key={session.id} session={session} selected={selected} />}
           />
         )}
         {cloud && !cloud.locked && !machine && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {((local && !cloud) || (machine && cloud)) && <RunRestartOffer session={session} />}
-        {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
+        {continuationSource && (machine && cloud
+          ? <MachineContinueDialog cloud={cloud} source={continuationSource} onClose={() => setContinuationSource(null)} />
+          : <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />)}
         {/* Fix errors at work, or what it sent. A failure is a toast with Try again (PRO-394, design 05.17). */}
         {(checkFix.busy || checkFix.notice) && <div className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-xs" role="status">
           <span className="min-w-0 flex-1 text-muted-foreground">{checkFix.busy ? "Collecting failed check logs…" : checkFix.notice}</span>
@@ -1096,7 +1123,7 @@ export function SessionView({
       {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
-      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
+      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={machineCheckFix?.attach ? checkFix : undefined} />}
       {!compact && prefs.panelOpen && !cloud &&
         (panelTab ? (
           <PanelHost session={session} tab={panelTab} checkFix={checkFix} />

@@ -25,6 +25,7 @@ import { MachineChip, MachineLocation, tryingText, useTick } from "./connectionS
 import { MachineRunPane, MachineSetupPane } from "./MachineRunPanes";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 import { MachineMessage } from "./MachineMessage";
+import { TabAccountMark } from "@/components/session/TabStrip";
 import { AddMachineDialog } from "./AddMachineDialog";
 
 export { MACHINE_LOCAL_ONLY } from "./MachineMessage";
@@ -97,6 +98,8 @@ export function MachineSessionStrips({
                 >
                   <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
                   <span className="truncate">{tab.title || tab.harness}</span>
+                  {/* Which of the machine's accounts its agent runs on, when it has several there (PRO-408). */}
+                  <TabAccountMark tab={tab} />
                   {dot && <span className={cn("size-1.5 shrink-0 rounded-full", dot)} aria-label={TAB_STATUS_LABEL[tab.status!]} />}
                 </button>
                 {cloud.manage && (

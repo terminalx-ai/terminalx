@@ -209,7 +209,8 @@ export interface CloudSessionModel {
    * once the runtime is back. Without it a stopped workspace stays stopped.
    */
   openTerminal(options?: { wake?: boolean }): Promise<void>;
-  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<void>;
+  /** Adds an agent tab and selects it; resolves to its id where the runtime names it. */
+  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<string | void>;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
   /** Agents the runtime has (`agents/1`), else the two every runtime ships. */

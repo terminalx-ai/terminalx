@@ -790,9 +790,26 @@ impl WorkspaceRpc {
 
     /// A session as it is sent: on a machine it names its project.
     fn session_wire(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>) -> Value {
+        self.session_wire_with(session, ids, None)
+    }
+
+    /// Whether `peer` is told which account each tab runs on: a label can be
+    /// an email address, so only a connection that manages the machine is.
+    fn sees_accounts(&self, peer: &Peer) -> bool {
+        self.is_machine() && self.authority(peer) == Authority::Manage
+    }
+
+    /// A session as it is sent. Given `accounts` (a machine, to a manage
+    /// connection) each tab names the account it runs on when its agent has
+    /// several there (`machine/8`, PRO-408); it holds what was read for the
+    /// sessions sent together.
+    fn session_wire_with(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>, accounts: Option<&mut super::machine_session::Accounts>) -> Value {
         let mut value = json!(session);
         if let (Some(ids), Some(fields)) = (ids, value.as_object_mut()) {
             fields.insert("projectId".into(), json!(ids.get(&session.project_path)));
+        }
+        if let Some(accounts) = accounts {
+            super::machine_session::account_labels(&mut value, session, accounts);
         }
         value
     }
@@ -1053,10 +1070,19 @@ impl WorkspaceRpc {
             }
         };
         let ids = self.project_ids();
-        let wire: Vec<Value> = sessions.iter().map(|session| self.session_wire(session, ids.as_ref())).collect();
+        let wire: Vec<Value> = sessions.iter().map(|session| self.session_wire_with(session, ids.as_ref(), None)).collect();
+        // The same list naming each tab's account, for the connections that manage the machine.
+        let labelled: Option<Vec<Value>> = peers.iter().any(|peer| self.sees_accounts(peer)).then(|| {
+            let mut accounts = super::machine_session::Accounts::default();
+            sessions.iter().map(|session| self.session_wire_with(session, ids.as_ref(), Some(&mut accounts))).collect()
+        });
         for peer in peers {
             // Workspace-wide, as `visible_sessions`.
-            let visible: &[Value] = if self.access(&peer).can_view() { &wire } else { &[] };
+            let visible: &[Value] = match (self.access(&peer).can_view(), &labelled) {
+                (false, _) => &[],
+                (true, Some(labelled)) if self.sees_accounts(&peer) => labelled,
+                (true, _) => &wire,
+            };
             peer.notify("session.sessions", json!({ "sessions": visible }));
         }
     }
@@ -1723,6 +1749,10 @@ impl WorkspaceRpc {
             },
             "machine.sessionActions" | "machine.runAction" | "machine.setupRerun" | "machine.setupStop" => match &self.scope {
                 Scope::Machine { .. } => self.machine_session_run_call(peer, method, &params),
+                Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
+            },
+            "session.usage" | "session.prepareContinuation" | "session.checkFailures" => match &self.scope {
+                Scope::Machine { .. } => self.machine_session_call(peer, method, &params),
                 Scope::Workspace { .. } => Err(RpcError::new("method_not_found", "this runtime serves one workspace")),
             },
             "cleanup.scan" => self.cleanup_scan(),
@@ -3321,7 +3351,8 @@ impl WorkspaceRpc {
 
     fn session_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let ids = self.project_ids();
-        let sessions: Vec<Value> = self.visible_sessions(peer)?.iter().map(|session| self.session_wire(session, ids.as_ref())).collect();
+        let mut accounts = self.sees_accounts(peer).then(super::machine_session::Accounts::default);
+        let sessions: Vec<Value> = self.visible_sessions(peer)?.iter().map(|session| self.session_wire_with(session, ids.as_ref(), accounts.as_mut())).collect();
         Ok(json!({ "sessions": sessions }))
     }
 
@@ -3855,6 +3886,44 @@ impl WorkspaceRpc {
             "machine.cloneStatus" => self.machine_clones.status(params),
             "machine.cloneCancel" => self.machine_clones.cancel(params),
             _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/6 method"))),
+        }
+    }
+
+    /// `machine/8` (PRO-408): a machine session's usage, a tab's
+    /// continuation context and a pull request's failed check logs, each for
+    /// a session the caller may see. Usage read again that moved is told to
+    /// every connection, as a turn's end tells it.
+    fn machine_session_call(&self, peer: &Peer, method: &str, params: &Value) -> Result<Value, RpcError> {
+        use super::machine_session as parity;
+        let session = self.visible_session(peer, required_str(params, "sessionId")?)?;
+        let tab = |session: &SessionEntry| -> Result<String, RpcError> {
+            let tab_id = required_str(params, "tabId")?;
+            match session.tab(tab_id) {
+                Some(tab) if tab.is_terminal() => Err(RpcError::invalid("the tab is a terminal, not an agent tab")),
+                Some(tab) => Ok(tab.id.clone()),
+                None => Err(RpcError::not_found("no such tab")),
+            }
+        };
+        match method {
+            "session.usage" => {
+                let (latest, changed) = crate::session_usage::refresh_session(&session.id).map_err(RpcError::internal)?;
+                if changed {
+                    self.sink.emit("session_updated", &latest);
+                }
+                let windows = self.manager().map(|manager| manager.usage_snapshot().windows).unwrap_or_default();
+                Ok(parity::usage_answer(&latest, windows))
+            }
+            "session.prepareContinuation" => {
+                let tab_id = tab(&session)?;
+                let tracked = self.manager().ok().and_then(|manager| manager.tracked_transcript(&session.id, &tab_id));
+                let context = crate::continuation::prepare(&session.id, &tab_id, tracked, false).map_err(RpcError::internal)?;
+                Ok(json!(context))
+            }
+            "session.checkFailures" => {
+                let tab_id = tab(&session)?;
+                parity::check_failures(&session.id, &tab_id, required_str(params, "prUrl")?)
+            }
+            _ => Err(RpcError::new("method_not_found", format!("{method} is not a machine/8 method"))),
         }
     }
 

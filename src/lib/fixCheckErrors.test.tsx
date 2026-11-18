@@ -117,3 +117,47 @@ it("links a failed Fix errors only to a web page: a provider's file:// check URL
   expect(openUrl).toHaveBeenCalledExactlyOnceWith(`${pr.url}/checks`);
   for (const entry of getErrorToasts()) dismissError(entry.id);
 });
+
+// PRO-408: a machine session's checks are read and sent on the machine.
+const machineInput = (overrides: Partial<{ attach: ReturnType<typeof vi.fn> | null; send: ReturnType<typeof vi.fn> }> = {}) => {
+  const source = { key: "machine-git", workStatus: vi.fn().mockResolvedValue({ branch: "feature", defaultBranch: "main" }) };
+  const attach = overrides.attach === undefined ? vi.fn().mockResolvedValue({ path: "/home/dev/.terminalx/attachments/s/check-failures.log", truncated: false }) : overrides.attach;
+  const send = overrides.send ?? vi.fn().mockResolvedValue({ events: [], queued: false });
+  return { source, attach, send, input: { ...input, sessionId: "machine:m:p:s", machine: { name: "Mac mini", source: source as never, attach: attach as never, send: send as never } } };
+};
+
+it("on a machine, finds the PR through the machine's Git, reads its logs there and sends to the machine's tab", async () => {
+  const { source, attach, send, input: machine } = machineInput();
+  const hook = renderHook(() => useFixCheckErrors(machine));
+  await act(async () => { await hook.result.current.fix(); });
+  // This computer's gh is never asked: not its authority, not its logs.
+  expect(gh.checkAuthority).not.toHaveBeenCalled();
+  expect(gh.fixAttachment).not.toHaveBeenCalled();
+  expect(agent.send).not.toHaveBeenCalled();
+  expect(source.workStatus).toHaveBeenCalledOnce();
+  expect(mocks.sessionPrs).toHaveBeenCalledWith(source, "machine:m:p:s", "feature", expect.any(Function));
+  expect(attach).toHaveBeenCalledExactlyOnceWith("active-agent", pr.url);
+  expect(send).toHaveBeenCalledExactlyOnceWith("active-agent", expect.stringContaining("@/home/dev/.terminalx/attachments/s/check-failures.log"));
+  expect(send.mock.calls[0][1]).toContain("Additional instructions:\nRun the affected tests.");
+  expect(hook.result.current.notice).toBe("Sent failed check logs to the agent on Mac mini.");
+});
+
+it("on a machine that cannot read check logs, says so and sends nothing", async () => {
+  const { send, input: machine } = machineInput({ attach: null });
+  const hook = renderHook(() => useFixCheckErrors(machine));
+  await act(async () => { await expect(hook.result.current.fix(pr)).rejects.toThrow("once Mac mini is connected"); });
+  expect(send).not.toHaveBeenCalled();
+  expect(hook.result.current.error).toContain("Mac mini");
+});
+
+it("on a machine, never sends logs read for a tab the reader has left", async () => {
+  let resolve!: (value: { path: string; truncated: boolean }) => void;
+  const attach = vi.fn().mockImplementation(() => new Promise((done) => { resolve = done; }));
+  const { send, input: machine } = machineInput({ attach });
+  const hook = renderHook((props) => useFixCheckErrors(props), { initialProps: machine });
+  let pending!: Promise<void>;
+  await act(async () => { pending = hook.result.current.fix(pr); });
+  hook.rerender({ ...machine, tabId: "another-agent" });
+  await act(async () => { resolve({ path: "/old.log", truncated: false }); await pending; });
+  expect(send).not.toHaveBeenCalled();
+});

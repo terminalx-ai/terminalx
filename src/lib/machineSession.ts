@@ -367,10 +367,17 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       archived: runtimeSession?.archived ?? false,
       pinned: runtimeSession?.pinned ?? false,
       tabs: ownTabs.length
-        ? ownTabs.map((tab, index) => ({
-            ...tabEntry(tab, false),
-            title: cloudTabTitle(tab.info.title, runtimeSession?.title, runtimeSession?.tabs.length ? runtimeSession.tabs[0].id === tab.tabId : index === 0),
-          }))
+        ? ownTabs.map((tab, index) => {
+            // What the machine keeps of the tab in its session list: its usage and the account it runs on (PRO-408).
+            const listed = runtimeSession?.tabs.find((candidate) => candidate.id === tab.tabId);
+            return {
+              ...tabEntry(tab, false),
+              title: cloudTabTitle(tab.info.title, runtimeSession?.title, runtimeSession?.tabs.length ? runtimeSession.tabs[0].id === tab.tabId : index === 0),
+              hasMessages: tab.info.hasMessages ?? listed?.hasMessages,
+              usage: listed?.usage ?? null,
+              accountLabel: listed?.accountLabel ?? null,
+            };
+          })
         : NO_TABS,
       activeTab: runtimeSession?.activeTab ?? null,
     }),
@@ -393,6 +400,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       const added = await client.addSessionTab(runtimeSessionId, { ...params, nativeCodex });
       await syncLiveTabs(scope, client).catch(() => undefined);
       selectSessionTab(key, { kind: "agent", id: added.tabId });
+      return added.tabId;
     },
     [sendBlocked, client, name, runtimeSessionId, scope, key],
   );

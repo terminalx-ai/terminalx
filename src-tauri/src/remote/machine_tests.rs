@@ -1117,3 +1117,70 @@ async fn a_one_root_runtime_has_no_machine_7() {
         assert_eq!(protocol::find_method(name).unwrap().capability, "machine/7", "{name}");
     }
 }
+
+// ------------------------------------------------- machine/8 (PRO-408)
+
+/// PRO-408: a machine session's cost chip, Continue in a new tab and Fix
+/// check errors read on the machine. `session.usage` reports the totals the
+/// machine keeps for its tabs, `session.prepareContinuation` a tab's context
+/// with the machine's own paths, and `session.checkFailures` refuses what it
+/// cannot read before running `gh`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
+    let m = machine_rpc();
+    let (path, id) = project(&m.path("code"), "api");
+    let (peer, _events, hello) = computer(&m.rpc).await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("machine/8")), "{hello}");
+    let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "model": "opus", "title": "Usage", "projectId": id, "clientRequestId": "create-usage" }))
+        .await
+        .unwrap();
+    let session_id = made["sessionId"].as_str().unwrap().to_string();
+    let tab_id = made["session"]["tabs"][0]["id"].as_str().unwrap().to_string();
+    let row = crate::session_usage::ModelUsage { model: "claude-opus-4-5".into(), input_tokens: 1200, output_tokens: 300, cache_read_tokens: 5000, cache_write_tokens: 0, cost_usd: Some(0.42) };
+    index::update_session(&session_id, |session| {
+        session.tab_mut(&tab_id).unwrap().usage = Some(crate::session_usage::TabUsage { models: vec![row.clone()], updated: index::now() });
+        Ok(())
+    })
+    .unwrap();
+
+    let usage = call(&m.rpc, &peer, "session.usage", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(usage["usage"]["sessionId"], json!(session_id), "{usage}");
+    assert_eq!(usage["usage"]["models"][0]["model"], "claude-opus-4-5", "{usage}");
+    assert_eq!(usage["usage"]["total"]["costUsd"], json!(0.42), "{usage}");
+    assert_eq!(usage["usage"]["tabs"][0]["tabId"], json!(tab_id), "{usage}");
+    assert!(usage["loginMethods"].as_object().unwrap().contains_key("claude"), "each agent with usage is named: {usage}");
+    assert!(usage["windows"].is_array(), "{usage}");
+    // The listed session carries the totals too, for the header's chip.
+    let listed = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(listed["session"]["tabs"][0]["usage"]["models"][0]["costUsd"], json!(0.42), "{listed}");
+    assert!(listed["session"]["tabs"][0].get("accountLabel").is_none(), "one account: no label: {listed}");
+
+    let context = call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id })).await.unwrap();
+    assert_eq!(context["tabId"], json!(tab_id), "{context}");
+    assert_eq!(context["provider"], "claude", "{context}");
+    assert_eq!(context["cwd"], json!(path), "the machine's own folder: {context}");
+    assert_eq!(code(call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": "tab-nope" })).await), "not_found");
+    assert_eq!(code(call(&m.rpc, &peer, "session.usage", json!({ "sessionId": "session-nope" })).await), "not_found");
+
+    assert_eq!(code(call(&m.rpc, &peer, "session.checkFailures", json!({ "sessionId": session_id, "tabId": tab_id, "prUrl": "file:///etc/passwd" })).await), "invalid_params");
+    assert_eq!(code(call(&m.rpc, &peer, "session.checkFailures", json!({ "sessionId": session_id, "tabId": "tab-nope", "prUrl": "https://github.com/acme/api/pull/1" })).await), "not_found");
+
+    // A session-scoped participant reads no logs.
+    let (viewer, _viewer_events) = Peer::new("viewer".into(), Authority::Participate);
+    call(&m.rpc, &viewer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/1", "machine/8"] })).await.unwrap();
+    assert_eq!(code(call(&m.rpc, &viewer, "session.checkFailures", json!({ "sessionId": session_id, "tabId": tab_id, "prUrl": "https://github.com/acme/api/pull/1" })).await), "forbidden");
+}
+
+/// A one-root runtime has no machine/8: its sessions' parity is the cloud's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_root_runtime_has_no_machine_8() {
+    let _home = crate::store::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let terminals = Arc::new(Terminals::new());
+    let rpc = WorkspaceRpc::new(dir.path(), 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
+    let (peer, _events) = Peer::new("device".into(), Authority::Manage);
+    let hello = call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/8", "fs/1"] })).await.unwrap();
+    assert_eq!(hello["capabilities"], json!(["fs/1"]));
+    assert_eq!(code(call(&rpc, &peer, "session.usage", json!({ "sessionId": "s" })).await), "capability_not_granted");
+    terminals.kill_all();
+}

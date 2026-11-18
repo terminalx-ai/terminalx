@@ -50,6 +50,12 @@ export interface TabEntry {
   contextMax?: number | null;
   /** Tokens and estimated cost of every conversation the tab holds or held, by model, as of its last turn end (PRO-273). */
   usage?: TabUsage | null;
+  /**
+   * A machine session's tab (PRO-408): the account it runs on as the machine
+   * names it, only when its agent has several there; `null` with one. Absent
+   * on a tab of this computer, whose account is read from its own list.
+   */
+  accountLabel?: string | null;
   /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
   loadingHistory?: boolean;
   /**

@@ -51,8 +51,8 @@ if (!process.env.MACHINES_SHOTS) await writeFile(join(output, ".gitignore"), "*\
 
 const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
   "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
-  "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7"];
-const OLDER = ALL.filter((capability) => capability !== "machine/4" && capability !== "machine/6" && capability !== "machine/7");
+  "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8"];
+const OLDER = ALL.filter((capability) => capability !== "machine/4" && capability !== "machine/6" && capability !== "machine/7" && capability !== "machine/8");
 
 // Runs in the page, after the stub.
 const fixture = `(() => {

@@ -850,6 +850,9 @@ the pull request that adds it.
 | `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
 | `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
 | `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
+| `session.usage` | `machine/8` | Served | Names the session; its tokens and cost read again from the machine's transcripts, how each agent signs in there, and the machine's usage windows (PRO-408, [Session parity](#as-built-pro-408-cost-account-continue-and-fix-check-errors)) |
+| `session.prepareContinuation` | `machine/8` | Served | Names the session and an agent tab; the tab's context with the machine's own transcript path |
+| `session.checkFailures` | `machine/8` | Served | Manage only; names the session, an agent tab and a pull request's https URL; its failed check logs read with the machine's `gh` into the session's attachments folder there |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -2063,7 +2066,10 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
 | Agent sign-in notice | Works; names the machine ("Sign in from its page") | 21.09, PRO-350 |
-| Cost chip, agent account label, Continue in a new tab, Fix check errors | Follow-up | PRO-408 |
+| Cost chip | Works; the totals come with the machine's session list, and the popover reads them again, how each agent signs in and the usage windows on the machine (`session.usage`) | PRO-408 |
+| Agent account label and tab mark | Works; the account the tab runs on as the machine lists its agent's accounts (`accountLabel`), only when that agent has several there | PRO-408 |
+| Continue in a new tab | Works; a new agent tab in the session on the machine, handed the tab's context read there (`session.prepareContinuation`) | PRO-408 |
+| Fix check errors | Works; the PR from the machine's `git/1`, its failed logs read with the machine's `gh` (`session.checkFailures`), the prompt sent to the tab on the machine | PRO-408 |
 | Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
 | Computer use | Hidden | Decision 7 |
 | Dictation into a terminal | Hidden; dictation into the composer works | Decision 7 |
@@ -2170,6 +2176,43 @@ it; reading is open to whoever sees the session, running is the manager's.
   PRO-355), made when there is none; with Forwarding off, or a machine
   without `ports/1`, it is not opened and says why. Any other URL opens as
   it is. No path of the machine is opened on this computer.
+### As built (PRO-408): cost, account, Continue and Fix check errors
+
+`machine/8` adds three methods for a session the caller may see, and each tab
+of `session.list` and `session.sessions` carries the account it runs on
+(`src-tauri/src/remote/machine_session.rs`). A machine that does not grant
+`machine/8` (an older TerminalX) shows the cost its tabs' `usage` carries and
+none of the rest.
+
+- **Cost chip.** A machine tab's `usage` is in the session list, so the chip
+  draws from it as a local session's does. Opening the popover asks
+  `session.usage`: the machine reads every tab's transcripts again (a move
+  goes out as `session.sessions`), and answers how each agent there signs in
+  (`loginMethods`, from the tab's account: an added key is "API key", an added
+  subscription the agent's account kind, the machine's own login what its CLI
+  says) and the machine's usage windows of those agents. The copied command
+  names the session's id on the machine and says to run it there; Open Stats
+  is left out, as Stats counts this computer's sessions.
+- **Account label.** `accountLabel` is the label of the account the tab runs
+  on, or last ran on (its `launchedAccount`, else `account`, else the
+  machine's own login), and only when that agent has two or more accounts on
+  the machine, and is sent only to a connection that manages the machine,
+  since a label can be an email address. The header's label and the tab's
+  mark read it, and never this
+  computer's accounts (`TabAccountLabel`, `TabAccountMark`).
+- **Continue in a new tab.** The title-bar button reads "Continue in a new
+  tab…" where the machine grants `machine/8` and `session/2`. The dialog
+  (`MachineContinueDialog`) reads `session.prepareContinuation`, offers the
+  machine's agents and models starting from the source tab's settings, and
+  Recent context or Full transcript (only when the machine has the transcript).
+  Continue adds the tab (`session.addTab`) and sends it the handoff as any
+  message; a send that fails keeps that tab and the next try sends to it,
+  never adding a second.
+- **Fix check errors.** The Branch tab's Fix errors and the shortcut find the
+  session's PR through the machine's `git/1` (`sessionPrs` on its
+  `cloudGitSource`), ask `session.checkFailures` for the logs, and send the
+  same prompt as on this computer, naming the machine's file. Nothing of this
+  computer's `gh` is used; a participant cannot ask for logs.
 
 ### As built (PRO-406): removing a machine session's worktree
 
@@ -2578,4 +2621,4 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   owner's decision.
 - **Still open in the epic:** PRO-368 (relay registration for a signed-in
   machine) and PRO-359 (the phone), both in review; session follow-ups
-  PRO-403 to PRO-408, in Backlog.
+  PRO-403 to PRO-407, in Backlog.
