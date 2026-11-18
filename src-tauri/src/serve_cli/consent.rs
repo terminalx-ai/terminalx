@@ -207,11 +207,12 @@ pub fn window_proof(host_secret: &[u8; 32], socket: &Path, nonce: &str) -> Strin
 
 /// Where the window's process finds the machine's host key, to prove it is
 /// the window; installed once by the app. No other process has one.
-pub type WindowKey = Box<dyn Fn() -> Option<zeroize::Zeroizing<[u8; 32]>> + Send + Sync>;
+pub type WindowKey = Box<dyn Fn() -> Result<zeroize::Zeroizing<[u8; 32]>> + Send + Sync>;
 
 static WINDOW_KEY: std::sync::OnceLock<WindowKey> = std::sync::OnceLock::new();
 
 /// Make every guarded request this process sends prove it is the window.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 pub fn speak_as_window(key: WindowKey) {
     if WINDOW_KEY.set(key).is_err() {
         log::warn!("the window's consent key was installed twice");
@@ -308,10 +309,21 @@ fn challenge(mut stream: UnixStream, expected: &str) -> bool {
 /// needs one; `None` for one that does not. In the window's process the
 /// parameter carries the window's proof too ([`speak_as_window`]).
 pub fn witness_for(command: &str, run: &Path, params: &mut Value) -> Result<Option<Witness>> {
+    witness_with_window_key(command, run, params, WINDOW_KEY.get())
+}
+
+fn witness_with_window_key(
+    command: &str,
+    run: &Path,
+    params: &mut Value,
+    provider: Option<&WindowKey>,
+) -> Result<Option<Witness>> {
     if !guards(command) {
         return Ok(None);
     }
-    let key = WINDOW_KEY.get().and_then(|key| key());
+    // Fail locally if this window cannot read its key. A caller without a
+    // provider still sends an ordinary witness for the runtime to judge.
+    let key = provider.map(|key| key()).transpose()?;
     witness_proving(command, run, params, key.as_deref())
 }
 
@@ -712,6 +724,34 @@ mod tests {
         assert_eq!(error.code, "person_required");
         assert!(witness_for(machine_wire::DECLINE, &run, &mut json!({})).unwrap().is_none(), "anyone may decline");
         assert!(witness_for(machine_wire::REVOKE, &run, &mut json!({})).unwrap().is_none());
+    }
+
+    #[test]
+    fn window_key_failure_stops_guarded_requests_before_a_witness_is_created() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let unavailable: WindowKey = Box::new(|| anyhow::bail!("window key unavailable"));
+        let available: WindowKey = Box::new(|| Ok(zeroize::Zeroizing::new([7; 32])));
+        for command in [machine_wire::CREATE_CODE, machine_wire::APPROVE] {
+            let mut params = json!({});
+            let error = witness_with_window_key(command, dir.path(), &mut params, Some(&unavailable))
+                .err().expect("a key read error stops the request locally");
+            assert_eq!(error.to_string(), "window key unavailable");
+            assert!(params.get(PARAM).is_none());
+            assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+
+            let _witness = witness_with_window_key(command, dir.path(), &mut params, Some(&available))
+                .unwrap().expect("a readable key produces a witness");
+            assert!(params[PARAM][WINDOW_FIELD].is_string());
+            let window = Window::Keyed(Some(zeroize::Zeroizing::new([7; 32])));
+            let refused = verify_for(dir.path(), &mut params, &window).unwrap_err();
+            assert_eq!(refused.code, "person_required");
+            assert!(refused.message.contains("the runtime itself"));
+        }
+
+        assert!(witness_with_window_key(machine_wire::DECLINE, dir.path(), &mut json!({}), Some(&unavailable))
+            .unwrap().is_none());
     }
 
     #[test]

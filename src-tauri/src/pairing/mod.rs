@@ -682,19 +682,19 @@ impl PairingManager {
 
     /// The machine's host key, with which this window proves to the
     /// runtime's pairing guard that it is the window (`serve_cli::consent`).
-    /// Only a runtime on a Mac keeps the window's key; elsewhere there is
-    /// nothing to prove. Blocking: a Keychain read.
-    pub(crate) fn consent_key(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
-        if !cfg!(target_os = "macos") {
-            return None;
-        }
-        match self.secrets.host_key(false) {
-            Ok(keypair) => keypair.map(|keypair| zeroize::Zeroizing::new(*keypair.secret())),
-            Err(error) => {
-                log::warn!("could not read this Mac's host key to prove the window: {error:#}");
-                None
-            }
-        }
+    /// Blocking: a Keychain read. Only macOS registers a proof provider.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn consent_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let keypair = self
+            .secrets
+            .host_key(false)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t read the pairing key from Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The TerminalX pairing key is missing from Keychain. Restart TerminalX and try again. If the key is still missing, contact support.")
+            })?;
+        Ok(zeroize::Zeroizing::new(*keypair.secret()))
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {

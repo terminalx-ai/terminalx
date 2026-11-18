@@ -38,6 +38,34 @@ fn manager(ttl_ms: i64) -> (Arc<PairingManager>, MemorySecrets, crate::store::Te
     (Arc::new(manager), store, home)
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn consent_key_distinguishes_missing_storage_entry_and_denied_read() {
+    use crate::keychain::testing::Call;
+
+    let (manager, store, _home) = manager(1_000);
+    let Err(missing) = manager.consent_key() else {
+        panic!("a missing key must fail closed");
+    };
+    assert!(missing.to_string().contains("missing from Keychain"));
+    assert!(missing.to_string().contains("Restart TerminalX"));
+
+    let host = manager.host_key(true).unwrap();
+    let read = manager.consent_key().unwrap();
+    assert!(&*read == host.secret(), "the stored key is used for proof");
+
+    store.fail_reads(true);
+    let Err(denied) = manager.consent_key() else {
+        panic!("a denied read must fail closed");
+    };
+    assert!(denied.to_string().contains("Unlock your login Keychain"));
+    assert!(!format!("{denied:#}").contains("the store refused the read"));
+
+    assert!(matches!(store.calls().as_slice(), [Call::Get, Call::Get, Call::Set(_), Call::Get, Call::Get]));
+    store.fail_reads(false);
+    assert!(manager.consent_key().is_ok(), "retry reads the key again");
+}
+
 fn entry(id: &str, token: &str) -> DeviceEntry {
     DeviceEntry {
         id: id.into(),
