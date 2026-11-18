@@ -296,10 +296,21 @@ async fn another_computer_updates_a_headless_machine_and_two_agents_and_a_shell_
     assert_eq!(status["blockers"], json!([]), "agents mid-turn and shells are carried over");
     assert_eq!(status["otherComputers"], json!([]));
 
-    let started = macbook.call("machine.update", json!({ "version": version })).await;
+    // Ignore queued idle status and keep progress even if it arrives before the RPC reply.
+    let progress = |params: &Value| params["status"]["progress"]["phase"] != "idle";
+    let mut early = None;
+    let started = macbook.call_observing("machine.update", json!({ "version": version }), |message| {
+        if early.is_none() && message["event"] == "machine.updateChanged" && progress(&message["params"]) {
+            early = Some(message["params"].clone());
+        }
+    }).await;
     assert_eq!(started["ok"], true, "{started}");
     assert_eq!(started["result"]["progress"]["phase"], "downloading");
-    let told = macbook.notification("machine.updateChanged", Duration::from_secs(120)).await.expect("the computer is told how the update goes");
+    let told = match early {
+        Some(told) => told,
+        None => macbook.notification("machine.updateChanged", Duration::from_secs(120), progress).await
+            .expect("the computer is told how the update goes"),
+    };
     assert!(["downloading", "verifying", "trial", "handingOver", "cleaningUp", "updated"].contains(&told["status"]["progress"]["phase"].as_str().unwrap()), "{told}");
 
     let record = ended(&world.data).await;

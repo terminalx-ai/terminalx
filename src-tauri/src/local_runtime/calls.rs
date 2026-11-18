@@ -259,9 +259,10 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "resendMessage" => serde_json::to_value(manager.resend_message(session, tab, params["seq"].as_u64().context("seq is required")?)?)?,
         "submitWaiting" => json!(manager.submit_waiting(session, tab, params["seq"].as_u64().context("seq is required")?)?),
         "prepareContinuation" => serde_json::to_value(crate::continuation::prepare(session, tab, manager.tracked_transcript(session, tab), params["portable"].as_bool() == Some(true))?)?,
-        "send" => serde_json::to_value(manager.send_pressed(session, tab, string(&params, "text")?.into(),
+        "send" => serde_json::to_value(manager.send_pressed_with_request(session, tab, string(&params, "text")?.into(),
             serde_json::from_value(params.get("images").cloned().unwrap_or_else(|| json!([])))?, params["pressedAt"].as_i64(),
-            serde_json::from_value(params.get("files").cloned().unwrap_or_else(|| json!([])))?)?)?,
+            serde_json::from_value(params.get("files").cloned().unwrap_or_else(|| json!([])))?,
+            serde_json::from_value(params["promptRequestId"].clone())?)?)?,
         "terminalViewReport" => { manager.note_terminal_view(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "incidentUi" => { manager.note_incident_ui(session, tab, &serde_json::from_value(params["report"].clone())?)?; Value::Null }
         "sendShown" => { manager.note_shown(session, tab, params["seq"].as_u64().context("seq is required")?, &serde_json::from_value(params["timings"].clone())?)?; Value::Null }

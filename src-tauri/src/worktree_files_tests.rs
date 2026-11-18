@@ -503,6 +503,7 @@ fn copy_batch_keeps_validated_source_after_ancestor_swap() {
 
 fn copy_path(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
     copy_one(&safe_open::Directory::open_resolved(&fs::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+        .map(|(bytes, warning, _, _, _)| (bytes, warning))
 }
 
 #[cfg(unix)]

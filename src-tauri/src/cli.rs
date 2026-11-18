@@ -64,6 +64,7 @@ Usage:
   terminalx sessions list --children-of SESSION [--json]
   terminalx sessions stop --children-of SESSION [--json]
   terminalx sessions archive|unarchive SESSION... [--json]
+  terminalx sessions pin|unpin SESSION [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME] [--experimental-codex-stdio] [--report] [--parent SESSION|--no-parent]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--account ACCOUNT] [--json]
@@ -778,6 +779,10 @@ fn parse_sessions(tokens: &mut Tokens, machine: &Option<String>) -> Result<Actio
                 return machine_rpc("sessions.archive", machine, Some(&first), json!({"sessions": sessions, "archived": command == "archive"}), tokens);
             }
             rpc(&format!("sessions.{command}"), json!({"sessions": sessions}), tokens)
+        }
+        command @ ("pin" | "unpin") => {
+            let session = tokens.required_front("session")?;
+            rpc(&format!("sessions.{command}"), json!({"session": session}), tokens)
         }
         "show" => {
             let session = tokens.required_front("session")?;
@@ -2138,6 +2143,20 @@ mod tests {
         for field in ["terminalx-report", "`status`", "`result`", "`evidence`", "`changed`", "`notDone`", "`couldNotRead`", "`uncertain`", "noEvidence", "`missing`", "truncated"] {
             assert!(GUIDE.contains(field), "the guide does not document {field}");
         }
+    }
+
+    #[test]
+    fn session_pinning_commands_accept_one_selector() {
+        for command in ["pin", "unpin"] {
+            let (method, params, _) = rpc_of(&["sessions", command, "0198a", "--json"]);
+            assert_eq!(method, format!("sessions.{command}"));
+            assert_eq!(params, json!({"session": "0198a"}));
+            assert_eq!(parse(&args(&["sessions", command])).unwrap_err().code, "invalid_arguments");
+            assert_eq!(parse(&args(&["sessions", command, "a", "b"])).unwrap_err().code, "invalid_arguments");
+        }
+        assert!(help_text().contains("sessions pin|unpin SESSION"));
+        assert!(GUIDE.contains("sessions pin <session>"));
+        assert!(GUIDE.contains("sessions unpin <session>"));
     }
 
     #[test]

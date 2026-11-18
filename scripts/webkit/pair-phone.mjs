@@ -6,7 +6,8 @@
 // down with Only this network chosen. In each: the dialog stays inside the
 // window and its two columns, nothing overlaps or is cut, no text is under
 // 11 px, the fingerprints are mono and device rows are 56 px. The Device tab
-// sits beside Terminal and offers access to live connections from the folded dock.
+// sits beside Terminal and offers access to live connections from the folded
+// dock or the lower-right Device button when the right panel is hidden.
 //
 // Pictures of every case go to PAIR_PHONE_SHOTS, by default scripts/webkit/output/pair-phone;
 // that default folder ignores itself, so a run leaves the worktree clean.
@@ -27,7 +28,6 @@ const RELAY_DOWN = "TerminalX Relay service is temporarily unavailable. Retrying
 // Runs in the page, after the stub: the Mac's pairing status, and a way to change it as the Mac would.
 const fixture = `(() => {
   const answers = window.__PW_STUB__.answers;
-  const now = Date.now();
   const offer = (mode) => ({
     pairingUrl: "terminalx://pair?v=2&code=" + "A1b2C3d4E5".repeat(mode === "automatic" ? 40 : 12),
     expiresAt: Date.now() + 292000,
@@ -58,10 +58,12 @@ const fixture = `(() => {
     devices: status.devices.map((device) => device.id === deviceId ? { ...device, connection: undefined } : device),
   });
   window.__PAIRING__ = {
-    now,
     set(patch) {
       status = { ...status, ...patch };
       window.__PW_STUB__.emit("pairing_status", status);
+    },
+    reconnect() {
+      this.set({ devices });
     },
     offer,
   };
@@ -170,18 +172,41 @@ try {
       const shot = (state) => join(shots, `pair-phone-${mode}-${viewport.width}x${viewport.height}-${state}.png`);
       const page = await open(browser, server.url, { cloud: true, localProjects: 1, localSession: true }, viewport, {
         colorScheme: mode,
-        extra: `localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: true, panelTerminalOpen: false }));\n${fixture}`,
+        extra: fixture,
       });
       const rail = await sidebar(page);
       await rail.getByTestId("conversation-list").getByRole("button", { name: /Local long session$/ }).click();
       await page.keyboard.press("Meta+B");
       await settle(page);
 
-      // Live remote access is discoverable and can be ended from the folded dock.
       const dock = page.getByTestId("panel-terminal");
+      const deviceStatus = page.getByRole("button", { name: "Device · 1 connected phone", exact: true });
+      await deviceStatus.waitFor();
+      await page.evaluate(() => window.__PW_STUB__.emit("status_bar_settings", { visible: false }));
+      await page.locator("[data-status-bar]").waitFor({ state: "hidden" });
+      const panelHidden = await dock.count() === 0;
+      const statusAtBottomRight = await deviceStatus.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        return box.left > innerWidth / 2 && box.bottom > innerHeight - 24;
+      });
+      await deviceStatus.click();
+      const statusDetails = page.getByRole("dialog", { name: "Device", exact: true });
+      await statusDetails.getByRole("button", { name: "Disconnect Paresh’s iPhone", exact: true }).click();
+      await deviceStatus.waitFor({ state: "hidden" });
+      failed += report(`${name}, hidden right panel`, {
+        "Device status is in the lower-right corner with no dock": panelHidden && statusAtBottomRight,
+        "Disconnect clears the live status and closes its controls": await statusDetails.count() === 0,
+      });
+      await page.evaluate(() => window.__PAIRING__.reconnect());
+      await deviceStatus.waitFor();
+
+      // Live remote access is discoverable and can be ended from the folded dock.
+      await page.keyboard.press("Meta+E");
       const deviceTab = dock.getByRole("tab", { name: "Device · 1", exact: true });
       const toggle = dock.getByRole("button", { name: "Show Device tab (1 connected phone)", exact: true });
       await toggle.waitFor();
+      await settle(page);
+      const dockOnly = await deviceStatus.count() === 0;
       const collapsed = (await toggle.getAttribute("aria-expanded")) === "false";
       const bannerGone = await page.getByTestId("phone-connected-bar").count() === 0;
       const placement = await deviceTab.evaluate((tab) => {
@@ -191,7 +216,7 @@ try {
         return {
           besideTerminal: terminal?.textContent.trim() === "Terminal" && terminal.getBoundingClientRect().right <= box.left,
           lowerRight: box.left > innerWidth / 2 && box.top > innerHeight / 2,
-          fits: box.top >= row.top && box.bottom <= row.bottom && box.right <= row.right,
+          fits: box.top >= row.top && box.bottom <= row.bottom && box.right <= Math.min(row.right, innerWidth),
           unselected: tab.getAttribute("aria-selected") === "false",
         };
       });
@@ -209,16 +234,21 @@ try {
         "a connection leaves the tab unselected and the dock collapsed": placement.unselected && collapsed,
         "there is no floating connection banner": bannerGone,
         "the collapsed toggle opens Device and the panel explains remote access": explainsAccess,
+        "the Device tab takes over from the lower-right Device button": dockOnly,
         "Disconnect clears the tab count and keeps the phone paired": await dock.getByRole("tab", { name: "Device", exact: true }).count() === 1 &&
           await page.evaluate(async () => (await window.__PW_STUB__.answers.pairing_status()).devices.some((device) => device.id === "phone-1" && !device.connection)),
       }, placement);
 
+      await page.evaluate(() => window.__PAIRING__.reconnect());
       await page.keyboard.press("Meta+K");
       const palette = page.getByRole("dialog");
       await palette.locator("input").fill("Pair a phone");
       await palette.getByRole("option", { name: /^Pair a phone…/ }).click();
       const dialog = page.getByRole("dialog", { name: "Pair a phone" });
       await dialog.getByAltText("TerminalX phone pairing QR code").waitFor();
+      const connectedRow = dialog.getByTestId("paired-device").filter({ hasText: "Paresh’s iPhone" });
+      await connectedRow.getByRole("button", { name: "Disconnect Paresh’s iPhone", exact: true }).waitFor();
+      await connectedRow.getByRole("button", { name: "Revoke Paresh’s iPhone", exact: true }).waitFor();
       await settle(page);
 
       // 1. A live Relay code.

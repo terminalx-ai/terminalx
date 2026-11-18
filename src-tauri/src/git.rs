@@ -933,7 +933,17 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     create_worktree_with_timeout(project, name, base, WORKTREE_FETCH_TIMEOUT)
 }
 
+/// Allocate before checking files out, so a failed checkout hook cannot hide
+/// an already-created worktree from the fork's rollback.
+pub(crate) fn create_fork_worktree(project: &Path, name: &str, base: Option<&str>) -> Result<(CreatedWorktree, String)> {
+    create_worktree_impl(project, name, base, WORKTREE_FETCH_TIMEOUT, true)
+}
+
 fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration) -> Result<CreatedWorktree> {
+    create_worktree_impl(project, name, base, timeout, false).map(|(worktree, _)| worktree)
+}
+
+fn create_worktree_impl(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration, fork: bool) -> Result<(CreatedWorktree, String)> {
     let _request = crate::github_process::scope();
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
@@ -941,18 +951,128 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let branch = worktree_branch_for(project, name)?;
     let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
+    let base_commit = run(project, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
     let path = worktree_path(project, name);
     let sparse = crate::store::configuration::sparse_checkout(project)?;
     std::fs::create_dir_all(worktree_root(project))?;
-    worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
+    if fork {
+        // No checkout hook runs until Git has successfully registered the
+        // branch and worktree, at which point both are ours to roll back.
+        if let Err(error) = run(project, &["worktree", "add", "--no-checkout", "--no-track", "-b", &branch, arg(&path)?, &base_commit]) {
+            // Git can fail before we know whether it created either name.
+            // Never guess ownership: point out any remaining destination.
+            if std::fs::symlink_metadata(&path).is_ok() || branch_exists(project, &branch) {
+                bail!("{error:#}; the destination {} or branch {branch} exists; its ownership could not be established, so it was kept", path.display());
+            }
+            return Err(error);
+        }
+        let checkout = match sparse.as_deref() {
+            Some(folders) => crate::sparse_checkout::populate(&path, folders, true),
+            None => run(&path, &["checkout", "-q"]).map(|_| ()),
+        };
+        if let Err(error) = checkout {
+            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit, false);
+            return Err(match cleanup { Ok(()) => error, Err(cleanup) => anyhow!("{error:#}; cleanup failed: {cleanup:#}") });
+        }
+    } else {
+        worktree_add(project, &["--no-track", "-b", &branch, arg(&path)?, &base], &path, sparse.as_deref(), Some(&branch), true)?;
+    }
     ensure_worktree_dir_ignored(project);
-    let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
-    let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let metadata = (|| -> Result<(String, String)> {
+        Ok((run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string(),
+            run(&path, &["rev-parse", "HEAD"])?.trim().to_string()))
+    })();
+    let (base_tree, commit) = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) if !fork => return Err(error),
+        Err(error) => {
+            // The branch was just made at `base`; retain it if it has moved.
+            let cleanup = rollback_new_worktree(project, &path, &branch, &base_commit, false);
+            return Err(match cleanup { Ok(()) => error, Err(cleanup) => anyhow!("{error:#}; cleanup failed: {cleanup:#}") });
+        }
+    };
     let from = Some(base.clone()).filter(|b| b != "HEAD");
-    Ok(CreatedWorktree {
+    Ok((CreatedWorktree {
         name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
         worktree_base: Some(WorktreeBase { commit, fetched, warning, from, file_copy: crate::worktree_files::copy_on_create(project, &path) }),
-    })
+    }, base_commit))
+}
+
+/// Roll back only the worktree and branch made for an unpublished fork.
+/// Compare the branch tip before deleting it so a branch moved by another
+/// process is retained and reported instead of losing new commits.
+pub(crate) fn rollback_created_worktree(project: &Path, worktree: &CreatedWorktree, expected: &str, snapshot: Option<&str>) -> Result<()> {
+    let path = Path::new(&worktree.path);
+    let snapshot = snapshot.context("worktree contains changes not owned by the fork; it was kept")?;
+    if fork_worktree_snapshot(path, worktree.worktree_base.as_ref().and_then(|base| base.file_copy.as_ref()).map(|report| report.copied_files.as_slice()).unwrap_or_default())? != snapshot { bail!("worktree changes were added or modified; it was kept"); }
+    rollback_new_worktree(project, path, &worktree.branch, expected, true)
+}
+
+/// Capture tracked changes while accepting only the exact files that the
+/// creation copy published and that have not since been changed.
+pub(crate) fn fork_worktree_snapshot(path: &Path, copied: &[crate::worktree_files::CopiedFile]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let untracked = run(path, &["ls-files", "--others", "-z"])?;
+    let actual: std::collections::BTreeSet<_> = untracked.split('\0').filter(|name| !name.is_empty()).collect();
+    let expected: std::collections::BTreeSet<_> = copied.iter().map(|file| file.path.as_str()).collect();
+    if actual != expected { bail!("worktree contains untracked or ignored files; it was kept"); }
+    for file in copied {
+        let relative = Path::new(&file.path);
+        let mut current = path.to_path_buf();
+        for component in relative.components() {
+            current.push(component);
+            let metadata = std::fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink() { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            }
+        }
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if !metadata.is_file() { bail!("copied file {} was replaced; worktree was kept", file.path); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if (metadata.dev(), metadata.ino()) != file.identity { bail!("copied file {} was replaced; worktree was kept", file.path); }
+            if metadata.permissions().mode() & 0o7777 != file.mode { bail!("copied file {} permissions changed; worktree was kept", file.path); }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if (metadata.creation_time(), 0) != file.identity || metadata.file_attributes() != file.mode {
+                bail!("copied file {} metadata changed; worktree was kept", file.path);
+            }
+        }
+        let mut input = std::fs::File::open(&current)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 16384];
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 { break; }
+            hash.update(&buffer[..count]);
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        if digest != file.digest { bail!("copied file {} changed; worktree was kept", file.path); }
+    }
+    let status = run(path, &["status", "--porcelain=v1", "--untracked-files=no"])?;
+    let staged = run(path, &["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
+    let unstaged = run(path, &["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"])?;
+    if status.is_empty() { return Ok(String::new()); }
+    Ok(format!("{status}\0{staged}\0{unstaged}"))
+}
+
+fn rollback_new_worktree(project: &Path, path: &Path, branch: &str, expected: &str, verified: bool) -> Result<()> {
+    if !verified && !fork_worktree_snapshot(path, &[])?.is_empty() { bail!("worktree contains changes; it was kept"); }
+    if !is_worktree_of(project, path) { bail!("{} is no longer this repository's worktree", path.display()); }
+    let actual_branch = run(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if actual_branch.trim() != branch { bail!("{} no longer has branch {branch}", path.display()); }
+    let current = run(project, &["rev-parse", "--verify", &format!("refs/heads/{branch}")])?;
+    if current.trim() != expected { bail!("branch {branch} moved; it and the worktree were kept"); }
+    run(project, &["worktree", "remove", "--force", arg(path)?])?;
+    run(project, &["update-ref", "-d", &format!("refs/heads/{branch}"), expected])?;
+    Ok(())
 }
 
 /// A worktree on a branch that already exists, rather than a new one: the
@@ -1174,7 +1294,7 @@ pub fn is_own_worktree(path: &Path) -> bool {
 }
 
 /// A repository's shared git directory, resolved.
-fn common_dir(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(cwd: &Path) -> Option<PathBuf> {
     let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
     let dir = out.trim();
     let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };

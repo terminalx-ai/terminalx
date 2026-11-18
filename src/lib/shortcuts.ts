@@ -91,8 +91,8 @@ const ACTIONS = [
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   // PRO-381: the new-tab menu's Browser. ⌘B is the sidebar; with Shift it is free.
   { id: "session.newBrowserTab", label: "New browser tab", group: "Session", keys: ["mod+shift+b"] },
-  // PRO-381: the tab menu's "Fork to new tab", on the tab on screen.
-  { id: "session.forkTab", label: "Fork the conversation to a new tab", group: "Session", keys: ["mod+alt+enter"] },
+  // PRO-381: fork the on-screen tab's conversation into a new session.
+  { id: "session.forkTab", label: "Fork the conversation to a new session", group: "Session", keys: ["mod+alt+enter"] },
   // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
   // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
   { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },

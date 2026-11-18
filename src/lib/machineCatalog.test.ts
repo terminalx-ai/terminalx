@@ -266,6 +266,28 @@ describe("machine catalog", () => {
     await expect(catalog.updateMachineSession("machine:m1:P1:s1", { archived: true })).rejects.toThrow(/not connected/);
   });
 
+  // PRO-406: a worktree removed on the machine takes its sessions' rows with it, before the machine's list says so.
+  it("drops the sessions a removed worktree took with it, on that machine only", async () => {
+    const mini = new FakeMachine();
+    const server = new FakeMachine();
+    mini.projects = [project("P1", "terminalx")];
+    server.projects = [project("P1", "terminalx")];
+    mini.sessions = [session("s1", "P1", "In the worktree"), session("s2", "P1", "Also there"), session("s3", "P1", "Elsewhere")];
+    server.sessions = [session("s1", "P1", "Same id, other machine")];
+    catalog.getMachineCatalog();
+    hold({ m1: mini, m2: server });
+    mini.connect();
+    server.connect();
+    await flush();
+
+    catalog.forgetMachineSessions("m1", ["s1", "s2"]);
+    expect(catalog.allMachineSessions().map((row) => row.key).sort()).toEqual(["machine:m1:P1:s3", "machine:m2:P1:s1"]);
+    // Nothing to drop, or a machine not known: nothing changes.
+    catalog.forgetMachineSessions("m1", []);
+    catalog.forgetMachineSessions("gone", ["s3"]);
+    expect(catalog.allMachineSessions()).toHaveLength(2);
+  });
+
   it("puts a pinned session first in its project, above newer ones, once the machine has pinned it", async () => {
     const mini = new FakeMachine();
     mini.projects = [project("P1", "terminalx")];

@@ -781,7 +781,8 @@ mod tests {
                 let mut params = json!({ "epoch": "e", "lease": "l" });
                 let witness = witness_proving(&command, &run, &mut params, secret.as_ref()).unwrap().unwrap();
                 let report = json!({ "pid": me(), "terminal": controlling_terminal(me()).is_some(), "params": params });
-                println!("CONSENT {report}");
+                // libtest can write the test name without a trailing newline.
+                println!("\nCONSENT {report}");
                 for _ in 0..600 {
                     if run.join("done").exists() {
                         break;

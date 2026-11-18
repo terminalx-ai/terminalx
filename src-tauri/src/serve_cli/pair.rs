@@ -202,23 +202,28 @@ fn turn_on(data: &Path) -> Result<()> {
     Ok(())
 }
 
-fn wait_until_listening(runtime: &Runtime, mut status: Status) -> Result<Status> {
-    let deadline = Instant::now() + LISTEN_WAIT;
+fn wait_until_listening(runtime: &Runtime, status: Status) -> Result<Status> {
+    wait_for_listener(status, Instant::now() + LISTEN_WAIT, || runtime.status(), || std::thread::sleep(POLL))
+}
+
+/// `Needed` also describes a headless runtime before it makes its own key.
+/// Wait for the listener instead of assuming that the window owns the key.
+fn wait_for_listener(mut status: Status, deadline: Instant, mut read: impl FnMut() -> Result<Status>, mut pause: impl FnMut()) -> Result<Status> {
     loop {
         if status.enabled && status.listening.is_some() && status.machine_id.is_some() {
             return Ok(status);
         }
-        if status.enabled && status.host_key == machine_wire::HostKeyState::Needed {
-            bail!("this runtime waits for the TerminalX window's key; pair it from Settings → Machines in the window");
-        }
         if Instant::now() >= deadline {
-            match status.error {
-                Some(error) => bail!("other computers cannot reach this server: {error}"),
-                None => bail!("the runtime did not start listening for computers within {} seconds", LISTEN_WAIT.as_secs()),
+            if let Some(error) = status.error {
+                bail!("other computers cannot reach this server: {error}");
             }
+            if status.enabled && status.host_key == machine_wire::HostKeyState::Needed {
+                bail!("the runtime's host key is not ready; if TerminalX opened this runtime, pair it from Settings → Machines in the window");
+            }
+            bail!("the runtime did not start listening for computers within {} seconds", LISTEN_WAIT.as_secs());
         }
-        std::thread::sleep(POLL);
-        status = runtime.status()?;
+        pause();
+        status = read()?;
     }
 }
 
@@ -556,6 +561,27 @@ mod terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_waits_for_a_headless_key_and_reports_an_unready_key_at_the_deadline() {
+        let needed: Status = serde_json::from_value(json!({
+            "enabled": true, "hostKey": "needed", "machineId": null, "listening": null,
+            "phoneRoute": false, "computers": [], "error": null
+        })).unwrap();
+        let mut ready = needed.clone();
+        ready.host_key = machine_wire::HostKeyState::Ready;
+        ready.machine_id = Some("machine".into());
+        ready.listening = Some("127.0.0.1:6768".into());
+        let mut reads = 0;
+        let result = wait_for_listener(needed.clone(), Instant::now() + Duration::from_secs(1), || {
+            reads += 1;
+            Ok(ready.clone())
+        }, || {}).unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(result, ready);
+        let error = wait_for_listener(needed, Instant::now(), || panic!("deadline must stop polling"), || {}).unwrap_err().to_string();
+        assert!(error.contains("host key is not ready") && error.contains("Settings → Machines"), "{error}");
+    }
 
     #[test]
     fn only_yes_allows() {

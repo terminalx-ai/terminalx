@@ -24,6 +24,7 @@ import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudColla
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
+import { FirstMessage } from "@/components/chat/FirstMessage";
 import { Composer, type Handoff } from "@/components/chat/Composer";
 import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
@@ -886,6 +887,7 @@ export function TabView({
     <RecoveryReports.Provider value={reporter}>
     <Chat
       sessionId={backend.logSessionId}
+      tabId={tab.id}
       checkpointTabId={local && !readOnly ? tab.id : undefined}
       transcript={asksInChat ? transcript : { ...transcript, pendingAsks: [] }}
       active={active}
@@ -904,6 +906,7 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
+      firstMessage={local && !readOnly && log.firstMessage && <FirstMessage message={log.firstMessage} session={session} agent={agentLabel} setup={setup} />}
       onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
       onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}

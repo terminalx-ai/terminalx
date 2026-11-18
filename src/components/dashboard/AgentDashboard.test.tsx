@@ -1,11 +1,15 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SessionEntry } from "@/types/session";
 import { DEFAULT_DASHBOARD_PREFERENCES, tableColumns } from "@terminalx/portable/dashboard";
 import { setPrefs, getPrefs } from "@/lib/prefs";
 import { AgentDashboard } from "./AgentDashboard";
+import { api } from "@/lib/api";
+import { AppDestinations } from "@/components/layout/ProjectRail";
 
 const state = vi.hoisted(() => ({ sessions: [] as SessionEntry[], select: vi.fn() }));
+vi.mock("@/components/layout/SessionSidebar", () => ({ SessionSidebar: () => null }));
+vi.mock("@/components/layout/ChatListSidebar", () => ({ ChatListSidebar: () => null }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ sessions: state.sessions, loaded: true, projects: [], harnesses: [] }), selectSession: state.select, openNewSession: vi.fn() }));
 vi.mock("@/lib/summaries", () => ({ useSessionSummaries: () => ({ get: () => undefined, loading: false }) }));
 vi.mock("@/lib/cloudDashboard", () => ({ useCloudDashboard: () => [], isCloudDashboardSession: () => false }));
@@ -22,7 +26,7 @@ beforeEach(() => {
   state.select.mockClear();
   Element.prototype.scrollIntoView = vi.fn();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 it("renders empty chats under Not started and moves a chat after its first message", () => {
   const at = "2026-11-05T12:00:00Z";
@@ -57,6 +61,80 @@ function session(id: string, patch: Partial<SessionEntry> = {}): SessionEntry {
 const rowNames = () => within(screen.getByRole("table", { name: "Sessions" })).getAllByRole("row").slice(1).map((r) => r.querySelector("[data-session-title]")?.textContent);
 const openMenu = (name: string) => fireEvent.pointerDown(screen.getByRole("button", { name }), { button: 0, ctrlKey: false, pointerType: "mouse" });
 const closeMenu = () => fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+it("updates live cards and counts across team views, with waiting taking priority", () => {
+  const first = session("First");
+  const second = session("Second");
+  state.sessions = [first, second];
+  const view = render(<AgentDashboard />);
+  const column = (name: string) => within(screen.getByRole("region", { name }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+  expect(column("Working").getByText("First")).toBeTruthy();
+  expect(column("Working").getByText("Second")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /^Active now0/ }));
+  expect(column("Working").getByText(/current view/)).toBeTruthy();
+  fireEvent.click(column("Working").getByRole("button", { name: "Show all sessions" }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+  state.sessions = [{ ...first, tabs: [{ ...first.tabs[0], status: "completed" }] }, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Working").getByText("1")).toBeTruthy();
+  expect(column("Done").getByText("First")).toBeTruthy();
+  state.sessions = [{ ...first, tabs: [{ ...first.tabs[0], status: "in_progress" }, { ...first.tabs[0], id: "waiting", status: "waiting" }] }, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Needs you").getByText("First")).toBeTruthy();
+  expect(column("Working").queryByText("First")).toBeNull();
+  state.sessions = [first, second];
+  view.rerender(<AgentDashboard />);
+  expect(column("Working").getByText("2")).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "missing" } });
+  fireEvent.click(column("Working").getByRole("button", { name: "Show all sessions" }));
+  expect(column("Working").getByText("2")).toBeTruthy();
+});
+
+it("keeps Overview rail counts and working dot in sync with the board during local background work", async () => {
+  vi.useFakeTimers();
+  const local = session("Local session");
+  state.sessions = [{ ...local, tabs: [{ ...local.tabs[0], status: "completed" }] }];
+  const fetch = vi.spyOn(api, "sessionRowStatuses").mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: null }] } });
+  const open = vi.fn();
+  const rail = <AppDestinations onOpenHome={open} onNewSession={open} onSearch={open} onOpenIssues={open} onOpenAgents={open} onOpenAutomations={open} />;
+  const overview = render(<div>{rail}</div>);
+  // Let the rail subscribe before opening the board, as it does elsewhere in the app.
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(fetch).toHaveBeenCalledWith([local.id]);
+  overview.rerender(<div>{rail}<AgentDashboard /></div>);
+
+  const expectActivity = (working: boolean) => {
+    const activeColumn = within(screen.getByRole("region", { name: working ? "Working" : "Done" }));
+    const emptyColumn = within(screen.getByRole("region", { name: working ? "Done" : "Working" }));
+    expect(activeColumn.getByText(local.title)).toBeTruthy();
+    expect(activeColumn.getByText("1")).toBeTruthy();
+    expect(emptyColumn.queryByText(local.title)).toBeNull();
+    const button = screen.getByRole("button", { name: `Overview, 0 needs you, ${working ? 1 : 0} working, ${working ? 0 : 1} done, 0 not started` });
+    expect(Boolean(button.querySelector(".bg-info.animate-pulse-soft"))).toBe(working);
+  };
+  expectActivity(false);
+  fetch.mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: "background" }] } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expectActivity(true);
+  fetch.mockResolvedValue({ [local.id]: { tabs: [{ status: "completed", activity: null }] } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expectActivity(false);
+});
+
+it("explains when hidden automations are the only running sessions", async () => {
+  state.sessions = [session("Automated", { automation: { id: "auto", name: "Daily", runId: "run", runNumber: 1 } })];
+  render(<AgentDashboard />);
+  const working = within(screen.getByRole("region", { name: "Working" }));
+  expect(working.getByText(/current view/)).toBeTruthy();
+  fireEvent.click(working.getByRole("button", { name: "Show all sessions" }));
+  expect(working.getByText("Automated")).toBeTruthy();
+  openMenu("With automations");
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "Hide automations" }));
+  await waitFor(() => expect(working.getByText(/current view/)).toBeTruthy());
+  fireEvent.click(working.getByRole("button", { name: "Show all sessions" }));
+  expect(working.getByText("Automated")).toBeTruthy();
+});
 /** The view lives in the Display menu (02.15). */
 async function showView(name: "Table" | "Board") {
   openMenu("Display");

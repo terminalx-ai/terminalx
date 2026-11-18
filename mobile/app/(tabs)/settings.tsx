@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Switch, Text, useColorScheme, View } from "react-native";
 import { useRouter } from "expo-router";
 import { Bell, Check, ChevronRight } from "lucide-react-native";
@@ -34,14 +34,19 @@ export default function SettingsScreen() {
 
   // Asked again when the machine starts or stops offering them (#730).
   const macOffered = useHostFeatures(app.api, app.activeHost?.id)?.macSettings === 1;
-  useEffect(() => {
-    let current = true;
+  const request = useMemo(() => ({ api: app.api, connected, host: app.activeHost?.id, macOffered, settingsRevision }), [app.api, connected, app.activeHost?.id, macOffered, settingsRevision]);
+  const [previousRequest, setPreviousRequest] = useState(request);
+  if (previousRequest !== request) {
+    setPreviousRequest(request);
     setMac(undefined);
     setMacError(null);
-    if (!connected) return;
-    app.api.macSettings().then((value) => { if (current) setMac(value); }).catch((cause: unknown) => { if (current) { setMac(null); setMacError(cause instanceof Error ? cause.message : String(cause)); } });
+  }
+  useEffect(() => {
+    if (!request.connected) return;
+    let current = true;
+    request.api.macSettings().then((value) => { if (current) setMac(value); }).catch((cause: unknown) => { if (current) { setMac(null); setMacError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { current = false; };
-  }, [app.api, connected, app.activeHost?.id, macOffered, settingsRevision]);
+  }, [request]);
 
   const toggleNativeCodex = async (on: boolean) => {
     const before = mac;

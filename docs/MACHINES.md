@@ -2060,9 +2060,8 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
 | Header branch button: diff size, Create PR, push, pull, mark ready, merge, agent steps | Works; read from the machine's `git/1` (`git.status`, `git.prs`, the branch's diff against its base) as files change there, and run there with its Git sign-in; Merge is pinned to the head that was read (`git.prMerge` `head`). A cloud workspace session keeps the branch chip only | 21.08, PRO-404 |
-| Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
-| Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
-| Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
+| Files, editor, file search | Works, rooted at the session's worktree: the repository Changes shows, inside the project or in an absolute worktree folder | PRO-347, PRO-405 |
+| Remove the session's worktree once its PR merged | Works: the chat's Delete workspace and the removal dialog, read and removed on the machine (`workspace/1`) | PRO-406 |
 | Rename, archive, pin | Works | PRO-346 |
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
@@ -2093,6 +2092,24 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Worktree root.** The session's `cwd` relative to its project's `path`
   (compared as strings, never opened here) is the base of `cloudFileSource`;
   Changes uses the repository `git.repositories` lists for that worktree.
+
+### As built (PRO-405)
+
+- **A worktree outside the project.** When Settings keeps worktrees in an
+  absolute folder, `git.repositories` names the project's own worktrees there
+  by canonical absolute path, and `fs/1` takes exactly those absolute paths
+  for the project (`WorkspaceFiles::lexical`/`existing_path`, re-read on each
+  `git.repositories`); any other absolute path, another project's worktree
+  beside it, or one that climbs or links out is `path_forbidden`
+  (`remote::machine_tests`, `machines_e2e`). No `sessionId` scope is needed:
+  the runtime's check is against the project's worktrees either way.
+- **Files and Changes agree.** `sessionFilesBase` roots Files, the editor and
+  search at the repository `sessionRepository` picks for Changes: `""`, a
+  relative worktree, or that absolute path. A worktree inside the project is
+  rooted before the list arrives; one outside waits for it. A
+  `cloudFileSource` with an absolute base opts in to absolute paths
+  (`remoteFilePath(path, true)`, no `.` or `..` part); every other source
+  still sends only workspace-relative ones.
 - **Live commands.** The machine's agent scope (no organization) sends
   `session.send/steer/stop/decide` with a `clientRequestId` when
   `agent-commands/1` is granted. A decision keeps one id per request across
@@ -2196,6 +2213,26 @@ none of the rest.
   `cloudGitSource`), ask `session.checkFailures` for the logs, and send the
   same prompt as on this computer, naming the machine's file. Nothing of this
   computer's `gh` is used; a participant cannot ask for logs.
+
+### As built (PRO-406): removing a machine session's worktree
+
+- **The host.** `machineWorkspaceHost` (`src/lib/machineWorkspaceHost.ts`) is
+  the session's `RemovableWorkspace` host while this Mac manages the machine,
+  the machine grants `workspace/1` and the session has a worktree. It calls
+  `workspace.disposition` and `workspace.remove` named by the session, so the
+  machine runs the checks a local removal runs (uncommitted work, unpushed
+  commits, the pull request, the second confirmation's digest). Nothing on
+  this computer is read or removed; the machine's path is only shown.
+- **Where it is offered.** As for a cloud session: once the PR merged, the
+  chat's Delete workspace opens the standard removal dialog with this host.
+  The sessions that went with the worktree leave the sidebar at once
+  (`forgetMachineSessions`); a lost answer counts as removed only when the
+  machine no longer lists the session.
+- **Left out.** Keeping the conversations (`keepSessions`) is refused, as on a
+  cloud workspace: `workspace.remove` deletes the worktree's sessions. This
+  desktop does not run merged clean-up passes on a machine (`workspace/2`):
+  removing by itself after a merge follows the machine's own settings, not
+  this Mac's.
 
 ### As built (PRO-348): a new session on a machine
 

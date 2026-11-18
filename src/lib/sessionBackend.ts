@@ -1,8 +1,8 @@
 import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { agent, attachments, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import { agent, attachments, errorMessage, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { FileRef } from "@/types/events";
 import { showError } from "@/lib/errorToasts";
-import { loadTab, setTabStatus } from "@/lib/agentEvents";
+import { applyEvent, loadTab, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
 import {
   attachCloudAgentTab,
@@ -296,14 +296,34 @@ export async function storeOnce(sessionId: string, files: FileInput[]): Promise<
  * here and go with the message by reference. Without files it is sent exactly
  * as any first prompt was.
  */
-export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<SendOutcome> {
-  if (!files?.length) return agent.send(sessionId, tabId, text, images);
-  // Nothing else on screen holds this message any more: a store that fails says so, rather than leaving the session silent.
-  const stored = await storeOnce(sessionId, files).catch((error) => {
+export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[], promptRequestId?: string): Promise<SendOutcome> {
+  // Tell the reader which attachments could not be stored.
+  const stored = files?.length ? await storeOnce(sessionId, files).catch((error) => {
     showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
     throw error;
+  }) : undefined;
+  return agent.send(sessionId, tabId, text, images, false, undefined, stored, promptRequestId);
+}
+
+/** Show the local Create prompt immediately, using the same send and attachment storage as before. */
+export async function sendHeldFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const finish = showFirstMessage(sessionId, tabId, {
+    requestId,
+    text,
+    images: (images ?? []).map(({ mediaType, data, name }) => ({ url: `data:${mediaType};base64,${data}`, name })),
+    files: (files ?? []).map(({ name }) => ({ name })),
+    startedAt: Date.now(),
+    error: null,
   });
-  return agent.send(sessionId, tabId, text, images, false, undefined, stored);
+  try {
+    const { events } = await sendFirstMessage(sessionId, tabId, text, images, files, requestId);
+    events.forEach(applyEvent);
+    finish();
+  } catch (error) {
+    finish(errorMessage(error) || "The agent did not take the message.");
+    throw error;
+  }
 }
 
 // ---- cloud

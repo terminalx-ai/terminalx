@@ -1303,6 +1303,72 @@ function BlockedActions({ run, piece, busy, act }: { run: Run; piece: RunPiece; 
   );
 }
 
+/**
+ * A piece with the lead: check and finish it, open the lead's chat, or skip it. On a piece the lead
+ * is held to, Check and finish first lists the files outside the piece it would add, and finishes
+ * only once the person confirms adding those files and no others.
+ */
+function LeadActions({ run, piece, number, busy, act, onShowChat }: { run: Run; piece: RunPiece; number: number; busy: boolean; act: Act; onShowChat: () => void }) {
+  const held = !!piece.tries?.at(-1)?.heldToOwns;
+  // The files outside the piece the person is asked to confirm, once Check and finish found some.
+  const [widens, setWidens] = useState<string[] | null>(null);
+  const finish = (accept: string[]) => act("finish", async () => {
+    try {
+      return await orchestration.finish(run.id, piece.id, accept);
+    } catch (e) {
+      // The lead committed another file outside it since the list was shown: ask again, with the new list.
+      const refusal = refusalOf(e);
+      const files = refusal.details?.files;
+      if (refusal.code === "confirm_widening" && Array.isArray(files)) {
+        setWidens(files.filter((file): file is string => typeof file === "string"));
+        return null;
+      }
+      throw e;
+    }
+  });
+  const check = () => void act("finish", async () => {
+    const outside = held ? await orchestration.finishWidens(run.id, piece.id) : [];
+    if (outside.length) {
+      setWidens(outside);
+      return null;
+    }
+    return orchestration.finish(run.id, piece.id);
+  });
+  return (
+    <div className="flex w-full flex-col gap-2.5">
+      {held && (
+        <p className="w-full text-xs text-muted-foreground" data-testid="piece-held-to-owns">
+          The lead is held to this piece's files. Check and finish lists any it changed outside them and asks before adding them to the piece.
+        </p>
+      )}
+      {widens && (
+        <div role="group" aria-label="Confirm widening" className="flex flex-col gap-2 text-xs" data-testid="finish-widens">
+          <span className="text-muted-foreground">The lead changed {widens.length === 1 ? "a file" : "files"} outside piece {number}. Checking and finishing it adds {widens.length === 1 ? "it" : "them"} to the piece:</span>
+          <ul className="flex flex-col gap-1">
+            {widens.map((path) => <li key={path} className="break-all"><code className={code}>{path}</code></li>)}
+          </ul>
+          <span className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 text-[11px] text-faint">The piece owns {widens.length === 1 ? "it" : "them"} from then on.</span>
+            <Button size="sm" variant="ghost" onClick={() => setWidens(null)}>Cancel</Button>
+            <Button size="sm" variant="accent" disabled={busy} onClick={() => { const accept = widens; void finish(accept).then((ok) => { if (ok) setWidens((now) => (now === accept ? null : now)); }); }}>
+              {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Add and finish
+            </Button>
+          </span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {!widens && (
+          <Button size="sm" variant="accent" disabled={busy} title="Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass." onClick={check}>
+            {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Check and finish
+          </Button>
+        )}
+        <Button size="sm" variant="outline" onClick={onShowChat}><Sparkles />Open lead chat</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("skip", () => orchestration.skip(run.id, piece.id))}><SkipForward />Skip piece</Button>
+      </div>
+    </div>
+  );
+}
+
 /** One piece: once it has a worker, what it reported and where that stands, then its brief as its worker is sent it. */
 function PieceDetail({ run, piece, number, editable, column, busy, cost, act, onShowChat, onClose, onSendBack, onResolve, onSkip, onSave, onRemove }: {
   run: Run;
@@ -1447,18 +1513,9 @@ function PieceDetail({ run, piece, number, editable, column, busy, cost, act, on
               {piece.toLead && <ToLeadNote piece={piece} />}
               <BlockedActions run={run} piece={piece} busy={busy} act={act} />
             </div>
-          ) : piece.state === "lead" && !["stopped", "done"].includes(run.state) ? <>
-            {piece.tries?.at(-1)?.heldToOwns && (
-              <p className="w-full text-xs text-muted-foreground" data-testid="piece-held-to-owns">
-                The lead is held to this piece's files. Check and finish accepts a change outside them as your widening of the piece.
-              </p>
-            )}
-            <Button size="sm" variant="accent" disabled={busy} title={piece.tries?.at(-1)?.heldToOwns ? "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass; files it changed outside the piece become the piece's." : "Runs this piece's commands in the lead's checkout on what it committed. The piece is done when they pass."} onClick={() => void act("finish", () => orchestration.finish(run.id, piece.id))}>
-              {busy ? <LoaderCircle className="animate-spin" /> : <CircleCheck />}Check and finish
-            </Button>
-            <Button size="sm" variant="outline" onClick={onShowChat}><Sparkles />Open lead chat</Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("skip", () => orchestration.skip(run.id, piece.id))}><SkipForward />Skip piece</Button>
-          </> : worker ? (
+          ) : piece.state === "lead" && !["stopped", "done"].includes(run.state) ? (
+            <LeadActions run={run} piece={piece} number={number} busy={busy} act={act} onShowChat={onShowChat} />
+          ) : worker ? (
             <>
               <Button size="sm" variant="outline" onClick={() => selectSession(worker.sessionId)}><SquareArrowOutUpRight />Open worker</Button>
               {(piece.branch || last) && (

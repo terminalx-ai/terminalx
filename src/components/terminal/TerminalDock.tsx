@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Plus, Smartphone, X } from "@/icons";
-import { ConnectedDevices } from "@/components/pairing/ConnectedDevices";
-import { pairedDevices } from "@/components/pairing/PairedDevices";
+import { ConnectedDevices, useConnectedDevices } from "@/components/pairing/ConnectedDevices";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { usePairing } from "@/lib/pairing";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { closeTerminal, dockPanes, openDockTerminal, selectSessionTab, useTerminals } from "@/lib/terminal";
 import { useSessionStore } from "@/lib/sessions";
@@ -54,9 +52,8 @@ export function runDot(runs: ActionRun[]) {
 export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: string }) {
   const prefs = usePrefs();
   const open = prefs.panelTerminalOpen;
-  const pairing = usePairing();
-  const devices = pairedDevices(pairing.status.devices).filter((device) => device.connection);
-  const deviceCount = devices.length;
+  const connected = useConnectedDevices();
+  const deviceCount = connected.devices.length;
   const deviceTabId = useId();
   const devicePanelId = useId();
   const showConnectedDevices = !open && deviceCount > 0;
@@ -234,7 +231,7 @@ export function TerminalDock({ sessionId, cwd }: { sessionId: string; cwd: strin
           {showingRun && <DockRun sessionId={sessionId} cwd={cwd} actions={actions} runs={actionRuns} />}
           {view === "device" && (
             <div id={devicePanelId} role="tabpanel" aria-labelledby={deviceTabId} className="h-full">
-              <ConnectedDevices devices={devices} busy={pairing.busy} error={pairing.status.lastError} />
+              <ConnectedDevices {...connected} />
             </div>
           )}
           {panes.map((pane) => (

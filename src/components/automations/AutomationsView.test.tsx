@@ -69,13 +69,13 @@ vi.mock("@/lib/prefs", () => ({
   subscribePrefs: () => () => {},
 }));
 // The store lists archived sessions too, flagged: only the sidebar filters them out.
-const sessionList = vi.hoisted(() => ({ archived: false }));
+const sessionList = vi.hoisted(() => ({ archived: false, status: "completed" }));
 vi.mock("@/lib/sessions", () => ({
   selectSession,
   useSessionStore: () => ({
     projects: [{ path: "/repo", name: "Raccoon" }, { path: "/docs", name: "Docs", kind: "folder" }],
     harnesses: discovery.harnesses,
-    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: sessionList.archived }],
+    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: sessionList.archived, tabs: [{ id: "tab-7", status: sessionList.status }] }],
   }),
 }));
 
@@ -157,6 +157,7 @@ beforeEach(() => {
   automationStore.runs = { "automation-1": [run()] };
   automationStore.loadingRuns = {};
   sessionList.archived = false;
+  sessionList.status = "completed";
   prefs.lastMode = "auto";
   prefs.lastModel = {};
   prefs.lastEffort = {};
@@ -183,6 +184,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("automation workspace navigation", () => {
+  it("shows a live run waiting for its session without reopening a finished run", async () => {
+    sessionList.status = "waiting";
+    automationStore.runs = { "automation-1": [run({ status: "running", endedAt: null }), run({ runId: "old", runNumber: 6 })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText("Waiting")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
+  });
+
   it("opens a selected automation in a dedicated run-table view and returns to the list", async () => {
     render(<AutomationsView />);
 
