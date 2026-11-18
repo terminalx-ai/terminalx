@@ -109,11 +109,16 @@ impl PairingManager {
         let manager = self.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let Some(runtime) = manager.runtime.lock().unwrap().clone() else { return };
-            match runtime.machine_host_status() {
-                Ok(status) => manager.follow_machine(&runtime, status),
-                Err(error) => log::debug!("machine host status unavailable: {error:#}"),
-            }
+            manager.reconcile_machine(&runtime);
         });
+    }
+
+    /// Read and apply the runtime's current machine host status. Blocking IPC.
+    pub(crate) fn reconcile_machine(self: &Arc<Self>, runtime: &Arc<Desktop>) {
+        match runtime.machine_host_status() {
+            Ok(status) => self.follow_machine(runtime, status),
+            Err(error) => log::debug!("machine host status unavailable: {error:#}"),
+        }
     }
 
     /// The runtime's `machine_host_changed` event carries its new status.

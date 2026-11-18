@@ -6,6 +6,7 @@ use crate::control::{ControlResponse, ControlService};
 use crate::keychain::{testing::MemorySecrets, SecretStore};
 use crate::local_runtime::{
     client::{Client, Refused},
+    desktop::Desktop,
     Lifetime,
 };
 use std::io::Read;
@@ -106,16 +107,27 @@ fn process_fixture() {
 }
 
 fn runtime(role: &str) {
-    let executor = tokio::runtime::Builder::new_current_thread()
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     let root = crate::store::root().unwrap();
     let endpoint = crate::hooks::prepare_control().unwrap();
     let lifetime = Lifetime::new(Duration::from_secs(60));
-    lifetime.set_stream_socket(root.join("run/events.sock"));
     let sink = Arc::new(crate::sink::BroadcastSink::new(16));
     let terminals = Arc::new(crate::pty::Terminals::new());
+    {
+        let _runtime = executor.enter();
+        let stream = crate::local_runtime::stream::start(
+            &endpoint,
+            sink.clone(),
+            terminals.clone(),
+            lifetime.clone(),
+        )
+        .unwrap();
+        lifetime.set_stream_socket(stream);
+    }
     let sessions = crate::session::SessionManager::new(
         sink.clone(),
         Arc::new(crate::sink::NoObserver),
@@ -212,17 +224,14 @@ fn window(restarted: bool) {
             .is_none()
     );
     let client = Client::connect(&crate::store::root().unwrap()).unwrap();
-    let attachment: Value = client
-        .quick(
-            "runtime.attach",
-            json!({ "protocol": crate::local_runtime::PROTOCOL }),
+    let desktop = Arc::new(
+        Desktop::connect(
+            client.clone(),
+            Arc::new(crate::sink::BroadcastSink::new(16)),
         )
-        .unwrap();
-    let call = |command: &str, mut params: Value| {
-        params["epoch"] = attachment["epoch"].clone();
-        params["lease"] = attachment["lease"].clone();
-        client.quick::<Value>(command, params)
-    };
+        .unwrap(),
+    );
+    let call = |command, params| desktop.machine_host(command, params);
     let refused = |command, params, case| {
         let error = call(command, params).expect_err(case);
         let refusal = error
@@ -258,14 +267,21 @@ fn window(restarted: bool) {
         ] {
             refused(command, params, "window key before runtime adoption");
         }
-        let keypair = manager.host_key(false).unwrap();
-        let adopted = call(
-            wire::ADOPT_KEY,
-            json!({ "secretB64": STANDARD.encode(keypair.secret()) }),
-        )
-        .unwrap();
-        assert_eq!(adopted["adopted"], true);
     }
+    let before = desktop.machine_host_status().unwrap().unwrap();
+    let expected = if restarted {
+        HostKeyState::Ready
+    } else {
+        HostKeyState::Needed
+    };
+    assert_eq!(before.host_key, expected);
+    manager.reconcile_machine(&desktop);
+    let after = desktop.machine_host_status().unwrap().unwrap();
+    assert_eq!(
+        after.host_key,
+        HostKeyState::Ready,
+        "the window supplies the key when the runtime needs it"
+    );
 
     let created = call(wire::CREATE_CODE, json!({})).unwrap();
     let code = wire::MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
@@ -281,6 +297,7 @@ fn window(restarted: bool) {
     // The installed provider reads the current key on each request. Changing
     // the window's store cannot replace an already-adopted runtime identity.
     secrets.set(&service, ACCOUNT, &OTHER_KEY).unwrap();
+    // Force a replacement attempt even though reconciliation sees Ready.
     let error = call(
         wire::ADOPT_KEY,
         json!({ "secretB64": STANDARD.encode(OTHER_KEY) }),
