@@ -2841,10 +2841,17 @@ fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut SessionEntry, 
 /// Fork a tab into a new session; `at` cuts its conversation at a turn and
 /// puts the new worktree's files at that turn's end where they were kept.
 fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option<u64>) -> Result<(SessionEntry, Option<String>), String> {
+    let (entry, note) = fork_session_contents(session_id, tab_id, at)?;
+    let _ = app.emit("session_created", &entry);
+    if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
+    Ok((entry, note))
+}
+
+/// Create and persist a fork before announcing it to the app.
+fn fork_session_contents(session_id: &str, tab_id: &str, at: Option<u64>) -> Result<(SessionEntry, Option<String>), String> {
     {
         let session_id = session_id.to_owned();
         let tab_id = tab_id.to_owned();
-        let app = app.clone();
         let src = index::get(&session_id).map_err(err)?;
         let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
         let id = uuid::Uuid::now_v7().to_string();
@@ -2864,8 +2871,9 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
                 Some(std::fs::canonicalize(&path).map_err(err)?.to_string_lossy().into_owned())
             } else { None };
             let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
+            let mut scratch_copy = None;
             if let (Some(scratch), true) = (&scratch, in_scratch) {
-                let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
+                scratch_copy = Some(copy_dir(Path::new(&src.cwd), Path::new(scratch)));
                 // The fork's CLI reopens the parent conversation from the new
                 // directory, and Claude Code looks for it under that directory's name.
                 if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
@@ -2899,7 +2907,10 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
                 parent: None,
                 unknown: BTreeMap::new(),
             };
-            let note = fork_workspace(&src, &tab, &mut entry, at, &mut allocation)?;
+            let mut note = fork_workspace(&src, &tab, &mut entry, at, &mut allocation)?;
+            if at.is_some() && entry.worktree_name.is_none() {
+                note = Some(non_worktree_fork_note(scratch_copy.as_ref()));
+            }
             if let Some(conversation) = &conversation {
                 let native = crate::session::fork_conversation_destination(&conversation.harness, &entry.cwd, &conversation.provider).map_err(err)?;
                 let lines = conversation.events.iter().map(|event| serde_json::to_value(event).map_err(err)).collect::<Result<Vec<_>, String>>()?;
@@ -2953,10 +2964,79 @@ fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option
             Ok(result) => { allocation.commit(); result }
             Err(error) => return Err(allocation.rollback(error)),
         };
-        let _ = app.emit("session_created", &entry);
-        // A fork with a worktree always creates it above; other forks share a checkout.
-        if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
         Ok((entry, note))
+    }
+}
+
+/// Describe the actual non-worktree destination and its file-state limitation.
+fn non_worktree_fork_note(scratch_copy: Option<&std::io::Result<()>>) -> String {
+    match scratch_copy {
+        Some(Ok(())) => "The fork has a separate scratch directory with a copy of the current files. Files were not restored to the selected turn.".into(),
+        Some(Err(error)) => format!("The fork has a separate scratch directory, but copying the current files failed and may be incomplete: {error}. Files were not restored to this turn."),
+        None => "The fork shares this checkout, so its files are as they are now.".into(),
+    }
+}
+
+#[cfg(test)]
+mod fork_notice_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn turn_forks_report_their_actual_scratch_or_shared_destination() {
+        let _home = store::temp_home();
+        let shared = store::root().unwrap().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let scratch = store::quick::create("quick-scratch").unwrap();
+        let provider = "32610000-0000-4000-8000-000000000001";
+        let cases = [
+            ("quick-scratch", "quick", scratch.as_str(), true),
+            ("quick-shared", "quick", shared.to_str().unwrap(), false),
+            ("project-shared", "project", shared.to_str().unwrap(), false),
+        ];
+        for (id, kind, cwd, copied) in cases {
+            std::fs::write(Path::new(cwd).join("note.txt"), "current files").unwrap();
+            let entry: SessionEntry = serde_json::from_value(json!({
+                "id": id, "kind": kind, "projectPath": cwd, "cwd": cwd, "title": "Fork",
+                "created": "now", "modified": "now",
+                "tabs": [{"id":"fork-t", "harness":"claude", "providerSessionId":provider, "created":"now"}]
+            })).unwrap();
+            index::update(|sessions| { sessions.push(entry.clone()); Ok(()) }).unwrap();
+            let native = crate::session::fork_conversation_destination("claude", cwd, provider).unwrap();
+            std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+            std::fs::write(native, include_str!("harness/fixtures/claude-reset.jsonl")).unwrap();
+            let log = store::log_path(id, "fork-t").unwrap();
+            for (seq, payload) in [
+                (1, json!({"type":"turn_started"})),
+                (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"})),
+                (3, json!({"type":"turn_completed","status":"ok"})),
+            ] {
+                store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":id,"tabId":"fork-t","harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+            }
+            let (fork, note) = fork_session_contents(id, "fork-t", Some(3)).unwrap();
+            let note = note.unwrap();
+            if copied {
+                assert_ne!(fork.cwd, cwd);
+                assert_eq!(std::fs::read_to_string(Path::new(&fork.cwd).join("note.txt")).unwrap(), "current files");
+                assert!(note.contains("separate scratch directory") && note.contains("copy of the current files"), "{note}");
+                assert!(note.contains("not restored to the selected turn"), "{note}");
+                std::fs::write(Path::new(&fork.cwd).join("note.txt"), "fork files").unwrap();
+                assert_eq!(std::fs::read_to_string(Path::new(cwd).join("note.txt")).unwrap(), "current files");
+            } else {
+                assert_eq!(fork.cwd, cwd);
+                assert!(note.contains("shares this checkout") && note.contains("files are as they are now"), "{note}");
+            }
+        }
+    }
+
+    #[test]
+    fn failed_scratch_copy_reports_incomplete_current_files() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let failed = copy_dir(&source.path().join("missing"), destination.path());
+        let note = non_worktree_fork_note(Some(&failed));
+        assert!(note.contains("copying the current files failed") && note.contains("may be incomplete"));
+        assert!(note.contains("not restored to this turn"));
     }
 }
 
