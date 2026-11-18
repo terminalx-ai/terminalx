@@ -1048,6 +1048,66 @@ async fn exited_machine_runs_stay_evicted_when_their_runtime_panes_are_listed() 
     assert_eq!(listed["terminals"].as_array().unwrap().len(), 7, "{listed}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_run_exit_gets_observed_priority_after_backfill_eviction() {
+    let m = machine_rpc();
+    let (path, _) = project(&m.path("code"), "api");
+    let session = workspace_session(&path, "delayed-exit");
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    let exit_shell = |n| {
+        let rpc = &m.rpc;
+        let peer = &peer;
+        let session_id = &session.id;
+        async move {
+            let shell = call(rpc, peer, "pty.create", json!({ "sessionId": session_id, "clientRequestId": format!("delayed-exit-{n}") })).await.unwrap();
+            let id = shell["ptyId"].as_str().unwrap().to_string();
+            call(rpc, peer, "pty.write", json!({ "ptyId": id, "data": "exit 0\n", "seq": 1 })).await.unwrap();
+            listed_until(rpc, peer, "shell exit", |terminal| terminal["ptyId"] == id.as_str() && terminal["exitCode"] == 0).await;
+            id
+        }
+    };
+    let oldest = exit_shell(0).await;
+    for n in 1..MAX_EXITED_PTYS - 1 {
+        exit_shell(n).await;
+    }
+
+    // Capture the runtime's actual exit on a separate sink so the RPC sees
+    // the finished pane on listing before it receives the exit event.
+    let pane = format!("{}:action-{}-717569636b", session.id, uuid::Uuid::now_v7().simple());
+    let delayed = Arc::new(BroadcastSink::new(16));
+    let mut events = delayed.subscribe_app();
+    m.terminals.spawn(delayed, &pane, crate::pty::PaneSpec {
+        cwd: &session.cwd, cols: 80, rows: 24, command: Some("/bin/sh -c 'printf delayed-run-output; exit 7'"), env: &[],
+    }).unwrap();
+    let exit: PtyExit = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event.as_ref() == "pty_exit" {
+                break serde_json::from_str(&event.payload).unwrap();
+            }
+        }
+    }).await.expect("the run exited");
+    assert!(!m.terminals.is_running(&pane));
+    let backfilled = listed_until(&m.rpc, &peer, "backfilled run", |terminal| terminal["ptyId"] == pane.as_str()).await;
+    assert_eq!(backfilled["exited"], true);
+    assert_eq!(backfilled["exitCode"], Value::Null);
+
+    exit_shell(MAX_EXITED_PTYS - 1).await;
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    assert!(listed["terminals"].as_array().unwrap().iter().all(|terminal| terminal["ptyId"] != pane.as_str()));
+    assert!(m.terminals.shell(&pane).is_some());
+
+    m.rpc.on_pty_exit(exit);
+    let listed = call(&m.rpc, &peer, "pty.list", json!({})).await.unwrap();
+    let terminals = listed["terminals"].as_array().unwrap();
+    assert_eq!(terminals.len(), MAX_EXITED_PTYS);
+    assert!(terminals.iter().all(|terminal| terminal["ptyId"] != oldest.as_str()));
+    let restored = terminals.iter().find(|terminal| terminal["ptyId"] == pane.as_str()).expect("the observed exit displaced the oldest shell");
+    assert_eq!(restored["exitCode"], 7);
+    assert!(output_of(&m.rpc, &peer, &pane).await.contains("delayed-run-output"));
+}
+
 /// A one-root runtime has no machine/7: its sessions' scripts are its own window's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_one_root_runtime_has_no_machine_7() {
