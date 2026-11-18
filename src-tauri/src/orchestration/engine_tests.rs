@@ -3303,8 +3303,25 @@ fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_a
     assert_eq!(error.code, "person_only");
     assert!(error.message.contains("Check and finish in the session's Run view accepts them as theirs"), "{}", error.message);
     assert!(error.recovery.as_deref().unwrap().contains("Check and finish in the Run view accepts them as their widening"), "{:?}", error.recovery);
-    // The person saw it and finishes it from the Run view: that is their widening, recorded on the piece.
-    let finished = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap();
+    // The Run view shows the person what Check and finish would add, before anything runs.
+    assert_eq!(engine::finish_widens(&host, &id, "cli").unwrap(), vec!["src/store/projects.rs".to_string()]);
+    // Unconfirmed, the person's finish is refused, naming the files, and nothing is checked.
+    let error = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("confirm_widening", json!(["src/store/projects.rs"])));
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Lead, "still with the lead");
+    // The lead committed one more outside file after the person looked: confirming the first alone is asked again.
+    let more = vec![
+        verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) },
+        verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) },
+        verify::FileChange { path: "src/store/index.rs".into(), added: Some(2), removed: Some(0) },
+    ];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: more, uncommitted: Vec::new() });
+    let error = engine::finish_accepting(&host, &id, "cli", engine::By::Person, false, &["src/store/projects.rs".into()]).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("confirm_widening", json!(["src/store/projects.rs", "src/store/index.rs"])));
+    let outside = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: outside, uncommitted: Vec::new() });
+    // The person saw it and confirmed it from the Run view: that is their widening, recorded on the piece.
+    let finished = engine::finish_accepting(&host, &id, "cli", engine::By::Person, false, &["src/store/projects.rs".into()]).unwrap();
     let piece = finished.run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.owns.clone()), (PieceState::Done, vec!["src/cli.rs".to_string(), "src/store/projects.rs".to_string()]));
     assert_eq!(piece.note.as_deref(), Some("Finished by the lead in its own checkout, at 4c1d0e2; its checks passed there. The person widened it to src/store/projects.rs."));

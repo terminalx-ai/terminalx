@@ -2192,8 +2192,11 @@ impl SessionManager {
             }
             "finish" => {
                 self.accepting_work()?;
-                engine::shown(&engine::finish(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?.run)
+                let accept: Vec<String> = params["accept"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                engine::shown(&engine::finish_accepting(&host, string("id")?, string("piece")?, engine::By::Person, false, &accept).map_err(refused)?.run)
             }
+            // What Check and finish would add to a held piece's files, shown before it is pressed.
+            "finishWidens" => serde_json::to_value(engine::finish_widens(&host, string("id")?, string("piece")?).map_err(refused)?)?,
             "widen" => {
                 self.accepting_work()?;
                 let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
