@@ -854,6 +854,16 @@ impl ControlService {
                 self.sink.emit("session_updated", &session);
                 Ok(json!({"sessionId": session.id, "session": session}))
             }
+            "sessions.pin" | "sessions.unpin" => {
+                let session = resolve_session(&required_string(&params, "session")?)?;
+                let pinned = command == "sessions.pin";
+                if session.pinned != pinned {
+                    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+                    let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(ControlError::internal)?;
+                    self.sink.emit("session_updated", &updated);
+                }
+                Ok(json!({"sessionId": session.id, "pinned": pinned}))
+            }
             "sessions.status" => {
                 let status = serde_json::from_value::<index::ManualStatus>(params.get("status").cloned().unwrap_or(Value::Null))
                     .map_err(|_| ControlError::invalid("Status must be backlog, in_progress, in_review, done or canceled."))?;
@@ -3055,6 +3065,44 @@ mod tests {
         // By its path, from a folder of another name.
         service.execute("projects.remove", json!({"project": gateway}), "r").unwrap();
         assert!(projects::list().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn the_cli_pins_and_unpins_the_persisted_sidebar_session() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let new = || crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "test", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (first, second) = (new(), new());
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let prefix = &first.id[..first.id.len() - 2];
+        assert_eq!(service.execute("sessions.pin", json!({"session": prefix}), "r").unwrap(), json!({"sessionId": first.id, "pinned": true}));
+        let event = heard.try_recv().unwrap();
+        assert_eq!(&*event.event, "session_updated");
+        assert!(serde_json::from_str::<SessionEntry>(&event.payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], true);
+        assert!(index::get(&first.id).unwrap().pinned);
+        service.execute("sessions.pin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        for selector in ["", "no-such-session"] {
+            assert!(service.execute("sessions.unpin", json!({"session": selector}), "r").is_err());
+        }
+        // UUIDs generated together share a prefix, which must never select both.
+        let common: String = first.id.chars().zip(second.id.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+        assert!(!common.is_empty());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": common}), "r").unwrap_err().code, "ambiguous_selector");
+        assert!(index::get(&first.id).unwrap().pinned);
+        assert!(!index::get(&second.id).unwrap().pinned);
+        assert!(heard.try_recv().is_err());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap(), json!({"sessionId": first.id, "pinned": false}));
+        assert!(!serde_json::from_str::<SessionEntry>(&heard.try_recv().unwrap().payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], false);
+        service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        assert_eq!(index::get(&first.id).unwrap().tabs.len(), first.tabs.len());
     }
 
     #[test]

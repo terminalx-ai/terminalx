@@ -265,6 +265,18 @@ with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the res
 stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
 you are, or were asked to manage.
 
+### Pin sessions
+
+```text
+terminalx sessions pin <session> --json
+terminalx sessions unpin <session> --json
+```
+
+These set the sidebar pin on a local session, using its exact id or an unambiguous id prefix.
+The result contains `sessionId` and the resulting `pinned` boolean. Repeating either command
+is safe; an invalid or ambiguous selector changes nothing. The pin persists across restarts,
+and neither command starts or stops the session. `sessions show` reports the same state.
+
 ### Archive sessions
 
 ```text
