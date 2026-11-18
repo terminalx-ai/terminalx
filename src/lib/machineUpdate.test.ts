@@ -47,7 +47,7 @@ function status(patch: Partial<MachineUpdateStatus> = {}): MachineUpdateStatus {
 }
 
 const connectedState = (capabilities: string[], runtimeVersion = "0.2.27"): WorkspaceConnectionState => ({ state: "connected", runtimeGeneration: 0, runtimeVersion, capabilities, authority: "manage", link: 1 });
-const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"];
+const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8"];
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -59,6 +59,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+ALL.push("machine/7");
+
 describe("a machine's version view", () => {
   it("says Needs update on the chip when a connected machine hides a feature, and names the side", () => {
     const machine = pairedMachine({ machineId: "m1", name: "ci-box", version: "0.2.27" });
@@ -68,6 +70,7 @@ describe("a machine's version view", () => {
     expect(view.shownState).toEqual({ state: "needsUpdate", version: "0.2.27", side: "machine" });
     // Everything granted: the chip shows the connection as it is.
     expect(update.machineVersionView(machine, live, null, connectedState(ALL), "0.2.33").shownState).toBe(live);
+    expect(update.machineVersionView(machine, live, null, connectedState(ALL.filter((name) => name !== "machine/7")), "0.2.33").gap?.hidden.map((feature) => feature.id)).toEqual(["sessionRuns"]);
   });
 
   it("shows the connection state, not Needs update, once a machine that hid a feature is no longer connected", () => {

@@ -19,9 +19,13 @@ import { selectCloudWorkspace } from "@/lib/sessions";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 import { machineSectionKey, parseMachineKey } from "@/types/target";
 import type { MachineConnectionState } from "@/types/machines";
+import { DockDot, dockTabClass, runDot, setupDot } from "@/components/terminal/TerminalDock";
+import { useMachineSessionRuns } from "@/lib/machineRuns";
 import { MachineChip, MachineLocation, tryingText, useTick } from "./connectionStatus";
+import { MachineRunPane, MachineSetupPane } from "./MachineRunPanes";
 import { MachineHiddenFeatures } from "./MachineFeatureNotice";
 import { MachineMessage } from "./MachineMessage";
+import { TabAccountMark } from "@/components/session/TabStrip";
 import { AddMachineDialog } from "./AddMachineDialog";
 
 export { MACHINE_LOCAL_ONLY } from "./MachineMessage";
@@ -94,6 +98,8 @@ export function MachineSessionStrips({
                 >
                   <AgentMark id={tab.harness} className="size-3.5 shrink-0" decorative />
                   <span className="truncate">{tab.title || tab.harness}</span>
+                  {/* Which of the machine's accounts its agent runs on, when it has several there (PRO-408). */}
+                  <TabAccountMark tab={tab} />
                   {dot && <span className={cn("size-1.5 shrink-0 rounded-full", dot)} aria-label={TAB_STATUS_LABEL[tab.status!]} />}
                 </button>
                 {cloud.manage && (
@@ -242,13 +248,30 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
   const prefs = usePrefs();
   const open = prefs.panelTerminalOpen;
   const { selected } = useCloudTerminals(cloud.workspaceKey);
-  const terminals = cloud.terminals;
+  // Setup and Run (PRO-403): the machine's scripts for this session, and their runs there.
+  const runs = useMachineSessionRuns(cloud);
+  // Its shells, then each action's run, named by its action; the setup's terminal shows under Setup.
+  const terminals = cloud.terminals.filter((terminal) => terminal.run?.kind !== "setup");
+  const [fixed, setFixed] = useState<"setup" | "run" | null>(null);
   const current: CloudTerminal | undefined = terminals.find((terminal) => terminal.id === selected) ?? terminals.at(-1);
+  const view = fixed ?? "terminal";
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [height, setHeight] = useState(() => clampHeight(prefs.panelTerminalHeight));
   const dragging = useRef<{ y: number; h: number } | null>(null);
-  const label = (terminal: CloudTerminal) => `${machine.name} terminal ${terminal.number}`;
+  const label = (terminal: CloudTerminal) => (terminal.run?.kind === "action" ? terminal.run.name : `${machine.name} terminal ${terminal.number}`);
+  const shells = terminals.filter((terminal) => !terminal.run);
+  const setupMark = setupDot(runs?.info?.setup ?? undefined);
+  const runMark = runDot([...(runs?.source.runs.values() ?? [])]);
+  const showTerminal = (id: string) => {
+    selectCloudTerminal(cloud.workspaceKey, id);
+    setFixed(null);
+    setPrefs({ panelTerminalOpen: true });
+  };
+  const showFixed = (tab: "setup" | "run") => {
+    setFixed(tab);
+    setPrefs({ panelTerminalOpen: true });
+  };
 
   const add = async () => {
     if (starting) return;
@@ -272,7 +295,10 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
   // A terminal another surface opened (the "+" menu, a shortcut) shows here, in the open dock.
   const shown = useRef(selected);
   useLayoutEffect(() => {
-    if (selected && selected !== shown.current && terminals.some((terminal) => terminal.id === selected)) setPrefs({ panelTerminalOpen: true });
+    if (selected && selected !== shown.current && terminals.some((terminal) => terminal.id === selected)) {
+      setFixed(null);
+      setPrefs({ panelTerminalOpen: true });
+    }
     shown.current = selected;
   }, [selected, terminals]);
   useEffect(() => setError(null), [cloud.connected]);
@@ -309,23 +335,30 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
           {open ? <ChevronDown /> : <ChevronUp />}
         </Button>
         <div role="tablist" aria-label="Terminals" className="flex h-full min-w-0 flex-1 items-stretch gap-3 overflow-x-auto pr-2">
-          {!terminals.length && (
-            <button type="button" onClick={toggle} disabled={!cloud.connected} className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">
+          {runs && (
+            <>
+              <button type="button" role="tab" aria-selected={open && view === "setup"} title={setupMark.label} onClick={() => showFixed("setup")} className={dockTabClass(open && view === "setup")}>
+                Setup<DockDot {...setupMark} />
+              </button>
+              <button type="button" role="tab" aria-selected={open && view === "run"} title={runMark.label} onClick={() => showFixed("run")} className={dockTabClass(open && view === "run")}>
+                Run<DockDot {...runMark} />
+              </button>
+            </>
+          )}
+          {!shells.length && (
+            <button type="button" onClick={() => (terminals.length ? void add() : toggle())} disabled={!cloud.connected} className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">
               {machine.name} terminal
             </button>
           )}
           {terminals.map((terminal) => {
-            const on = open && terminal.id === current?.id;
+            const on = open && view === "terminal" && terminal.id === current?.id;
             return (
               <div key={terminal.id} className="group relative flex shrink-0 items-stretch">
                 <button
                   type="button"
                   role="tab"
                   aria-selected={on}
-                  onClick={() => {
-                    selectCloudTerminal(cloud.workspaceKey, terminal.id);
-                    setPrefs({ panelTerminalOpen: true });
-                  }}
+                  onClick={() => showTerminal(terminal.id)}
                   className={cn("border-b text-xs", on ? "border-foreground/60 text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
                 >
                   {label(terminal)}
@@ -357,8 +390,10 @@ export function MachineTerminalDock({ cloud }: { cloud: CloudSessionModel }) {
               {error}
             </p>
           )}
-          {!cloud.connected && !terminals.length && <p className="px-3 py-2 text-xs text-muted-foreground">Terminals open once {machine.name} is connected.</p>}
-          {current && cloud.client && (
+          {view === "setup" && runs && <MachineSetupPane cloud={cloud} runs={runs} />}
+          {view === "run" && runs && <MachineRunPane cloud={cloud} runs={runs} onShow={showTerminal} />}
+          {view === "terminal" && !cloud.connected && !terminals.length && <p className="px-3 py-2 text-xs text-muted-foreground">Terminals open once {machine.name} is connected.</p>}
+          {view === "terminal" && current && cloud.client && (
             <CloudTerminalPane
               key={current.id}
               workspace={cloud.workspaceKey}

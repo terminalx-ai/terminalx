@@ -6,13 +6,13 @@ import { formatSetupDuration, rerunSetup, setupActive, setupDuration, stopSetup,
 import { TerminalView } from "./TerminalView";
 import { disposeInstance } from "@/lib/terminal";
 
-export const setupStatus = (run: WorkspaceSetup) => ({ pending: "Setup queued", running: "Setup running", stopping: "Stopping setup…", stopped: "Setup stopped", succeeded: "Setup succeeded", failed: "Setup failed" })[run.status];
+export const setupStatus = (run: Pick<WorkspaceSetup, "status">) => ({ pending: "Setup queued", running: "Setup running", stopping: "Stopping setup…", stopped: "Setup stopped", succeeded: "Setup succeeded", failed: "Setup failed" })[run.status];
 
 /** Where a workspace's setup script is saved, for the empty states. */
 export const SETUP_SCRIPT_PLACE = "Settings → Projects → Scripts";
 
 /** "✓ Last setup finished in 14s · exit 0", "✗ Last setup failed after 3s · exit 7", "Setup running · 12s". */
-export function setupOutcome(run: WorkspaceSetup, duration: number | null): string {
+export function setupOutcome(run: Pick<WorkspaceSetup, "status" | "exitCode">, duration: number | null): string {
   const took = duration == null ? null : formatSetupDuration(duration);
   const exit = run.exitCode == null ? "" : ` · exit ${run.exitCode}`;
   switch (run.status) {

@@ -237,10 +237,12 @@ fn an_agent_waiting_on_a_background_command_is_not_stopped_until_it_reports_in()
     assert!(rig.sweep(Some(LIMIT)).is_empty());
     assert!(rig.running());
     assert_eq!(rig.manager.background_work(SESSION, TAB).as_deref(), Some("a background command it has not heard back from"));
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
 
     write(&[json!({ "type": "attachment", "uuid": "n-1", "timestamp": index::now(), "attachment": { "type": "queued_command", "commandMode": "task-notification",
         "prompt": "<task-notification>\n<task-id>bci</task-id>\n<tool-use-id>toolu_ci</tool-use-id>\n<status>completed</status>\n</task-notification>" } })]);
     rig.wait("the watch to be heard back from", || rig.manager.background_work(SESSION, TAB).is_none());
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB), "a queued notification is not yet handled");
     rig.idle_for_the_limit();
     assert_eq!(rig.sweep(Some(LIMIT)), [crate::idle_agents::Why::Idle(LIMIT)]);
     assert!(!rig.running());

@@ -421,7 +421,7 @@ export function TabMenuItems({
       ) : null}
       {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
-          <GitFork /> Fork to new tab
+          <GitFork /> Fork conversation to new session
           {shortcut("session.forkTab")}
         </ContextMenuItem>
       ) : null}

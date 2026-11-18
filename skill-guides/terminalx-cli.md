@@ -265,6 +265,18 @@ with `sessionId`, `tabId`, `title`), `failed` (the same with an `error`; the res
 stopped) and `workers`, the number of sessions it looked at. Stop only the workers of a lead
 you are, or were asked to manage.
 
+### Pin sessions
+
+```text
+terminalx sessions pin <session> --json
+terminalx sessions unpin <session> --json
+```
+
+These set the sidebar pin on a local session, using its exact id or an unambiguous id prefix.
+The result contains `sessionId` and the resulting `pinned` boolean. Repeating either command
+is safe; an invalid or ambiguous selector changes nothing. The pin persists across restarts,
+and neither command starts or stops the session. `sessions show` reports the same state.
+
 ### Archive sessions
 
 ```text
@@ -1415,7 +1427,10 @@ The project's main checkout and externally managed worktrees cannot be renamed h
 
 `worktrees list` gives each worktree's `sessionCount` and, except for the main checkout, its
 `sessions`: the ones deleting it would delete. Each has `id`, `title`, `project` (null for a
-quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`.
+quick chat) and `belongsTo`: `thisProject`, `anotherProject` or `quickChat`. If the checkout
+identity of an overlapping session cannot be verified, that worktree has `sessionCount: null`
+and a `sessionError` explaining why; its `sessions` is also null when present. Other worktrees
+remain listed with their verified counts. Removal still refuses uncertain session accounting.
 
 Deletion refuses a project's main checkout. It stops every tab running in the worktree and
 deletes every session whose folder is in it, whatever project it belongs to and archived or

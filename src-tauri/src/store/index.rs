@@ -570,6 +570,18 @@ const RUN_WORKER: &str = "runWorker";
 const ORCHESTRATE_START: &str = "orchestrateStart";
 
 impl SessionEntry {
+    /// The checkout this session was attached to, retained even if its cwd disappears.
+    pub(crate) fn checkout_root(&self) -> Option<&str> {
+        self.unknown.get("checkoutRoot").and_then(serde_json::Value::as_str)
+    }
+
+    pub(crate) fn set_checkout_root(&mut self, root: Option<&str>) {
+        if let Some(root) = root {
+            self.unknown.insert("checkoutRoot".into(), serde_json::Value::String(root.into()));
+        } else {
+            self.unknown.remove("checkoutRoot");
+        }
+    }
     /// Whether this session was started as an orchestration run's worker
     /// (`orchestration::guard`): it never pushes, merges or deploys.
     pub fn run_worker(&self) -> bool {
@@ -1145,6 +1157,7 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
         });
     }
     session.cwd = session.project_path.clone();
+    session.set_checkout_root(None);
     session.worktree_name = None;
     session.worktree_removed = true;
     // A quick chat that was pointed at the workspace goes back to its scratch

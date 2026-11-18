@@ -35,6 +35,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "slashCommands", label: "Slash commands", capability: "composer/1", action: "use slash commands" },
   { id: "fileMentions", label: "File mentions", capability: "composer/2", action: "mention files" },
   { id: "images", label: "Images in prompts", capability: "composer/3", action: "send images" },
+  { id: "files", label: "Files in prompts", capability: "composer/4", action: "send files" },
   { id: "worktreeRemoval", label: "Worktree removal", capability: "workspace/1", action: "remove a session's worktree" },
   { id: "mergedCleanup", label: "Clean-up after merge", capability: "workspace/2", action: "remove merged worktrees" },
   { id: "cleanup", label: "Worktree clean-up", capability: "cleanup/1", action: "clean up worktrees" },
@@ -43,6 +44,8 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "updates", label: "Updating it from this Mac", capability: "machine/3", action: "update it from this Mac" },
   { id: "agentSetup", label: "Signing in its agents from here", capability: "machine/4", action: "sign in its agents" },
   { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
+  { id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" },
+  { id: "sessionParity", label: "Session cost, Continue in a new tab and Fix check errors", capability: "machine/8", action: "read session costs, continue in a new tab and fix check errors" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {

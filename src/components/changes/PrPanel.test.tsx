@@ -602,13 +602,19 @@ describe("merge state labels", () => {
     [{ isDraft: true, mergeState: "BLOCKED" }, "Draft", false],
     [{ reviewDecision: "REVIEW_REQUIRED" }, "Blocked", false],
     [{ checks: [{ name: "ci", state: "failure" }], requiredChecks: ["ci"] }, "Checks failing", false],
-    [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Checks running", false],
+    [{ checks: [{ name: "ci", state: "pending" }], requiredChecks: ["ci"] }, "Waiting for 1 check", false],
+    // PRO-394: GitHub says BLOCKED while required checks run; that is a wait, not a block.
+    [{ mergeState: "BLOCKED", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }, { name: "b", state: "queued" }, { name: "c", state: "success" }], requiredChecks: ["a", "b", "c"] }, "Waiting for 2 checks", false],
+    // The wait is said only when checks are all that holds the PR: a review still needed or a stale base comes first.
+    [{ mergeState: "BLOCKED", reviewDecision: "REVIEW_REQUIRED", checks: [{ name: "a", state: "pending" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BLOCKED", reviewDecision: "CHANGES_REQUESTED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Blocked", false],
+    [{ mergeState: "BEHIND", reviewDecision: "APPROVED", checks: [{ name: "a", state: "in_progress" }], requiredChecks: ["a"] }, "Behind base", false],
     [{ checks: [{ name: "ci", state: "new_state" }], requiredChecks: ["ci"] }, "Checking mergeability", false],
     [{ detailsError: "offline" }, "Merge details unavailable", false],
     [{ mergeQueueEnabled: true, autoMergeEnabled: true }, "Waiting to enter merge queue", false],
     [{}, "Ready to merge", true],
   ] as [Partial<PullRequest>, string, boolean][])("chooses %s → %s", (changes, label, ok) => {
-    expect(mergeReadiness({ ...openPr, ...changes })).toEqual({ label, ok });
+    expect(mergeReadiness({ ...openPr, ...changes })).toMatchObject({ label, ok });
   });
 
   it.each([
@@ -644,10 +650,13 @@ describe("check summaries and deployments", () => {
   it.each([false, true])("renders matching counts, required/optional labels and deployment links (inline=%s)", async (inline) => {
     panelBackend(() => ({ ...openPr, checks, requiredChecks: ["build", "test"], deployments: [{ name: "Vercel preview", state: "success", url: "https://preview.example.test/" }] }));
     render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} inline={inline} />);
-    await screen.findByText("2 of 5 failed · 1 running · 1 skipped");
+    // PRO-394: a red band says how many failed; only required checks carry a chip, and every check is listed.
+    await screen.findByText("2 of 5 checks failed");
+    expect(screen.getByText("· 1 running · 1 skipped")).toBeTruthy();
     for (const check of checks) expect(screen.getByLabelText(`${check.name}: ${check.state}`)).toBeTruthy();
-    expect(screen.getAllByText("Required")).toHaveLength(2);
-    expect(screen.getAllByText("Optional")).toHaveLength(3);
+    expect(screen.getAllByText("required")).toHaveLength(2);
+    expect(screen.queryByText(/^optional$/i)).toBeNull();
+    expect(screen.getByText("Skipped")).toBeTruthy();
     expect(screen.getByRole("region", { name: "Deployments" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "https://preview.example.test/" }));
     const { openUrl } = await import("@tauri-apps/plugin-opener");
@@ -657,7 +666,9 @@ describe("check summaries and deployments", () => {
   it("keeps unread requirements unknown and refuses non-web provider links", async () => {
     panelBackend(() => ({ ...openPr, requiredChecks: null, checks: [{ name: "ci", state: "success", url: "file:///tmp/run" }], deployments: [{ name: "unsafe", state: "success", url: "javascript:alert(1)" }] }));
     render(<PrPanel cwd={cwd} branch={followup.head} active busy={false} />);
-    await screen.findByText("Requirement unknown");
+    await screen.findByLabelText("ci: success");
+    // Requirements GitHub has not said are not guessed at: no chip.
+    expect(screen.queryByText("required")).toBeNull();
     expect(screen.queryByRole("button", { name: "ci" })).toBeNull();
     expect(screen.queryByRole("button", { name: /javascript/ })).toBeNull();
     expect(screen.queryByText("Optional")).toBeNull();

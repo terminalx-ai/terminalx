@@ -44,9 +44,9 @@ import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
 import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
-import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
+import { subscribeAgentEvents } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
-import { sendFirstMessage } from "@/lib/sessionBackend";
+import { sendHeldFirstMessage } from "@/lib/sessionBackend";
 import { loadModels, onAgentSettingsRequest } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
 import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
@@ -93,6 +93,7 @@ import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootCloudPipelines } from "@/lib/cloudPipelines";
 import { bootPairing } from "@/lib/pairing";
 import { PairPhoneDialogHost } from "@/components/pairing/PairPhoneDialog";
+import { DeviceStatus } from "@/components/pairing/DeviceStatus";
 import { MachineApprovalHost } from "@/components/machines/MachineApprovalDialog";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
@@ -199,8 +200,7 @@ export function AppShell() {
   // The first prompt of a new session is sent right after the worktree exists.
   const onCreated = useCallback((sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]) => {
     // Files attached on the new-session screen are stored now that the session exists (PRO-290).
-    void sendFirstMessage(sessionId, tabId, text, images, files)
-      .then((out) => out.events.forEach(applyEvent))
+    void sendHeldFirstMessage(sessionId, tabId, text, images, files)
       .catch((e) => console.error("first send failed", e));
   }, []);
 
@@ -336,6 +336,7 @@ export function AppShell() {
   // "New session" from a session: a dialog over it, which goes back to it when closed.
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
+  const localDockVisible = prefs.panelOpen && !settingsOpen && !machineSession && !cloudKey && !!(selected || behind);
   // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
   // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
   const orchestrating = experimentalSwitches?.orchestratorRuns === true;
@@ -485,13 +486,18 @@ export function AppShell() {
         )}
       </div>
 
-      {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
-        <ErrorBoundary label="the status bar" fallback={null}>
-          <Suspense fallback={statusBarFallback}>
-            <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />
-          </Suspense>
-        </ErrorBoundary>
-      ) : null}
+      <div className="flex shrink-0 justify-end">
+        {(status.settings.visible || runtimeSwitch) && !(settingsOpen && cloudSetup) ? (
+          <div className="min-w-0 flex-1">
+            <ErrorBoundary label="the status bar" fallback={null}>
+              <Suspense fallback={statusBarFallback}>
+                <StatusBar onOpenAgentSettings={openAgentSettings} onOpenUsageDetails={showStats} />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        ) : null}
+        {!localDockVisible && <DeviceStatus />}
+      </div>
 
       {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
       <UpdateNotice />

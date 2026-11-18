@@ -22,6 +22,7 @@ import {
   attachmentFile,
 } from "@/lib/editors";
 import { DiffEditorPane } from "./DiffEditorPane";
+import { CheckLogTab } from "@/components/changes/CheckLogTab";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { ConflictView } from "@/components/changes/ConflictView";
 import { MediaPane } from "./MediaPane";
@@ -220,7 +221,7 @@ export function EditorSplit({ sessionId, active, fill = false, selectedTab }: {
       <div className="relative min-h-0 flex-1">
         {editors.map((e) => (
           <div key={e.id} className={cn("absolute inset-0 flex flex-col", e.id !== activeId && "hidden")}>
-            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "attachment" ? <AttachmentPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} embedded={false} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
+            {e.kind === "diff" ? <DiffEditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "conflict" ? <ConflictView entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "pr" ? <PrPanel cwd={e.root} sessionId={e.sessionId.startsWith("checkout:") ? undefined : e.sessionId} branch={e.pr.head} selectedPr={e.pr} active={e.id === activeId && active && !collapsed && !reviewShown} busy={false} /> : e.kind === "attachment" ? <AttachmentPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} embedded={false} /> : e.kind === "checkLog" ? <CheckLogTab entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : e.kind === "text" ? <EditorPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} /> : <MediaPane entry={e} visible={e.id === activeId && active && !collapsed && !reviewShown} />}
           </div>
         ))}
       </div>
@@ -247,6 +248,7 @@ export function ReviewTab({ entry, visible, focused = visible, embedded = false 
       : entry.kind === "conflict" ? <ConflictView entry={entry} visible={visible} />
       : entry.kind === "attachment" ? <AttachmentPane entry={entry} visible={visible} embedded={embedded} />
       : entry.kind === "pr" ? <PrPanel cwd={entry.root} sessionId={entry.sessionId} branch={entry.pr.head} selectedPr={entry.pr} active={visible} busy={false} />
+      : entry.kind === "checkLog" ? <CheckLogTab entry={entry} visible={visible} />
       : entry.kind === "text" ? <EditorPane entry={entry} visible={visible} />
       : <MediaPane entry={entry} visible={visible} />}
   </div>;

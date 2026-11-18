@@ -101,7 +101,7 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `review-threads-checks-${mode}.png`) });
 
     // Changes: the footer counts the PR's threads under the file list.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
     const footer = page.locator('[data-testid="changes-review-threads"]:visible');
     await footer.waitFor();
     const footerText = await footer.textContent();
@@ -114,7 +114,7 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `review-threads-footer-${mode}.png`) });
 
     // A row opens its file's centre diff with the thread inline on its lines.
-    await page.getByRole("tab", { name: "Overview", exact: true }).click();
+    await page.getByRole("button", { name: "Checks", exact: true }).click();
     await list.getByRole("button", { name: "Go to review thread src/slug.js:2-4 (head)", exact: true }).click();
     const card = page.locator('.diff-pane article[data-review-thread="t-open"]:visible');
     await card.waitFor();

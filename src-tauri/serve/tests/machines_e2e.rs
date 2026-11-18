@@ -1,7 +1,7 @@
 //! Two machines end to end (PRO-358): the operating computer's own code (the
 //! desktop's pairing client and `MachineSupervisor`) against two real
 //! runtimes in their own processes, "Mac mini" (a second runtime on this
-//! host, approved in its window) and "dev-server" (a headless runtime in a
+//! host, approved in a terminal) and "dev-server" (a headless runtime in a
 //! Linux container, paired from its terminal), with "this Mac" (the operating
 //! computer's own runtime, hosting off) beside them. `common/world.rs` starts
 //! them; `scripts/machine-e2e/run.py` builds the container image and runs
@@ -40,6 +40,23 @@ const PAIRING_BROKEN: &str = "PAIRING CHECK BROKEN";
 const SCOPING_BROKEN: &str = "PROJECT SCOPING BROKEN";
 
 const COMMIT_AUTHOR: (&str, &str) = ("E2E Tester", "e2e@example.com");
+
+/// A real terminal-owned witness for the headless fixture's guarded IPC.
+#[test]
+fn terminal_consent_helper() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let Ok(socket) = std::env::var("TX_E2E_SOCKET") else { return };
+    let command = std::env::var("TX_E2E_COMMAND").unwrap();
+    let mut params: Value = serde_json::from_str(&std::env::var("TX_E2E_PARAMS").unwrap()).unwrap();
+    let run = PathBuf::from(std::env::var_os("TX_E2E_RUN").unwrap());
+    let _witness = raccoon_lib::serve_cli::consent::witness_for(&command, &run, &mut params).unwrap().unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    writeln!(stream, "{}", json!({ "id": "t", "token": std::env::var("TX_E2E_TOKEN").unwrap(), "command": command, "params": params })).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    println!("TX_E2E_RESPONSE {}", line.trim());
+}
 
 /// A machine's own disk, read there: Mac mini's on this host, dev-server's
 /// inside its container.
@@ -103,7 +120,7 @@ async fn refuse(link: &mut Link, method: &str, params: Value, code: &str, why: &
 
 // ---------------------------------------------------------------- pairing
 
-/// Pair with Mac mini by a code its window made, and Allow there. The code
+/// Pair with Mac mini by a code its person made, and Allow there. The code
 /// and the paired computer's id.
 async fn pair_mac_mini(mini: &MacMini) -> (MachineCode, String) {
     pair_mac_mini_with(mini, mini.create_code()).await
@@ -117,7 +134,7 @@ async fn pair_mac_mini_with(mini: &MacMini, code: MachineCode) -> (MachineCode, 
         tokio::spawn(async move { pair_with(&code, &endpoint, OPERATOR_KEY).await })
     };
     let pending = mini.pending();
-    assert_eq!(pending["label"], OPERATOR_LABEL, "Mac mini's window names the asking computer: {pending}");
+    assert_eq!(pending["label"], OPERATOR_LABEL, "Mac mini names the asking computer: {pending}");
     assert!(pending["fingerprint"].as_str().is_some_and(|fingerprint| !fingerprint.is_empty()), "and shows the fingerprint: {pending}");
     mini.approve(pending["requestId"].as_str().expect("the request has an id"));
     let described = pairing.await.unwrap().unwrap_or_else(|failure| panic!("Mac mini refused the pairing it allowed: {failure:?}"));
@@ -330,14 +347,14 @@ async fn a_computer_pairs_with_two_machines_and_operates_each_in_its_own_project
     let dev = linux_image().map(|image| DevServer::start(&image));
     let mut failures = Vec::new();
 
-    // Mac mini: paired by code, allowed in its window; then operated.
+    // Mac mini: paired by code, allowed by its person; then operated.
     let (mini_code, mini_computer) = pair_mac_mini(&mini).await;
     let mut mini_link = Link::open("Mac mini", Kept::new(&mini_code, &mini.endpoint(), &mini_code.device_token, OPERATOR_KEY)).await;
     let mini_machine = Machine {
         name: "Mac mini",
         tag: "mini",
         family: host_family(),
-        has_window: true,
+        has_window: false,
         projects: mini.projects.clone(),
         // Its other project is outside the first.
         outside: "../web/README.md",
@@ -383,7 +400,7 @@ async fn a_computer_pairs_with_two_machines_and_operates_each_in_its_own_project
         assert!(dev.computers().is_empty(), "no computer is paired with the dev-server after the revocation: {:?}", dev.computers());
     }
 
-    // Revoked in Mac mini's window: the connection ends, and the credential
+    // Revoked on Mac mini: the connection ends, and the credential
     // is refused from then on.
     mini.revoke(&mini_computer);
     assert_access_removed(&mut mini_link).await;
@@ -420,7 +437,7 @@ async fn pairing_refuses_a_wrong_or_used_code_another_key_and_a_declined_approva
     assert_eq!(link.ok("machine.describe", json!({})).await["machineId"], json!(mini_code.machine.machine_id));
     link.stop();
 
-    // Declined in Mac mini's window: nothing is paired.
+    // Declined on Mac mini: nothing is paired.
     let another = mini.create_code();
     let pairing = {
         let (code, endpoint) = (another.clone(), mini.endpoint());
@@ -430,7 +447,7 @@ async fn pairing_refuses_a_wrong_or_used_code_another_key_and_a_declined_approva
     mini.decline(pending["requestId"].as_str().unwrap());
     match pairing.await.unwrap() {
         Err(failure) => assert_eq!(failure.reason, "not-approved", "a declined approval on Mac mini: {failure:?}"),
-        Ok(_) => panic!("{PAIRING_BROKEN}: Mac mini paired a computer its window declined"),
+        Ok(_) => panic!("{PAIRING_BROKEN}: Mac mini paired a computer its person declined"),
     }
     assert_eq!(mini.computers().len(), 1, "the declined computer was not paired: {:?}", mini.computers());
 

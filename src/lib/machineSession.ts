@@ -11,11 +11,13 @@ import { createCloudTerminal, followCloudTerminals, sessionTerminals, syncCloudT
 import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
 import { machineAgentScope, useMachineProjects } from "@/lib/machineCatalog";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
+import { machineWorkspaceHost } from "@/lib/machineWorkspaceHost";
 import { agentPtyServed, cloudSessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
 import { setPrefs } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource } from "@/lib/workspaceFiles";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { machineProjectKey, machineProjectRoot, machineSectionKey, parseMachineKey, type RemotePath } from "@/types/target";
 import type { MachineConnectionState } from "@/types/machines";
 import type { SessionEntry, TabEntry } from "@/types/session";
@@ -31,7 +33,8 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  *   command goes live (`agent-commands/1`); nothing is queued on this Mac
  *   while the machine is away.
  * - Files and Git are the project's (`forProject`: each `fs.*`/`git.*` call
- *   names it), rooted at the session's worktree when it is inside the project.
+ *   names it), rooted at the session's worktree, inside the project or in an
+ *   absolute worktree folder (PRO-405, `sessionFilesBase`).
  * - Terminals are the machine's, created in the session (`pty/2`).
  * - Nothing of an organization is here: no sharing, presence, leases, wake or
  *   sleep, price or mirror. `orgId` is empty and `collab` is never live.
@@ -63,12 +66,41 @@ export function worktreeInProject(projectPath: string | null | undefined, cwd: s
   return rel.split("/").some((part) => !part || part === "." || part === "..") ? null : rel;
 }
 
-/** The repository `git.repositories` lists for the session's worktree; else the project's own. */
+/** The closest repository containing the session cwd; else the project's own. */
 export function sessionRepository(repositories: readonly RemoteRepository[], project: MachineProject | null, session: RuntimeSession | null): string | null {
-  if (!repositories.length) return null;
   const rel = worktreeInProject(project?.path, session?.cwd);
   const wanted = rel ?? session?.cwd ?? null;
-  return repositories.find((repo) => repo.repo === wanted)?.repo ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0].repo;
+  const containing = containingRepository(repositories, wanted);
+  return containing ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
+}
+
+function containingRepository(repositories: readonly RemoteRepository[], cwd: string | null | undefined): string | null {
+  let closest: string | null = null;
+  for (const { repo } of repositories) {
+    if (worktreeInProject(repo, cwd) !== null && (closest === null || repo.length > closest.length)) {
+      closest = repo;
+    }
+  }
+  return closest;
+}
+
+/**
+ * Where Files, the editor and search are rooted for the session, as its
+ * project's `fs/1` names the folder: "" for the project's own folder, a
+ * relative path for a cwd inside it, or an absolute path under a listed
+ * external worktree (PRO-405). An external cwd waits for discovery (null).
+ */
+export function sessionFilesBase(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
+  const inside = worktreeInProject(project?.path, session?.cwd);
+  if (inside !== null) return inside === "." ? "" : inside;
+  if (session?.cwd && project?.path) {
+    if (repositories === null) return null;
+    const cwd = session.cwd.replace(/\/+$/, "");
+    if (cwd.startsWith("/") && containingRepository(repositories, cwd)?.startsWith("/")) return cwd;
+    return "";
+  }
+  const repo = repositories && sessionRepository(repositories, project, session);
+  return repo && repo !== "." ? repo : "";
 }
 
 /** The header's connection word for a machine: what its chip says (21.09). */
@@ -190,16 +222,25 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   // Git: the project's repositories; the session's worktree first.
   const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const discoverRepositories = useMemo(() => {
+    if (!generation || !projectClient) return undefined;
+    // Changes and Files share discovery for this connection, independent of the file source's root.
+    let request: Promise<RemoteRepository[]> | undefined;
+    return () => request ??= listRepositories(projectClient).catch((error: unknown) => {
+      request = undefined;
+      throw error;
+    });
+  }, [generation, projectClient]);
   useEffect(() => {
-    if (!generation || !projectClient) return;
+    if (!discoverRepositories) return;
     let cancelled = false;
-    listRepositories(projectClient)
+    discoverRepositories()
       .then((found) => !cancelled && setRepositories(found))
       .catch(() => !cancelled && setRepositories([]));
     return () => {
       cancelled = true;
     };
-  }, [generation, projectClient]);
+  }, [discoverRepositories]);
   const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
@@ -208,13 +249,18 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     [connected, projectClient, repository, projectKey, manage],
   );
 
-  // Files: the session's worktree when it is inside the project (as a local session's files are its `cwd`), else the project's folder.
-  const worktree = worktreeInProject(project?.path, ownSession?.cwd);
-  const base = worktree && worktree !== "." ? worktree : "";
+  // Files use the session's cwd, just as they do for a local session.
+  // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
+  const filesBase = sessionFilesBase(repositories, project, ownSession);
+  const base = filesBase ?? "";
   const projectRoot = machineProjectRoot(machineId, projectId);
   const root = (base ? `${projectRoot}/${base}` : projectRoot) as RemotePath;
   const fileKey = base ? `${projectKey}/${base}` : projectKey;
-  const fileSource = useMemo(() => (connected && projectClient ? cloudFileSource(fileKey, projectClient, !manage, base) : undefined), [connected, projectClient, fileKey, manage, base]);
+  const filesReady = filesBase !== null;
+  const fileSource = useMemo(
+    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base, discoverRepositories) : undefined),
+    [connected, projectClient, filesReady, fileKey, manage, base, discoverRepositories],
+  );
   useEffect(() => {
     if (!fileSource) return;
     const unregister = registerFileSource(fileSource);
@@ -223,6 +269,25 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       fileSource.dispose();
     };
   }, [fileSource]);
+
+  // The session's worktree, removed on the machine (`workspace/1`, PRO-406): the chat offers it once its pull request
+  // has merged, and the removal dialog asks the machine for every check. None for a session in the project's own folder.
+  const worktreeName = ownSession?.worktreeName ?? null;
+  const worktreePath = ownSession?.cwd ?? "";
+  const removesWorktrees = manage && !!client?.hasCapability("workspace/1");
+  const removableWorkspace = useMemo<RemovableWorkspace | undefined>(
+    () =>
+      client && removesWorktrees && worktreeName
+        ? {
+            host: machineWorkspaceHost({ machineId, name, sessionId: runtimeSessionId, sessionKey: key, client }),
+            projectPath: projectKey,
+            // The machine's own path: only shown, or sent back to it.
+            path: worktreePath,
+            name: worktreeName,
+          }
+        : undefined,
+    [client, removesWorktrees, worktreeName, worktreePath, machineId, name, runtimeSessionId, key, projectKey],
+  );
 
   const followUps = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.followUps ?? [], [agents.tabs]);
   const settingsNotice = useCallback(
@@ -302,10 +367,17 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       archived: runtimeSession?.archived ?? false,
       pinned: runtimeSession?.pinned ?? false,
       tabs: ownTabs.length
-        ? ownTabs.map((tab, index) => ({
-            ...tabEntry(tab, false),
-            title: cloudTabTitle(tab.info.title, runtimeSession?.title, runtimeSession?.tabs.length ? runtimeSession.tabs[0].id === tab.tabId : index === 0),
-          }))
+        ? ownTabs.map((tab, index) => {
+            // What the machine keeps of the tab in its session list: its usage and the account it runs on (PRO-408).
+            const listed = runtimeSession?.tabs.find((candidate) => candidate.id === tab.tabId);
+            return {
+              ...tabEntry(tab, false),
+              title: cloudTabTitle(tab.info.title, runtimeSession?.title, runtimeSession?.tabs.length ? runtimeSession.tabs[0].id === tab.tabId : index === 0),
+              hasMessages: tab.info.hasMessages ?? listed?.hasMessages,
+              usage: listed?.usage ?? null,
+              accountLabel: listed?.accountLabel ?? null,
+            };
+          })
         : NO_TABS,
       activeTab: runtimeSession?.activeTab ?? null,
     }),
@@ -328,6 +400,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       const added = await client.addSessionTab(runtimeSessionId, { ...params, nativeCodex });
       await syncLiveTabs(scope, client).catch(() => undefined);
       selectSessionTab(key, { kind: "agent", id: added.tabId });
+      return added.tabId;
     },
     [sendBlocked, client, name, runtimeSessionId, scope, key],
   );
@@ -364,8 +437,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     selectRepository: setPicked,
     gitSource,
     fileSource,
-    // Removing a session's worktree from here is a follow-up (docs/MACHINES.md "Session feature parity").
-    removableWorkspace: undefined,
+    removableWorkspace,
     machine: { machineId, projectId, record: machine, name, state: machineState },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },

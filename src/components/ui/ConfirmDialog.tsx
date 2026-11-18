@@ -58,7 +58,7 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
 /**
  * Draws the question `confirmInApp` is waiting on. Mounted once per window.
  *
- * Two questions are not asked here. Quitting is asked from Rust, which may have no window to draw in (PRO-455).
+ * Quit is asked natively even with a window; tray quit may have no window (PRO-455). See docs/CONFIRMATIONS.md.
  * Cloud control's agreement is a system alert on purpose: an agent driving this web view must not be able to give it.
  */
 export function ConfirmDialogHost() {

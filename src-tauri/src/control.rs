@@ -854,6 +854,16 @@ impl ControlService {
                 self.sink.emit("session_updated", &session);
                 Ok(json!({"sessionId": session.id, "session": session}))
             }
+            "sessions.pin" | "sessions.unpin" => {
+                let session = resolve_session(&required_string(&params, "session")?)?;
+                let pinned = command == "sessions.pin";
+                if session.pinned != pinned {
+                    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+                    let updated = crate::session_ops::update_session_meta(&session.id, &patch).map_err(ControlError::internal)?;
+                    self.sink.emit("session_updated", &updated);
+                }
+                Ok(json!({"sessionId": session.id, "pinned": pinned}))
+            }
             "sessions.status" => {
                 let status = serde_json::from_value::<index::ManualStatus>(params.get("status").cloned().unwrap_or(Value::Null))
                     .map_err(|_| ControlError::invalid("Status must be backlog, in_progress, in_review, done or canceled."))?;
@@ -1126,7 +1136,7 @@ impl ControlService {
                 return Err(ControlError::invalid("--worktree lists every session in the worktree, quick chats and archived ones included; it cannot be combined with --quick or --archived."));
             }
             let (project, worktree) = resolve_worktree(&params)?;
-            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
+            let mut held = crate::worktree_control::sessions_in(&sessions, &worktree.path).map_err(ControlError::internal)?;
             self.manager.annotate_row_statuses_among(&mut held, &stored);
             let held: Vec<Value> = held.iter().map(crate::session_usage::with_cost).collect();
             return Ok(json!({"project": project.path, "worktree": worktree.path, "sessions": held}));
@@ -1841,11 +1851,19 @@ impl ControlService {
                 .map_err(ControlError::internal)?;
             let mut listed = Vec::with_capacity(worktrees.len());
             for worktree in worktrees {
-                let held = crate::worktree_control::sessions_in(&sessions, &worktree.path);
                 let mut value = serde_json::to_value(&worktree).map_err(ControlError::internal)?;
-                value["sessionCount"] = json!(held.len());
-                if !worktree.is_main {
-                    value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                match crate::worktree_control::sessions_in(&sessions, &worktree.path) {
+                    Ok(held) => {
+                        value["sessionCount"] = json!(held.len());
+                        if !worktree.is_main {
+                            value["sessions"] = json!(crate::worktree_control::summaries(&held, &project.path));
+                        }
+                    }
+                    Err(error) => {
+                        value["sessionCount"] = Value::Null;
+                        if !worktree.is_main { value["sessions"] = Value::Null; }
+                        value["sessionError"] = json!(error);
+                    }
                 }
                 listed.push(value);
             }
@@ -3058,6 +3076,44 @@ mod tests {
     }
 
     #[test]
+    fn the_cli_pins_and_unpins_the_persisted_sidebar_session() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let new = || crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "title": "test", "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let (first, second) = (new(), new());
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let prefix = &first.id[..first.id.len() - 2];
+        assert_eq!(service.execute("sessions.pin", json!({"session": prefix}), "r").unwrap(), json!({"sessionId": first.id, "pinned": true}));
+        let event = heard.try_recv().unwrap();
+        assert_eq!(&*event.event, "session_updated");
+        assert!(serde_json::from_str::<SessionEntry>(&event.payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], true);
+        assert!(index::get(&first.id).unwrap().pinned);
+        service.execute("sessions.pin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        for selector in ["", "no-such-session"] {
+            assert!(service.execute("sessions.unpin", json!({"session": selector}), "r").is_err());
+        }
+        // UUIDs generated together share a prefix, which must never select both.
+        let common: String = first.id.chars().zip(second.id.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a).collect();
+        assert!(!common.is_empty());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": common}), "r").unwrap_err().code, "ambiguous_selector");
+        assert!(index::get(&first.id).unwrap().pinned);
+        assert!(!index::get(&second.id).unwrap().pinned);
+        assert!(heard.try_recv().is_err());
+        assert_eq!(service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap(), json!({"sessionId": first.id, "pinned": false}));
+        assert!(!serde_json::from_str::<SessionEntry>(&heard.try_recv().unwrap().payload).unwrap().pinned);
+        assert_eq!(service.execute("sessions.show", json!({"session": first.id}), "r").unwrap()["pinned"], false);
+        service.execute("sessions.unpin", json!({"session": first.id}), "r").unwrap();
+        assert!(heard.try_recv().is_err());
+        assert_eq!(index::get(&first.id).unwrap().tabs.len(), first.tabs.len());
+    }
+
+    #[test]
     fn the_cli_archives_and_brings_back_sessions_as_the_app_does_and_lists_the_archived_ones() {
         let _home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
@@ -3125,6 +3181,54 @@ mod tests {
 
     fn ids(sessions: &Value) -> std::collections::BTreeSet<String> {
         sessions.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn worktree_listing_keeps_other_results_when_session_identity_is_uncertain() {
+        let _home = crate::store::temp_home();
+        let (repo, other_repo) = (git_repo(), git_repo());
+        let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+        let other = projects::add(other_repo.path().to_str().unwrap()).unwrap();
+        let sub = Path::new(&project.path).join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": sub, "title": "Legacy subdirectory", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let isolated = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": true, "title": "Isolated", "tab": {"harness": "claude"},
+        })).unwrap()).unwrap();
+        let (service, _sink) = headless_service();
+        let listed = service.execute("worktrees.list", json!({}), "r").unwrap();
+        let groups = listed["projects"].as_array().unwrap();
+        let group = |path: &str| groups.iter().find(|group| group["project"]["path"] == path).unwrap();
+        let worktrees = group(&project.path)["worktrees"].as_array().unwrap();
+        let main = worktrees.iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert!(main["sessionCount"].is_null());
+        assert!(main["sessionError"].as_str().unwrap().contains("Legacy subdirectory"));
+        assert!(main.get("sessions").is_none());
+        let tree = worktrees.iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert_eq!(tree["sessionCount"], 1);
+        assert_eq!(ids(&tree["sessions"]), std::collections::BTreeSet::from([isolated.id.clone()]));
+        assert!(tree.get("sessionError").is_none());
+        let other_main = group(&other.path)["worktrees"].as_array().unwrap().iter().find(|tree| tree["isMain"] == true).unwrap();
+        assert_eq!(other_main["sessionCount"], 0);
+        assert!(other_main.get("sessionError").is_none());
+
+        // The same uncertainty in a non-main worktree must not look like
+        // an empty session list either.
+        let nested = Path::new(&isolated.cwd).join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_legacy = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "cwd": nested, "title": "Nested legacy", "useWorktree": false,
+        })).unwrap()).unwrap();
+        index::update_session(&nested_legacy.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        let listed = service.execute("worktrees.list", json!({"project": project.path}), "r2").unwrap();
+        let tree = listed["projects"][0]["worktrees"].as_array().unwrap().iter().find(|tree| tree["path"] == isolated.cwd).unwrap();
+        assert!(tree["sessionCount"].is_null() && tree["sessions"].is_null());
+        assert!(tree["sessionError"].as_str().unwrap().contains("Nested legacy"));
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&isolated.cwd), false).is_err());
+        assert!(crate::session_ops::workspace_disposition(Path::new(&project.path), Path::new(&project.path), false).is_err());
     }
 
     /// #719: a session of another project and a quick chat run in the

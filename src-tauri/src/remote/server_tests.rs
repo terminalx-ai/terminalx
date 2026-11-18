@@ -1463,6 +1463,52 @@ async fn an_image_is_uploaded_in_parts_by_someone_who_may_send_and_named_by_thei
     assert!(agents.attachments.load("alice", &["attach-0001".into()]).is_err());
 }
 
+/// PRO-407: `session.attach` with `kind: "file"` takes any file in parts
+/// (`composer/4`), named by its last segment; the live send stores it in the
+/// session's attachments folder on this computer before the agent gets it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_is_uploaded_and_the_live_send_stores_it_in_the_sessions_attachments_folder() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let agents = with_tab(&f);
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let (peer, _events) = Peer::for_user("device-files".into(), Authority::Manage, person_for(Authority::Manage));
+    let hello = call(&f.rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "composer/3", "composer/4"] })).await.unwrap();
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|name| name == "composer/4"), "{hello}");
+    let requests = AtomicUsize::new(0);
+    let part = |id: &str, name: &str, offset: u64, bytes: &[u8], last: bool| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({
+            "sessionId": session.id, "tabId": tab_id, "attachmentId": id, "kind": "file", "mediaType": "text/markdown", "name": name,
+            "offset": offset, "data": STANDARD.encode(bytes), "last": last,
+            "clientRequestId": format!("request-file-{}", requests.fetch_add(1, Ordering::SeqCst)),
+        });
+        async move { rpc.handle(&peer, &json!({ "id": "1", "method": "session.attach", "params": params })).await }
+    };
+    assert_eq!(part("attach-0001", "/Users/alice/secret/plan.md", 0, b"# Plan\n", false).await["result"]["size"], 7);
+    assert_eq!(part("attach-0001", "/Users/alice/secret/plan.md", 7, b"- ship\n", true).await["result"]["complete"], true);
+    // A name TerminalX uses for its own files is refused in words.
+    let reserved = part("attach-0002", "terminalx.json", 0, b"{}", true).await;
+    assert_eq!((reserved["error"]["code"].clone(), reserved["error"]["data"]["reason"].clone()), (json!("invalid_params"), json!("file-refused")));
+    assert!(reserved["error"]["message"].as_str().unwrap().contains("Rename it"));
+    // A file is never typed as an image.
+    let as_image = json!({ "sessionId": session.id, "tabId": tab_id, "text": "look", "images": [{ "id": "attach-0001" }], "clientRequestId": "request-file-send-1" });
+    assert_eq!(f.rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": as_image })).await["error"]["data"]["reason"], "attachment-missing");
+
+    let send = json!({ "sessionId": session.id, "tabId": tab_id, "text": "read the plan", "files": [{ "id": "attach-0001", "name": "plan.md" }], "clientRequestId": "request-file-send-2" });
+    // The fixture runs no agent, so the send ends `unavailable` once the file is stored.
+    assert_eq!(f.rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": send })).await["error"]["code"], "unavailable");
+    assert!(agents.attachments.check_files(&attachment_owner(&peer), &["attach-0001".into()]).is_err(), "the upload is done with");
+    let folder = crate::store::attachments_dir(&session.id).unwrap();
+    let stored: Vec<PathBuf> = std::fs::read_dir(&folder).unwrap().flatten().flat_map(|entry| std::fs::read_dir(entry.path()).unwrap().flatten().map(|file| file.path())).collect();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].file_name().unwrap(), "plan.md");
+    assert_eq!(std::fs::read(&stored[0]).unwrap(), b"# Plan\n- ship\n");
+    // Never in the session's own tree.
+    assert!(!walk_names(&f.root).iter().any(|name| name == "plan.md"));
+}
+
 /// Every file name under `root`.
 fn walk_names(root: &Path) -> Vec<String> {
     let mut names = Vec::new();
@@ -3539,7 +3585,7 @@ async fn escape_interrupts_a_running_turn_for_whoever_may_stop_it_and_stops_noth
     let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap();
     f.rpc.set_agents(agents.clone());
     // A message someone queued behind the running turn.
-    let queued = crate::cloud_agents::FollowUp { policy_stamp: None, client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new() };
+    let queued = crate::cloud_agents::FollowUp { policy_stamp: None, client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new(), files: Vec::new() };
     agents.follow_ups.push(&tab_id, queued).unwrap();
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager" },

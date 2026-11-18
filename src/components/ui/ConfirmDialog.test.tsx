@@ -13,7 +13,7 @@ async function asking<T>(question: () => Promise<T>): Promise<{ answer: Promise<
 }
 const labels = (dialog: HTMLElement) => within(dialog).getAllByRole("button").map((button) => button.textContent);
 
-// PRO-400, design 17.01: every confirmation is the app's own card, never a system alert.
+// PRO-400, design 17.01: in-scope confirmations use the app card; Quit is an exception (PRO-455).
 describe("the app's confirmation dialog", () => {
   it("asks with the question as its title, what happens below, the safe choice left and the red action right", async () => {
     render(<ConfirmDialogHost />);

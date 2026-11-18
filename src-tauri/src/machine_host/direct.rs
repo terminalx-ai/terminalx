@@ -45,6 +45,15 @@ pub(crate) struct Listening {
 }
 
 impl Listening {
+    /// A reported endpoint for consent tests that never opens a TCP listener.
+    #[cfg(all(test, feature = "desktop", target_os = "macos"))]
+    pub(super) fn for_window_consent_test() -> Self {
+        Self {
+            address: SocketAddr::from((Ipv4Addr::LOCALHOST, 6768)),
+            accept: tokio::spawn(std::future::pending()),
+        }
+    }
+
     /// Close the port. Open connections are closed by the host.
     pub fn stop(self) {
         self.accept.abort();

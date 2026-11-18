@@ -427,7 +427,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "#12" })).toBeTruthy();
     expect(screen.getByTestId("session-automation").textContent).toBe("Nightly #3");
     expect(screen.getByTestId("session-branch").getAttribute("title")).toContain("Base 1234567 · fetched at creation");
-    expect(within(header).getByRole("button", { name: "Workspace details" })).toBeTruthy();
+    expect(within(header).getByRole("button", { name: "Session actions" })).toBeTruthy();
     expect(within(header).queryByRole("tablist")).toBeNull();
     // The row of tabs is right under the title bar, and the + ends it.
     const row = screen.getByTestId("workspace-tab-strip");
@@ -459,7 +459,7 @@ describe("a local session's row of tabs under the title bar", () => {
     // The tab on screen can differ from the session's persisted activeTab.
     fireEvent.click(screen.getByRole("tab", { name: "Write the fix" }));
     if (entry === "workspace menu") {
-      const menu = within(header).getByRole("button", { name: "Workspace details" });
+      const menu = within(header).getByRole("button", { name: "Session actions" });
       fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
       fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
       fireEvent.click(menu);
@@ -488,7 +488,7 @@ describe("a local session's row of tabs under the title bar", () => {
       branch: null,
       worktreeName: null,
     });
-    expect(within(header).queryByRole("button", { name: "Workspace details" })).toBeNull();
+    expect(within(header).queryByRole("button", { name: "Session actions" })).toBeNull();
     expect(within(header).getByRole("button", { name: "Continue in New Session…" })).toBeTruthy();
   });
 
@@ -499,11 +499,11 @@ describe("a local session's row of tabs under the title bar", () => {
     const header = show();
     await waitFor(() => expect(guard.calls.some(({ command }) => command === "repo_mirror_status")).toBe(true));
     expect(within(header).queryByRole("button", { name: /repo root/ })).toBeNull();
-    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    const menu = within(header).getByRole("button", { name: "Session actions" });
     fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
     fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
     fireEvent.click(menu);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Mirror into repo root…" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Mirror into repo root/ }));
     const dialog = await screen.findByRole("dialog", { name: "Mirror into repo root" });
     await waitFor(() => expect((within(dialog).getByRole("button", { name: "Mirror into repo root" }) as HTMLButtonElement).disabled).toBe(false));
   });
@@ -515,7 +515,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(await screen.findByRole("dialog", { name: "Stop mirroring" })).toBeTruthy();
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    const menu = within(header).getByRole("button", { name: "Session actions" });
     fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
     fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
     fireEvent.click(menu);

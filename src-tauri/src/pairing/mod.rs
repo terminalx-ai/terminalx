@@ -672,6 +672,36 @@ impl PairingManager {
         resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_secrets_for_test(identifier: &str, store: Arc<dyn crate::keychain::SecretStore>) -> Arc<Self> {
+        let mut manager = Self::new(Arc::new(AccountManager::default()));
+        manager.secrets = PairingSecrets::with_store(store);
+        manager.secrets.configure(identifier).unwrap();
+        Arc::new(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
+        self.phone.set_owner(Some(owner));
+    }
+
+    /// The machine's host key, with which this window proves to the
+    /// runtime's pairing guard that it is the window (`serve_cli::consent`).
+    /// Blocking: a Keychain read. Only macOS registers a proof provider.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn consent_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let keypair = self
+            .secrets
+            .host_key(false)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t read the pairing key from Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The TerminalX pairing key is missing from Keychain. Restart TerminalX and try again. If the key is still missing, contact support.")
+            })?;
+        Ok(zeroize::Zeroizing::new(*keypair.secret()))
+    }
+
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
         let keypair = self
             .secrets

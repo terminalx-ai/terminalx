@@ -223,10 +223,8 @@ try {
       await raise(page);
       assert.equal(await notices(page).count(), 4);
     }
-    await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "More options" }).focus();
+    await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]:visible').focus();
     await page.keyboard.press("Enter");
-    await page.getByTestId("permission-mode").focus();
-    await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).focus();
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog");

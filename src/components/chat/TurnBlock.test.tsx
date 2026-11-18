@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (path: string) => `asset://localhost/${encodeURIComponent(path)}`, invoke: vi.fn() }));
@@ -469,6 +469,48 @@ describe("the turn's menu (PRO-379)", () => {
     expect(screen.queryByRole("menuitem", { name: /Fork|Reset/ })).toBeNull();
     expect(screen.getByRole("menuitem", { name: /Copy answer as Markdown/ })).toBeDefined();
   });
+});
+
+it("tracks read aloud by session, tab and turn across switches and late events", () => {
+  const utterances: SpeechSynthesisUtterance[] = [];
+  class Utterance {
+    onend: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(public text: string) {}
+  }
+  const cancel = vi.fn();
+  vi.stubGlobal("SpeechSynthesisUtterance", Utterance);
+  vi.stubGlobal("speechSynthesis", { cancel, speak: (utterance: SpeechSynthesisUtterance) => utterances.push(utterance) });
+  try {
+    const value = { ...turn([]), work: [{ kind: "text", key: "answer", seq: 5, text: "Done" }] } as Turn;
+    const view = render(<TooltipProvider>
+      <div data-testid="first"><TurnBlock turn={value} sessionId="s1" tabId="t1" stream={[]} working={false} /></div>
+      <div data-testid="second"><TurnBlock turn={value} sessionId="s1" tabId="t2" stream={[]} working={false} /></div>
+      <div data-testid="third"><TurnBlock turn={value} sessionId="s2" tabId="t1" stream={[]} working={false} /></div>
+    </TooltipProvider>);
+    const button = (id: string, name: string) => within(screen.getByTestId(id)).getByRole("button", { name });
+    fireEvent.click(button("first", "Read aloud"));
+    expect(button("first", "Stop reading aloud")).toBeDefined();
+    expect(button("second", "Read aloud")).toBeDefined();
+    expect(button("third", "Read aloud")).toBeDefined();
+    fireEvent.click(button("second", "Read aloud"));
+    act(() => utterances[0].onend?.(new Event("end") as SpeechSynthesisEvent));
+    expect(button("first", "Read aloud")).toBeDefined();
+    expect(button("second", "Stop reading aloud")).toBeDefined();
+    fireEvent.click(button("second", "Stop reading aloud"));
+    fireEvent.click(button("second", "Read aloud"));
+    act(() => utterances[1].onerror?.(new Event("error") as SpeechSynthesisErrorEvent));
+    expect(button("second", "Stop reading aloud")).toBeDefined();
+    fireEvent.click(button("third", "Read aloud"));
+    expect(button("second", "Read aloud")).toBeDefined();
+    expect(button("third", "Stop reading aloud")).toBeDefined();
+    act(() => utterances[3].onend?.(new Event("end") as SpeechSynthesisEvent));
+    expect(button("third", "Read aloud")).toBeDefined();
+    expect(cancel).toHaveBeenCalledTimes(5);
+    view.unmount();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 describe("a pasted Markdown table in a message", () => {

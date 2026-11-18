@@ -18,6 +18,7 @@ import type { CommitInfo } from "@/types/session";
 import { localStep, NextLine } from "./NextStep";
 import { getDataPrivacy, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MergedWorkspaceStep } from "./MergedWorkspaceStep";
+import { useDraftPushes } from "@/lib/panelMarks";
 
 /**
  * Where the reader is working, read top down: the branch, the one thing to
@@ -36,6 +37,7 @@ export function BranchPanel({
   from,
   onStep,
   inline = false,
+  top,
   children,
 }: {
   cwd: string;
@@ -47,8 +49,13 @@ export function BranchPanel({
   /** Whether the branch itself has a step to take first; the pull request's own step waits on it. */
   onStep?: (held: boolean) => void;
   inline?: boolean;
-  /** The pull request, placed under the next step. */
+  /** Placed under the next step (Autopilot). */
   children?: ReactNode;
+  /**
+   * The pull request and its checks, above the branch (PRO-394: the Checks
+   * tab opens on them), where the branch can have one.
+   */
+  top?: ReactNode;
 }) {
   const [read, setRead] = useState<{ key: string; overview: BranchOverview } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -137,9 +144,13 @@ export function BranchPanel({
   }, [cwd, branch, active, overview?.onBase, overview?.hasRemote, github, reread]);
 
   const baseName = (localOnly ? overview?.base : overview?.base?.replace(/^origin\//, "")) ?? "the base";
-  const step = overview ? localStep(overview, pr, baseName, localOnly) : null;
+  const found = overview ? localStep(overview, pr, baseName, localOnly) : null;
+  // Before a pull request exists, its draft above says what pushing is for and pushes with it (PRO-394, design 05.06).
+  // Only while that draft is on screen and can create: with GitHub unread, signed out or the draft unable to push, Push stays.
+  const draftPushes = useDraftPushes(cwd);
+  const step = found?.kind === "push" && draftPushes ? null : found;
   // Until the branch is read, nothing below it is the next step either.
-  const held = !overview || !!step || overview.onBase || !github;
+  const held = !overview || !!found || overview.onBase || !github;
   useEffect(() => onStep?.(held), [held, onStep]);
 
   if (error && !overview) return <p className="p-4 text-xs text-destructive">{error}</p>;
@@ -181,7 +192,7 @@ export function BranchPanel({
       type="button"
       onClick={() => run(what)}
       disabled={!!working}
-      className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
+      className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-xs font-medium text-accent hover:bg-accent/25 disabled:opacity-60"
     >
       {working === what && <Loader2 className="size-3 animate-spin" aria-hidden />}
       {label}
@@ -219,7 +230,7 @@ export function BranchPanel({
       askButton("conflicts", `Merge the latest ${overview.base ?? baseName} into ${here}, and resolve the conflicts.`, "Resolve")
     ) : step?.kind === "commit" ? (
       <>
-        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-[11px] font-medium text-accent hover:bg-accent/25">
+        <button type="button" onClick={() => showPanelTab("changes")} className="flex shrink-0 items-center gap-1 h-6 rounded-md bg-accent/15 px-2.5 text-xs font-medium text-accent hover:bg-accent/25">
           Review &amp; commit
         </button>
         {askButton("commit", "Commit the changes in this worktree with a clear message.")}
@@ -233,6 +244,7 @@ export function BranchPanel({
 
   return (
     <div className={cn("animate-panel-content", !inline && "h-full overflow-y-auto scrollbar-thin")} data-testid="branch-panel">
+      {!overview.onBase && overview.hasRemote && github && top && <div className="border-b border-hairline">{top}</div>}
       {/* One left edge for the tab, 24px from the panel: the branch icon, each box's own edge, the graph's dots and every row
           start on it. Only what is inside a box is indented. */}
       <div className="flex flex-col gap-3 px-6 py-4">
@@ -243,7 +255,7 @@ export function BranchPanel({
             {branch ?? "Detached HEAD"}
           </h3>
           {localOnly && (
-            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-[10.5px] text-muted-foreground" title="GitHub pull requests are unavailable for this project" data-testid="branch-local-only">
+            <span className="ml-auto shrink-0 rounded-full bg-veil-raised px-2.5 py-0.5 text-xs text-muted-foreground" title="GitHub pull requests are unavailable for this project" data-testid="branch-local-only">
               Local merge
             </span>
           )}
@@ -280,11 +292,11 @@ export function BranchPanel({
             {step.kind === "conflicts" && (
               <ul className="pl-3.5" data-testid="branch-conflicts">
                 {overview.merge.conflicted.slice(0, 6).map((path) => (
-                  <li key={path} className="truncate font-mono text-[11px] text-muted-foreground" title={path}>
+                  <li key={path} className="truncate font-mono text-xs text-muted-foreground" title={path}>
                     {path}
                   </li>
                 ))}
-                {overview.merge.conflicted.length > 6 && <li className="text-[11px] text-faint">and {overview.merge.conflicted.length - 6} more</li>}
+                {overview.merge.conflicted.length > 6 && <li className="text-xs text-faint">and {overview.merge.conflicted.length - 6} more</li>}
               </ul>
             )}
           </NextLine>
@@ -314,7 +326,7 @@ function since(iso: string): string {
   return r === "now" ? "just now" : /^\d/.test(r) ? `${r} ago` : `on ${r}`;
 }
 
-const AGENT_BUTTON = "flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] text-muted-foreground hover:bg-veil-raised hover:text-foreground";
+const AGENT_BUTTON = "flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-veil-raised hover:text-foreground";
 
 /** Commits of the base drawn on its line; older ones are counted above them. */
 const BASE_SHOWN = 12;
@@ -457,7 +469,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
                     </span>
                   )
                 ) : row.kind === "more" ? (
-                  <span className="text-[11px] text-faint">{row.label}</span>
+                  <span className="text-xs text-faint">{row.label}</span>
                 ) : (
                   <>
                     <span className="min-w-0 flex-1 truncate text-xs" title={`${row.commit.subject}\n${row.commit.author} · ${relativeTime(row.commit.date)}`}>
@@ -465,7 +477,7 @@ function BranchGraph({ overview, baseName, branch, who, github, landed }: { over
                       <span className="text-faint"> {row.commit.subject}</span>
                     </span>
                     {i === newestBase && (
-                      <span className="shrink-0 rounded bg-veil-raised px-1 text-[10px] text-muted-foreground" data-testid="branch-base-now">
+                      <span className="shrink-0 rounded bg-veil-raised px-1 text-xs text-muted-foreground" data-testid="branch-base-now">
                         {baseName} now
                       </span>
                     )}

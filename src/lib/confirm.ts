@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * A question the app asks before it does something: drawn in the app's own
- * dialog (design 17.01), never as a system alert. The title is the question,
+ * An in-app confirmation (design 17.01). Quit is a native-dialog exception
+ * tracked by PRO-455; see docs/CONFIRMATIONS.md. The title is the question,
  * the body says what happens, the safe choice is on the left and the action
  * on the right.
  */

@@ -159,7 +159,7 @@ fn pane_id(session: &str, action: &str) -> Result<String> {
 }
 
 /// The session and action id an action tab's pane id names.
-fn parse_pane(pane: &str) -> Option<(&str, String)> {
+pub fn parse_pane(pane: &str) -> Option<(&str, String)> {
     let (session, rest) = pane.split_once(':')?;
     let (_, hex) = rest.strip_prefix(PANE_PREFIX)?.split_once('-')?;
     if hex.is_empty() || hex.len() % 2 != 0 { return None }

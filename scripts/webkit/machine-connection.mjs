@@ -63,7 +63,7 @@ const fixture = (paired) => `(() => {
   // machine state (docs/MACHINES.md "As built (PRO-345)"): connected carries
   // the link, offline is reconnecting, needs update and access removed end it.
   // Every feature this desktop uses, so a connected machine is not shown as needing an update (PRO-354).
-  const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/6"];
+  const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8"];
   const links = {};
   const transport = (machineId, view) => {
     switch (view.state) {

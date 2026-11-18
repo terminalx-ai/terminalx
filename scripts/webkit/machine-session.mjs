@@ -99,7 +99,8 @@ const fixture = (paired) => `(() => {
       return { state: "connected", runtimeGeneration: 1, runtimeEpoch: "e1", runtimeVersion: "0.2.33", authority: "manage", link,
         capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "composer/2", "machine/1", "machine/2", "agent-commands/1",
           // Every feature in machineFeatures.ts, so the machine reads as up to date and nothing is hidden.
-          "ports/1", "session/3", "session-status/1", "agent-pty/1", "composer/1", "composer/3", "workspace/1", "workspace/2", "cleanup/1", "pipeline/1", "pipeline/2", "machine/3", "machine/4"] };
+          "ports/1", "session/3", "session-status/1", "agent-pty/1", "composer/1", "composer/3", "composer/4", "workspace/1", "workspace/2",
+          "cleanup/1", "pipeline/1", "pipeline/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8"] };
     }
     return view.state === "reconnecting" ? { state: "reconnecting", attempt: 1, reason: "network", retryInMs: 2000 } : { state: "connecting", attempt: 1 };
   };
@@ -150,6 +151,8 @@ const fixture = (paired) => `(() => {
       case "git.repositories": reply(frame.id, { repositories: [] }); break;
       case "fs.list": reply(frame.id, { path: params.path ?? "", entries: [] }); break;
       case "runtime.agents": reply(frame.id, { agents: [] }); break;
+      // machine/8: this session has no usage kept on the machine yet.
+      case "session.usage": reply(frame.id, { usage: { sessionId: params.sessionId, title: "", tabs: [], models: [], estimate: true }, loginMethods: {}, windows: [] }); break;
       case "session.unsubscribe": case "pty.detach": case "fs.unwatch": case "session.markRead": case "session.nudge": reply(frame.id, {}); break;
       default: refuse(frame.id, "method_not_found");
     }

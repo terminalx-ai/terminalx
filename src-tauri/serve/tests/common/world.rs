@@ -8,10 +8,8 @@
 //!   do may reach it.
 //! - **Mac mini** is a second `terminalx-serve` in machine mode (no
 //!   `--project-root`) with two projects and hosting on. It runs as its
-//!   desktop app launches it (`TERMINALX_LOCAL_DESKTOP=1`, no Keychain
-//!   service, so its host key is a file), and the test is its window: codes
-//!   are made and approved over the runtime IPC with a consent witness, as
-//!   Settings → Machines does.
+//!   headless, with a file-owned host key. Guarded requests are sent by a
+//!   helper in its own controlling terminal, with a consent witness.
 //! - **dev-server** is `terminalx-serve` in a Linux container
 //!   (`scripts/machine-e2e/Dockerfile`), headless, one project added with
 //!   `terminalx-serve projects add`. It is paired the way a person pairs a
@@ -89,7 +87,7 @@ pub fn git_project(path: &Path, readme: &str) -> PathBuf {
     std::fs::canonicalize(path).unwrap()
 }
 
-/// The projects a machine's window registered, in its store.
+/// The projects registered in a machine's store.
 fn register_projects(data: &Path, projects: &[&Path]) {
     let projects: Vec<Value> = projects
         .iter()
@@ -156,8 +154,7 @@ impl ThisMac {
 
 // ---------------------------------------------------------------- Mac mini
 
-/// A second runtime as a machine: two projects, hosting on, a window (the
-/// test) that makes codes and approves.
+/// A second headless runtime as a machine: two projects and hosting on.
 pub struct MacMini {
     pub world: AgentWorld,
     pub serve: Serve,
@@ -175,11 +172,7 @@ impl MacMini {
         std::fs::write(world.data.join("settings.json"), json!({ "machineName": "Mac mini", "machines": { "allowOperating": true } }).to_string()).unwrap();
         let port = free_port();
         let mut command = world.machine_command();
-        command
-            .env("TERMINALX_MACHINE_HOST_PORT", port.to_string())
-            // Launched by its desktop app, whose window answers for the
-            // person; no TERMINALX_LOCAL_APPLICATION, so no Keychain item.
-            .env("TERMINALX_LOCAL_DESKTOP", "1");
+        command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string());
         let serve = Serve::start(command, &world.data);
         let address = listening(&serve);
         assert!(address.ends_with(&format!(":{port}")), "Mac mini listens on {address}, not port {port}");
@@ -194,49 +187,61 @@ impl MacMini {
         self.projects.iter().map(|path| project_id(path)).collect()
     }
 
-    /// A runtime IPC command as Mac mini's window sends it: with a fresh
-    /// attachment, and a consent witness for what only a person may do.
-    pub fn window(&self, command: &str, extra: Value) -> Value {
+    /// A runtime IPC command with a fresh attachment. Guarded commands run
+    /// in an independent controlling terminal, like a headless person.
+    pub fn person(&self, command: &str, extra: Value) -> Value {
         let attached = self.serve.control("runtime.attach", json!({ "protocol": 1 }));
         let mut params = json!({ "epoch": attached["epoch"], "lease": attached["lease"] });
-        for (name, value) in extra.as_object().expect("window params are an object") {
+        for (name, value) in extra.as_object().expect("request params are an object") {
             params[name] = value.clone();
         }
-        let run = self.world.data.join("run");
-        let _witness = raccoon_lib::serve_cli::consent::witness_for(command, &run, &mut params).expect("open a consent witness in Mac mini's run directory");
-        self.serve.try_control(command, params)
+        if !raccoon_lib::serve_cli::consent::guards(command) {
+            return self.serve.try_control(command, params);
+        }
+        let mut helper = Command::new(std::env::current_exe().unwrap());
+        helper.args(["--exact", "terminal_consent_helper", "--nocapture"])
+            .env("TX_E2E_SOCKET", &self.serve.socket)
+            .env("TX_E2E_TOKEN", &self.serve.token)
+            .env("TX_E2E_RUN", self.world.data.join("run"))
+            .env("TX_E2E_COMMAND", command)
+            .env("TX_E2E_PARAMS", params.to_string());
+        let mut terminal = Terminal::start(helper);
+        assert_eq!(terminal.exit_code(), 0, "terminal helper failed: {}", terminal.screen());
+        let screen = terminal.wait_for("test result:");
+        let response = screen.lines().find_map(|line| line.split_once("TX_E2E_RESPONSE ").map(|(_, value)| value)).expect("terminal helper response");
+        serde_json::from_str(response).expect("terminal helper returned JSON")
     }
 
-    fn window_ok(&self, command: &str, extra: Value) -> Value {
-        let response = self.window(command, extra);
-        assert_eq!(response["ok"], true, "Mac mini's window: {command} failed: {response}");
+    fn person_ok(&self, command: &str, extra: Value) -> Value {
+        let response = self.person(command, extra);
+        assert_eq!(response["ok"], true, "Mac mini's person: {command} failed: {response}");
         response["result"].clone()
     }
 
-    /// "Create pairing code" in Settings → Machines.
+    /// Create a pairing code for this machine.
     pub fn create_code(&self) -> MachineCode {
-        let created = self.window_ok("runtime.machineHost.createCode", json!({}));
+        let created = self.person_ok("runtime.machineHost.createCode", json!({}));
         let code = created["code"].as_str().unwrap_or_else(|| panic!("createCode answered no code: {created}"));
         MachineCode::decode(code).unwrap_or_else(|error| panic!("Mac mini's code does not decode ({error:#}): {code}"))
     }
 
-    /// The approval the window shows, once a computer asks.
+    /// The pending approval, once a computer asks.
     pub fn pending(&self) -> Value {
         wait_until("a computer to ask Mac mini for approval", || status(&self.serve)["pending"].as_object().map(|pending| Value::Object(pending.clone())))
     }
 
     pub fn approve(&self, request_id: &str) {
-        let approved = self.window_ok("runtime.machineHost.approve", json!({ "requestId": request_id }));
+        let approved = self.person_ok("runtime.machineHost.approve", json!({ "requestId": request_id }));
         assert_eq!(approved["approved"], true, "{approved}");
     }
 
     pub fn decline(&self, request_id: &str) {
-        let declined = self.window_ok("runtime.machineHost.decline", json!({ "requestId": request_id }));
+        let declined = self.person_ok("runtime.machineHost.decline", json!({ "requestId": request_id }));
         assert_eq!(declined["declined"], true, "{declined}");
     }
 
     pub fn revoke(&self, id: &str) {
-        let revoked = self.window_ok("runtime.machineHost.revoke", json!({ "id": id }));
+        let revoked = self.person_ok("runtime.machineHost.revoke", json!({ "id": id }));
         assert_eq!(revoked["revoked"], true, "Mac mini revoked {id}: {revoked}");
     }
 

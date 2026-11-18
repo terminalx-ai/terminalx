@@ -80,7 +80,13 @@ impl FileBytes {
 /// These operations are implemented by the cua runtime, never by an owner
 /// fallback. Replies are observations; only the owner can commit task receipts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+// Keep the existing snake_case fields on the guest worker wire.
+#[serde(
+    tag = "operation",
+    rename_all = "snake_case",
+    rename_all_fields = "snake_case",
+    deny_unknown_fields
+)]
 pub(super) enum Operation {
     Discover {
         provider: Provider,
@@ -228,7 +234,13 @@ impl Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
+// Keep the existing snake_case fields on the guest worker wire.
+#[serde(
+    tag = "observation",
+    rename_all = "snake_case",
+    rename_all_fields = "snake_case",
+    deny_unknown_fields
+)]
 pub(super) enum Observation {
     Provider {
         installed: bool,
@@ -476,9 +488,7 @@ impl DeadlineIo for std::os::unix::net::UnixStream {
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) =>
-                {
-                    ()
-                }
+                {}
                 result => return result,
             }
         }
@@ -497,9 +507,7 @@ impl DeadlineIo for std::os::unix::net::UnixStream {
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                     ) =>
-                {
-                    ()
-                }
+                {}
                 result => return result,
             }
         }

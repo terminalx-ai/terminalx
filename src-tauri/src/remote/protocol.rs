@@ -38,6 +38,11 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `composer/3`: `session.attach`, an image uploaded in parts for a
 ///   message that then names it (`images: [{ id }]`, in a mailbox `send` or
 ///   the live `session.send`).
+/// - `composer/4` (PRO-407): files other than images. `session.attach` takes
+///   `kind: "file"` (any media type, up to 25 MB, a name the session's
+///   attachments folder can store), and a send names them (`files: [{ id }]`,
+///   with its images at most 10). The runtime stores them in the session's
+///   attachments folder on its own computer and hands the agent those paths.
 /// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
 ///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
 /// - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
@@ -80,8 +85,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 27] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+pub const CAPABILITIES: [&str; 28] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1",
 ];
 
@@ -101,7 +106,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -331,6 +336,21 @@ pub const METHODS: &[Method] = &[
     method("machine.cloneProject", "machine/6", Manage, false),
     method("machine.cloneStatus", "machine/6", Manage, false),
     method("machine.cloneCancel", "machine/6", Manage, false),
+    // PRO-403: a machine session's Setup and Run. What the session's project
+    // saved on the machine, read there; its runs are the machine runtime's
+    // own panes, listed by `pty.list` with the session and attached as any
+    // terminal. Starting, rerunning or stopping one is the machine's to do.
+    method("machine.sessionActions", "machine/7", Participate, false),
+    method("machine.runAction", "machine/7", Manage, false),
+    method("machine.setupRerun", "machine/7", Manage, false),
+    method("machine.setupStop", "machine/7", Manage, false),
+    // PRO-408: a machine session's cost, Continue in a new tab and Fix check
+    // errors. Reading usage and a continuation's context is a participant's
+    // read; reading check logs runs `gh` and writes a file there, so it is
+    // the manager's. None is replayed: each reads the moment.
+    method("session.usage", "machine/8", Participate, false),
+    method("session.prepareContinuation", "machine/8", Participate, false),
+    method("session.checkFailures", "machine/8", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -355,6 +375,8 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
         "composer/3" => &["session.attach"],
+        // `composer/4` adds no method: `session.attach` takes `kind: "file"`
+        // and `session.send` names `files` (PRO-407).
         "ports/1" => &["ports."],
         "machine/1" => &["machine."],
         "machine/2" => &["machine.relayAccess"],
@@ -362,6 +384,8 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/4" => &["machine.agentSetup", "machine.agentSetupRunning"],
         "machine/5" => &["machine.rotateCredential"],
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
+        "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
+        "machine/8" => &["session.usage", "session.prepareContinuation", "session.checkFailures"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         _ => &[],
     }
@@ -730,6 +754,22 @@ mod tests {
         for code in ["update_confirm", "update_busy", "update_unavailable"] {
             assert_eq!(leak_code(code), code);
         }
+    }
+
+    /// PRO-408: `machine/8` is offered by a machine only; reading usage and
+    /// a continuation is a participant's, reading check logs the manager's.
+    #[test]
+    fn machine_8_is_a_machines_session_parity_only() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/8"));
+        assert!(!workspace.contains(&"machine/8"));
+        for (name, authority) in [("session.usage", Participate), ("session.prepareContinuation", Participate), ("session.checkFailures", Manage)] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("machine/8", authority, false), "{name}");
+            assert!(namespace_prefixes("machine/8").contains(&name), "{name}");
+        }
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/6"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/6"], "an older desktop is not handed machine/8");
     }
 
     /// PRO-351: `machine/6` is offered by a machine only, and every one of

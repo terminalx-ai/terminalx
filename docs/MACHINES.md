@@ -302,13 +302,12 @@ PRO-341 settled these points while building decision 4.
   the same result: each side checks the token against its own registry, so a
   phone's token is refused on `/machine/1` and a computer's on `/`. PRO-342
   and PRO-345 put `/machine/1` in a machine offer's direct endpoints. With no
-  window registered, PRO-359 instead serves the phone in the runtime.
+  window registered, a phone is refused as unreachable, as today.
 - **The relay route goes through PRO-340's `serve_machine`**, so a machine has
   one relay registration. PRO-341 adds two hooks to its `RelayHost`: paired
   computers are admitted from the registry by their relay device id and
   token, and a `conn-open` for any other device goes to the window's phone
-  route, which opens the data leg itself; #1168 serves it in the runtime
-  when no window takes phones. PRO-368 registers a signed-in
+  route, which opens the data leg itself. PRO-368 registers a signed-in
   machine from the account; while it is registered the window stays off the
   relay and makes its phones' invites, credential installs and revocations
   through the runtime's registration ("As built (PRO-368)").
@@ -753,7 +752,7 @@ the pull request that adds it.
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
-| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3) |
+| `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |
 | `pty.create` | `pty/1` | Needs a project | Unless it names a `sessionId` (`pty/2`), which places it in that session's folder |
 | `pty.list` | `pty/1` | Served | Every terminal; each names its session or project |
 | `pty.write` | `pty/1` | Served | |
@@ -847,6 +846,13 @@ the pull request that adds it.
 | `machine.cloneProject` | `machine/6` | Served | Manage only; starts a clone with the machine's git sign-in |
 | `machine.cloneStatus` | `machine/6` | Served | Manage only; names the clone |
 | `machine.cloneCancel` | `machine/6` | Served | Manage only; names the clone |
+| `machine.sessionActions` | `machine/7` | Served | Names a session; its project's saved actions, preview URLs and setup script as the machine has them, its ports and its setup run (PRO-403, [Setup and Run](#as-built-pro-403-setup-and-run-in-a-machine-session)) |
+| `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
+| `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
+| `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
+| `session.usage` | `machine/8` | Served | Names the session; its tokens and cost read again from the machine's transcripts, how each agent signs in there, and the machine's usage windows (PRO-408, [Session parity](#as-built-pro-408-cost-account-continue-and-fix-check-errors)) |
+| `session.prepareContinuation` | `machine/8` | Served | Names the session and an agent tab; the tab's context with the machine's own transcript path |
+| `session.checkFailures` | `machine/8` | Served | Manage only; names the session, an agent tab and a pull request's https URL; its failed check logs read with the machine's `gh` into the session's attachments folder there |
 
 Not settled by any ticket yet: asking a machine to merge one of its pipelines
 from the operating computer. A runtime has no `pipeline.merge`
@@ -1042,14 +1048,17 @@ as a user service and is paired from its own terminal. The user's guide is
   witness's pid from the kernel (`SO_PEERCRED`, `LOCAL_PEERPID`), challenges it
   with the nonce, and refuses (`person_required`) the runtime itself, any
   process it started, one whose controlling terminal is one of its terminals,
-  and, on a runtime with no window, one with no controlling terminal. The
-  window's client sends a witness too. `pair` also refuses when its input or
-  output is not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known
-  limits: a same-user process that detaches and opens a pseudo-terminal of its
-  own looks like a person anywhere; and on a desktop-launched runtime, which
-  must let the terminal-less window through, a process that detaches with
-  `setsid` and has no terminal is let through too, until the runtime can
-  recognise the window process itself (PRO-369).
+  and one with no controlling terminal: on a runtime with no window always;
+  on a runtime the desktop launched on a Mac, unless it proves it is the
+  window (PRO-369). The window's client sends a witness too, with a MAC of the
+  witness socket and nonce under a key derived from the machine's host key,
+  which only the window (its Keychain item) and the runtime (the copy the
+  window handed over) hold. `pair` also refuses when its input or output is
+  not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known limits: a
+  same-user process that detaches and opens a pseudo-terminal of its own
+  looks like a person anywhere; and a desktop-launched runtime that keeps its
+  own host key (not on a Mac) holds nothing only the window knows, so there a
+  process that detaches with `setsid` and has no terminal is let through.
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
@@ -1140,7 +1149,8 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
 - **A headless server** has no host binding, so it is not listed on the
-  account; it pairs from its terminal (PRO-353).
+  account; it pairs from its terminal (PRO-353). Relay registration does not
+  create that binding.
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -1318,9 +1328,8 @@ host key is ready and someone is signed in on the machine, its runtime
 registers with the relay under its relay host id (`machineId`), through the
 same `RelayHost` as `--relay-link` (`MachineHost::start_relay`,
 `src-tauri/src/machine_host.rs`). It serves the machine's one `WorkspaceRpc`,
-admits paired computers by their relay device id and routes phones to the
-window when it takes them, or to the runtime otherwise (#1168). Registration
-alone does not authorize a phone; its link is
+admits paired computers by their relay device id and routes other devices to
+the window's phone route when present, or to the runtime's phone host. Its link is
 `remote::account_link::AccountLink`:
 
 - The token comes from `POST /v1/desktop/machine-host/relay-session`
@@ -1403,9 +1412,11 @@ each frame on its control socket and answers the relay's reply to its `reqId`
 `account-pairing-changed` hint on the runtime's registration reaches the window
 as `machine_host_relay_hint`, so account grants are answered as promptly. The
 window registers its phone route whenever the runtime is registered, whoever
-holds the direct port, so phones' relay connections reach it as before. When
-the runtime's registration ends or changes, the window's use of it ends and the
-supervisor picks again.
+holds the direct port. When that route takes over, runtime-served phones are
+disconnected and reconnect through the window. When the runtime's registration
+ends or changes, the window's use of it ends and the supervisor picks again.
+Retaining registration cancellation through window forwarding remains open in
+[#1239](https://github.com/terminalx-ai/terminalx/issues/1239) (the #1236 review).
 
 **Capability.** The window's host binding advertises `machine-operating.v1`
 only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
@@ -1891,10 +1902,14 @@ which runs in a child process because data privacy is one switch per process.
 - **A shell on the operating computer can remove a machine** by editing
   `machines.json` or the Keychain. That loses this computer's own access and
   gains nothing, so no integrity key guards it.
-- **Consent cannot yet tell the window from a detached process** of the same
-  user on a desktop runtime (`serve_cli::consent`); recognising the window is
-  PRO-369. A same-user process that opens a pseudo-terminal of its own to run
-  `terminalx-serve pair` also passes.
+- **Consent identifies the window on supported Mac desktops**
+  (`serve_cli::consent`, PRO-369): the window proves it holds the host key in
+  its Keychain item. A desktop runtime without a window-owned key, including
+  a non-Mac desktop or a Mac whose application identifier is missing or
+  invalid, refuses consent-guarded pairing actions even from a terminal. A
+  separately launched headless runtime still permits an unrelated interactive
+  terminal. A same-user process that opens its own pseudo-terminal can pass
+  the terminal check on supported Mac desktops and headless runtimes.
 - **A computer on a runtime before PRO-357** does not rotate its token (it
   does not ask for `machine/5`). Its token still expires after 90 days unused.
 - **Whoever holds a computer's client key and token is that computer.** With
@@ -1972,8 +1987,8 @@ Why the protocol changed: a phone could not reach a Mac whose window was
 closed, or a server with no window at all. The runtime that already holds the
 direct port now answers phones too, with nothing new on the phone's wire.
 
-- **Who serves a phone.** The direct listener (`machine_host/direct.rs`) passes
-  a phone to the window while one has registered `phoneRoute`, as since PRO-341.
+- **Who serves a phone.** The direct listener (`machine_host/direct.rs`) and
+  runtime relay pass a phone to the window while one has registered `phoneRoute`.
   Without one, the runtime serves it (`machine_host/phones.rs`). It uses the same
   E2EE v2 handshake with the machine's one host key, the same `devices.json`
   records and the same RPC. The RPC moved from the desktop-only `pairing` module
@@ -2002,12 +2017,21 @@ direct port now answers phones too, with nothing new on the phone's wire.
   false on a runtime no desktop app launched (`TERMINALX_LOCAL_DESKTOP`), and
   the phone shows such a machine with the server icon. Older phones read only
   `name`; older computers send only `name`, and the phone keeps what it had.
-- **The runtime answers phones** with `pairing.getEndpoints` as
-  direct endpoints and, while registered, relay assignment details; otherwise
-  `relay` is null. An authenticated phone can provision a relay resume
-  credential over a direct connection or an invite connection. The runtime
-  checks the registration around relay control requests, and supports install
-  status and resume confirmation. Registration itself grants no phone access.
+- **Relay discovery and provisioning.** `pairing.getEndpoints` returns
+  `{ v: 1, directEndpoints, relay }` to an authenticated phone. While the
+  runtime has a registered relay, `relay` describes its current director, cell,
+  assignment, host id and E2EE framing; otherwise it is `null`. Registration
+  depends on hosting being enabled, a ready host key, a signed-in account and
+  a working relay link, with the debug-build restriction and failure states
+  described under PRO-368 above. Direct endpoints remain available when the
+  relay is absent; a phone can retain an existing relay bundle for later.
+  `pairing.provisionRelay` installs a phone's resume-token hash through the
+  current registration, authorized by its authenticated direct connection or
+  an invite-based relay connection. It is unavailable on other relay
+  connections or without active relay control. Control requests fail if the
+  registration changes during the request or the relay refuses or fails to
+  answer. Endpoint requests can also ask for install status or, on a resume
+  connection, resume confirmation (`machine_host/phones.rs`).
 - **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
   window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
   no relay; the strict offer schema is unchanged). It prints the link as a
@@ -2024,18 +2048,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Relay admission and cleanup (#1168).** With no window taking phones, the
-  runtime serves relay connections as well as direct connections. It checks the
-  encrypted device token, account binding, and relay device identity before
-  admission; session-scoped invitations remain with the window that shared the
-  session. A window takeover, host stop, or changed relay registration fences
-  in-flight connections. Revocation and account changes close affected phones
-  and retire their relay credentials. A durable cleanup journal retries pending
-  relay revocations across restarts until the relay acknowledges them.
-- **Remaining limit.** A headless machine has no account host binding and is
-  not listed in the account directory; pair its phone from the terminal. The
-  phone code carries direct endpoints only, so initial pairing needs a direct
-  route. A registered relay can be provisioned after authentication.
+- **Discovery.** Relay registration alone does not make a headless machine
+  discoverable on a phone through the account: the headless runtime does not
+  create a host binding or run the window's host-binding poll. A phone can list
+  the machine after pairing from its terminal. The account list shows Linux and
+  SSH machines as servers when they are listed.
 
 ## Session feature parity
 
@@ -2049,24 +2066,26 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Transcript replay, live events, tool rows, images | Works | `session.subscribe` on the machine |
 | Composer: `/` commands, `@` files, model, effort, mode | Works; lists come from the machine (`composer/2`, `session.files`) | PRO-347 |
 | Image attachments | Works; uploaded to the machine by session | PRO-347 |
-| Other file attachments | Follow-up | PRO-407 |
+| Other file attachments | Works; uploaded to the machine (`composer/4`), stored in the session's attachments folder there, and the agent is handed those paths | PRO-407 |
 | Send, steer, stop, interrupt, approvals, questions | Works, live over `agent-commands/1`; nothing is queued on this computer while the machine is away | PRO-343, PRO-347 |
 | Settings chosen before a send (model, effort, mode) | Works; sent with the next `session.send` | PRO-347 |
 | Agent tabs: add, close, switch | Works (`session.addTab`, `session.close`) | PRO-347 |
 | Terminal view of an agent tab | Works (`agent-pty/1`) | PRO-347 |
 | Shell terminals | Works; created in the session on the machine, docked in the side panel as "{machine} terminal N" | PRO-347 |
-| Setup and Run scripts, Run menu, restart offer | Follow-up | PRO-403 |
+| Setup and Run scripts, Run menu, restart offer | Works: read and run on the machine (`machine/7`); the dock's Setup and Run tabs, each action's run a dock tab; previews open through a forward | PRO-403 |
 | Changes, diffs, staging, commit, push | Works on the machine through `git/1`; commits carry this computer's git identity, push uses the machine's git sign-in | PRO-347 |
 | The branch's PRs in the side panel | Works through the machine's `git/1` (`git.prs`) | PRO-347 |
-| Header branch button: diff size, Create PR | Follow-up | PRO-404 |
-| Files, editor, file search | Works, rooted at the session's worktree when it is inside the project | PRO-347 |
-| Files for a worktree outside the project folder | Follow-up; Files shows the project's folder | PRO-405 |
-| Remove the session's worktree, merged cleanup | Follow-up | PRO-406 |
+| Header branch button: diff size, Create PR, push, pull, mark ready, merge, agent steps | Works; read from the machine's `git/1` (`git.status`, `git.prs`, the branch's diff against its base) as files change there, and run there with its Git sign-in; Merge is pinned to the head that was read (`git.prMerge` `head`). A cloud workspace session keeps the branch chip only | 21.08, PRO-404 |
+| Files, editor, file search | Works, rooted at the session's worktree: the repository Changes shows, inside the project or in an absolute worktree folder | PRO-347, PRO-405 |
+| Remove the session's worktree once its PR merged | Manual Delete workspace works on the machine (`workspace/1`); automatic cleanup is machine-owned and depends on its own running cleanup passes and settings | PRO-406, [#1212](https://github.com/terminalx-ai/terminalx/issues/1212) |
 | Rename, archive, pin | Works | PRO-346 |
 | Header chip (machine, state, route), "Runs on" strip | Works; the chip opens the connection popover | 21.08, 21.09, PRO-347, PRO-352 |
 | Reconnecting and unreachable states in the session | Works; the composer keeps what is typed and sends nothing until the machine is back and the person sends it | 21.09, PRO-347, PRO-352 |
 | Agent sign-in notice | Works; names the machine ("Sign in from its page") | 21.09, PRO-350 |
-| Cost chip, agent account label, Continue in a new tab, Fix check errors | Follow-up | PRO-408 |
+| Cost chip | Works; the totals come with the machine's session list, and the popover reads them again, how each agent signs in and the usage windows on the machine (`session.usage`) | PRO-408 |
+| Agent account label and tab mark | Works; the account the tab runs on as the machine lists its agent's accounts (`accountLabel`), only when that agent has several there | PRO-408 |
+| Continue in a new tab | Works; a new agent tab in the session on the machine, handed the tab's context read there (`session.prepareContinuation`) | PRO-408 |
+| Fix check errors | Works; the PR from the machine's `git/1`, its failed logs read with the machine's `gh` (`session.checkFailures`), the prompt sent to the tab on the machine | PRO-408 |
 | Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
 | Computer use | Hidden | Decision 7 |
 | Dictation into a terminal | Hidden; dictation into the composer works | Decision 7 |
@@ -2089,6 +2108,24 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Worktree root.** The session's `cwd` relative to its project's `path`
   (compared as strings, never opened here) is the base of `cloudFileSource`;
   Changes uses the repository `git.repositories` lists for that worktree.
+
+### As built (PRO-405)
+
+- **A worktree outside the project.** When Settings keeps worktrees in an
+  absolute folder, `git.repositories` names the project's own worktrees there
+  by canonical absolute path, and `fs/1` takes exactly those absolute paths
+  for the project (`WorkspaceFiles::lexical`/`existing_path`, re-read on each
+  `git.repositories`); any other absolute path, another project's worktree
+  beside it, or one that climbs or links out is `path_forbidden`
+  (`remote::machine_tests`, `machines_e2e`). No `sessionId` scope is needed:
+  the runtime's check is against the project's worktrees either way.
+- **Files and Changes agree.** `sessionFilesBase` roots Files, the editor and
+  search at the repository `sessionRepository` picks for Changes: `""`, a
+  relative worktree, or that absolute path. A worktree inside the project is
+  rooted before the list arrives; one outside waits for it. A
+  `cloudFileSource` with an absolute base opts in to absolute paths
+  (`remoteFilePath(path, true)`, no `.` or `..` part); every other source
+  still sends only workspace-relative ones.
 - **Live commands.** The machine's agent scope (no organization) sends
   `session.send/steer/stop/decide` with a `clientRequestId` when
   `agent-commands/1` is granted. A decision keeps one id per request across
@@ -2098,6 +2135,150 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 - **Paths.** The session's display root is `machine://<m>:<p>[/<worktree>]`,
   which `assertLocal` refuses; PR associations skip `machine:` keys like
   `cloud:` ones, so nothing of the machine is looked up on this computer.
+
+### As built (PRO-403): Setup and Run in a machine session
+
+A local session's Run menu, Open button, restart offer and the dock's Setup
+and Run tabs read the project's scripts from this computer's settings and run
+them here. A machine session (screen 21.08 shows Setup and Run beside the
+machine's terminal) has all of them, and everything is the machine's.
+
+`machine/7` adds four methods. Only a runtime that serves its machine grants
+it; reading is open to whoever sees the session, running is the manager's.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `machine.sessionActions` | `{ sessionId }` | `{ actions, previewUrls, setupScript, setupApplies, available, ports, setup }` |
+| `machine.runAction` | `{ sessionId, actionId, restart? }` | `{ started, run: { actionId, name, ptyId, state, exitCode }, terminal }` |
+| `machine.setupRerun` | `{ sessionId }` | `{ setup }` |
+| `machine.setupStop` | `{ sessionId, paneId }` | `{ setup }` |
+
+- **Read on the machine.** `actions` and `previewUrls` are the project's in
+  the machine's `projects.json`; `setupScript` is what the machine would run
+  (its project store, or the repository layers it trusts). Nothing is read
+  from this computer's settings, and the empty states say to save scripts on
+  the machine. `ports` is the session's port block there: a preview's `$PORT`
+  is the machine's port.
+- **Run on the machine.** `machine.runAction` and the setup calls go through
+  the machine runtime's own `action_runner` and `workspace_setup`, exactly as
+  its own window's Run menu does: in the session's folder there, with its
+  environment layers, `TERMINALX_PORT`/`TERMINALX_PORTS` and
+  `TERMINALX_ACTION_ID`. A non-concurrent action already running answers
+  `started: false` with that run; `restart` stops it and starts it again.
+  Its own "Run after setup" starts there too. Nothing runs on this computer.
+- **Runs are terminals.** Each run is the runtime's pane
+  (`<session>:action-…`, `<session>:workspace-setup-…`). The machine's
+  protocol server records it from its first byte, as an agent's terminal, and
+  `pty.list` lists it with its session and a `run`
+  (`{ kind: "action", actionId, name }` or `{ kind: "setup" }`); `pty.attach`,
+  `pty.write`, `pty.resize` and `pty.control` work on it as on any terminal.
+  The caller who started a run controls it. A run found already exited is
+  given what the runtime kept of its output; one still running that started
+  before the server existed shows its output from when it was first seen. It
+  is never counted against `MAX_PTYS` and an eviction drops only this record,
+  not the runtime's pane; `pty.kill` on an action's run ends it, and on the
+  setup's is refused (`machine.setupStop` stops it).
+- **The desktop.** `useMachineSessionRuns` (`src/lib/machineRuns.ts`) reads
+  `machine.sessionActions` on each connect, again whenever a run starts or
+  ends, and every 2 s while setup is going. The header's Run menu and Open
+  button are the local `RunControls` over that source; the restart offer is
+  the same strip. The dock (`MachineTerminalDock`) has Setup and Run first,
+  then the machine's shells, then each action's run as a tab named by its
+  action; the setup's terminal shows inside Setup. A machine without
+  `machine/7` shows no Run menu, and Setup and Run say in one line to update
+  it ("Setup and Run scripts" in `MACHINE_FEATURES`).
+- **Previews.** A preview URL on the machine itself (a loopback host) opens
+  in TerminalX's built-in browser through a forward of that port (`ports/1`,
+  PRO-355), made when there is none; with Forwarding off, or a machine
+  without `ports/1`, it is not opened and says why. Any other URL opens as
+  it is. No path of the machine is opened on this computer.
+### As built (PRO-408): cost, account, Continue and Fix check errors
+
+`machine/8` adds three methods for a session the caller may see, and each tab
+of `session.list` and `session.sessions` carries the account it runs on
+(`src-tauri/src/remote/machine_session.rs`). A machine that does not grant
+`machine/8` (an older TerminalX) shows the cost its tabs' `usage` carries and
+none of the rest.
+
+- **Cost chip.** A machine tab's `usage` is in the session list, so the chip
+  draws from it as a local session's does. Opening the popover asks
+  `session.usage`: the machine reads every tab's transcripts again (a move
+  goes out as `session.sessions`), and answers how each agent there signs in
+  (`loginMethods`, from the tab's account: an added key is "API key", an added
+  subscription the agent's account kind, the machine's own login what its CLI
+  says) and the machine's usage windows of those agents. The copied command
+  names the session's id on the machine and says to run it there; Open Stats
+  is left out, as Stats counts this computer's sessions.
+- **Account label.** `accountLabel` is the label of the account the tab runs
+  on, or last ran on (its `launchedAccount`, else `account`, else the
+  machine's own login), and only when that agent has two or more accounts on
+  the machine, and is sent only to a connection that manages the machine,
+  since a label can be an email address. The header's label and the tab's
+  mark read it, and never this
+  computer's accounts (`TabAccountLabel`, `TabAccountMark`).
+- **Continue in a new tab.** The title-bar button reads "Continue in a new
+  tab…" where the machine grants `machine/8` and `session/2`. The dialog
+  (`MachineContinueDialog`) reads `session.prepareContinuation`, offers the
+  machine's agents and models starting from the source tab's settings, and
+  Recent context or Full transcript (only when the machine has the transcript).
+  Continue adds the tab (`session.addTab`) and sends it the handoff as any
+  message; a send that fails keeps that tab and the next try sends to it,
+  never adding a second.
+- **Fix check errors.** The Branch tab's Fix errors and the shortcut find the
+  session's PR through the machine's `git/1` (`sessionPrs` on its
+  `cloudGitSource`), ask `session.checkFailures` for the logs, and send the
+  same prompt as on this computer, naming the machine's file. Nothing of this
+  computer's `gh` is used; a participant cannot ask for logs.
+
+### As built (PRO-406): removing a machine session's worktree
+
+- **The host.** `machineWorkspaceHost` (`src/lib/machineWorkspaceHost.ts`) is
+  the session's `RemovableWorkspace` host while this Mac manages the machine,
+  the machine grants `workspace/1` and the session has a worktree. It calls
+  `workspace.disposition` and `workspace.remove` named by the session, so the
+  machine runs the checks a local removal runs (uncommitted work, unpushed
+  commits, the pull request, the second confirmation's digest). Nothing on
+  this computer is read or removed; the machine's path is only shown.
+- **Where it is offered.** As for a cloud session: once the PR merged, the
+  chat's Delete workspace opens the standard removal dialog with this host.
+  The sessions that went with the worktree leave the sidebar at once
+  (`forgetMachineSessions`); a lost answer counts as removed only when the
+  machine no longer lists the session.
+- **Left out.** Keeping the conversations (`keepSessions`) is refused, as on a
+  cloud workspace: `workspace.remove` deletes the worktree's sessions. This
+  desktop does not run merged clean-up passes on a machine (`workspace/2`).
+
+**Parity disposition ([#1212](https://github.com/terminalx-ai/terminalx/issues/1212)).**
+Automatic merged-workspace cleanup is owned by the machine, using its own
+settings and local cleanup driver. PRO-406 does not require a separate desktop
+control or desktop-driven passes for paired machines. No implementation remains
+in this scope; a future remote control would need an explicit product and
+authorization decision, including its settings and safeguards. Connecting a
+machine does not turn cleanup on or copy this Mac's preferences.
+
+This is conditional parity, not a promise of unattended cleanup on every
+machine: `src/lib/mergedCleanup.ts` drives passes in the main app window for
+the local host and connected cloud workspaces, and does not select paired
+machines. A machine with no local driver running will not get automatic passes
+from this desktop. The local `mergedSweep` in
+`src-tauri/src/local_runtime/workspaces.rs` reads that host's enabled projects,
+grace period and conversation setting. The `workspace/2` RPC is a separate
+manager-authorized operation whose caller supplies its scope settings
+(`src-tauri/src/remote/server.rs`); its availability is not itself a scheduler
+or an instruction to apply this Mac's settings.
+
+Acceptance evidence for this disposition:
+
+- `src-tauri/src/store/settings.rs` tests the default-off setting and project
+  overrides; `src-tauri/src/merged_cleanup_tests.rs` covers disabled cleanup,
+  grace periods, dirty and active work, and branch outcomes.
+- `src-tauri/src/remote/cleanup_tests.rs` covers manager/capability gating,
+  held and dirty worktrees, removal records and restore, and verifies that an
+  unconfirmed stop is not reported as removed.
+- `src/lib/machineSession.removableWorkspace.test.ts` covers the manual machine
+  host and its availability; `src/lib/mergedCleanup.ts` defines the current
+  local/cloud host selection. These are source and test evidence, not a claim
+  that a headless machine runs its own timer.
 
 ### As built (PRO-348): a new session on a machine
 
@@ -2439,7 +2620,7 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
 | Item | Mac to Mac | Mac to Linux | Other evidence |
 | --- | --- | --- | --- |
 | Pair by code, fingerprint, Allow | Two-machine CI (the window approves) | Two-machine CI (`terminalx-serve pair`, answered `y`) | `pairing_tests`, `security_tests` |
-| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; signed-in relay registration is built in PRO-368 |
+| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; the relay registration for a signed-in machine is PRO-368 (in review) |
 | Sessions and chat (create, send, read) | Two-machine CI | Two-machine CI | |
 | Approvals, stop | Two-machine CI (`session.decide`, `session.interrupt`) | Two-machine CI | |
 | Terminals (create, resize, reconnect, replay) | Two-machine CI | Two-machine CI | |
@@ -2480,8 +2661,10 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   desktop, agents and sign-in, the account route and the command line have
   their own tests but no two-machine scenario.
 - **Security review (PRO-357).** Every threat has a mitigation and a test, or
-  is an accepted risk above. The one open finding has a ticket: PRO-369
-  (telling the window from a detached process during consent), in Backlog.
+  is an accepted risk above. The one open finding, telling the window from a
+  detached process during consent, is closed on a Mac by PRO-369.
   The agent control changed in PRO-360 (pairing instead of the switch) by the
   owner's decision.
-- **Still open in the epic:** session follow-ups PRO-403 to PRO-408, in Backlog.
+- **Still open in the epic:** PRO-368 (relay registration for a signed-in
+  machine) and PRO-359 (the phone), both in review; session follow-ups
+  PRO-403 to PRO-407, in Backlog.

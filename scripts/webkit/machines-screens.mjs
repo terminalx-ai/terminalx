@@ -51,7 +51,7 @@ const VIEWPORT = { width: 1440, height: 900 };
 const TITLE = "Add read markers to the catalog feed";
 // Every feature this desktop uses, so no connected machine is shown as needing an update (PRO-354).
 const CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
-  "composer/1", "composer/2", "composer/3", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
+  "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
   "machine/1", "machine/2", "machine/3", "machine/4"];
 
 // Runs in the page, after the stub. `settings` adds ci-box and Studio to the paired machines; `none` pairs none (PRO-360).

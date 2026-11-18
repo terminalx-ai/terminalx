@@ -326,6 +326,7 @@ mod tests {
             worktree_name: None,
             issue: None,
             final_message: None,
+            deferred_completion: None,
             changed_files: None,
             usage: None,
             precheck: None,

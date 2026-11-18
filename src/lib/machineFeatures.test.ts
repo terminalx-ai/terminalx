@@ -13,9 +13,9 @@ import {
   missingMachineFeatures,
 } from "./machineFeatures";
 
-// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–4 and machine/6.
+// What a current machine grants: every namespace but the ones it withholds by design, and machine/1–7.
 const WITHHELD = ["keys/1", "mirror/1", "collab/1"];
-const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6"];
+const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8"];
 const without = (...names: string[]) => CURRENT.filter((name) => !names.includes(name));
 const connected = { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 4 } as const;
 
@@ -101,5 +101,14 @@ describe("machine features", () => {
     expect(machineFeaturesMessage("dev-server", "0.2.33", missingMachineFeatures(without("machine/4", "machine/6")))).toBe(
       "dev-server runs TerminalX 0.2.33. Update it to sign in its agents and add and remove its projects from here.",
     );
+  });
+
+  it("hides a session's Run menu and Setup and Run tabs on a machine without machine/7 (PRO-403)", () => {
+    const feature = machineFeature("machine/7")!;
+    expect(feature).toEqual({ id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" });
+    expect(machineHasFeature(without("machine/7"), "machine/7")).toBe(false);
+    expect(machineHasFeature(CURRENT, "machine/7")).toBe(true);
+    expect(machineFeatureMessage("dev-server", "0.2.33", feature)).toBe("dev-server runs TerminalX 0.2.33. Update it to run its sessions' Setup and Run scripts from here.");
+    expect(missingMachineFeatures(without("machine/7")).map((entry) => entry.id)).toEqual(["sessionRuns"]);
   });
 });

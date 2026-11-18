@@ -3,8 +3,8 @@ import { keepMessageTime, newestMessageTime } from "@/lib/messageActivity";
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
-import type { ImageInput } from "@/lib/api";
-import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
+import type { FileInput, ImageInput } from "@/lib/api";
+import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages, uploadMachineFiles, type MachineFileRef } from "@/lib/cloudComposer";
 import type { CloudImageRef } from "@/lib/cloudAgentApi";
 import {
   cloudAgentApi,
@@ -1125,9 +1125,17 @@ async function enqueue(
  * A prompt: now if the agent is idle, else queued as a follow-up by the runtime.
  * With `wake: false` it starts nothing: a workspace that is not running refuses it (`WORKSPACE_STOPPED`) and nothing is kept.
  */
-export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean } = {}) {
+export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean; files?: FileInput[] } = {}) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
+  const files = options.files ?? [];
+  // Files other than images go to a machine only (PRO-407), uploaded before the images so a refused file costs no image upload.
+  if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
+  let attachedFiles: MachineFileRef[] = [];
+  if (files.length) {
+    const target = liveTarget(scope, tabId, client);
+    attachedFiles = await uploadMachineFiles(target.client, { sessionId: target.sessionId, tabId }, files, images.length);
+  }
   // Images go to the runtime first (PRO-22); the message then names them. A
   // mailbox command is far too small to carry one.
   let attached: CloudImageRef[] = [];
@@ -1138,11 +1146,11 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
     attached = await uploadCloudImages(client!, { sessionId: tab.info.sessionId, tabId }, images);
   }
   const withImages = attached.length ? { images: attached } : {};
-  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached);
+  if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached, attachedFiles);
   const sent = tab?.pendingConfig ?? null;
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
-  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, options);
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, { wake: options.wake });
   if (images.length) sentImages.set(entry.clientCommandId, images);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
@@ -1193,14 +1201,14 @@ function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, r
  * prompt during a turn waits in the tab's follow-up queue there. Settings
  * chosen while away ride with it, as they ride with a mailbox send.
  */
-async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = []): Promise<OutboxEntry> {
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = [], files: MachineFileRef[] = []): Promise<OutboxEntry> {
   const s = store(scope);
   const target = liveTarget(scope, tabId, client);
   const durable = takesLiveCommands(scope, target.client);
   const settings = durable ? (s.tabs.get(tabId)?.pendingConfig ?? null) : null;
   let receipt: { settingsIgnored?: boolean } | undefined;
   try {
-    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(settings ?? {}) });
+    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(settings ?? {}) });
   } catch (error) {
     throw liveCommandError(error);
   }

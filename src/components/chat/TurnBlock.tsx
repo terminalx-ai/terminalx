@@ -52,6 +52,7 @@ export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
 interface TurnProps {
   turn: Turn;
   sessionId: string;
+  tabId?: string;
   checkpointTabId?: string;
   cwd?: string;
   stream: StreamBlock[];
@@ -85,6 +86,7 @@ function TurnBody({
   agent,
   turn,
   sessionId,
+  tabId,
   checkpointTabId,
   cwd,
   stream,
@@ -183,7 +185,7 @@ function TurnBody({
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet} />}
     </div>
   );
 }
@@ -312,8 +314,10 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
  * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet }: {
+function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet }: {
   turn: Turn;
+  sessionId: string;
+  tabId?: string;
   outcome: Outcome | null;
   fallback?: TurnFallback;
   onSecondOpinion?: (turn: Turn) => void;
@@ -327,7 +331,8 @@ function TurnFooter({ turn, outcome, fallback, onSecondOpinion, secondOpinionAge
   const text = answer.map((w) => w.text).join("\n\n");
   const [copied, setCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const reading = useReadingAloud(turn.key);
+  const speechKey = JSON.stringify([sessionId, tabId ?? null, turn.key]);
+  const reading = useReadingAloud(speechKey);
   useEffect(() => {
     if (!copied) return;
     const id = window.setTimeout(() => setCopied(false), 1500);
@@ -366,7 +371,7 @@ function TurnFooter({ turn, outcome, fallback, onSecondOpinion, secondOpinionAge
       )}
       {text && canReadAloud() && (
         <button type="button" aria-label={reading ? "Stop reading aloud" : "Read aloud"} title={reading ? "Stop reading aloud" : "Read aloud"} aria-pressed={reading}
-          onClick={() => (reading ? stopReading() : readAloud(turn.key, text))} className={cn(icon, !reading && hover, reading && "text-foreground")}>
+          onClick={() => (reading ? stopReading() : readAloud(speechKey, text))} className={cn(icon, !reading && hover, reading && "text-foreground")}>
           {reading ? <Square className="size-3" /> : <Unmute className="size-3.5" />}
         </button>
       )}
@@ -586,14 +591,14 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string }) {
+export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string; failed?: boolean }) {
   const layout = usePrefs().transcriptLayout;
   return (
-    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy>
+    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy={!failed}>
       <ReaderMessage message={message} cwd={cwd} className="mb-1 opacity-70" />
-      <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
+      {!failed && <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
         Sending…
-      </div>
+      </div>}
     </div>
   );
 }
