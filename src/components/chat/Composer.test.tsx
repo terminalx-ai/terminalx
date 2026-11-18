@@ -25,7 +25,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
-const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[] }));
+const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[], loaded: false }));
 vi.mock("@/lib/models", async (original) => ({
   // The pure helpers stay real; only the list and its loading are stubbed.
   ...(await original<typeof import("@/lib/models")>()),
@@ -34,6 +34,7 @@ vi.mock("@/lib/models", async (original) => ({
   refreshModels: vi.fn(),
   upgradeHint: () => null,
   useModels: () => listed.models,
+  useModelsLoaded: () => listed.loaded,
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 
@@ -90,6 +91,37 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/** Open a row's submenu (Agent, Model, Effort) in the open model picker and return it. */
+async function openRow(name: RegExp): Promise<HTMLElement> {
+  const top = (await screen.findAllByRole("menu", { hidden: true }))[0]!;
+  fireEvent.keyDown(within(top).getByRole("menuitem", { name, hidden: true }), { key: "ArrowRight" });
+  return waitFor(() => {
+    const menus = screen.getAllByRole("menu", { hidden: true });
+    if (menus.length < 2) throw new Error(`the ${name} submenu is not open`);
+    return menus.at(-1)!;
+  });
+}
+
+/** Close an open submenu, back to the picker. */
+async function closeRow(sub: HTMLElement) {
+  fireEvent.keyDown(sub, { key: "ArrowLeft" });
+  await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true })).toHaveLength(1));
+}
+
+/** The open picker's choices, the Model submenu's and then the Effort submenu's, as `[text, ticked, disabled]`. */
+async function pickerChoices(): Promise<{ text: string; ticked: boolean; disabled: boolean }[]> {
+  const rows: { text: string; ticked: boolean; disabled: boolean }[] = [];
+  const top = (await screen.findAllByRole("menu", { hidden: true }))[0]!;
+  for (const name of [/^Model/, /^Effort/]) {
+    if (!within(top).queryByRole("menuitem", { name, hidden: true })) continue;
+    const sub = await openRow(name);
+    rows.push(...within(sub).queryAllByRole("menuitemradio", { hidden: true }).map((item) => ({ text: item.textContent ?? "", ticked: item.getAttribute("aria-checked") === "true", disabled: item.getAttribute("aria-disabled") === "true" })));
+    await closeRow(sub);
+  }
+  return rows;
+}
+const choiceTexts = async () => (await pickerChoices()).map((row) => row.text);
 
 it("shows setup progress while still letting the agent take a prompt", async () => {
   const onSend = vi.fn();
@@ -339,24 +371,28 @@ describe("composer pickers", () => {
   // hidden: an open modal menu hides the rest of the page from the accessibility tree.
   const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
 
-  it("offers handoff as a new tab and warns about the cache before a mid-chat setting change", async () => {
+  it("offers handoff as a new tab under Agent, with no standing warning about the cache", async () => {
     const run = vi.fn();
     const onSetModel = vi.fn();
     const props = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel, onSetEffort: vi.fn(), onSetMode: vi.fn() };
     const { rerender } = render(<Composer {...props} hasConversation agentHandoff={{ id: "claude", name: "Claude Code", run }} />);
     mouseClick(screen.getByTestId("model-picker"));
-    const handoff = await screen.findByRole("menuitem", { name: /Hand off to Claude Code/ });
+    const top = await screen.findByRole("menu");
+    // Agent, Model and Effort are rows that each open a submenu.
+    expect(within(top).getByTestId("model-picker-agent").textContent).toBe("AgentCodex");
+    expect(top.textContent).not.toContain("prompt cache");
+    expect(screen.queryByRole("note")).toBeNull();
+    const agents = await openRow(/^Agent/);
+    const handoff = within(agents).getByRole("menuitem", { name: /Hand off to Claude Code/, hidden: true });
     expect(handoff.textContent).toContain("Opens in a new tab");
-    expect(screen.getByRole("note").textContent).toContain("rebuild the prompt cache");
-    expect(onSetModel).not.toHaveBeenCalled();
     fireEvent.click(handoff);
     expect(run).toHaveBeenCalledTimes(1);
     expect(onSetModel).not.toHaveBeenCalled();
     rerender(<Composer {...props} />);
     mouseClick(screen.getByTestId("model-picker"));
     await screen.findByRole("menu");
-    expect(screen.queryByRole("menuitem", { name: /Hand off/ })).toBeNull();
-    expect(screen.queryByRole("note")).toBeNull();
+    await openRow(/^Agent/);
+    expect(screen.queryByRole("menuitem", { name: /Hand off/, hidden: true })).toBeNull();
   });
 
   it("the model picker opens on a real mouse click and closes on a second one", async () => {
@@ -376,7 +412,7 @@ describe("composer pickers", () => {
 
   it("open on an accessibility press (a click with no pointerdown)", async () => {
     render(<TestComposer onSend={vi.fn()} />);
-    for (const name of [/Default/, /More options/]) {
+    for (const name of [/Default/, /^Permission mode/]) {
       accessibilityPress(picker(name));
       await screen.findByRole("menu");
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
@@ -425,28 +461,31 @@ describe("a Claude alias in the model picker (#256)", () => {
   it("offers a cloud tab the aliases only, and keeps a pinned version it is already on", async () => {
     const view = show({ modelsAreLocal: false });
     mouseClick(screen.getByTitle("Model: Opus (latest)"));
-    let menu = await screen.findByRole("menu");
+    await screen.findByRole("menu");
     // The desktop's pinned versions may not exist on the workspace's CLI.
-    expect(menu.textContent).not.toContain("Pinned version");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+    const sub = await openRow(/^Model/);
+    expect(sub.textContent).not.toContain("Pinned version");
+    await closeRow(sub);
+    expect(await choiceTexts()).toEqual(["Opuslatest", "low", "high"]);
     view.unmount();
     show({ modelsAreLocal: false, tab: { ...onOpus, model: "claude-opus-5" } });
     mouseClick(screen.getByTitle("Model: Opus 5"));
-    menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
-    expect(within(menu).getByRole("menuitemradio", { name: "Opus 5" }).getAttribute("aria-disabled")).toBe("true");
+    const choices = await pickerChoices();
+    expect(choices.map((row) => row.text)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
+    expect(choices.find((row) => row.text === "Opus 5")?.disabled).toBe(true);
   });
 
   it("offers the alias and, apart, the versions that can be pinned", async () => {
     const onSetModel = vi.fn();
     show({ onSetModel });
     mouseClick(screen.getByTitle("Model: Opus (latest, running Opus 5.5)"));
-    const menu = await screen.findByRole("menu");
+    expect(await choiceTexts()).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
+    const menu = await openRow(/^Model/);
     expect(menu.textContent).toContain("Pinned version");
-    const items = within(menu).getAllByRole("menuitemradio").map((item) => item.textContent);
-    expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
-    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
+    // Before the first turn a pick applies at once.
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5", hidden: true }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
   });
 
   it("offers the VM's pinned versions and resolved alias, then aliases only when disconnected", async () => {
@@ -458,15 +497,16 @@ describe("a Claude alias in the model picker (#256)", () => {
     show({ modelsAreLocal: false, modelClient: client, onSetModel });
     const button = await screen.findByTitle("Model: Opus (latest, running Opus 4.6)");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
+    await screen.findByRole("menu");
+    const menu = await openRow(/^Model/);
     expect(within(menu).getByText("latest · Opus 4.6")).toBeTruthy();
-    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5" })).toBeNull();
-    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" }));
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5", hidden: true })).toBeNull();
+    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6", hidden: true }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-4-6");
+    await waitFor(() => expect(screen.queryByRole("menu", { hidden: true })).toBeNull());
     act(() => runtime.emit({ state: "suspended" }));
     mouseClick(screen.getByTitle("Model: Opus (latest)"));
-    const offline = await screen.findByRole("menu");
-    expect(within(offline).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+    expect(await choiceTexts()).toEqual(["Opuslatest", "low", "high"]);
   });
 
   it("reads a stored pinned id the list no longer carries", async () => {
@@ -476,9 +516,9 @@ describe("a Claude alias in the model picker (#256)", () => {
     expect(button.textContent).toBe("Opus 4.8");
     // and it keeps the effort menu of its family and its own ticked row.
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "Opus 4.8", "low", "high"]);
-    expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.8" }).getAttribute("aria-checked")).toBe("true");
+    const choices = await pickerChoices();
+    expect(choices.map((row) => row.text)).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "Opus 4.8", "low", "high"]);
+    expect(choices.find((row) => row.text === "Opus 4.8")?.ticked).toBe(true);
   });
 });
 
@@ -488,6 +528,7 @@ describe("the pickers show what the agent is running (#404)", () => {
   const show = (shown: TabEntry, props: Partial<Parameters<typeof Composer>[0]> = {}) =>
     render(<Composer tab={shown} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
   const ticked = (menu: HTMLElement) => within(menu).getAllByRole("menuitemradio").filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent);
+  const tickedChoices = async () => (await pickerChoices()).filter((row) => row.ticked).map((row) => row.text);
   const pending = () => screen.queryByTestId("composer-settings-pending")?.textContent ?? null;
 
   beforeEach(() => {
@@ -501,7 +542,7 @@ describe("the pickers show what the agent is running (#404)", () => {
     show(onSol);
     expect(pending()).toBeNull();
     mouseClick(screen.getByTitle("Model: GPT-5.6 Sol · low"));
-    expect(ticked(await screen.findByRole("menu"))).toEqual(["GPT-5.6 Sol", "low"]);
+    expect(await tickedChoices()).toEqual(["GPT-5.6 Sol", "low"]);
   });
 
   it("keeps showing the running model and effort while a change waits for the turn", async () => {
@@ -511,9 +552,9 @@ describe("the pickers show what the agent is running (#404)", () => {
     expect(button.textContent).toBe("GPT-5.6 Sollow");
     expect(pending()).toBe("Switching to GPT-6 Astra · High after this turn");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(ticked(menu)).toEqual(["GPT-5.6 Sol", "low"]);
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astraswitching…", "low", "highswitching…"]);
+    const choices = await pickerChoices();
+    expect(choices.filter((row) => row.ticked).map((row) => row.text)).toEqual(["GPT-5.6 Sol", "low"]);
+    expect(choices.map((row) => row.text)).toEqual(["GPT-5.6 Sol", "GPT-6 Astraswitching…", "low", "highswitching…"]);
   });
 
   it("says a change to an idle agent is on its way, for either setting alone", () => {
@@ -540,10 +581,10 @@ describe("the pickers show what the agent is running (#404)", () => {
     const button = screen.getByTitle("Model: GPT-9 Nova · ultra");
     expect(button.textContent).toBe("GPT-9 Novaultra");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(ticked(menu)).toEqual(["GPT-9 Nova", "ultra"]);
+    const choices = await pickerChoices();
+    expect(choices.filter((row) => row.ticked).map((row) => row.text)).toEqual(["GPT-9 Nova", "ultra"]);
     // What can be chosen instead is still offered.
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "GPT-9 Nova", "low", "high", "ultra"]);
+    expect(choices.map((row) => row.text)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "GPT-9 Nova", "low", "high", "ultra"]);
   });
 
   it("names a requested model it has no entry for by its id", () => {
@@ -597,7 +638,7 @@ describe("the pickers show what the agent is running (#404)", () => {
     mouseClick(button);
     const menu = await screen.findByRole("menu");
     expect(menu.textContent).not.toContain("Effort");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Auto", "GPT-5"]);
+    expect(await choiceTexts()).toEqual(["Auto", "GPT-5"]);
   });
 });
 
@@ -1056,8 +1097,7 @@ describe("composer history (PRO-85)", () => {
     const view = render(<CloudComposer connected />);
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
     // The button opens the list on the shallowest files, as a bare `@` does locally.
-    fireEvent.keyDown(screen.getByRole("button", { name: "More options" }), { key: "Enter" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Mention a file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
     expect((await screen.findByRole("option")).textContent).toContain("README.md");
     fireEvent.change(box, { target: { value: "read @log", selectionStart: 9 } });
     await waitFor(() => expect(screen.getByRole("option").textContent).toContain("src/auth/login.rs"));
@@ -1067,6 +1107,7 @@ describe("composer history (PRO-85)", () => {
     expect(invoke).not.toHaveBeenCalledWith("search_files", expect.anything());
     // Not connected: no list and no button, and nothing is asked.
     view.rerender(<CloudComposer connected={false} />);
+    expect(screen.queryByRole("button", { name: "Mention a file" })).toBeNull();
     search.mockClear();
     fireEvent.change(box, { target: { value: "read @", selectionStart: 6 } });
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1127,9 +1168,9 @@ describe("composer history (PRO-85)", () => {
     expect(field().value).toBe("earlier");
   });
 
-  it("the model and options menus take the arrows while open", async () => {
+  it("the model and permission menus take the arrows while open", async () => {
     render(<HistoryComposer />);
-    for (const name of [/Default/, /More options/]) {
+    for (const name of [/Default/, /^Permission mode/]) {
       mouseClick(screen.getByRole("button", { name, hidden: true }));
       await screen.findByRole("menu");
       expect(press("ArrowUp")).toBe(false);
@@ -1641,5 +1682,100 @@ describe("attaching any file (PRO-290)", () => {
     expect(again[3][0]).toBe(first[3][0]);
     expect(again[1][0]).toBe(first[1][0]);
     await waitFor(() => expect(chips()).toHaveLength(0));
+  });
+});
+
+describe("the composer's model picker (PRO-397)", () => {
+  const entry = (id: string, label: string) => ({ id, label, harness: "claude", efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: false, upgrade: null, description: null });
+  const onOpus: TabEntry = { ...tab, harness: "claude", model: "claude-opus-5-5", effort: "high" };
+  const show = (props: Partial<Parameters<typeof Composer>[0]> = {}) =>
+    render(<Composer tab={onOpus} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
+  const pickSonnet = async () => {
+    mouseClick(screen.getByTestId("model-picker"));
+    await screen.findByRole("menu");
+    fireEvent.click(within(await openRow(/^Model/)).getByRole("menuitemradio", { name: "Sonnet 5.5", hidden: true }));
+    await waitFor(() => expect(screen.queryByRole("menu", { hidden: true })).toBeNull());
+  };
+
+  beforeEach(() => {
+    listed.models = [entry("claude-opus-5-5", "Opus 5.5"), entry("claude-sonnet-5-5", "Sonnet 5.5")];
+  });
+  afterEach(() => {
+    listed.models = [];
+  });
+
+  it("puts the model and the permission mode at the left, and the context, mention, attach, mic and Send at the right", () => {
+    show({ files: { key: "repo", search: async () => [] }, contextUsed: 31_000, contextMax: 100_000 });
+    const toolbar = document.querySelector("[data-composer-toolbar]")!;
+    const order = [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("data-testid") ?? button.getAttribute("aria-label"));
+    expect(order).toEqual(["model-picker", "permission-mode", "Context 31% used", "Mention a file", "Attach files", "Dictate", "Send"]);
+    expect(screen.getByTestId("model-picker").textContent).toBe("Opus 5.5high");
+    expect(screen.getByTestId("permission-mode-label").textContent).toBe("Auto");
+    expect(screen.getByTestId("context-percent").textContent).toBe("31%");
+    expect(screen.queryByRole("button", { name: "More options" })).toBeNull();
+  });
+
+  it("switches at once before the first turn", async () => {
+    const onSetModel = vi.fn();
+    show({ onSetModel });
+    await pickSonnet();
+    expect(onSetModel).toHaveBeenCalledWith("claude-sonnet-5-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+  });
+
+  it("asks before a mid-chat switch, switches only on 'Switch model', and Undo goes back", async () => {
+    const onSetModel = vi.fn();
+    const view = show({ onSetModel, hasConversation: true });
+    await pickSonnet();
+    expect(onSetModel).not.toHaveBeenCalled();
+    const card = screen.getByTestId("model-switch-confirm");
+    expect(within(card).getByText("Mid-chat model change")).toBeTruthy();
+    expect(card.textContent).toContain("Switching to Sonnet 5.5 mid-chat rebuilds the prompt cache.");
+    fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(onSetModel).not.toHaveBeenCalled();
+
+    await pickSonnet();
+    fireEvent.click(within(screen.getByTestId("model-switch-confirm")).getByRole("button", { name: "Switch model" }));
+    expect(onSetModel).toHaveBeenCalledExactlyOnceWith("claude-sonnet-5-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+    view.rerender(<Composer tab={{ ...onOpus, requestedModel: "claude-sonnet-5-5" }} busy hasConversation draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={onSetModel} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
+    const notice = screen.getByTestId("model-switch-notice");
+    expect(notice.textContent).toBe("Switch requested for Sonnet 5.5·Undo");
+    fireEvent.click(within(notice).getByRole("button", { name: "Undo" }));
+    expect(onSetModel).toHaveBeenLastCalledWith("claude-opus-5-5");
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+  });
+
+  it("says the switch once, not again in the pending line, while the agent has not taken it", async () => {
+    const view = show({ hasConversation: true, busy: true });
+    await pickSonnet();
+    fireEvent.click(screen.getByRole("button", { name: "Switch model" }));
+    view.rerender(<Composer tab={{ ...onOpus, requestedModel: "claude-sonnet-5-5" }} busy hasConversation draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
+    expect(screen.getByTestId("model-switch-notice").textContent).toContain("Switch requested for Sonnet 5.5");
+    expect(screen.queryByTestId("composer-settings-pending")).toBeNull();
+  });
+
+  it("keeps the session's model on the button when the agent lists none, and says so beside the Model row", async () => {
+    listed.models = [];
+    // The agent has answered, with nothing.
+    listed.loaded = true;
+    const props = { tab: { ...tab, harness: "codex", model: "gpt-6.1-sol", effort: null }, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    render(<Composer {...props} agentHandoff={{ id: "claude", name: "Claude Code", run: vi.fn() }} />);
+    const button = screen.getByTestId("model-picker");
+    expect(button.textContent).toBe("GPT-6.1 Sol");
+    mouseClick(button);
+    const top = await screen.findByRole("menu");
+    await waitFor(() => expect(within(top).getByTestId("model-picker-model-value").textContent).toBe("None found"));
+    expect(within(top).getByTestId("model-picker-model-value").className).toContain("text-destructive");
+    const card = await openRow(/^Model/);
+    expect(within(card).getByText("No models from Codex")).toBeTruthy();
+    expect(card.textContent).toContain("Its ChatGPT sign-in may have expired");
+    expect(within(card).getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent)).toEqual(["Open Settings › Agents", "Retry"]);
+    expect(card.textContent).toContain("Claude Code models still work.");
+    expect(button.textContent).toBe("GPT-6.1 Sol");
+    listed.loaded = false;
   });
 });

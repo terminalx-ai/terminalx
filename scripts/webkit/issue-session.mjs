@@ -90,6 +90,8 @@ try {
       const agentMenu = page.getByTestId("agent-menu");
       await agentMenu.focus();
       await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: /^Agent/ }).focus();
+      await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitem", { name: "Codex", exact: true }).focus();
       await page.keyboard.press("Enter");
       await agentMenu.focus();
@@ -102,6 +104,8 @@ try {
       await page.keyboard.press("Enter");
       await agentMenu.focus();
       await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: /^Effort/ }).focus();
+      await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: "High", exact: true }).focus();
       await page.keyboard.press("Enter");
       assert.equal(await page.getByTestId("agent-effort").textContent(), "High");
