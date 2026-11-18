@@ -9,14 +9,14 @@
 //! it. Every other connection is a phone: the runtime passes it, untouched,
 //! to the window that registered a [`PhoneRoute`], which runs the phone's
 //! E2EE handshake and pairing exactly as before. With no window registered,
-//! the phone is refused as unreachable, as it is today with the window closed.
+//! the runtime serves the phone itself.
 //!
 //! On a phone route the runtime opens one Unix connection per phone and
 //! writes one [`Forwarded`] header line (`encode_header`) before anything
 //! else. For [`Forwarded::Direct`] the phone's own bytes follow, from the
 //! first byte of its HTTP upgrade request, in both directions until either
-//! side closes. For [`Forwarded::Relay`] nothing follows: the window opens
-//! the relay data leg itself with what the header names.
+//! side closes. For [`Forwarded::Relay`] the window opens the relay data leg
+//! itself; the Unix connection stays open to fence it when registration ends.
 
 use std::path::PathBuf;
 

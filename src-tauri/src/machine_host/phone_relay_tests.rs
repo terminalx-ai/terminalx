@@ -479,13 +479,16 @@ async fn window_takeover_fences_pre_auth_and_routes_until_its_lease_ends() {
         .await
         .unwrap()
         .unwrap();
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let mut bytes = Vec::new();
-    window.read_to_end(&mut bytes).await.unwrap();
+    tokio::io::BufReader::new(&mut window).read_until(b'\n', &mut bytes).await.unwrap();
     assert!(String::from_utf8(bytes).unwrap().contains("relayDeviceId"));
     rig.lifetime.release(&lease);
     let mut runtime = rig.connect("phone", "token", "resume", [7; 32]).await;
     runtime.authenticated().await;
+    rig.relay.phone_test_retire();
+    let mut byte = [0; 1];
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), window.read(&mut byte)).await.unwrap().unwrap(), 0);
     rig.host.stop_serving();
     assert!(runtime.read().await.is_none());
 }

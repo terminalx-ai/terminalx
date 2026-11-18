@@ -302,12 +302,13 @@ PRO-341 settled these points while building decision 4.
   the same result: each side checks the token against its own registry, so a
   phone's token is refused on `/machine/1` and a computer's on `/`. PRO-342
   and PRO-345 put `/machine/1` in a machine offer's direct endpoints. With no
-  window registered, a phone is refused as unreachable, as today.
+  window registered, PRO-359 instead serves the phone in the runtime.
 - **The relay route goes through PRO-340's `serve_machine`**, so a machine has
   one relay registration. PRO-341 adds two hooks to its `RelayHost`: paired
   computers are admitted from the registry by their relay device id and
   token, and a `conn-open` for any other device goes to the window's phone
-  route, which opens the data leg itself. PRO-368 registers a signed-in
+  route, which opens the data leg itself; #1168 serves it in the runtime
+  when no window takes phones. PRO-368 registers a signed-in
   machine from the account; while it is registered the window stays off the
   relay and makes its phones' invites, credential installs and revocations
   through the runtime's registration ("As built (PRO-368)").
@@ -1138,8 +1139,8 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
-- **A headless server** has no host binding until PRO-368, so it is not listed
-  on the account; it pairs from its terminal (PRO-353).
+- **A headless server** has no host binding, so it is not listed on the
+  account; it pairs from its terminal (PRO-353).
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -1317,8 +1318,9 @@ host key is ready and someone is signed in on the machine, its runtime
 registers with the relay under its relay host id (`machineId`), through the
 same `RelayHost` as `--relay-link` (`MachineHost::start_relay`,
 `src-tauri/src/machine_host.rs`). It serves the machine's one `WorkspaceRpc`,
-admits paired computers by their relay device id and passes every other
-device to the window's phone route, as PRO-341 built. Its link is
+admits paired computers by their relay device id and routes phones to the
+window when it takes them, or to the runtime otherwise (#1168). Registration
+alone does not authorize a phone; its link is
 `remote::account_link::AccountLink`:
 
 - The token comes from `POST /v1/desktop/machine-host/relay-session`
@@ -2001,10 +2003,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   the phone shows such a machine with the server icon. Older phones read only
   `name`; older computers send only `name`, and the phone keeps what it had.
 - **The runtime answers phones** with `pairing.getEndpoints` as
-  `{ v: 1, directEndpoints, relay: null }`, and refuses
-  `pairing.provisionRelay`: it has no relay route for phones until PRO-368
-  registers a signed-in machine with the relay. A phone keeps any relay bundle
-  it has and uses its direct route.
+  direct endpoints and, while registered, relay assignment details; otherwise
+  `relay` is null. An authenticated phone can provision a relay resume
+  credential over a direct connection or an invite connection. The runtime
+  checks the registration around relay control requests, and supports install
+  status and resume confirmation. Registration itself grants no phone access.
 - **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
   window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
   no relay; the strict offer schema is unchanged). It prints the link as a
@@ -2021,10 +2024,18 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Not yet.** A headless machine is listed on the phone from the account only
-  once it registers with the relay (PRO-368). Until then the phone lists it once
-  paired from its terminal. The account list already shows Linux and SSH
-  machines as servers.
+- **Relay admission and cleanup (#1168).** With no window taking phones, the
+  runtime serves relay connections as well as direct connections. It checks the
+  encrypted device token, account binding, and relay device identity before
+  admission; session-scoped invitations remain with the window that shared the
+  session. A window takeover, host stop, or changed relay registration fences
+  in-flight connections. Revocation and account changes close affected phones
+  and retire their relay credentials. A durable cleanup journal retries pending
+  relay revocations across restarts until the relay acknowledges them.
+- **Remaining limit.** A headless machine has no account host binding and is
+  not listed in the account directory; pair its phone from the terminal. The
+  phone code carries direct endpoints only, so initial pairing needs a direct
+  route. A registered relay can be provisioned after authentication.
 
 ## Session feature parity
 
@@ -2428,7 +2439,7 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
 | Item | Mac to Mac | Mac to Linux | Other evidence |
 | --- | --- | --- | --- |
 | Pair by code, fingerprint, Allow | Two-machine CI (the window approves) | Two-machine CI (`terminalx-serve pair`, answered `y`) | `pairing_tests`, `security_tests` |
-| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; the relay registration for a signed-in machine is PRO-368 (in review) |
+| Pair through the account | Not in two-machine CI | Not in two-machine CI | `pairing_tests::a_computer_paired_through_a_grant…`; signed-in relay registration is built in PRO-368 |
 | Sessions and chat (create, send, read) | Two-machine CI | Two-machine CI | |
 | Approvals, stop | Two-machine CI (`session.decide`, `session.interrupt`) | Two-machine CI | |
 | Terminals (create, resize, reconnect, replay) | Two-machine CI | Two-machine CI | |
@@ -2473,6 +2484,4 @@ runner and whose dev-server is a Linux container. `machine-compat` runs on
   (telling the window from a detached process during consent), in Backlog.
   The agent control changed in PRO-360 (pairing instead of the switch) by the
   owner's decision.
-- **Still open in the epic:** PRO-368 (relay registration for a signed-in
-  machine) and PRO-359 (the phone), both in review; session follow-ups
-  PRO-403 to PRO-408, in Backlog.
+- **Still open in the epic:** session follow-ups PRO-403 to PRO-408, in Backlog.

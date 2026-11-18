@@ -1713,15 +1713,22 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         let route = route.unwrap();
         #[cfg(unix)]
         tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let sent = async {
                 let mut window = tokio::net::UnixStream::connect(&route).await?;
                 window.write_all(&wire::encode_header(&forwarded)?).await?;
-                window.shutdown().await?;
+                // The route socket is the lifetime of the window's relay leg.
+                // Closing it cancels the window's handshake or active session.
+                let mut byte = [0; 1];
+                let _ = window.read(&mut byte).await?;
                 anyhow::Ok(())
             };
-            if let Err(error) = sent.await {
-                log::debug!("machine host: pass a phone's relay connection to the window: {error:#}");
+            tokio::select! {
+                biased;
+                _ = relay_cancel.recv() => {},
+                result = sent => if let Err(error) = result {
+                    log::debug!("machine host: pass a phone's relay connection to the window: {error:#}");
+                },
             }
         });
         #[cfg(not(unix))]

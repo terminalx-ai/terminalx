@@ -309,12 +309,21 @@ impl PairingManager {
             }
             // The window opens the relay data leg itself.
             Forwarded::Relay { cell_url, relay_host_id, generation, connection } => {
-                drop(stream);
                 let connection = super::relay::ConnectionOpen::forwarded(connection)?;
                 let keypair = self.host_key(false)?;
-                self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection).await
+                until_route_closes(&mut stream, self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection)).await
             }
         }
+    }
+}
+
+#[cfg(unix)]
+async fn until_route_closes<T>(stream: &mut tokio::net::UnixStream, serving: impl std::future::Future<Output = Result<T>>) -> Result<()> {
+    let mut byte = [0; 1];
+    tokio::select! {
+        biased;
+        result = stream.read(&mut byte) => { result?; Ok(()) },
+        result = serving => { result?; Ok(()) },
     }
 }
 
@@ -337,6 +346,24 @@ async fn read_header<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result<
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_route_closure_cancels_the_window_connection() {
+        let (runtime, mut window) = tokio::net::UnixStream::pair().unwrap();
+        let (dropped, observed) = tokio::sync::oneshot::channel::<()>();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let serving = async move {
+            let _guard = dropped;
+            let _ = started.send(());
+            std::future::pending::<Result<()>>().await
+        };
+        let task = tokio::spawn(async move { until_route_closes(&mut window, serving).await });
+        ready.await.unwrap();
+        drop(runtime);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+        assert!(observed.await.is_err(), "the relay serving future must be dropped");
+    }
 
     #[tokio::test]
     async fn the_header_is_read_without_taking_the_phones_bytes() {
