@@ -35,7 +35,11 @@ fn listed(accounts: Vec<Account>) -> Accounts {
 
 /// A session as the machine's index stores it, its tabs with the fields given.
 fn session(tabs: serde_json::Value) -> SessionEntry {
-    serde_json::from_value(json!({ "id": "s1", "projectPath": "/srv/api", "cwd": "/srv/api", "title": "Work", "created": "2026-11-18T10:00:00Z", "tabs": tabs })).unwrap()
+    let timestamp = "2026-11-18T10:00:00Z";
+    serde_json::from_value(json!({
+        "id": "s1", "projectPath": "/srv/api", "cwd": "/srv/api", "title": "Work",
+        "created": timestamp, "modified": timestamp, "tabs": tabs,
+    })).unwrap()
 }
 
 fn usage(cost: f64) -> serde_json::Value {
