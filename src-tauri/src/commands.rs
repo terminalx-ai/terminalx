@@ -5161,6 +5161,17 @@ mod command_tests {
     #[cfg(unix)]
     #[test]
     fn forks_recover_missing_cwd_from_original_worktree_registration() {
+        check_missing_cwd_recovery(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forks_recover_missing_cwd_with_relative_worktree_links() {
+        check_missing_cwd_recovery(true);
+    }
+
+    #[cfg(unix)]
+    fn check_missing_cwd_recovery(relative_links: bool) {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
         let repo = tempfile::tempdir().unwrap();
@@ -5172,6 +5183,7 @@ mod command_tests {
         std::fs::write(root.join("sub/file"), "main").unwrap();
         git::run(&root, &["add", "."]).unwrap();
         git::run(&root, &["commit", "-qm", "initial"]).unwrap();
+        git::run(&root, &["config", "worktree.useRelativePaths", if relative_links { "true" } else { "false" }]).unwrap();
         let wt = git::create_worktree(&root, "registered-source", Some("main")).unwrap();
         let checkout = std::path::Path::new(&wt.path);
         std::fs::write(checkout.join("sub/file"), "source branch").unwrap();

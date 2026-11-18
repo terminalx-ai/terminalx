@@ -92,8 +92,27 @@ fn registrations(common: &Path) -> Option<PathBuf> {
     (std::fs::canonicalize(&path).ok()? == path).then_some(path)
 }
 
+// Git can store either absolute paths or paths relative to the directory
+// containing the link. Accept Git's leading ".." components, but refuse
+// interior parent traversals that might resolve differently through symlinks.
+fn registration_link_matches(base: &Path, value: &str, expected: &Path) -> bool {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return path == expected;
+    }
+    let mut base = base;
+    let mut tail = path.components();
+    while let Some(Component::ParentDir) = tail.clone().next() {
+        let Some(parent) = base.parent() else { return false };
+        base = parent;
+        tail.next();
+    }
+    tail.clone().all(|part| matches!(part, Component::Normal(_)))
+        && base.join(tail.as_path()) == expected
+}
+
 fn matches_registration(admin: &Path, root: &Path, branch: &str) -> bool {
-    record_value(&admin.join("gitdir")).is_some_and(|path| Path::new(&path) == root.join(".git"))
+    record_value(&admin.join("gitdir")).is_some_and(|path| registration_link_matches(admin, &path, &root.join(".git")))
         && record_value(&admin.join("HEAD")).as_deref() == Some(&format!("ref: refs/heads/{branch}"))
         && record_value(&admin.join("commondir")).as_deref() == Some("../..")
 }
@@ -141,7 +160,7 @@ pub(crate) fn legacy_missing_cwd(
             return None;
         }
         let backlink = admin.join("gitdir");
-        if Path::new(&record_value(&backlink)?) != root.join(".git") {
+        if !registration_link_matches(&admin, &record_value(&backlink)?, &root.join(".git")) {
             continue;
         }
         if matching.is_some()
@@ -176,7 +195,7 @@ fn missing_relative_cwd(
         }
         if prefix == root {
             if !matches_checkout(&directory_identity(root)?)
-                || record_value(&root.join(".git"))?.strip_prefix("gitdir: ")? != admin.to_str()?
+                || !registration_link_matches(root, record_value(&root.join(".git"))?.strip_prefix("gitdir: ")?, admin)
             {
                 return None;
             }
