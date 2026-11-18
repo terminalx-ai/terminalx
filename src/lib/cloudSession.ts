@@ -254,7 +254,7 @@ export interface MachineSessionPlace {
   /** How the machine is reached now (21.09): direct, relay, reconnecting, offline… */
   state: MachineConnectionState;
   /** The session checkout's Git, independent of the repository selected in Changes. */
-  branchGit?: { source: GitSource; remote: string | null };
+  branchGit?: { source: GitSource; remote: string | null; baseRef: string | null };
 }
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };

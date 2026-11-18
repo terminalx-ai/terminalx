@@ -685,6 +685,8 @@ export interface RuntimeSession {
   projectPath: string;
   cwd: string;
   worktreeName?: string | null;
+  /** The ref used when the runtime cut the worktree. */
+  worktreeBase?: { from?: string | null } | null;
   branch?: string | null;
   title: string;
   created: string;

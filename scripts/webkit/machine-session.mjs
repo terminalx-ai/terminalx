@@ -65,7 +65,8 @@ const fixture = (paired) => `(() => {
   const session = (id, title, minutes, tabs, cwd) => ({ id, projectId: "p-tx", projectPath: project.path, cwd, title, branch: "read-markers",
     created: ago(minutes + 60), modified: ago(minutes), lastMessageAt: ago(minutes), hasMessages: true, archived: false, pinned: false, tabs, activeTab: tabs[0].id });
   const sessions = [
-    session("s-read", "${TITLE}", 3, [tab("t-read", "completed", "Read markers")], project.path + "/" + worktree),
+    { ...session("s-read", "${TITLE}", 3, [tab("t-read", "completed", "Read markers")], project.path + "/" + worktree),
+      worktreeBase: { from: "origin/release/2.x" } },
     session("s-flaky", "Bisect the flaky relay e2e", 11, [tab("t-flaky", "waiting", "Bisect")], project.path),
   ];
   const ASK = { requestId: "r-flaky", toolName: "Bash", input: { command: "git bisect run pnpm e2e:relay" },
@@ -157,9 +158,8 @@ const fixture = (paired) => `(() => {
           ahead: 0, behind: 0, aheadOfBase: 1, defaultBranch: "main", dirty: false, files: [] });
         break;
       case "git.fetch": reply(frame.id, { repo: worktree }); break;
-      case "git.reviewRange": reply(frame.id, { target: "origin/main", base: "base-tree", head: "live-tree" }); break;
-      case "git.changesBetween":
-        reply(frame.id, { files: [{ path: "src/readMarkers.ts", status: "added", additions: 42, deletions: 0 }], truncated: false });
+      case "git.branchDiffSize":
+        reply(frame.id, { additions: params.base === "release/2.x" ? 42 : 99, deletions: 0 });
         break;
       case "git.workingChanges": reply(frame.id, { head: "abc", files: [], truncated: false }); break;
       case "git.prs": reply(frame.id, { branch: params.branch, prs: [] }); break;

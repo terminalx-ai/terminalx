@@ -39,6 +39,7 @@ export interface GitSource {
   fileContentsAt(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }>;
   mediaContentAt?(path: string, tree: string | null): Promise<{ data: string; mime: string } | null>;
   workStatus(): Promise<SourceStatus>;
+  branchDiffSize?(base: string): Promise<{ additions: number; deletions: number } | null>;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
   prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
@@ -191,6 +192,7 @@ export function runtimeSessionIn(workspaceKey: string, sessionKey: string): stri
  * credentials never leave the runtime.
  */
 export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null> }): GitSource {
+  let servesBranchDiffSize = true;
   const { remote } = input;
   const statusOf = async (): Promise<SourceStatus> => {
     const status = await remote.status();
@@ -221,6 +223,16 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     fileContentsAt: (path, base, head) => remote.fileContents(path, base, head),
     mediaContentAt: (path, tree) => remote.mediaContent(path, tree),
     workStatus: statusOf,
+    branchDiffSize: async (base) => {
+      if (!servesBranchDiffSize) return null;
+      try {
+        return await remote.branchDiffSize(base);
+      } catch (error) {
+        if (!(error instanceof WorkspaceRpcError) || error.code !== "method_not_found") throw error;
+        servesBranchDiffSize = false;
+        return null;
+      }
+    },
     landed: input.canWrite ? async () => {
       try { return await remote.prLanded(); }
       catch (error) {

@@ -1,6 +1,6 @@
 import type { PullRequest } from "@/lib/api";
 import { FAILING_CHECKS } from "@/lib/checks";
-import type { GitSource, SourceStatus } from "@/lib/gitSource";
+import type { SourceStatus } from "@/lib/gitSource";
 import type { BranchAction, BranchState } from "@/lib/branchStep";
 
 /**
@@ -57,6 +57,12 @@ export function isGithubRemote(url: string | null | undefined): boolean {
 export function branchPr(prs: readonly PullRequest[], branch: string): MachinePr | null {
   const mine = prs.filter((pr) => pr.head === branch);
   return mine.find((pr) => pr.state === "OPEN") ?? mine[0] ?? null;
+}
+
+export function machineBranchBase(work: SourceStatus, pr: MachinePr | null, baseRef?: string | null): string | null {
+  if (pr?.state === "OPEN") return pr.base;
+  const recorded = baseRef?.replace(/^(refs\/heads\/|(?:refs\/remotes\/)?origin\/)/, "");
+  return recorded && recorded !== "HEAD" ? recorded : work.defaultBranch;
 }
 
 type Bucket = "pass" | "fail" | "pending";
@@ -136,9 +142,8 @@ export function composeMachineSnapshot(input: { work: SourceStatus; remote: stri
   const { work, known, working } = input;
   if (!work.isRepo || !work.branch || !work.head || work.branch === work.defaultBranch || !isGithubRemote(input.remote)) return null;
   const pr = known ? input.pr : null;
-  const recorded = input.baseRef && input.baseRef !== "HEAD" ? input.baseRef.replace(/^origin\//, "") : null;
-  const base = (pr?.state === "OPEN" ? pr.base : null) ?? recorded ?? work.defaultBranch;
-  if (!base) return null;
+  const base = machineBranchBase(work, pr, input.baseRef);
+  if (!base || base === work.branch) return null;
   // `aheadOfBase` is counted against the default branch; another base is not counted, as branch_step's unwrap_or(1).
   const aheadOfBase = base === work.defaultBranch ? work.aheadOfBase : null;
   let state = resolveMachineStep(work, pr, working, aheadOfBase);
@@ -180,26 +185,6 @@ export function agentPrompt(action: BranchAction, snapshot: MachineBranchSnapsho
 /** Whether the action is the agent's to take in this snapshot. */
 export function isAgentAction(action: BranchAction, snapshot: MachineBranchSnapshot | null): boolean {
   return action === "resolveConflicts" || action === "fixChecks" || action === "addressReview" || (action === "pull" && !!snapshot?.pullNeedsAgent);
-}
-
-/**
- * Lines added and removed on the branch against its base, uncommitted work
- * included: `git.reviewRange` from the merge base with `origin/<base>` (else
- * the local `<base>`) to the working tree. Null where it cannot be counted.
- */
-export async function branchDiffSize(source: GitSource, base: string): Promise<{ additions: number; deletions: number } | null> {
-  let range: { base: string; head: string } | null = null;
-  for (const target of [`origin/${base}`, base]) {
-    try { range = await source.reviewRange(target, false); break; } catch { /* the next candidate */ }
-  }
-  if (!range) return null;
-  try {
-    const files = await source.changesBetween(range.base, range.head);
-    return files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 });
-  } catch {
-    // Too many files to answer completely: no number rather than a wrong one.
-    return null;
-  }
 }
 
 /** The two snapshots describe the same branch state, so an action prepared on one may run on the other. */

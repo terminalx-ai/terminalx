@@ -372,6 +372,7 @@ impl WorkspaceGit {
         let result = match method {
             "git.repositories" => Ok(self.list()),
             "git.status" => self.status(params),
+            "git.branchDiffSize" => self.branch_diff_size(params),
             "git.diff" => self.diff(params),
             "git.workingChanges" => self.working_changes(params),
             "git.reviewRange" => self.review_range(params),
@@ -653,6 +654,13 @@ impl WorkspaceGit {
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
+    }
+
+    fn branch_diff_size(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
+        let (additions, deletions) = crate::git::branch_diff_size(&repo.dir, base).map_err(git_error)?;
+        Ok(json!({ "additions": additions, "deletions": deletions }))
     }
 
     fn review_range(&self, params: &Value) -> Result<Value, RpcError> {

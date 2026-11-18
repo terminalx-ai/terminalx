@@ -229,6 +229,9 @@ const fixture = (settings, none = false) => `(() => {
       case "git.status":
         reply(connectionId, frame.id, { repository: true, repo: params.repo, branch: "read-markers", head: "abc", upstream: null, ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase: 1, dirty: true, operation: null, conflicted: [], files: [] });
         break;
+      case "git.branchDiffSize":
+        reply(connectionId, frame.id, { additions: 142, deletions: 9 });
+        break;
       case "git.reviewRange": reply(connectionId, frame.id, { target: "main", base: "base-tree", head: "live-tree" }); break;
       case "git.changesBetween":
       case "git.workingChanges": reply(connectionId, frame.id, { head: "abc", files: CHANGED, truncated: false }); break;

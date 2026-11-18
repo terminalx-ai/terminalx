@@ -548,6 +548,7 @@ export function SessionView({
     gitSource: !cloud?.locked ? machine?.branchGit?.source : undefined,
     fileSource: machine ? cloud?.fileSource : undefined,
     remote: machine?.branchGit?.remote ?? null,
+    baseRef: machine?.branchGit?.baseRef ?? null,
     connected: !!machine && !!cloud?.connected,
     tabId: activeTab?.id,
   });

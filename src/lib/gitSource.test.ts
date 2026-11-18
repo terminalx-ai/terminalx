@@ -1,8 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { RemoteGit } from "@terminalx/portable/workspaceGit";
 
 vi.mock("@/lib/api", () => ({ api: {}, gh: {}, git: {}, errorMessage: (error: unknown) => String(error) }));
 
-const { runtimeSessionIn } = await import("./gitSource");
+const { cloudGitSource, runtimeSessionIn } = await import("./gitSource");
+
+it("omits the header totals when a runtime has no safe diff size method", async () => {
+  const call = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.branchDiffSize"));
+  const remote = new RemoteGit({ call } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+
+  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBeNull();
+  await expect(source.branchDiffSize?.("release/2.x")).resolves.toBeNull();
+  expect(call.mock.calls).toEqual([["git.branchDiffSize", { repo: "topic", base: "release/2.x" }]]);
+});
 
 describe("the runtime session a session key names in a workspace", () => {
   it("reads a machine session in its own project (PRO-347)", () => {

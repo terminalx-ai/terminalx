@@ -55,6 +55,7 @@ function session(id: string, cwd: string, worktreeName: string | null): RuntimeS
     id,
     cwd,
     worktreeName,
+    worktreeBase: worktreeName ? { from: "origin/release/2.x" } : null,
     projectId: "project",
     projectPath: projectRoot,
     title: id,
@@ -111,6 +112,7 @@ it("keeps header Git on the session checkout when Changes selects another reposi
   mini.runtime.connect();
   const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
   await waitFor(() => expect(result.current?.machine?.branchGit?.source.key).toBe(`machine:mini:project|${firstPath}`));
+  expect(result.current?.machine?.branchGit?.baseRef).toBe("origin/release/2.x");
   const headerGit = result.current!.machine!.branchGit!.source;
 
   act(() => result.current!.selectRepository("."));

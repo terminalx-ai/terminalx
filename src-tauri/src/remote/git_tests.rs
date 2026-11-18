@@ -136,6 +136,47 @@ fn a_single_repository_is_used_without_naming_it_and_a_workspace_without_one_say
 }
 
 #[test]
+fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let project = f.clone(&origin, "app");
+    git(&project, &["checkout", "-qb", "release/2.x"]);
+    std::fs::write(project.join("release.txt"), "release only\n").unwrap();
+    std::fs::write(project.join(".gitattributes"), "draft.txt filter=test\n").unwrap();
+    std::fs::write(project.join(".gitignore"), "ignored.txt\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "release"]);
+    let checkout = project.join("worktrees/topic");
+    git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    std::fs::write(checkout.join("committed.txt"), "committed\n").unwrap();
+    git(&checkout, &["add", "committed.txt"]);
+    git(&checkout, &["commit", "-qm", "topic"]);
+    std::fs::write(checkout.join("staged.txt"), "staged\n").unwrap();
+    git(&checkout, &["add", "staged.txt"]);
+    std::fs::write(checkout.join("README.md"), "edited\n").unwrap();
+    std::fs::write(checkout.join("ignored.txt"), "not counted\n").unwrap();
+    std::fs::write(checkout.join("draft.txt"), "one\n").unwrap();
+    git(&project, &["config", "filter.test.clean", "touch filter-ran && cat"]);
+    git(&project, &["config", "filter.test.required", "true"]);
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let objects = git(&project, &["count-objects", "-v"]);
+    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+    let diff_size = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
+    };
+
+    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1 }));
+    std::fs::write(checkout.join("draft.txt"), "one\ntwo\n").unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1 }));
+    std::fs::remove_file(checkout.join("draft.txt")).unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1 }));
+    assert_eq!(git(&project, &["count-objects", "-v"]), objects);
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    assert!(!checkout.join("filter-ran").exists());
+}
+
+#[test]
 fn commits_carry_the_callers_identity_never_the_workspaces() {
     let f = fixture();
     let remote = f.remote("origin");

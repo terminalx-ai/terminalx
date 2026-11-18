@@ -228,6 +228,7 @@ pub const METHODS: &[Method] = &[
     // workspace has exactly one (`remote/git.rs`).
     method("git.repositories", "git/1", Participate, false),
     method("git.status", "git/1", Participate, false),
+    method("git.branchDiffSize", "git/1", Participate, false),
     method("git.diff", "git/1", Participate, false),
     method("git.workingChanges", "git/1", Participate, false),
     method("git.reviewRange", "git/1", Participate, false),

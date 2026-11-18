@@ -13,7 +13,7 @@ import { currentMergeMethod, noteMerge, type MergeMethod } from "@/lib/mergeMeth
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { SessionBackend } from "@/lib/sessionBackend";
-import { agentPrompt, branchDiffSize, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
+import { agentPrompt, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, machineBranchBase, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
 import type { SessionEntry } from "@/types/session";
 
 /** How often the machine's `git.status` is read while the window shows; file changes on the machine read it sooner. */
@@ -33,6 +33,8 @@ export interface MachineBranchInput {
   fileSource: FileSource | undefined;
   /** `origin`'s URL on the machine, for the repository the session works in. */
   remote: string | null;
+  /** The branch the machine cut the worktree from. */
+  baseRef: string | null;
   connected: boolean;
   tabId?: string;
 }
@@ -58,11 +60,10 @@ const errorText = (source: GitSource | undefined, error: unknown) => (source ? s
  * reconnect) drops what the last one said.
  */
 export function useMachineBranch(input: MachineBranchInput) {
-  const { gitSource: source, fileSource, remote, connected, session } = input;
+  const { gitSource: source, fileSource, remote, connected, session, baseRef } = input;
   const busyTabs = session.tabs.some((tab) => tab.status === "in_progress" || tab.status === "waiting");
   const [agentPending, setAgentPending] = useState(false);
   const working = agentPending || busyTabs;
-  const baseRef = input.session.baseRef ?? null;
   const [read, setRead] = useState<Read>(EMPTY_READ);
   const refreshRef = useRef<(hosted: boolean) => Promise<MachineBranchSnapshot | null>>(async () => null);
   const workingRef = useRef(working);
@@ -111,8 +112,8 @@ export function useMachineBranch(input: MachineBranchInput) {
         }
         const prCount = hostedState?.count ?? null;
         const snapshot = composeMachineSnapshot({ work, remote, pr: hostedState?.pr ?? null, known: prCount !== null, working: workingRef.current, baseRef });
-        const base = snapshot?.base ?? work.defaultBranch;
-        const size = work.isRepo && base ? await branchDiffSize(source, base) : null;
+        const base = machineBranchBase(work, hostedState?.pr ?? null, baseRef);
+        const size = work.isRepo && base ? await source.branchDiffSize?.(base).catch(() => null) : null;
         if (disposed) return null;
         setRead({ currentBranch, prCount, snapshot, diff: size && base ? { ...size, base } : null, error: null, refreshing: false });
         return snapshot;

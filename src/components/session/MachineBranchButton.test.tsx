@@ -36,8 +36,7 @@ function makeSource(): GitSource {
     workStatus: vi.fn(async () => ({ ...status })),
     fetch: vi.fn(async () => null),
     prs: vi.fn(async () => { if (prsFail) throw prsFail; return prs; }),
-    reviewRange: vi.fn(async (target: string) => ({ target, base: "b".repeat(40), head: "c".repeat(40) })),
-    changesBetween: vi.fn(async () => [{ path: "a.ts", status: "modified", additions: 140, deletions: 9 }, { path: "b.ts", status: "added", additions: 2, deletions: 0 }]),
+    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9 })),
     commit: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1 }; return null; }),
     push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
     pull: vi.fn(async () => null),
@@ -51,11 +50,11 @@ function makeSource(): GitSource {
 
 const fileSource = { watch: (listener: (paths: string[] | null) => void) => { watchers.push(listener); return () => {}; } } as unknown as FileSource;
 
-function Harness({ tabs, source }: { tabs: TabEntry[]; source: GitSource }) {
-  const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs, baseRef: null } as unknown as SessionEntry;
+function Harness({ tabs, source, baseRef }: { tabs: TabEntry[]; source: GitSource; baseRef: string | null }) {
+  const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs } as unknown as SessionEntry;
   const branch = useMachineBranch({
     session, machineName: "Mac mini", backend: { send } as unknown as SessionBackend, gitSource: source, fileSource,
-    remote: "git@github.com:octo/app.git", connected: true, tabId: "t1",
+    remote: "git@github.com:octo/app.git", connected: true, tabId: "t1", baseRef,
   });
   return <div>
     <span data-testid="current-branch">{branch.currentBranch}</span>
@@ -66,12 +65,12 @@ function Harness({ tabs, source }: { tabs: TabEntry[]; source: GitSource }) {
 }
 
 const idle = [{ id: "t1", status: "completed" }] as TabEntry[];
-function render(tabs: TabEntry[] = idle) {
+function render(tabs: TabEntry[] = idle, baseRef: string | null = null) {
   const source = makeSource();
-  const view = renderView(<TooltipProvider delayDuration={0}><Harness tabs={tabs} source={source} /></TooltipProvider>);
+  const view = renderView(<TooltipProvider delayDuration={0}><Harness tabs={tabs} source={source} baseRef={baseRef} /></TooltipProvider>);
   return {
     ...view,
-    retab: (next: TabEntry[]) => view.rerender(<TooltipProvider delayDuration={0}><Harness tabs={next} source={source} /></TooltipProvider>),
+    retab: (next: TabEntry[]) => view.rerender(<TooltipProvider delayDuration={0}><Harness tabs={next} source={source} baseRef={baseRef} /></TooltipProvider>),
   };
 }
 beforeEach(() => {
@@ -86,19 +85,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("machine session header Git step (PRO-404, 21.08)", () => {
-  it("shows the branch's diff size and Create PR, and opens the PR on the machine after pushing", async () => {
-    // A branch with commits the machine has not pushed yet and no pull request.
+  it("compares against the selected base and opens a PR for an already pushed branch", async () => {
     status = { ...status, upstream: "origin/feature", ahead: 0 };
-    render();
+    render(idle, "origin/release/2.x");
     expect((await screen.findByTestId("machine-diff-size")).textContent).toContain("+142 −9");
-    expect(git.reviewRange).toHaveBeenCalledWith("origin/main", false);
+    expect(git.branchDiffSize).toHaveBeenCalledWith("release/2.x");
     fireEvent.click(await screen.findByRole("button", { name: "Create PR" }));
     const dialog = await screen.findByRole("dialog");
     expect((dialog).textContent).toContain("Runs on Mac mini with its Git sign-in.");
+    expect(dialog.textContent).toContain("open a pull request into release/2.x");
     expect(((within(dialog).getByLabelText("PR title")) as HTMLInputElement).value).toBe("Add read markers to the catalog feed");
     fireEvent.change(within(dialog).getByLabelText("Description"), { target: { value: "Adds markers." } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
-    await waitFor(() => expect(git.createPr).toHaveBeenCalledWith({ title: "Add read markers to the catalog feed", body: "Adds markers.", base: "main", draft: false, sessionId: "machine:m1:p1:s1", branch: "feature" }));
+    await waitFor(() => expect(git.createPr).toHaveBeenCalledWith({ title: "Add read markers to the catalog feed", body: "Adds markers.", base: "release/2.x", draft: false, sessionId: "machine:m1:p1:s1", branch: "feature" }));
     // Already on the remote: nothing is pushed again.
     expect(git.push).not.toHaveBeenCalled();
     // The PR state follows: the new PR is read back and is ready to merge.
@@ -206,7 +205,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     render();
     await screen.findByRole("button", { name: "Merge" });
     status = { ...status, dirty: true };
-    git.changesBetween.mockResolvedValue([{ path: "a.ts", status: "modified", additions: 150, deletions: 9 }]);
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9 });
     await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
     expect((await screen.findByRole("button", { name: "Commit and push" })).hasAttribute("disabled")).toBe(false);
     expect((screen.getByTestId("machine-diff-size")).textContent).toContain("+150 −9");
@@ -217,7 +216,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     status = { ...status, dirty: true };
     await act(async () => { render(); });
     expect(screen.getByTestId("machine-diff-size").textContent).toContain("+142 −9");
-    git.changesBetween.mockResolvedValue([{ path: "a.ts", status: "modified", additions: 150, deletions: 9 }]);
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9 });
     await act(async () => { await vi.advanceTimersByTimeAsync(MACHINE_STATUS_EVERY_MS); });
     expect(screen.getByTestId("machine-diff-size").textContent).toContain("+150 −9");
   });

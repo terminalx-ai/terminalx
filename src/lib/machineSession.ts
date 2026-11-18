@@ -449,7 +449,10 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState, branchGit: sessionGit && { source: sessionGit, remote: sessionRemote } },
+    machine: {
+      machineId, projectId, record: machine, name, state: machineState,
+      branchGit: sessionGit && { source: sessionGit, remote: sessionRemote, baseRef: ownSession?.worktreeBase?.from ?? null },
+    },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,

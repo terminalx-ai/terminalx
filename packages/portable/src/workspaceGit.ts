@@ -278,6 +278,10 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
+  branchDiffSize(base: string): Promise<{ additions: number; deletions: number }> {
+    return this.read("git.branchDiffSize", { base });
+  }
+
   workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
     return this.read("git.workingChanges", hideWhitespace ? { hideWhitespace } : {});
   }
