@@ -1173,10 +1173,40 @@ async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
     assert_eq!(listed["session"]["tabs"][0]["usage"]["models"][0]["costUsd"], json!(0.42), "{listed}");
     assert!(listed["session"]["tabs"][0].get("accountLabel").is_none(), "one account: no label: {listed}");
 
-    let context = call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id })).await.unwrap();
+    let prepare = || call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id }));
+    let refused = prepare().await.unwrap_err();
+    assert_eq!(refused.0, "internal");
+    assert!(refused.1.contains("No usable saved context"), "{refused:?}");
+
+    // The runtime can hand off recent messages from the saved app log when
+    // the provider has no complete transcript for this tab.
+    let prompt = "Check the machine's saved context.";
+    let reply = "The machine retained this exchange.";
+    let log = crate::store::log_path(&session_id, &tab_id).unwrap();
+    for (seq, payload) in [
+        (1, json!({ "type": "user_message", "text": prompt })),
+        (2, json!({ "type": "assistant_text", "text": reply })),
+    ] {
+        let event = json!({
+            "id": format!("saved-{seq}"),
+            "seq": seq,
+            "ts": index::now(),
+            "sessionId": session_id,
+            "tabId": tab_id,
+            "harness": "claude",
+            "payload": payload,
+        });
+        crate::store::append_line(&log, &event.to_string()).unwrap();
+    }
+    let context = prepare().await.unwrap();
     assert_eq!(context["tabId"], json!(tab_id), "{context}");
     assert_eq!(context["provider"], "claude", "{context}");
     assert_eq!(context["cwd"], json!(path), "the machine's own folder: {context}");
+    assert_eq!(context["lastPrompt"], prompt, "{context}");
+    assert_eq!(context["lastUpdate"], reply, "{context}");
+    assert!(context["transcriptPath"].is_null(), "{context}");
+    let capture = context["partialCapture"].as_str().unwrap();
+    assert!(capture.ends_with(&format!("User: {prompt}\n\nAssistant: {reply}")), "{context}");
     assert_eq!(code(call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": "tab-nope" })).await), "not_found");
     assert_eq!(code(call(&m.rpc, &peer, "session.usage", json!({ "sessionId": "session-nope" })).await), "not_found");
 
