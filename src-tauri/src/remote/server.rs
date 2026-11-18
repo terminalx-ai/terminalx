@@ -259,6 +259,18 @@ impl PtyInput {
 }
 
 
+#[derive(Clone, Copy)]
+enum RunDiscovery {
+    Active,
+    Backfill,
+    Exit,
+}
+
+enum EvictedRun {
+    Backfilled,
+    Observed,
+}
+
 /// One remote terminal. Its bytes live only in `ring`: nothing here writes
 /// terminal output into a session transcript.
 struct PtyState {
@@ -287,6 +299,7 @@ struct PtyState {
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
     exit: Option<Option<i32>>,
+    /// When this server heard the exit. Historical backfill has no timestamp.
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
@@ -459,6 +472,9 @@ pub struct WorkspaceRpc {
     terminals: Arc<Terminals>,
     sessions: Option<SessionManager>,
     ptys: Mutex<HashMap<String, PtyState>>,
+    /// Runtime-owned run panes whose exited remote records were evicted.
+    /// Accessed under the ptys lock so discovery cannot race eviction.
+    evicted_runs: Mutex<HashMap<String, EvictedRun>>,
     /// Agent tabs that were removed. Tab ids are never reused, and the last
     /// output of a CLI that was just stopped must not bring its terminal back.
     /// The newest [`MAX_REMOVED_AGENT_TABS`] are remembered: by the time one
@@ -591,6 +607,7 @@ impl WorkspaceRpc {
             terminals,
             sessions,
             ptys: Mutex::new(HashMap::new()),
+            evicted_runs: Mutex::new(HashMap::new()),
             removed_agent_tabs: Mutex::new(VecDeque::new()),
             session_subs: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
@@ -2833,12 +2850,32 @@ impl WorkspaceRpc {
     /// A pane still running is recorded from here on, so one that started
     /// before this server existed shows its output from then. Called with the
     /// terminals locked; `None` for a pane of no session of this machine.
-    fn run_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pane: &str, title: Option<&str>, backfill: bool) -> Option<&'a mut PtyState> {
+    fn run_entry<'a>(&self, ptys: &'a mut HashMap<String, PtyState>, pane: &str, title: Option<&str>, discovery: RunDiscovery) -> Option<&'a mut PtyState> {
         if !ptys.contains_key(pane) {
+            let observed_exit = matches!(discovery, RunDiscovery::Exit);
+            // The runtime can finish the pane before delivering its exit.
+            // If listing found it in that interval, let the real exit take
+            // its place in the retention order even after backfill eviction.
+            if self.evicted_runs.lock().unwrap().get(pane)
+                .is_some_and(|evicted| !observed_exit || matches!(evicted, EvictedRun::Observed))
+            {
+                return None;
+            }
             let Scope::Machine { projects, .. } = &self.scope else { return None };
             let (session_id, run) = SessionRun::of_pane(pane, title.map(str::to_string).or_else(|| self.terminals.title(pane).map(|(title, _)| title)).as_deref())?;
             let session = index::get(&session_id).ok()?;
             let project = projects.get(&machine::project_id(&session.project_path)).ok()?;
+            let running = !observed_exit && self.terminals.is_running(pane);
+            if !running && self.terminals.shell(pane).is_none() {
+                return None;
+            }
+            // Historical runs can fill spare slots. Only observed exits can
+            // displace records, and an observed exit always outranks backfill.
+            if !running && !observed_exit
+                && ptys.values().filter(|pty| pty.exit.is_some() && !pty.stop_pending).count() >= MAX_EXITED_PTYS
+            {
+                return None;
+            }
             let cwd = std::fs::canonicalize(&session.cwd).ok().filter(|cwd| project.files.contains(cwd)).map(|cwd| project.files.relative(&cwd)).unwrap_or_else(|| ".".into());
             let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
             let input_pending = Arc::new(AtomicUsize::new(0));
@@ -2858,8 +2895,7 @@ impl WorkspaceRpc {
                     }
                 })
                 .ok()?;
-            let running = self.terminals.is_running(pane);
-            let ring: VecDeque<u8> = if backfill && !running {
+            let ring: VecDeque<u8> = if !running && !matches!(discovery, RunDiscovery::Active) {
                 let kept = self.terminals.read_output(pane).unwrap_or_default();
                 kept[kept.len().saturating_sub(PTY_RING_BYTES)..].iter().copied().collect()
             } else {
@@ -2883,7 +2919,7 @@ impl WorkspaceRpc {
                     ring,
                     // Its code was the runtime's to hear; this server did not.
                     exit: (!running).then_some(None),
-                    exited_at: (!running).then(Instant::now),
+                    exited_at: None,
                     closed: false,
                     stop_pending: false,
                     applied_seq: HashMap::new(),
@@ -2899,14 +2935,15 @@ impl WorkspaceRpc {
         ptys.get_mut(pane).filter(|pty| pty.run.is_some())
     }
 
-    /// Record every script run of a visible session the runtime holds a pane
-    /// for, so a run started before anyone listened (or by the runtime itself,
-    /// "Run after setup") is listed too. Called with the terminals locked.
+    /// Discover live runs of visible sessions and fill spare exit slots from
+    /// the runtime's history. Keep eviction history while the pane exists.
+    /// Called with the terminals locked.
     fn record_session_runs(&self, ptys: &mut HashMap<String, PtyState>, shells: &[crate::pty::ShellPane], scope: Option<&HashSet<String>>) {
         let Some(visible) = scope else { return };
+        self.evicted_runs.lock().unwrap().retain(|id, _| self.terminals.shell(id).is_some());
         for shell in shells {
             if visible.contains(&shell.session_id) && !ptys.contains_key(&shell.id) && SessionRun::of_pane(&shell.id, None).is_some() {
-                self.run_entry(ptys, &shell.id, shell.title.as_deref(), true);
+                self.run_entry(ptys, &shell.id, shell.title.as_deref(), RunDiscovery::Backfill);
             }
         }
     }
@@ -2933,7 +2970,7 @@ impl WorkspaceRpc {
                     Err(_) => return,
                 }
             } else if run {
-                match self.run_entry(&mut ptys, &data.id, None, false) {
+                match self.run_entry(&mut ptys, &data.id, None, RunDiscovery::Active) {
                     Some(pty) => pty,
                     None => return,
                 }
@@ -2993,11 +3030,21 @@ impl WorkspaceRpc {
         let mut ended = Vec::new();
         let evicted = {
             let mut ptys = self.ptys.lock().unwrap();
-            let Some(pty) = ptys.get_mut(&exit.id) else { return };
+            let pty = if ptys.contains_key(&exit.id) {
+                ptys.get_mut(&exit.id)
+            } else if self.is_machine() && SessionRun::of_pane(&exit.id, None).is_some() {
+                self.run_entry(&mut ptys, &exit.id, None, RunDiscovery::Exit)
+            } else {
+                None
+            };
+            let Some(pty) = pty else { return };
             if pty.setup.is_some() {
                 // Installed or signed in, or not: what the agents' logins say now is read again.
                 crate::harness::setup::ended_elsewhere(&exit.id);
                 super::machine_agents::forget();
+            }
+            if pty.run.is_some() {
+                self.evicted_runs.lock().unwrap().remove(&exit.id);
             }
             pty.exit = Some(exit.code);
             pty.exited_at = Some(Instant::now());
@@ -3012,17 +3059,22 @@ impl WorkspaceRpc {
             }
             // Exited terminals keep their output for a late reader, up to a
             // bound: the oldest are dropped first.
-            let mut exited: Vec<(Instant, String)> =
-                ptys.iter().filter(|(_, pty)| !pty.stop_pending).filter_map(|(id, pty)| pty.exited_at.map(|at| (at, id.clone()))).collect();
+            let mut exited: Vec<_> = ptys.iter()
+                .filter(|(_, pty)| pty.exit.is_some() && !pty.stop_pending)
+                .map(|(id, pty)| (pty.exited_at, id.clone()))
+                .collect();
             let mut evicted = Vec::new();
             if exited.len() > MAX_EXITED_PTYS {
                 exited.sort();
-                for (_, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
+                for (exited_at, id) in exited.drain(..exited.len() - MAX_EXITED_PTYS) {
                     // A session's script run is the runtime's pane: only this record of it goes.
                     let owned = ptys.get(&id).is_some_and(|pty| pty.run.is_none());
                     ended.extend(Self::remove_pty(&mut ptys, &id));
                     if owned {
                         evicted.push(id);
+                    } else {
+                        let eviction = if exited_at.is_some() { EvictedRun::Observed } else { EvictedRun::Backfilled };
+                        self.evicted_runs.lock().unwrap().insert(id, eviction);
                     }
                 }
             }
@@ -3839,7 +3891,7 @@ impl WorkspaceRpc {
                 let outcome = crate::action_runner::run(manager, &session.id, action_id, crate::action_runner::RunOptions { restart }).map_err(refused)?;
                 let scope = self.pty_session_scope(peer);
                 let mut ptys = self.ptys.lock().unwrap();
-                let terminal = self.run_entry(&mut ptys, &outcome.run.pane_id, Some(&outcome.run.name), false).map(|pty| {
+                let terminal = self.run_entry(&mut ptys, &outcome.run.pane_id, Some(&outcome.run.name), RunDiscovery::Active).map(|pty| {
                     // The person who started it types into it (a Ctrl-C, an answer to a prompt).
                     if outcome.started {
                         pty.controller = Some(peer.device_id.clone());
