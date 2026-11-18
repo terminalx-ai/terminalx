@@ -222,16 +222,25 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   // Git: the project's repositories; the session's worktree first.
   const [repositories, setRepositories] = useState<RemoteRepository[] | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const discoverRepositories = useMemo(() => {
+    if (!generation || !projectClient) return undefined;
+    // Changes and Files share discovery for this connection, independent of the file source's root.
+    let request: Promise<RemoteRepository[]> | undefined;
+    return () => request ??= listRepositories(projectClient).catch((error: unknown) => {
+      request = undefined;
+      throw error;
+    });
+  }, [generation, projectClient]);
   useEffect(() => {
-    if (!generation || !projectClient) return;
+    if (!discoverRepositories) return;
     let cancelled = false;
-    listRepositories(projectClient)
+    discoverRepositories()
       .then((found) => !cancelled && setRepositories(found))
       .catch(() => !cancelled && setRepositories([]));
     return () => {
       cancelled = true;
     };
-  }, [generation, projectClient]);
+  }, [discoverRepositories]);
   const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
   const defaultRepository = repositories ? sessionRepository(repositories, project, ownSession) : null;
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
@@ -249,8 +258,8 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const fileKey = base ? `${projectKey}/${base}` : projectKey;
   const filesReady = filesBase !== null;
   const fileSource = useMemo(
-    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base) : undefined),
-    [connected, projectClient, filesReady, fileKey, manage, base],
+    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base, discoverRepositories) : undefined),
+    [connected, projectClient, filesReady, fileKey, manage, base, discoverRepositories],
   );
   useEffect(() => {
     if (!fileSource) return;

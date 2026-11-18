@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { listRepositories } from "@terminalx/portable/workspaceGit";
+import { listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
 import {
   FS_MAX_FILE_BYTES,
   listRemoteDir,
@@ -205,7 +205,21 @@ const PORCELAIN: Record<string, ChangeStatus> = { "?": "added", A: "added", M: "
  * gives is relative to that folder, as a local session's are to its `cwd`.
  * Empty for the workspace's own root.
  */
-export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnly: boolean, base = ""): CloudFileSource {
+/** The path beneath a file root, in project-relative or absolute coordinates. */
+export function pathInFileRoot(root: string, path: string): string | null {
+  if (root.startsWith("/") !== path.startsWith("/")) return null;
+  if (!root) return path;
+  if (path === root) return "";
+  return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : null;
+}
+
+export function cloudFileSource(
+  key: string,
+  client: WorkspaceRpcClient,
+  readOnly: boolean,
+  base = "",
+  discoverRepositories: () => Promise<readonly RemoteRepository[]> = () => listRepositories(client),
+): CloudFileSource {
   const absolute = base.startsWith("/");
   const root = base ? remoteFilePath(base, absolute) : "";
   /** Only a source rooted at an outside worktree names absolute paths, and only under its root. */
@@ -213,11 +227,7 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
   /** The runtime's path for one of ours. */
   const inside = (rel: string) => (root ? (rel ? `${root}/${remotePath(rel)}` : root) : rel);
   /** Ours for one of the runtime's; one outside the base is not ours (null). */
-  const outside = (path: string): string | null => {
-    if (!root) return path;
-    if (path === root) return "";
-    return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : null;
-  };
+  const outside = (path: string) => root ? pathInFileRoot(root, path) : path;
   let disposed = false;
   const controllers = new Set<AbortController>();
   const listeners = new Set<(paths: string[] | null) => void>();
@@ -303,14 +313,20 @@ export function cloudFileSource(key: string, client: WorkspaceRpcClient, readOnl
       const under = (repo: string | undefined) => (repo && repo !== "." ? `${repo}/` : "");
       const badges = (status: Status, prefix: string) =>
         (status.files ?? []).flatMap((file) => {
+          const path = outside(prefix + file.path);
           const code = file.index === "?" ? "?" : file.worktree !== " " ? file.worktree : file.index;
           const change = PORCELAIN[code];
-          return change ? [{ path: prefix + file.path, status: change }] : [];
+          return path && change ? [{ path, status: change }] : [];
         });
-      // Rooted at a worktree: that worktree is the repository, and its paths are already ours.
+      // A session folder can be below a repository root. Status paths are relative to that repository.
       if (root) {
-        const status = await live(client.call<Status>("git.status", { repo: root }));
-        return status.repository ? badges(status, "") : [];
+        const repositories = await live(discoverRepositories());
+        const containing = repositories
+          .filter(({ repo }) => pathInFileRoot(repo === "." ? "" : repo, root) !== null)
+          .sort((a, b) => under(b.repo).length - under(a.repo).length)[0];
+        if (!containing) return [];
+        const status = await live(client.call<Status>("git.status", { repo: containing.repo }));
+        return status.repository ? badges(status, under(containing.repo)) : [];
       }
       try {
         const status = await live(client.call<Status>("git.status"));

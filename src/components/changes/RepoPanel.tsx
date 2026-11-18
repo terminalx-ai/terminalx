@@ -25,8 +25,8 @@ export type RepoView = "uncommitted" | "history";
  * writes, and each refetches. `source` is a cloud repository (PRO-27);
  * without it this is the local checkout at `cwd`.
  */
-export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff, onOpenFile }: {
-  onOpenFile?: (path: string) => void;
+export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange: setSub, author, embedded = false, onReviewCommit, revision = 0, onOpenDiff, openFileAction }: {
+  openFileAction?: (path: string) => (() => void) | undefined;
   onOpenDiff?: (file: ChangedFile, range: ChangeRange) => void;
   cwd?: string;
   source?: GitSource;
@@ -278,7 +278,7 @@ export function RepoPanel({ cwd, source: given, active, view: sub, onViewChange:
           </div>
           {current && head && <div className="min-h-0 flex-1">
             <FileDiff key={current.blobHash ?? revision} source={source} path={current.path} oldPath={current.oldPath} base={selectedStaged ? head : index ?? head} head={selectedStaged ? index : null} revision={tick} onDiscard={source.discard && writable ? () => askDiscard(current) : undefined}
-              onOpenFile={onOpenFile && current.status !== "deleted" ? () => onOpenFile(current.path) : undefined}
+              onOpenFile={current.status !== "deleted" ? openFileAction?.(current.path) : undefined}
               staging={source.applyHunk ? { staged: selectedStaged, disabled: !!busy, onHunk: applyHunk } : undefined} />
           </div>}
         </>

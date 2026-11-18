@@ -106,16 +106,20 @@ it("keeps the working-tree view scoped to the workspace", async () => {
 });
 
 it.each(([
-  ["cloud:org:workspace", "cloud:org:workspace", "app", "app/large.ts"],
-  ["machine:m:p", "machine:m:p/trees/topic", "trees/topic", "large.ts"],
-  ["cloud:org:workspace", "cloud:other:workspace", "app", null],
-] as const).flatMap((row) => [false, true].flatMap((uncommitted) => [false, true].map((deleted) => [...row, uncommitted, deleted] as const))))("opens an oversized Changes file only through its matching file source (%s, %s, %s, %s, uncommitted=%s, deleted=%s)", async (workspaceKey, fileKey, repo, expectedPath, uncommitted, deleted) => {
+  ["cloud:org:workspace", "cloud:org:workspace", "app", "large.ts", "app/large.ts"],
+  ["machine:m:p", "machine:m:p/trees/topic", "trees/topic", "large.ts", "large.ts"],
+  ["machine:m:p", "machine:m:p/src", ".", "src/nested/large.ts", "nested/large.ts"],
+  ["machine:m:p", "machine:m:p/src", ".", "src-other/large.ts", null],
+  ["machine:m:p", "machine:m:p/trees/topic/src", "trees/topic", "src/large.ts", "large.ts"],
+  ["machine:m:p", "machine:m:p//outside/topic/src", "/outside/topic", "src/large.ts", "large.ts"],
+  ["cloud:org:workspace", "cloud:other:workspace", "app", "large.ts", null],
+] as const).flatMap((row) => [false, true].flatMap((uncommitted) => [false, true].map((deleted) => [...row, uncommitted, deleted] as const))))("opens an oversized Changes file only through its matching file source (%s, %s, %s, %s → %s, uncommitted=%s, deleted=%s)", async (workspaceKey, fileKey, repo, changedPath, expectedPath, uncommitted, deleted) => {
   const { cloudGitSource } = await import("@/lib/gitSource");
   const { RemoteGit } = await import("@terminalx/portable/workspaceGit");
   const { getEditors, dropEditors } = await import("@/lib/editors");
   const call = vi.fn(async (method: string) => {
     if (method === "git.reviewRange") return { target: "main", base: "base", head: "head" };
-    if (method === "git.changesBetween" || method === "git.workingChanges") return { head: "head", files: [{ path: "large.ts", status: deleted ? "deleted" : "modified", additions: 0, deletions: 0 }] };
+    if (method === "git.changesBetween" || method === "git.workingChanges") return { head: "head", files: [{ path: changedPath, status: deleted ? "deleted" : "modified", additions: 0, deletions: 0 }] };
     if (method === "git.branches") return { branches: [] };
     if (method === "git.fileContents") return deleted ? { before: "<file too large to show>", beforeSize: 5 * 1024 * 1024, after: null } : { before: "old", after: "<file too large to show>", afterSize: 5 * 1024 * 1024 };
     throw new Error(method);
