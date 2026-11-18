@@ -362,10 +362,10 @@ static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file
 #[cfg(all(target_os = "macos", feature = "desktop"))]
 fn install_window_pairing_consent(pairing: &std::sync::Arc<pairing::PairingManager>) {
     let keys = std::sync::Arc::downgrade(pairing);
-    serve_cli::consent::speak_as_window(Box::new(move || {
+    serve_cli::consent::speak_as_window(Box::new(move |create| {
         keys.upgrade()
             .ok_or_else(|| anyhow::anyhow!("TerminalX pairing is unavailable. Restart TerminalX and try again."))?
-            .consent_key()
+            .consent_key(create)
     }));
 }
 

@@ -72,12 +72,6 @@ fn runtime_service() -> Option<String> {
     )
 }
 
-/// Whether this runtime's host key is the window's, handed over from the
-/// app's Keychain item, rather than one it keeps itself.
-pub(crate) fn window_owned() -> bool {
-    runtime_service().is_some()
-}
-
 impl KeyStore {
     /// The store this runtime uses, under `data_dir`.
     pub(crate) fn for_runtime(data_dir: &Path) -> Self {
@@ -202,23 +196,6 @@ mod tests {
         assert_eq!(desktop_service(Some("1"), None), None);
         assert_eq!(desktop_service(Some("1"), Some("no-dot")), None);
         assert_eq!(desktop_service(Some("1"), Some("com.x/../y")), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn desktop_consent_fails_closed_when_the_window_cannot_own_the_key() {
-        use crate::serve_cli::consent::{terminal_rule, Refusal, Window};
-        for (macos, application, supported) in [
-            (true, Some("com.terminalx.next"), true),
-            (false, Some("com.terminalx.next"), false),
-            (true, None, false),
-            (true, Some("invalid"), false),
-        ] {
-            let owned = desktop_service_for(macos, Some("1"), application).is_some();
-            let window = Window::desktop(owned, Some(zeroize::Zeroizing::new([7; 32])));
-            assert_eq!(terminal_rule(&window, false, true), if supported { None } else { Some(Refusal::UnsupportedDesktop) });
-            assert_eq!(terminal_rule(&window, true, false), if supported { None } else { Some(Refusal::UnsupportedDesktop) });
-        }
     }
 
     #[test]

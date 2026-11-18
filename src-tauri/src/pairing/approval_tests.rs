@@ -42,20 +42,21 @@ fn manager(ttl_ms: i64) -> (Arc<PairingManager>, MemorySecrets, crate::store::Te
 #[test]
 fn consent_key_distinguishes_missing_storage_entry_and_denied_read() {
     use crate::keychain::testing::Call;
+    use ring::signature::KeyPair as _;
 
     let (manager, store, _home) = manager(1_000);
-    let Err(missing) = manager.consent_key() else {
+    let Err(missing) = manager.consent_key(false) else {
         panic!("a missing key must fail closed");
     };
     assert!(missing.to_string().contains("missing from Keychain"));
-    assert!(missing.to_string().contains("Restart TerminalX"));
+    assert!(missing.to_string().contains("Restart the local runtime"));
 
-    let host = manager.host_key(true).unwrap();
-    let read = manager.consent_key().unwrap();
-    assert!(&*read == host.secret(), "the stored key is used for proof");
+    let created = manager.consent_key(true).unwrap();
+    let read = manager.consent_key(false).unwrap();
+    assert_eq!(read.public_key().as_ref(), created.public_key().as_ref());
 
     store.fail_reads(true);
-    let Err(denied) = manager.consent_key() else {
+    let Err(denied) = manager.consent_key(false) else {
         panic!("a denied read must fail closed");
     };
     assert!(denied.to_string().contains("Unlock your login Keychain"));
@@ -63,7 +64,7 @@ fn consent_key_distinguishes_missing_storage_entry_and_denied_read() {
 
     assert!(matches!(store.calls().as_slice(), [Call::Get, Call::Get, Call::Set(_), Call::Get, Call::Get]));
     store.fail_reads(false);
-    assert!(manager.consent_key().is_ok(), "retry reads the key again");
+    assert!(manager.consent_key(false).is_ok(), "retry reads the key again");
 }
 
 fn entry(id: &str, token: &str) -> DeviceEntry {

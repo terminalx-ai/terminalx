@@ -685,21 +685,17 @@ impl PairingManager {
         self.phone.set_owner(Some(owner));
     }
 
-    /// The machine's host key, with which this window proves to the
-    /// runtime's pairing guard that it is the window (`serve_cli::consent`).
-    /// Blocking: a Keychain read. Only macOS registers a proof provider.
+    /// The window's signing key for runtime consent. Reading it can block
+    /// on the Keychain. A runtime launch may create it if absent.
     #[cfg(target_os = "macos")]
-    pub(crate) fn consent_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let keypair = self
-            .secrets
-            .host_key(false)
+    pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
+        self.secrets.window_consent_key(create)
             .map_err(|_| {
-                anyhow!("TerminalX couldn’t read the pairing key from Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
             })?
             .ok_or_else(|| {
-                anyhow!("The TerminalX pairing key is missing from Keychain. Restart TerminalX and try again. If the key is still missing, contact support.")
-            })?;
-        Ok(zeroize::Zeroizing::new(*keypair.secret()))
+                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+            })
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {

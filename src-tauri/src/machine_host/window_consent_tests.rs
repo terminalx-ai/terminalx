@@ -1,4 +1,4 @@
-//! The macOS window and runtime keep separate copies of the pairing key.
+//! The macOS window owns the consent signing key and the runtime pins its verifier.
 //! Child processes isolate the two OnceLocks and let the kernel identify the
 //! window's witness as a caller outside the runtime's process tree.
 use super::*;
@@ -9,6 +9,7 @@ use crate::local_runtime::{
     desktop::Desktop,
     Lifetime,
 };
+use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -17,7 +18,13 @@ const ROLE: &str = "TERMINALX_TEST_WINDOW_CONSENT_ROLE";
 const APP: &str = "test.terminalx.window-consent";
 const ACCOUNT: &str = "host-e2ee-key";
 const KEY: [u8; 32] = [42; 32];
-const OTHER_KEY: [u8; 32] = [73; 32];
+const CONSENT_ACCOUNT: &str = "window-consent-signing-key";
+const SIGNING_SEED: [u8; 32] = [67; 32];
+
+fn launch_key() -> String {
+    let key = Ed25519KeyPair::from_seed_unchecked(&SIGNING_SEED).unwrap();
+    STANDARD.encode(key.public_key())
+}
 
 fn child(root: &Path, role: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -31,12 +38,16 @@ fn child(root: &Path, role: &str) -> Command {
         .env("TERMINALX_HOME", root)
         .env("TERMINALX_LOCAL_DESKTOP", "1")
         .env("TERMINALX_LOCAL_APPLICATION", APP)
+        .env(
+            crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV,
+            launch_key(),
+        )
         .env_remove("TERMINALX_TEST_MANAGED_PRIVACY");
     command
 }
 
 #[test]
-fn installed_pairing_key_authorizes_the_window_after_runtime_adoption() {
+fn pinned_consent_key_authorizes_only_the_window_after_runtime_adoption() {
     // The control and witness sockets need a short path on macOS.
     let home = tempfile::Builder::new()
         .prefix("wc")
@@ -60,21 +71,13 @@ fn installed_pairing_key_authorizes_the_window_after_runtime_adoption() {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let window = ready.exists().then(|| {
-            let mut command = child(&root, caller);
-            // SAFETY: setsid is async-signal-safe. The window is a sibling
-            // of the runtime, in its own session with no controlling terminal.
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
-            }
-            command.stdin(Stdio::null()).output().unwrap()
-        });
+        let window = ready
+            .exists()
+            .then(|| detached_child(&root, caller).output().unwrap());
+        let reopened = window
+            .as_ref()
+            .filter(|window| window.status.success())
+            .map(|_| detached_child(&root, "window-reopened").output().unwrap());
         // EOF lets the runtime drop its listener before the next launch.
         drop(runtime.stdin.take());
         if window.is_none() {
@@ -94,14 +97,38 @@ fn installed_pairing_key_authorizes_the_window_after_runtime_adoption() {
             String::from_utf8_lossy(&window.stdout),
             String::from_utf8_lossy(&window.stderr)
         );
+        let reopened = reopened.unwrap();
+        assert!(
+            reopened.status.success(),
+            "reopened window failed: {}\n{}",
+            String::from_utf8_lossy(&reopened.stdout),
+            String::from_utf8_lossy(&reopened.stderr)
+        );
     }
+}
+
+fn detached_child(root: &Path, role: &str) -> Command {
+    let mut command = child(root, role);
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    command.stdin(Stdio::null());
+    command
 }
 
 #[test]
 fn process_fixture() {
     match std::env::var(ROLE).as_deref() {
         Ok(role @ ("runtime" | "runtime-restarted")) => runtime(role),
-        Ok(role @ ("window" | "window-restarted")) => window(role == "window-restarted"),
+        Ok(role @ ("window" | "window-restarted" | "window-reopened")) => window(role),
+        Ok("untrusted") => untrusted(),
         _ => {}
     }
 }
@@ -216,14 +243,14 @@ fn runtime(role: &str) {
     host.stop_for_test();
 }
 
-fn window(restarted: bool) {
+fn detached_desktop(root: &Path) -> (Arc<Client>, Arc<Desktop>) {
     // SAFETY: getsid/getpid only query the calling process.
     assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
     assert!(
         crate::serve_cli::consent::controlling_terminal(std::process::id() as libc::pid_t)
             .is_none()
     );
-    let client = Client::connect(&crate::store::root().unwrap()).unwrap();
+    let client = Client::connect(root).unwrap();
     let desktop = Arc::new(
         Desktop::connect(
             client.clone(),
@@ -231,48 +258,61 @@ fn window(restarted: bool) {
         )
         .unwrap(),
     );
-    let call = |command, params| desktop.machine_host(command, params);
-    let refused = |command, params, case| {
-        let error = call(command, params).expect_err(case);
-        let refusal = error
-            .downcast_ref::<Refused>()
-            .unwrap_or_else(|| panic!("{case}: {error:#}"));
-        assert_eq!(refusal.code, "person_required", "{case}: {refusal}");
-        assert!(
-            refusal.message.contains("not the TerminalX window"),
-            "{case}: {refusal}"
+    (client, desktop)
+}
+
+fn assert_person_required(result: Result<Value>, case: &str) {
+    let error = result.expect_err(case);
+    let refusal = error
+        .downcast_ref::<Refused>()
+        .unwrap_or_else(|| panic!("{case}: {error:#}"));
+    assert_eq!(refusal.code, "person_required", "{case}: {refusal}");
+    assert!(
+        refusal.message.contains("not the TerminalX window"),
+        "{case}: {refusal}"
+    );
+}
+
+fn untrusted() {
+    let root = crate::store::root().unwrap();
+    let (_, desktop) = detached_desktop(&root);
+    let request_id = std::env::var("TERMINALX_TEST_CONSENT_REQUEST_ID").unwrap();
+    for (command, params) in [
+        (wire::CREATE_CODE, json!({})),
+        (wire::APPROVE, json!({"requestId": request_id})),
+    ] {
+        assert_person_required(
+            desktop.machine_host(command, params),
+            "detached caller without the signing key",
         );
-    };
+    }
+}
+
+fn window(role: &str) {
+    let root = crate::store::root().unwrap();
+    let (client, desktop) = detached_desktop(&root);
+    let call = |command, params| desktop.machine_host(command, params);
     let secrets = MemorySecrets::default();
     let service = format!("{APP}.pairing");
     secrets.set(&service, ACCOUNT, &KEY).unwrap();
     let manager =
         crate::pairing::PairingManager::with_secrets_for_test(APP, Arc::new(secrets.clone()));
 
-    for (command, params) in [
-        (wire::CREATE_CODE, json!({})),
-        (wire::APPROVE, json!({"requestId": "unused"})),
-    ] {
-        refused(
-            command,
-            params,
-            "detached caller with no installed proof provider",
-        );
-    }
+    secrets
+        .set(&service, CONSENT_ACCOUNT, &SIGNING_SEED)
+        .unwrap();
     crate::install_window_pairing_consent(&manager);
-    if !restarted {
-        for (command, params) in [
-            (wire::CREATE_CODE, json!({})),
-            (wire::APPROVE, json!({"requestId": "unused"})),
-        ] {
-            refused(command, params, "window key before runtime adoption");
-        }
-    }
+    assert_eq!(
+        crate::serve_cli::consent::launch_public_key()
+            .unwrap()
+            .as_deref(),
+        Some(launch_key().as_str())
+    );
     let before = desktop.machine_host_status().unwrap().unwrap();
-    let expected = if restarted {
-        HostKeyState::Ready
-    } else {
+    let expected = if role == "window" {
         HostKeyState::Needed
+    } else {
+        HostKeyState::Ready
     };
     assert_eq!(before.host_key, expected);
     manager.reconcile_machine(&desktop);
@@ -285,6 +325,9 @@ fn window(restarted: bool) {
 
     let created = call(wire::CREATE_CODE, json!({})).unwrap();
     let code = wire::MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
+    if role == "window-reopened" {
+        return;
+    }
     assert_eq!(
         code.public_key_b64,
         manager.host_key(false).unwrap().public_key_b64()
@@ -294,24 +337,31 @@ fn window(restarted: bool) {
         .unwrap();
     let answer = json!({ "requestId": pending["requestId"] });
 
-    // The installed provider reads the current key on each request. Changing
-    // the window's store cannot replace an already-adopted runtime identity.
-    secrets.set(&service, ACCOUNT, &OTHER_KEY).unwrap();
-    // Force a replacement attempt even though reconciliation sees Ready.
-    let error = call(
-        wire::ADOPT_KEY,
-        json!({ "secretB64": STANDARD.encode(OTHER_KEY) }),
-    )
-    .unwrap_err();
-    assert_eq!(error.downcast_ref::<Refused>().unwrap().code, "key_refused");
-    refused(wire::CREATE_CODE, json!({}), "different window key");
-    refused(
-        wire::APPROVE,
-        answer.clone(),
-        "different window key for a real pending request",
+    let untrusted = detached_child(&root, "untrusted")
+        .env(
+            "TERMINALX_TEST_CONSENT_REQUEST_ID",
+            pending["requestId"].as_str().unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        untrusted.status.success(),
+        "detached fixture failed: {}\n{}",
+        String::from_utf8_lossy(&untrusted.stdout),
+        String::from_utf8_lossy(&untrusted.stderr)
     );
 
-    secrets.set(&service, ACCOUNT, &KEY).unwrap();
+    // Even possession of the adopted host key cannot prove window identity.
+    secrets.set(&service, CONSENT_ACCOUNT, &KEY).unwrap();
+    assert_person_required(call(wire::CREATE_CODE, json!({})), "different signing key");
+    assert_person_required(
+        call(wire::APPROVE, answer.clone()),
+        "different signing key for a real pending request",
+    );
+
+    secrets
+        .set(&service, CONSENT_ACCOUNT, &SIGNING_SEED)
+        .unwrap();
     let approved = call(wire::APPROVE, answer).unwrap();
     assert_eq!(approved["approved"], true);
     let status = call(wire::STATUS, json!({})).unwrap();

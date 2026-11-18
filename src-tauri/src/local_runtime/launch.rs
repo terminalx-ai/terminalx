@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::client::Client;
+use crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV;
 
 fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -143,7 +144,14 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
     }
     let executable = installed(source, &home)?;
     let mut command = Command::new(executable);
+    command.env_remove(WINDOW_PUBLIC_KEY_ENV);
     if let Some(application) = application {
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        match crate::serve_cli::consent::launch_public_key() {
+            Ok(Some(key)) => { command.env(WINDOW_PUBLIC_KEY_ENV, key); }
+            Ok(None) => {}
+            Err(error) => log::warn!("could not provision window pairing consent: {error:#}"),
+        }
         command.env("TERMINALX_LOCAL_DESKTOP","1").env("TERMINALX_LOCAL_APPLICATION",application);
     } else {
         command.env_remove("TERMINALX_LOCAL_DESKTOP").env_remove("TERMINALX_LOCAL_APPLICATION");
