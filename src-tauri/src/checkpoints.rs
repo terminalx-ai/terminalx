@@ -813,12 +813,22 @@ pub fn plan_reset(session: &str, tab: &str, end_seq: u64) -> Result<ResetPlan> {
     })
 }
 
-/// An older session can prove its workspace through its own saved checkpoint
-/// and the matching pinned ref. A path or branch name alone proves no history.
+/// A legacy session can identify its original registration through its saved
+/// attachment or an earlier filesystem observation in checkpoint metadata.
+/// Retention of the snapshot trees is separate from checkout identity.
 pub(crate) fn legacy_fork_workspace(
     src: &index::SessionEntry, project: &Path, common: &Path, branch: &str,
 ) -> Option<(PathBuf, PathBuf)> {
     let cwd = Path::new(&src.cwd);
+    if let (Some(recorded), Ok(created)) = (src.checkout_root(), chrono::DateTime::parse_from_rfc3339(&src.created)) {
+        let root = Path::new(recorded);
+        let observed = created.into();
+        if let Some(relative) = git::worktree_identity::legacy_project_unchanged(project, common, observed)
+            .and_then(|()| git::worktree_identity::legacy_missing_cwd(common, root, cwd, branch, observed))
+        {
+            return Some((root.to_path_buf(), relative));
+        }
+    }
     let mut verified = None;
     for tab in &src.tabs {
         let Ok(state) = load(&src.id, &tab.id) else { continue };
@@ -838,8 +848,10 @@ pub(crate) fn legacy_fork_workspace(
             let id = format!("{}-{}", tab.id, turn.seq);
             let reference = trees::reference(&src.id, &id, "start").ok()?;
             let pinned = git::run(project, &["rev-parse", "--verify", "--quiet", &reference]).ok();
-            if pinned.as_deref().map(str::trim) != Some(turn.start.as_str()) {
-                continue;
+            match pinned.as_deref() {
+                Some(tree) if tree.trim() == turn.start => {}
+                None if git::worktree_identity::legacy_project_unchanged(project, common, observed.into()).is_some() => {}
+                _ => continue,
             }
             if verified.as_ref().is_some_and(|(previous, _): &(PathBuf, PathBuf)| previous != root) {
                 return None;

@@ -5128,7 +5128,12 @@ mod command_tests {
         src.worktree_name = Some(wt.name);
         src.branch = Some(wt.branch.clone());
         src.set_checkout_root(Some(&wt.path));
-        store::index::save(&[src.clone()]).unwrap();
+        let mut no_checkpoint = src.clone();
+        no_checkpoint.id = uuid::Uuid::now_v7().to_string();
+        // The session creation timestamp precedes allocation for sessions that
+        // created their worktree. Those need a later historical observation.
+        src.created = "2000-01-01T00:00:00Z".into();
+        store::index::save(&[src.clone(), no_checkpoint.clone()]).unwrap();
         let legacy = store::index::get(&src.id).unwrap();
         assert!(legacy.checkout_identity().is_none());
         src.bind_checkout_root(&wt.path);
@@ -5174,6 +5179,7 @@ mod command_tests {
             no_root_record.set_checkout_root(None);
             for (source, at) in [&src, &legacy, &no_root_record].into_iter()
                 .flat_map(|source| [None, Some(0), Some(2)].map(|at| (source, at)))
+                .chain([(&no_checkpoint, None), (&no_checkpoint, Some(0))])
             {
                 let mut dest = source.clone();
                 dest.worktree_name = None;
@@ -5212,14 +5218,23 @@ mod command_tests {
             assert_eq!(store::index::get(&src.id).unwrap(), legacy);
         }
 
-        let reference = git::checkpoints::reference(&src.id, &format!("{}-1", tab.id), "end-index").unwrap();
-        git::run(&root, &["update-ref", "-d", &reference]).unwrap();
-        let mut dest = src.clone();
-        dest.worktree_name = None;
-        let mut allocation = crate::fork_allocation::ForkAllocation::default();
-        let note = super::fork_workspace(&src, tab, &mut dest, Some(2), &mut allocation).unwrap().unwrap();
-        assert!(note.contains("saved file checkpoint is unavailable"), "{note}");
-        assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+        for edge in ["start", "index", "end", "end-index"] {
+            let reference = git::checkpoints::reference(&src.id, &format!("{}-1", tab.id), edge).unwrap();
+            git::run(&root, &["update-ref", "-d", &reference]).unwrap();
+        }
+        for at in [None, Some(2)] {
+            let mut dest = legacy.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&legacy, tab, &mut dest, at, &mut allocation).unwrap();
+            if at.is_some() {
+                assert!(note.unwrap().contains("saved file checkpoint is unavailable"));
+            } else {
+                assert!(note.is_none());
+            }
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("file")).unwrap(), "source branch");
+            assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+        }
 
         git::run(&root, &["worktree", "prune", "--expire", "now"]).unwrap();
         for replace in [false, true] {
@@ -5227,7 +5242,7 @@ mod command_tests {
                 git::run(&root, &["worktree", "add", "-q", &wt.path, &wt.branch]).unwrap();
                 std::fs::remove_dir_all(&sub).unwrap();
             }
-            for (source, at) in [&src, &legacy].into_iter().flat_map(|source| [None, Some(0)].map(|at| (source, at))) {
+            for (source, at) in [&src, &legacy, &no_checkpoint].into_iter().flat_map(|source| [None, Some(0)].map(|at| (source, at))) {
                 let mut dest = source.clone();
                 let mut allocation = crate::fork_allocation::ForkAllocation::default();
                 let before = git::list_worktrees(&root).unwrap();

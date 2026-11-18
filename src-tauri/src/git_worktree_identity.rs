@@ -99,21 +99,35 @@ fn matches_registration(admin: &Path, root: &Path, branch: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn recorded_before(path: &Path, observed: std::time::SystemTime) -> Option<bool> {
+fn metadata_changed_at(meta: &std::fs::Metadata) -> Option<std::time::SystemTime> {
     use std::{os::unix::fs::MetadataExt, time::{Duration, UNIX_EPOCH}};
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    let changed = UNIX_EPOCH.checked_add(Duration::new(meta.ctime().try_into().ok()?, meta.ctime_nsec().try_into().ok()?))?;
-    Some(meta.is_file() && changed < observed && meta.modified().ok()? < observed)
+    UNIX_EPOCH.checked_add(Duration::new(meta.ctime().try_into().ok()?, meta.ctime_nsec().try_into().ok()?))
 }
 
 #[cfg(not(unix))]
-fn recorded_before(_: &Path, _: std::time::SystemTime) -> Option<bool> {
+fn metadata_changed_at(_: &std::fs::Metadata) -> Option<std::time::SystemTime> {
     None
 }
 
-/// A legacy checkpoint proves where the session ran. Require the Git directories
-/// and the registration's backlink to predate that observation so a later
-/// replacement or re-registration cannot acquire the checkpoint's identity.
+fn recorded_before(path: &Path, observed: std::time::SystemTime) -> Option<bool> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(meta.is_file() && metadata_changed_at(&meta)? < observed && meta.modified().ok()? < observed)
+}
+
+/// Without a pinned ref, conservatively require an ordinary project checkout
+/// whose directory entry and immediate contents predate the saved observation.
+/// Renaming a replacement into place or swapping its .git entry changes this
+/// timestamp even if the replacement itself was created much earlier.
+pub(crate) fn legacy_project_unchanged(
+    project: &Path, common: &Path, observed: std::time::SystemTime,
+) -> Option<()> {
+    let meta = std::fs::symlink_metadata(project).ok()?;
+    (meta.is_dir() && common == project.join(".git") && metadata_changed_at(&meta)? < observed).then_some(())
+}
+
+/// Require the Git directories and backlink to predate a recorded attachment
+/// or observation. This keeps a later replacement or re-registration from
+/// inheriting a legacy session's checkout path.
 pub(crate) fn legacy_missing_cwd(
     common: &Path, root: &Path, cwd: &Path, branch: &str, observed: std::time::SystemTime,
 ) -> Option<PathBuf> {
