@@ -985,8 +985,8 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
     Ok(disposition)
 }
 
-// Resolve missing descendants against Git's registered worktrees too. The
-// deepest match wins, so a missing nested worktree never belongs to its parent.
+// A missing descendant may have belonged to a pruned nested checkout. No
+// surviving ancestor can prove otherwise, even if Git still registers it.
 fn checkout_root(project: &Path, path: &Path) -> PathBuf {
     let mut ancestor = path;
     while !ancestor.exists() {
@@ -1002,9 +1002,7 @@ fn checkout_root(project: &Path, path: &Path) -> PathBuf {
     let resolved = git::list_worktrees(project).unwrap_or_default().into_iter()
         .map(|(root, _)| { let root = PathBuf::from(root); std::fs::canonicalize(&root).unwrap_or(root) })
         .chain(git_root)
-        // A missing, already-pruned worktree may be under the project. Do
-        // not mistake the surviving project checkout for that lost root.
-        .filter(|root| normalized.starts_with(root) && (path.exists() || *root != project_root))
+        .filter(|root| normalized.starts_with(root) && (path.exists() || *root == normalized))
         .max_by_key(|root| root.components().count());
     // Git may have removed the worktree registration and .git file before a
     // failed deletion left the directory behind. Preserve that exact recorded
@@ -2810,26 +2808,34 @@ mod tests {
         assert_eq!(sole_workspace_of(&session.id).unwrap(), None);
         assert_eq!(workspace_disposition(dir.path(), &sub, false).unwrap().sessions, 2);
 
-        // Even a missing cwd can be identified from the registered worktree.
+        // A missing cwd might have been a nested checkout Git has pruned.
+        // Keep its identity separate until it exists again.
         std::fs::remove_dir(&sub).unwrap();
-        assert_eq!(sessions_sharing_worktree(&session.id).unwrap()[0].id, companion.id);
+        assert!(sessions_sharing_worktree(&session.id).unwrap().is_empty());
+        assert_eq!(sessions_in_workspace(&root).unwrap()[0].id, companion.id);
+        std::fs::create_dir(&sub).unwrap();
         delete_session_blocking(&sink(), &companion.id, &|_| {}).unwrap();
         assert_eq!(sole_workspace_of(&session.id).unwrap().as_deref(), Some(root.to_str().unwrap()));
 
         let nested = root.join("nested");
         git::run(dir.path(), &["worktree", "add", "-q", "-b", "nested-test", nested.to_str().unwrap()]).unwrap();
-        let nested_session = session_in(dir.path(), nested.to_str().unwrap(), "Nested");
+        let nested_sub = nested.join("sub");
+        std::fs::create_dir(&nested_sub).unwrap();
+        let nested_session = session_in(dir.path(), nested_sub.to_str().unwrap(), "Nested");
+        let transcript = said(&nested_session.id, "nested-tab", "keep this conversation");
         assert!(sessions_sharing_worktree(&session.id).unwrap().is_empty());
         assert_eq!(sessions_in_workspace(&root).unwrap().len(), 1);
         std::fs::remove_dir_all(&nested).unwrap();
         assert!(sessions_sharing_worktree(&session.id).unwrap().is_empty());
-        assert_eq!(sessions_in_workspace(&nested).unwrap()[0].id, nested_session.id);
-        // Clear the nested worktree before removing its parent.
+        assert!(sessions_in_workspace(&nested).unwrap().is_empty());
         git::run(dir.path(), &["worktree", "prune"]).unwrap();
-        delete_session_blocking(&sink(), &nested_session.id, &|_| {}).unwrap();
+        assert_eq!(sessions_in_workspace(&root).unwrap().iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&session.id]);
+        assert_eq!(workspace_disposition(dir.path(), &root, false).unwrap().session_ids, vec![session.id.clone()]);
         remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
         assert!(!root.exists());
         assert!(index::get(&session.id).is_err());
+        assert!(index::get(&nested_session.id).is_ok());
+        assert!(transcript.exists());
     }
 
     #[test]
