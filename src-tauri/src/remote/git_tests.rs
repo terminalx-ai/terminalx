@@ -303,6 +303,37 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
 
 #[cfg(unix)]
 #[test]
+fn guarded_commit_uses_hooks_selected_by_the_real_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["config", "--local", "extensions.worktreeConfig", "false"]);
+    git(&checkout, &["config", "--local", "core.hooksPath", ".git/default-hooks"]);
+    git(&checkout, &["config", "--local", "includeIf.gitdir:**/app/.git.path", "checkout.conf"]);
+    std::fs::write(checkout.join(".git/checkout.conf"), "[core]\n\thooksPath = .git/checkout-hooks\n").unwrap();
+    assert_eq!(git(&checkout, &["config", "--get", "core.hooksPath"]), ".git/checkout-hooks");
+
+    let hooks = checkout.join(".git/checkout-hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git config --show-scope --get core.hooksPath | cut -f1)\" = local\n",
+        "printf 'checkout hook ran\\n' > hook-ran\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    let result = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
+    assert_eq!(std::fs::read_to_string(checkout.join("hook-ran")).unwrap(), "checkout hook ran\n");
+}
+
+#[cfg(unix)]
+#[test]
 fn switching_the_real_head_during_commit_preparation_updates_neither_branch() {
     use std::os::unix::fs::PermissionsExt;
     let f = fixture();

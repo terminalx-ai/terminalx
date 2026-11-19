@@ -1114,20 +1114,20 @@ impl WorkspaceGit {
         // Git assigns includes the scope of the file that loads them. Include
         // from the private repository's config files and keep relative includes
         // anchored at the original files.
-        let set_config = |file: &Path, key: &str, value: &Path| {
+        let add_config = |file: &Path, key: &str, value: &Path| {
             let mut command = git_command(&repo.dir);
-            command.args(["config", "--file"]).arg(file).arg(key).arg(value);
+            command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
                 return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
             }
             Ok(())
         };
-        set_config(&config, "include.path", &common.join("config"))?;
+        add_config(&config, "include.path", &common.join("config"))?;
         let worktree_config = git_dir.join("config.worktree");
         let private_worktree_config = scratch.path().join("config.worktree");
         if include_worktree && worktree_config.is_file() {
-            set_config(&private_worktree_config, "include.path", &worktree_config)?;
+            add_config(&private_worktree_config, "include.path", &worktree_config)?;
         }
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
@@ -1156,8 +1156,12 @@ impl WorkspaceGit {
         let hooks = path(&hooks_args)?;
         let private_hooks = run(&hooks_args)?;
         if Path::new(private_hooks.strip_suffix('\n').unwrap_or(&private_hooks)) != hooks {
-            let hooks_config = if include_worktree { &private_worktree_config } else { &config };
-            set_config(hooks_config, "core.hooksPath", &hooks)?;
+            let hooks_config = scratch.path().join("hooks.config");
+            add_config(&hooks_config, "core.hooksPath", &hooks)?;
+            let scoped_config = if include_worktree { &private_worktree_config } else { &config };
+            // A second include loads after the original config. Writing
+            // core.hooksPath directly could put it in the earlier [core] section.
+            add_config(scoped_config, "include.path", &hooks_config)?;
         }
         run(&["add", "-A", "--", "."])?;
         if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
