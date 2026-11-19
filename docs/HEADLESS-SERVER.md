@@ -96,10 +96,18 @@ server then appears under Machines on your computer, with its projects.
 
   It prints a link. Open it on any device where you are signed in to
   TerminalX, check that it shows the same code as the server's terminal, and
-  approve. `terminalx-serve logout` signs the server out again. The server
-  keeps its session in `~/.terminalx/data/account/session.json`, readable by
-  you only. The relay carries end-to-end encrypted traffic. First pairing
-  uses the direct route, the one-time code and `Allow? [y/N]` on the server.
+  approve. Keep the direct route available until the server's service log
+  (`~/.terminalx/logs/runtime.log`) says `machine host: registered with the relay`.
+  On your Mac, select the server in the sidebar and open the connection
+  status in its header. Choose **Disconnect**, then reopen the status and
+  choose **Try again**. During this direct reconnect, the Mac requests its
+  relay credential. You can then reach the server over the relay when the
+  direct route is unavailable.
+
+  The server keeps its sign-in session in
+  `~/.terminalx/data/account/session.json`, readable by you only.
+  `terminalx-serve logout` signs the server out again. The relay carries
+  end-to-end encrypted traffic.
 
 ## Add a project
 

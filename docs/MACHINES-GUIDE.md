@@ -18,9 +18,10 @@ available by default.
 
 - TerminalX on both computers. A machine can be a Mac with the app, a Mac with
   only the runtime, or a Linux server (x64 or arm64).
-- For pairing by code, a direct connection from this Mac to TCP port 6768 on
-  the machine, on the same network or through [Tailscale](https://tailscale.com).
-  Pairing this way works signed out.
+- For first pairing, both a pairing code and the account list require a
+  direct connection from this Mac to TCP port 6768 on the machine, on the
+  same network or through [Tailscale](https://tailscale.com). Pairing by code
+  works signed out.
 - For account pairing with another desktop Mac or for TerminalX Relay, sign
   both computers in to the same TerminalX account. The relay can carry a
   paired connection when a direct route is unavailable.
@@ -73,9 +74,12 @@ A Linux server, or any computer you reach only through a terminal.
 3. On this Mac, choose **Add a machine** → **Headless server**, and paste
    the code. Choose **Continue**, compare the fingerprint the server prints
    with the one on this Mac, and answer `y` on the server if they match.
-   First pairing requires the direct connection. For later relay access, run
-   `terminalx-serve login` on the server and sign this Mac in to the same
-   account.
+   For later relay access, run `terminalx-serve login` on the server and sign
+   this Mac in to the same account. Once the server registers with the relay,
+   open its connection status in TerminalX on this Mac, choose **Disconnect**,
+   then **Try again** while the direct route is still available. This direct
+   reconnect gives this Mac its relay credential.
+   [Server relay setup](HEADLESS-SERVER.md#how-your-computer-reaches-the-server)
 4. Give the server something to work on. Either add a project from this Mac
    (open the server in Settings → Machines, then **Add a project** under
    Projects), or on the server:
