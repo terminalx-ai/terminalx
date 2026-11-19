@@ -817,6 +817,14 @@ impl AccountManager {
         })
     }
 
+    pub(crate) fn support_scope(&self, revision: &str) -> Option<CloudScope> {
+        let inner = self.inner.lock().unwrap();
+        let session = inner.session.as_ref()?;
+        let scope = cloud_scope(session);
+        let key = context_scope(&scope.user_id, &scope.profile_id, &scope.active_org_id);
+        (revision == format!("{key}:{}", inner.generation)).then_some(scope)
+    }
+
     pub(crate) fn context_revision(context: &AccountContext) -> String {
         format!("{}:{}", context_scope(&context.user_id, &context.profile_id, &context.organization_id), context.generation)
     }

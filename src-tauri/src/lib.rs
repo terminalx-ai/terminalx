@@ -48,6 +48,8 @@ mod commands;
 mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
+#[cfg(feature = "desktop")]
+mod support_reports;
 pub mod startup;
 #[cfg(feature = "desktop")]
 mod cloud_ports;
@@ -739,6 +741,10 @@ pub fn run() {
             cloud_remote::cloud_port_forwards,
             cloud_remote::cloud_port_settings,
             cloud_remote::cloud_port_set_settings,
+            support_reports::support_report_preview,
+            support_reports::support_report_submit,
+            support_reports::support_report_local,
+            support_reports::support_report_copy,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,

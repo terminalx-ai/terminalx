@@ -147,6 +147,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Signed update feed" }, layout: "content",
   }),
   defineSetting({
+    id: "about.supportReport", section: "about", title: "Support report",
+    description: "Review selected diagnostics before sending them to TerminalX Support.",
+    searchTerms: ["about", "support", "feedback", "diagnostics", "report", "help"], scope: "user",
+    storage: { kind: "action", location: "TerminalX Support" },
+  }),
+  defineSetting({
     id: "about.changelog", section: "about", title: "Changelog",
     description: "Changes in each version of TerminalX.",
     searchTerms: ["about", "changelog"], scope: "user",

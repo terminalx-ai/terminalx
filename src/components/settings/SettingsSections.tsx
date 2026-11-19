@@ -1,3 +1,4 @@
+import { openSupportReport } from "@/components/SupportReportDialog";
 import { SettingsDescription } from "./SettingsDescription";
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -620,6 +621,8 @@ export function AboutTab() {
         )}
         {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
       </div></RegisteredSetting>
+
+      <RegisteredSetting setting="about.supportReport" control={<Button variant="outline" size="sm" onClick={openSupportReport}>Prepare report</Button>} />
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>
