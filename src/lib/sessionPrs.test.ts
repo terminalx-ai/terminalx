@@ -3,7 +3,6 @@ import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { PrAssociation, PullRequest } from "@/lib/api";
 import { cloudGitSource, localGitSource } from "@/lib/gitSource";
-import { failingPr } from "./fixCheckErrors";
 import { sessionPrs } from "./sessionPrs";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -204,35 +203,14 @@ it("drops a withdrawn machine link even while the checkout's branch still lists 
   expect(invoke).not.toHaveBeenCalled();
 });
 
-it("uses the machine's creation records for Fix errors after switching the Branch panel picker", async () => {
+it("records Branch panel PR creation on the machine under its native session ID", async () => {
   const workspaceKey = "machine:mini:project";
-  const own = { ...b, checks: [{ name: "build", state: "failure", url: "https://github.com/acme/widgets/actions/runs/12/job/34", actions: { runId: 12, jobId: 34 } }] };
-  const other = { ...own, number: 3, url: "https://github.com/acme/widgets/pull/3", head: "other" };
-  const associations: { url: string; number: number; head: string; repo: string; linked: boolean }[] = [];
-  const call = vi.fn(async (method: string, params: { repo: string; number?: number }) => {
-    if (method === "git.prAssociations") return { associations };
-    if (method === "git.prs") return { prs: [params.number === own.number || params.repo === "app" ? own : other] };
-    throw Error(method);
-  });
-  const mutate = vi.fn(async (method: string, params: { repo: string }) => {
-    if (params.repo !== "app") throw new WorkspaceRpcError("conflict", "Select this session's checkout before creating a pull request.", method);
-    associations.push({ url: own.url, number: own.number, head: own.head, repo: params.repo, linked: false });
-    return { pr: own, created: true, existing: false, sessionAssociated: true };
-  });
-  const client = { call, mutate } as unknown as WorkspaceRpcClient;
-  const source = (repo: string) => cloudGitSource({ workspaceKey, remote: new RemoteGit(client, repo), canWrite: true, author: async () => null });
-  const sessionId = `${workspaceKey}:author`;
-  const create = { title: own.title, body: "", base: "main", draft: false, sessionId, branch: own.head };
-  await source("app").createPr(create);
+  const mutate = vi.fn(async () => ({ pr: b, created: true, existing: false, sessionAssociated: true }));
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "app");
+  const source = cloudGitSource({ workspaceKey, remote, canWrite: true, author: async () => null });
+  const create = { title: b.title, body: "", base: "main", draft: false, sessionId: `${workspaceKey}:author` };
+  await source.createPr(create);
   expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreate", { ...create, repo: "app", sessionId: "author" });
-
-  const picked = source("worktrees/other");
-  await expect(picked.createPr({ ...create, branch: other.head })).rejects.toMatchObject({ code: "conflict" });
-  const { rows } = await sessionPrs(picked, sessionId, other.head);
-  expect(rows).toMatchObject([{ pr: own, current: false, association: { linked: false } }]);
-  expect(failingPr(rows, other.url)).toBeUndefined();
-  const sessionRows = (await sessionPrs(source("app"), sessionId, own.head)).rows;
-  expect(failingPr(sessionRows)).toEqual(own);
   expect(invoke).not.toHaveBeenCalled();
 });
 

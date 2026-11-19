@@ -184,11 +184,20 @@ export interface RemotePushResult {
   reconciled: boolean;
 }
 
+export interface RemotePrCreateInput {
+  title: string;
+  body: string;
+  base: string | null;
+  draft: boolean;
+  branch?: string;
+  sessionId?: string;
+}
+
 export interface RemotePrCreateResult {
   repo: string;
   pr: RemotePullRequest;
   created: boolean;
-  /** An open pull request for the branch already existed; it is linked, not duplicated. */
+  /** An open pull request for the branch already existed. */
   existing: boolean;
   reconciled?: boolean;
   /** The machine saved this pull request to the named session. */
@@ -373,9 +382,10 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: RemotePrCreateInput, head?: string): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
-    return this.write("git.prCreate", base ? { ...rest, base } : rest);
+    const params = base ? { ...rest, base } : rest;
+    return head === undefined ? this.write("git.prCreate", params) : this.write("git.prCreateWithPush", { ...params, head });
   }
 
   readyPr(number: number): Promise<unknown> {

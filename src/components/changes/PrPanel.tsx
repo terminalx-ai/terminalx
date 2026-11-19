@@ -627,9 +627,15 @@ export function PrPanel({
           working={working === "create"}
           disabled={!!working || !fresh || !!currentOpen}
           onCreate={() => void act("create", async () => {
-            // Unpushed commits go up first: GitHub opens a pull request from what it has.
-            if (!status.upstream || status.ahead > 0) await source.push();
-            return source.createPr({ title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId, branch: currentBranch });
+            const request = { title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId, branch: currentBranch };
+            if (!status.upstream || status.ahead > 0) {
+              if (source.createPrWithPush) {
+                if (!status.head) throw new Error("Refresh the branch before publishing.");
+                return source.createPrWithPush(request, status.head);
+              }
+              await source.push();
+            }
+            return source.createPr(request);
           }).then((ok) => {
             if (!ok) return;
             setTitle("");

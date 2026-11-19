@@ -723,20 +723,39 @@ fn machine_pr_creation_records_the_native_session_association() {
     crate::store::index::save(&[
         session("native", &f.root, &checkout),
         session("outside", &f.base, &checkout),
-        session("moved", &f.root, &checkout),
+        session("other", &f.root, &f.root),
     ]).unwrap();
     let repo = checkout.to_str().unwrap();
-    f.call("git.push", json!({ "repo": repo })).unwrap();
     let create = |repo: &str, id: &str, branch: &str| json!({ "repo": repo, "title": "Add pr", "base": "main", "sessionId": id, "branch": branch });
-    let rows = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    let rows = |id: &str| f.call("git.prAssociations", json!({ "sessionId": id })).unwrap();
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    let publish = |repo: &str, branch: &str, head: &str| {
+        let mut request = create(repo, "native", branch);
+        request["head"] = json!(head);
+        request
+    };
+    git(&f.root, &["checkout", "-qb", "picker"]);
     assert_eq!(f.code("git.prCreate", create(repo, "outside", "feature/pr")), "not_found");
-    assert_eq!(f.code("git.prCreate", create(".", "native", "main")), "conflict");
-    assert_eq!(f.code("git.prCreate", create(repo, "native", "develop")), "conflict");
+    assert_eq!(f.code("git.prCreateWithPush", publish(".", "picker", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "develop", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "feature/pr", &"0".repeat(40))), "conflict");
     assert!(f.gh_calls().is_empty());
-    assert_eq!(rows()["associations"], json!([]));
+    assert_eq!(rows("native")["associations"], json!([]));
+    assert!(git(&remote, &["branch", "--list", "picker", "feature/pr"]).is_empty());
+    assert!(git(&f.root, &["branch", "--list", "--format=%(upstream)", "picker"]).is_empty());
 
-    let created = f.call("git.prCreate", create(repo, "native", "feature/pr")).unwrap();
+    // GitHub's initial lookup may outlast the checkout that started the request.
+    let shim = f.git.gh.as_ref().unwrap();
+    let original = std::fs::read_to_string(shim).unwrap();
+    std::fs::write(shim, original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1)).unwrap();
+    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "feature/pr", &head)), "conflict");
+    assert!(git(&remote, &["branch", "--list", "feature/pr"]).is_empty());
+    std::fs::write(shim, original).unwrap();
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+
+    let created = f.call("git.prCreateWithPush", publish(repo, "feature/pr", &head)).unwrap();
     assert_eq!(created["sessionAssociated"], true);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), head);
     // Switching the picker cannot attach even an already open PR whose head
     // names the session's branch in the shared repository.
     let calls = f.gh_calls();
@@ -746,19 +765,65 @@ fn machine_pr_creation_records_the_native_session_association() {
     assert_eq!(repeat["existing"], true);
     assert_eq!(repeat["sessionAssociated"], true);
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
-    let rows = rows();
-    assert_eq!(rows["associations"].as_array().unwrap().len(), 1);
-    assert_eq!(rows["associations"][0]["url"], created["pr"]["url"]);
-    assert_eq!(rows["associations"][0]["linked"], false);
+    let owned = rows("native");
+    assert_eq!(owned["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(owned["associations"][0]["url"], created["pr"]["url"]);
+    assert_eq!(owned["associations"][0]["linked"], false);
 
-    let shim = f.git.gh.as_ref().unwrap();
-    let original = std::fs::read_to_string(shim).unwrap();
-    std::fs::write(shim, original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1)).unwrap();
-    let changed = f.call("git.prCreate", create(repo, "moved", "feature/pr")).unwrap();
-    assert_eq!(changed["existing"], true);
-    assert_eq!(changed["pr"]["url"], created["pr"]["url"]);
-    assert!(changed.get("sessionAssociated").is_none());
-    assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "moved" })).unwrap()["associations"], json!([]));
+    git(&checkout, &["checkout", "-q", "--detach"]);
+    git(&f.root, &["checkout", "-q", "feature/pr"]);
+    let reused = f.call("git.prCreate", create(".", "other", "feature/pr")).unwrap();
+    assert_eq!(reused["existing"], true);
+    assert_eq!(reused["pr"]["url"], created["pr"]["url"]);
+    assert_eq!(reused["sessionAssociated"], false);
+    assert_eq!(rows("other")["associations"], json!([]));
+    assert_eq!(rows("native"), owned);
+}
+
+#[test]
+fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
+    for replace_checkout in [false, true] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        let repo = checkout.to_str().unwrap();
+        git(&f.root, &["worktree", "add", "-qb", "feature/pr", repo]);
+        let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+            "id": "native", "projectPath": f.root, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        f.call("git.push", json!({ "repo": repo })).unwrap();
+
+        if replace_checkout {
+            let replacement = f.clone(&remote, "replacement");
+            git(&replacement, &["checkout", "-q", "feature/pr"]);
+            let shim = f.git.gh.as_ref().unwrap();
+            let original = std::fs::read_to_string(shim).unwrap();
+            let command = original.strip_prefix("#!/bin/sh\n").unwrap();
+            let backup = f.base.join("original-checkout");
+            std::fs::write(shim, format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'pr create' ]; then\n({command}) || exit\nmv '{repo}' '{}' && mv '{}' '{repo}'\nelse\n{command}fi\n",
+                backup.display(), replacement.display()
+            )).unwrap();
+        } else {
+            f.fault("drop-after-create");
+        }
+
+        let made = f.call("git.prCreate", json!({ "repo": repo, "sessionId": "native", "title": "Add pr", "base": "main" })).unwrap();
+        assert_eq!(made["pr"]["head"], "feature/pr");
+        assert_eq!(made["sessionAssociated"], false);
+        if replace_checkout {
+            assert!(crate::git::is_own_worktree(&checkout));
+            assert_eq!(crate::git::current_branch(&checkout).as_deref(), Some("feature/pr"));
+            assert_eq!(f.code("git.status", json!({ "repo": repo })), "not_found");
+        } else {
+            assert_eq!(made["reconciled"], true);
+        }
+        assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
+    }
 }
 
 #[test]
