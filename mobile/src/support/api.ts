@@ -2,7 +2,7 @@ import { reportPath, type PreviewRequest, type ServerPreview, type Submission } 
 import { readSession, refreshStoredSession } from "../auth/native";
 import { AUTH_CONFIG } from "../auth/protocol";
 
-async function send<T>(owner: string | undefined, action: "preview" | "submit", data: PreviewRequest | Submission): Promise<T> {
+async function send<T>(owner: string | undefined, action: "preview" | "submit", data: PreviewRequest | Submission, authorize?: () => Promise<void>): Promise<T> {
   const held = await readSession();
   if (!held || held.user.userId !== owner) throw new Error("unauthorized");
   const refreshed = await refreshStoredSession(held);
@@ -10,6 +10,7 @@ async function send<T>(owner: string | undefined, action: "preview" | "submit", 
   if (!current || refreshed.status === "rejected" || current.user.userId !== owner || current.accessToken !== refreshed.session.accessToken) {
     throw new Error("unauthorized");
   }
+  if (authorize) await authorize();
   const endpoint = new URL(reportPath + "/" + action, AUTH_CONFIG.sessionEndpoint);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
@@ -31,5 +32,5 @@ async function send<T>(owner: string | undefined, action: "preview" | "submit", 
 
 export const supportApi = {
   preview: (owner: string | undefined, request: PreviewRequest) => send<ServerPreview>(owner, "preview", request),
-  submit: (owner: string | undefined, request: Submission) => send<{ reference: string }>(owner, "submit", request),
+  submit: (owner: string | undefined, request: Submission, authorize: () => Promise<void>) => send<{ reference: string }>(owner, "submit", request, authorize),
 };

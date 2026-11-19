@@ -267,20 +267,14 @@ struct RecordedClose {
 /// only: it is gone when the app quits and leaves only in an export. A 4101
 /// is either the relay's close or the client's own check of the runtime
 /// generation in `rpc.hello`; both mean the attachment was stale.
+#[derive(Default)]
 pub struct ConnectionCloseLog {
     entries: Mutex<VecDeque<RecordedClose>>,
-    started_at: i64,
-}
-
-impl Default for ConnectionCloseLog {
-    fn default() -> Self {
-        Self { entries: Mutex::new(VecDeque::new()), started_at: chrono::Utc::now().timestamp_millis() }
-    }
 }
 
 pub(crate) struct SupportCloseSnapshot {
     pub events: Vec<(i64, &'static str)>,
-    pub retained_since: i64,
+    pub retained_since: Option<i64>,
 }
 
 impl ConnectionCloseLog {
@@ -315,18 +309,16 @@ impl ConnectionCloseLog {
 
     pub(crate) fn support_events(&self, scope: &crate::account::CloudScope, from: i64, to: i64) -> SupportCloseSnapshot {
         let entries = self.entries.lock().unwrap();
-        let retained_since = if entries.len() == CLOSE_LOG_CAPACITY {
-            self.started_at.max(entries[0].close.at.saturating_add(1))
-        } else {
-            self.started_at
-        };
-        let events = entries.iter().filter_map(|entry| {
+        let events: Vec<_> = entries.iter().filter_map(|entry| {
             let (user, profile) = entry.owner.as_ref()?;
             let close = &entry.close;
             let organization = close.organization_id.as_deref()?;
             (user == &scope.user_id && profile == &scope.profile_id && scope.allows(organization)
                 && (from..=to).contains(&close.at)).then_some((close.at, close.name))
         }).collect();
+        // Use only scoped history. A shared-buffer eviction may have dropped
+        // events at the earliest retained timestamp, so skip that boundary.
+        let retained_since = events.iter().map(|(at, _)| at.saturating_add(1)).min();
         SupportCloseSnapshot { events, retained_since }
     }
 
@@ -757,7 +749,17 @@ mod tests {
             multi_org: true,
             members: ["org_1".to_string()].into_iter().collect(),
         };
-        assert_eq!(log.support_events(&scope, 100, 150).events, vec![(100, "stale_generation")]);
+        let snapshot = log.support_events(&scope, 100, 150);
+        assert_eq!(snapshot.events, vec![(100, "stale_generation")]);
+        assert_eq!(snapshot.retained_since, Some(101));
+        for at in 200..200 + CLOSE_LOG_CAPACITY as i64 {
+            log.record_for(Some(("mine", "my-profile")), Some("org_2"), None, 4100, at);
+        }
+        let snapshot = log.support_events(&scope, 100, 500);
+        assert!(snapshot.events.is_empty());
+        assert_eq!(snapshot.retained_since, None);
+        log.record_for(Some(("mine", "my-profile")), Some("org_1"), None, 4101, 500);
+        assert_eq!(log.support_events(&scope, 100, 501).retained_since, Some(501));
     }
 
     #[test]

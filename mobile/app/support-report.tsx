@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Linking, Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { usePreventRemove, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
@@ -9,7 +9,9 @@ import {
 import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
 import { supportApi } from "@mobile/support/api";
-import { connectionLogRetainedSince, scopedConnectionEvents, supportConnectionClassifications, supportConnectionStages } from "@mobile/transport/connection";
+import { scopedConnectionSnapshot, supportConnectionClassifications, supportConnectionStages } from "@mobile/transport/connection";
+import { supportPairingsCurrent, type SupportPairing } from "@mobile/store/pairing-instance";
+import { readHosts } from "@mobile/store/hosts";
 import { Button, Card, Screen } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -17,6 +19,7 @@ import { useTheme } from "@mobile/ui/theme";
 let pendingReport: {
   owner: string;
   preview: PreparedReport;
+  pairings: readonly SupportPairing[];
   problem: Problem;
   attach: boolean;
   reference: string;
@@ -40,7 +43,10 @@ function ReportForm() {
   const [reference, setReference] = useState(previous?.reference ?? "");
   const [local, setLocal] = useState(false);
   const [server, setServer] = useState(false);
-  const [preview, setPreview] = useState<PreparedReport | undefined>(previous?.preview);
+  const [storedPreview, setPreview] = useState<PreparedReport | undefined>(previous?.preview);
+  const [pairings, setPairings] = useState<readonly SupportPairing[]>(previous?.pairings ?? []);
+  const revoked = Boolean(storedPreview) && !supportPairingsCurrent(app.hosts, owner, pairings);
+  const preview = revoked ? undefined : storedPreview;
   const [receipt, setReceipt] = useState<string | undefined>(previous?.receipt);
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -49,6 +55,29 @@ function ReportForm() {
   const active = useRef(false);
   usePreventRemove(busy);
 
+  function resetPairingDraft() {
+    setPreview(undefined);
+    setPairings([]);
+    setDetail(false);
+    setAttempted(false);
+    setMessage(supportError("support_pairing_changed"));
+  }
+
+  if (revoked && !receipt) resetPairingDraft();
+
+  useEffect(() => {
+    const pending = pendingReport;
+    if (pending && pending.owner === owner && !pending.receipt && !supportPairingsCurrent(app.hosts, owner, pending.pairings)) {
+      pendingReport = undefined;
+    }
+  }, [app.hosts, owner]);
+
+  async function authorizePairings() {
+    if (pairings.length && !supportPairingsCurrent(await readHosts(), owner, pairings)) {
+      throw new Error("support_pairing_changed");
+    }
+  }
+
   async function run(action: () => Promise<void>, context: "preview" | "submit" | "copy" = "submit") {
     if (active.current) return;
     active.current = true;
@@ -56,6 +85,11 @@ function ReportForm() {
     setMessage(undefined);
     try { await action(); }
     catch (cause) {
+      if (cause instanceof Error && cause.message === "support_pairing_changed") {
+        if (pendingReport?.owner === owner && !pendingReport?.receipt) pendingReport = undefined;
+        resetPairingDraft();
+        return;
+      }
       if (cause instanceof Error && cause.message === "support_preview_expired") {
         if (pendingReport?.owner === owner) pendingReport = undefined;
         setPreview(undefined);
@@ -69,19 +103,24 @@ function ReportForm() {
   const prepare = () => run(async () => {
     const input = attach ? { reference: reference.trim().toLowerCase(), server: false as const } : { to: Date.now(), hours, server };
     const metadata = { appVersion: appVersion(), platform: Platform.OS };
-    const prepared = await prepareReport(input, (request) => supportApi.preview(owner, request),
-      (window) => localReportSource(metadata, window, supportConnectionStages,
-        !local ? "omitted" : owner ? scopedConnectionEvents(app.logs, owner, app.hosts) : "unavailable", supportConnectionClassifications, connectionLogRetainedSince(app.logs)), metadata);
+    let contributors: readonly SupportPairing[] = [];
+    const prepared = await prepareReport(input, (request) => supportApi.preview(owner, request), (window) => {
+      const snapshot = local && owner ? scopedConnectionSnapshot(app.logs, owner, app.hosts, window) : undefined;
+      contributors = snapshot?.pairings ?? [];
+      return localReportSource(metadata, window, supportConnectionStages,
+        snapshot?.events ?? (local ? "unavailable" : "omitted"), supportConnectionClassifications, snapshot?.retainedSince);
+    }, metadata);
+    setPairings(contributors);
     setPreview(prepared);
     setMessage(prepared.error);
   }, "preview");
 
   const submit = () => run(async () => {
     if (!preview?.key || !owner || !canSubmitReport(preview, attach)) return;
-    const pending = { owner, preview, problem, attach, reference, receipt: undefined as string | undefined };
+    const pending = { owner, preview, pairings, problem, attach, reference, receipt: undefined as string | undefined };
     pendingReport = pending;
     setAttempted(true);
-    const result = await supportApi.submit(owner, { v: 1, key: preview.key, problem: attach ? undefined : problem, local: preview.local });
+    const result = await supportApi.submit(owner, { v: 1, key: preview.key, problem: attach ? undefined : problem, local: preview.local }, authorizePairings);
     if (!supportReference.test(result.reference)) throw new Error("unavailable");
     pending.receipt = result.reference;
     setReceipt(result.reference);
@@ -128,6 +167,7 @@ function ReportForm() {
           {detail && <Text selectable style={{ color: palette.ink }}>{JSON.stringify({ mobile: preview.local, ...(!attach && { server: preview.server }) }, null, 2)}</Text>}
           {!attempted && <Button label="Edit draft" kind="secondary" disabled={busy} onPress={() => { setPreview(undefined); setMessage(undefined); setDetail(false); }} />}
           <Button label="Copy local report" kind="secondary" disabled={busy} onPress={() => void run(async () => {
+            await authorizePairings();
             if (!await Clipboard.setStringAsync(reportExport("mobile", preview, attach ? undefined : problem, preview.local))) throw new Error("unavailable");
             setMessage("Reviewed local report copied. Share it only with the intended recipient.");
           }, "copy")} />

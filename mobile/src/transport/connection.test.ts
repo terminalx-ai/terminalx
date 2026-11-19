@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredHost } from "../store/hosts";
+import { endPairingInstance } from "../store/pairing-instance";
 import { RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
@@ -42,7 +43,7 @@ vi.mock("./relay-client", async (importOriginal) => {
       return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, scopedConnectionEvents, type ConnectionLogEntry } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, scopedConnectionSnapshot, type ConnectionLogEntry } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -57,21 +58,35 @@ beforeEach(() => {
 });
 afterEach(() => { connection.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-it("projects only in-memory connection events belonging to a currently paired account", async () => {
+it("derives coverage only from events of current, scoped pairings", async () => {
   const owned: StoredHost = { ...host, hostName: "ghp_FIXTURE_HOST_LABEL", provenance: { kind: "automatic", userId: "first" } };
+  const other: StoredHost = { ...host, id: "other", provenance: { kind: "automatic", userId: "second" } };
   const logs: ConnectionLogEntry[] = [];
   connection.onLog((entry) => logs.push(entry));
   mocks.reachable.add(lan);
+  const window = { from: 1000, to: 10000 };
+  vi.setSystemTime(2000);
+  connection.start(other, credential);
+  await flush();
+  vi.setSystemTime(3000);
   connection.start(owned, credential);
   await flush();
-  expect(scopedConnectionEvents(logs, "first", [owned])).toEqual([
-    { at: expect.any(Number), kind: "connecting", classification: undefined },
-    { at: expect.any(Number), kind: "connected", classification: "direct" },
+
+  const first = scopedConnectionSnapshot(logs, "first", [owned, other], window);
+  expect(first.events).toEqual([
+    { at: 3000, kind: "connecting", classification: undefined },
+    { at: 3000, kind: "connected", classification: "direct" },
   ]);
-  expect(scopedConnectionEvents(logs, "second", [owned])).toBe("unavailable");
-  expect(scopedConnectionEvents(logs, "first", [])).toBe("unavailable");
+  expect(first.retainedSince).toBe(3001);
+  expect(first.pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+  expect(scopedConnectionSnapshot(logs.slice(0, 2), "first", [owned], window)).toEqual({
+    events: [], retainedSince: undefined, pairings: [],
+  });
+  expect(scopedConnectionSnapshot(logs, "first", [], window).events).toBe("unavailable");
   const reopenedLog = JSON.parse(JSON.stringify(logs)) as ConnectionLogEntry[];
-  expect(scopedConnectionEvents(reopenedLog, "first", [owned])).toEqual([]);
+  expect(scopedConnectionSnapshot(reopenedLog, "first", [owned], window).events).toEqual([]);
+  endPairingInstance(owned.id);
+  expect(scopedConnectionSnapshot(logs, "first", [owned], window).events).toEqual([]);
 });
 
 describe("host path recovery", () => {

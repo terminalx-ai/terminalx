@@ -66,6 +66,7 @@ const messages: Record<string, string> = {
   support_report_rate_limited: "Too many reports were prepared. Try again later or copy the reviewed report.",
   support_report_too_large: "The report is too large. Shorten the time window or copy the reviewed report.",
   support_reports_unavailable: "Support reporting is unavailable on this server. You can copy the reviewed local report.",
+  support_pairing_changed: "Pairing access changed. Prepare a new preview. If delivery was uncertain, ask TerminalX Support before sending again.",
   support_scope_changed: "Desktop account or organization access changed. Prepare a new preview before copying or sending.",
   support_attachment_empty: "Choose a device source with events in the original report window.",
   privacy: "Data privacy mode blocks sending. You can copy the reviewed local report.",

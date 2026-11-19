@@ -1,6 +1,7 @@
 import { directEndpoints } from "./direct-endpoints";
 import { z } from "zod";
-import type { ReportEvent } from "@terminalx/portable/supportReports";
+import { accountPairedHostIds, isCurrentPairingInstance, pairingInstance, type SupportPairing } from "../store/pairing-instance";
+import type { ReportEvent, ReportWindow } from "@terminalx/portable/supportReports";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
@@ -31,26 +32,25 @@ export interface ConnectionLogEntry { id: string; at: number; level: "info" | "s
 // Typed annotations on existing connection-log entries. Ownership and report
 // fields never enter the persisted display log or outlive its in-memory entry.
 export const CONNECTION_LOG_CAPACITY = 200;
-const logStartedAt = Date.now();
+const reportFields = new WeakMap<ConnectionLogEntry, ReportFields & SupportPairing & { owner: string }>();
 
-export function connectionLogRetainedSince(logs: readonly ConnectionLogEntry[]): number {
-  // A full rolling buffer may have evicted an entry with the same millisecond
-  // as its oldest remaining entry. Exclude that boundary from full coverage.
-  return logs.length >= CONNECTION_LOG_CAPACITY
-    ? Math.max(logStartedAt, logs[0]!.at + 1)
-    : logStartedAt;
-}
-
-const reportFields = new WeakMap<ConnectionLogEntry, ReportFields & { owner: string; hostId: string }>();
-
-export function scopedConnectionEvents(logs: readonly ConnectionLogEntry[], owner: string, hosts: readonly StoredHost[]): ReportEvent[] | "unavailable" {
-  const permitted = new Set(hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === owner).map((host) => host.id));
-  if (!permitted.size) return "unavailable";
-  return logs.flatMap((entry) => {
+export function scopedConnectionSnapshot(logs: readonly ConnectionLogEntry[], owner: string, hosts: readonly StoredHost[], { from, to }: ReportWindow) {
+  const permitted = accountPairedHostIds(hosts, owner);
+  if (!permitted.size) return { events: "unavailable" as const, pairings: [] };
+  const contributors = new Map<string, SupportPairing>();
+  let retainedSince: number | undefined;
+  const events = logs.flatMap((entry) => {
     const fields = reportFields.get(entry);
-    if (!fields || fields.owner !== owner || !permitted.has(fields.hostId)) return [];
-    return [{ at: entry.at, kind: fields.kind, classification: fields.classification }];
+    if (!fields || fields.owner !== owner || !permitted.has(fields.hostId) ||
+        !isCurrentPairingInstance(fields) || entry.at < from || entry.at > to) return [];
+    contributors.set(fields.hostId, { hostId: fields.hostId, instance: fields.instance });
+    // The shared log may have dropped events at the same millisecond. Only
+    // authorized events can contribute to the conservative coverage boundary.
+    retainedSince = Math.min(retainedSince ?? Infinity, entry.at + 1);
+    const event: ReportEvent = { at: entry.at, kind: fields.kind, classification: fields.classification };
+    return [event];
   });
+  return { events, retainedSince, pairings: [...contributors.values()] };
 }
 
 const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
@@ -116,7 +116,7 @@ export class HostConnection {
   private skipDelay: (() => void) | null = null;
   private pendingClients = new Set<RelayClient>();
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
-  private active: { host: StoredHost; credential: HostCredential } | null = null;
+  private active: { host: StoredHost; credential: HostCredential; pairing: symbol } | null = null;
   private eventListeners = new Set<(event: RelayEvent) => void>();
   private stageListeners = new Set<(stage: ConnectionStage, attempt: number) => void>();
   private logListeners = new Set<(entry: ConnectionLogEntry) => void>();
@@ -133,7 +133,7 @@ export class HostConnection {
   start(host: StoredHost, credential: HostCredential): void {
     this.stop("another connection started");
     this.flaps = 0;
-    this.active = { host, credential };
+    this.active = { host, credential, pairing: pairingInstance(host.id) };
     this.releaseHold();
     const generation = this.generation;
     void this.connectLoop(generation);
@@ -611,9 +611,9 @@ export class HostConnection {
 
   private log(level: ConnectionLogEntry["level"], message: string, detail?: string, report?: ReportFields): void {
     const entry = { id: `${Date.now()}-${Math.random()}`, at: Date.now(), level, message, ...(detail ? { detail } : {}) };
-    const host = this.active?.host;
-    if (report && host?.provenance.kind === "automatic") {
-      reportFields.set(entry, { ...report, owner: host.provenance.userId, hostId: host.id });
+    const active = this.active;
+    if (report && active?.host.provenance.kind === "automatic") {
+      reportFields.set(entry, { ...report, owner: active.host.provenance.userId, hostId: active.host.id, instance: active.pairing });
     }
     for (const listener of this.logListeners) listener(entry);
   }

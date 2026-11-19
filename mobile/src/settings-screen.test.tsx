@@ -7,16 +7,18 @@ import PrivacyScreen from "../app/privacy";
 import ConnectionLogScreen from "../app/connection-log";
 import AccountScreen from "../app/account";
 import SupportReportScreen from "../app/support-report";
+import { pairingInstance, endPairingInstance } from "./store/pairing-instance";
 import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
-const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), preventRemove: vi.fn() }));
+const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), hosts: vi.fn(), preventRemove: vi.fn() }));
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
 vi.mock("@mobile/support/api", () => ({ supportApi: support }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: support.copy }));
-vi.mock("@mobile/transport/connection", () => ({ connectionLogRetainedSince: () => Date.now() - 2000, scopedConnectionEvents: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
+vi.mock("@mobile/store/hosts", () => ({ readHosts: support.hosts }));
+vi.mock("@mobile/transport/connection", () => ({ scopedConnectionSnapshot: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
 vi.mock("expo-router", () => ({ usePreventRemove: support.preventRemove, useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
@@ -52,6 +54,7 @@ beforeEach(() => {
   support.submit.mockReset();
   support.copy.mockReset();
   support.events.mockReset();
+  support.hosts.mockReset().mockImplementation(async () => mocks.app.hosts);
   support.preventRemove.mockReset();
   mocks.back.mockReset();
   mocks.setName.mockReset();
@@ -194,20 +197,34 @@ it("opens support reports from Settings and cancels before sending", async () =>
   expect(support.submit).not.toHaveBeenCalled();
 });
 
-it("previews scoped mobile events and retries the reviewed submission before confirming delivery", async () => {
-  const now = Date.now();
+function prepareMobileSupport(now: number) {
   mocks.app.session.user.userId = "my-account";
-  support.events.mockReturnValue([{ at: now - 500, kind: "connected", classification: "relay", detail: "ghp_CANARY" }]);
+  const machine = { ...mocks.app.hosts[0], provenance: { kind: "automatic", userId: "my-account" } };
+  mocks.app.hosts = [machine];
+  support.events.mockReturnValue({
+    events: [{ at: now - 500, kind: "connected", classification: "relay", detail: "ghp_CANARY" }],
+    retainedSince: now - 499, pairings: [{ hostId: machine.id, instance: pairingInstance(machine.id) }],
+  });
   support.preview.mockResolvedValue({
     key: supportReceipt, from: now - 1000, to: now, server: { status: "omitted", events: [], capturedAt: now, truncated: false },
   });
-  support.submit.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ reference: supportReceipt });
+  return machine;
+}
+
+async function showMobilePreview() {
   await show(<SupportReportScreen />);
   await act(async () => container.querySelector<HTMLInputElement>('[aria-label="This phone’s connection events"]')!.click());
   expect(support.events).not.toHaveBeenCalled();
   await tap("Prepare preview");
   expect(container.textContent).toContain("Phone: Included");
-  expect(support.events).toHaveBeenCalledWith(mocks.app.logs, "my-account", mocks.app.hosts);
+}
+
+it("previews scoped mobile events and retries the reviewed submission before confirming delivery", async () => {
+  const now = Date.now();
+  prepareMobileSupport(now);
+  support.submit.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ reference: supportReceipt });
+  await showMobilePreview();
+  expect(support.events).toHaveBeenCalledWith(mocks.app.logs, "my-account", mocks.app.hosts, { from: now - 1000, to: now });
   await tap("Send to TerminalX Support");
   expect(container.textContent).not.toContain("Report delivered");
   expect(support.preventRemove).toHaveBeenCalledWith(true);
@@ -215,7 +232,30 @@ it("previews scoped mobile events and retries the reviewed submission before con
   await show(<SupportReportScreen />);
   await tap("Retry same report");
   expect(container.textContent).toContain(supportReceipt);
-  expect(support.submit.mock.calls[0]).toEqual(support.submit.mock.calls[1]);
+  expect(support.submit.mock.calls[0]!.slice(0, 2)).toEqual(support.submit.mock.calls[1]!.slice(0, 2));
   expect(JSON.stringify(support.submit.mock.calls)).not.toContain("ghp_CANARY");
   await tap("Done");
+});
+
+it("hides a pending report after the contributing machine is forgotten and paired again", async () => {
+  const machine = prepareMobileSupport(Date.now());
+  support.submit.mockRejectedValueOnce(new Error("offline"));
+  await showMobilePreview();
+  await tap("Send to TerminalX Support");
+  await show(<SettingsScreen />);
+  endPairingInstance(machine.id);
+  pairingInstance(machine.id);
+  await show(<SupportReportScreen />);
+  expect(container.textContent).toContain("Pairing access changed");
+  expect(container.textContent).not.toMatch(/Review diagnostic fields|Copy local report|Retry same report/);
+  expect(support.submit).toHaveBeenCalledTimes(1);
+});
+
+it("refuses to copy if the saved pairing disappeared before the settings view refreshed", async () => {
+  prepareMobileSupport(Date.now());
+  await showMobilePreview();
+  support.hosts.mockResolvedValueOnce([]);
+  await tap("Copy local report");
+  expect(container.textContent).toContain("Pairing access changed");
+  expect(support.copy).not.toHaveBeenCalled();
 });

@@ -48,6 +48,10 @@ it("retries the same reviewed snapshot and waits for a confirmed reference", asy
   expect(screen.queryByText("Report delivered")).toBeNull();
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (name, args) => name === "support_report_submit" ? { reference } : original(name, args));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  act(openSupportReport);
+  expect(calls("support_report_preview")).toHaveLength(1);
   fireEvent.click(screen.getByText("Retry same report"));
   await screen.findByText("Report delivered");
   expect(calls("support_report_submit")).toHaveLength(2);

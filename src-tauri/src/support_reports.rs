@@ -174,9 +174,9 @@ pub fn support_report_local(
         });
     let (mut events, mut retained_since, status) = match snapshot {
         Some(snapshot) if snapshot.events.is_empty() => {
-            (snapshot.events, Some(snapshot.retained_since), "empty")
+            (snapshot.events, snapshot.retained_since, "empty")
         }
-        Some(snapshot) => (snapshot.events, Some(snapshot.retained_since), "included"),
+        Some(snapshot) => (snapshot.events, snapshot.retained_since, "included"),
         None => (
             Vec::new(),
             None,

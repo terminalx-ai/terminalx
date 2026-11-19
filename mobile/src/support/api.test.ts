@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { localReportSource } from "@terminalx/portable/supportReports";
 import { supportApi } from "./api";
 
 const { readSession, refreshStoredSession } = vi.hoisted(() => ({ readSession: vi.fn(), refreshStoredSession: vi.fn() }));
@@ -28,5 +29,14 @@ it("uses the signed-in owner's bearer on the authenticated HTTPS preview route",
 it("refuses to send after the account changes during credential refresh", async () => {
   readSession.mockResolvedValueOnce(session).mockResolvedValueOnce({ ...session, user: { userId: "two" } });
   await expect(supportApi.preview("one", input)).rejects.toThrow("unauthorized");
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("rechecks the draft’s pairings before submitting an authenticated request", async () => {
+  const now = Date.now();
+  const local = localReportSource({ platform: "ios", appVersion: "1.2.3" }, { from: now - 1000, to: now }, [], "omitted");
+  const authorize = vi.fn(async () => { throw new Error("support_pairing_changed"); });
+  await expect(supportApi.submit("one", { v: 1, key: "preview", local }, authorize)).rejects.toThrow("support_pairing_changed");
+  expect(authorize).toHaveBeenCalledOnce();
   expect(fetchMock).not.toHaveBeenCalled();
 });

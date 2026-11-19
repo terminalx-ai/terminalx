@@ -17,6 +17,7 @@ export function openSupportReport() {
 
 export function SupportReportDialog() {
   const [open, setOpen] = useState(false);
+  const [retainAttempt, setRetainAttempt] = useState(false);
   const account = useAccount();
   const revision = account.status.state === "signed-in" ? account.status.context?.revision : undefined;
   useEffect(() => {
@@ -25,11 +26,14 @@ export function SupportReportDialog() {
     return () => window.removeEventListener(openEvent, show);
   }, []);
   return <Dialog open={open} onOpenChange={(value) => { if (value) setOpen(true); }}>
-    {open && <ReportForm key={revision} revision={revision} close={() => setOpen(false)} />}
+    {(open || retainAttempt) && <ReportForm key={revision} revision={revision} close={(keepAttempt) => {
+      setRetainAttempt(keepAttempt);
+      setOpen(false);
+    }} />}
   </Dialog>;
 }
 
-function ReportForm({ revision, close }: { revision?: string; close: () => void }) {
+function ReportForm({ revision, close }: { revision?: string; close: (keepAttempt: boolean) => void }) {
   const [problem, setProblem] = useState<Problem>({ feature: "connection", symptom: "failed" });
   const [hours, setHours] = useState<ReportHours>(24);
   const [attach, setAttach] = useState(false);
@@ -84,8 +88,9 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
   });
 
   const coverage = preview && coverageLabel(preview.local, preview);
+  const dismiss = () => close(attempted && !receipt);
 
-  return <DialogContent className="max-h-[85vh] overflow-y-auto" onEscapeKeyDown={(event) => { event.preventDefault(); if (!busy) close(); }}
+  return <DialogContent className="max-h-[85vh] overflow-y-auto" onEscapeKeyDown={(event) => { event.preventDefault(); if (!busy) dismiss(); }}
     onPointerDownOutside={(event) => event.preventDefault()} showClose={false}>
     <DialogHeader>
       <DialogTitle>{receipt ? "Report delivered" : "Send a support report"}</DialogTitle>
@@ -95,7 +100,7 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
       <p>To include another device, open Send a support report on that device and enter this reference under Add to a report.</p>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" onClick={() => { void openUrl(supportConsole).catch(() => setError("Open Support reports at console.terminalx.ai to manage this report.")); }}>Manage report</Button>
-        <Button onClick={close}>Done</Button>
+        <Button onClick={dismiss}>Done</Button>
       </div>
       {error && <p role="alert">{error}</p>}
     </div> : <>
@@ -125,7 +130,7 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
       </div>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap justify-end gap-2">
-        <Button variant="outline" disabled={busy} onClick={close}>{attempted ? "Close" : "Cancel"}</Button>
+        <Button variant="outline" disabled={busy} onClick={dismiss}>{attempted ? "Close" : "Cancel"}</Button>
         {preview ? <>
           {!attempted && <Button variant="outline" disabled={busy} onClick={() => { setPreview(undefined); setError(undefined); }}>Edit draft</Button>}
           <Button variant="outline" disabled={busy} onClick={() => void run(async () => {
