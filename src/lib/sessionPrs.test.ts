@@ -215,7 +215,7 @@ it("records Branch panel PR creation on the machine under its native session ID"
   const source = cloudGitSource({ workspaceKey, remote, canWrite: true, author: async () => null });
   const create = { title: b.title, body: "", base: "main", draft: false, sessionId: `${workspaceKey}:author` };
   await source.createPr(create);
-  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreate", { ...create, repo: "app", sessionId: "author" });
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreate", { ...create, repo: "app", sessionId: "author", associateExisting: false });
   expect(invoke).not.toHaveBeenCalled();
 });
 

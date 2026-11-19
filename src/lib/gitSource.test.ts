@@ -25,7 +25,7 @@ it("sends the selected branch and the machine session together when creating a P
   await expect(source.createPr({ ...request, sessionId: "machine:m1:p2:s1" })).rejects.toThrow("different workspace");
   expect(mutate).not.toHaveBeenCalled();
   await expect(source.createPr({ ...request, sessionId: "machine:m1:p1:s1" })).resolves.toBeNull();
-  expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic" });
+  expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic", associateExisting: false });
 });
 
 it("refuses to fall back to an unguarded commit on an older machine", async () => {

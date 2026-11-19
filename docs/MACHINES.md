@@ -805,7 +805,7 @@ the pull request that adds it.
 | `git.push` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.pushHead` | `git/1` | Needs a project | Pushes the confirmed commit with the machine's git sign-in |
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
-| `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
+| `git.prCreate` | `git/1` | Needs a project | With the machine's `gh`. Set `associateExisting: false` to keep an existing PR's session association as it is. |
 | `git.prLinkBranch` | `git/1` | Needs a project | Verifies a manager-supplied PR URL against the session's checkout and saves a removable link |
 | `git.prUnlink` | `git/1` | Needs a project | Removes a manually added PR link using the machine's registry |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |

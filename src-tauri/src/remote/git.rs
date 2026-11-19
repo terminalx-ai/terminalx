@@ -1476,6 +1476,12 @@ impl WorkspaceGit {
         Ok(response)
     }
 
+    fn checkout_contains(root: &Path, cwd: &Path) -> bool {
+        cwd == root || (cwd.starts_with(root)
+            && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
+                .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_deref() == Some(root))
+    }
+
     fn pr_link_branch(&self, params: &Value) -> Result<Value, RpcError> {
         if !self.project {
             return Err(RpcError::forbidden("Branch PR linking is only available on paired machines."));
@@ -1484,9 +1490,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let repo_root = repo.dir.canonicalize().map_err(RpcError::internal)?;
         let matches_checkout = match Path::new(&session.cwd).canonicalize() {
-            Ok(cwd) => cwd == repo_root || (cwd.starts_with(&repo_root)
-                && crate::git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
-                    .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_ref() == Some(&repo_root)),
+            Ok(cwd) => Self::checkout_contains(&repo_root, &cwd),
             Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
                 session.checkout_root().and_then(|root| Path::new(root).canonicalize().ok()).as_ref() == Some(&repo_root)
             }
@@ -1524,7 +1528,10 @@ impl WorkspaceGit {
 
     fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {
         let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
-            self.project_repositories()
+            self.project_repositories().into_iter().filter_map(|name| {
+                let root = self.dir(&name).canonicalize().ok()?;
+                Some((name, root))
+            }).collect()
         } else {
             vec![]
         };
@@ -1541,9 +1548,11 @@ impl WorkspaceGit {
                 // A machine link is verified in its saved checkout, which can
                 // have its own gh routing even when another shares its origin.
                 crate::pr_associations::Scope::Local { cwd } if self.project && association.linked => {
-                    let path = Path::new(cwd).canonicalize().ok();
-                    linked_checkouts.iter().find(|name| {
-                        path.is_some() && self.dir(name).canonicalize().ok() == path && self.verified_machine_repo(name)
+                    Path::new(cwd).canonicalize().ok().and_then(|path| {
+                        let (name, root) = linked_checkouts.iter()
+                            .filter(|(_, root)| path.starts_with(root))
+                            .max_by_key(|(_, root)| root.components().count())?;
+                        (self.verified_machine_repo(name) && Self::checkout_contains(root, &path)).then_some(name)
                     })
                 }
                 _ => repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name),
@@ -1634,11 +1643,18 @@ impl WorkspaceGit {
             return Err(RpcError::invalid("the base branch is the branch itself"));
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        // Existing git/1 clients rely on Create attaching an open PR. The
+        // newer desktop leaves that choice to the explicit link action.
+        let associate_existing = match params.get("associateExisting") {
+            None => true,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(RpcError::invalid("associateExisting must be a boolean")),
+        };
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
         let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
             let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
             if let Some(session) = &session {
-                let associated = if existing {
+                let associated = if existing && !associate_existing {
                     let url = crate::pr_associations::identity(&pr.url).map_err(RpcError::internal)?;
                     crate::pr_associations::for_session(&session.id, vec![]).map_err(RpcError::internal)?
                         .iter().any(|row| row.url == url)

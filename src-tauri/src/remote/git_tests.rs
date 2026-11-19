@@ -788,7 +788,13 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
     }
     assert_eq!(read()["associations"], json!([]));
 
-    assert_eq!(f.call("git.prLinkBranch", link(public_url)).unwrap()["sessionAssociated"], true);
+    // Older local desktops saved the directory from which the user linked
+    // the PR. Resolve it to the registered worktree even when its origin is
+    // identical to the project root's origin.
+    let legacy_cwd = checkout.join("legacy-subdir");
+    std::fs::create_dir(&legacy_cwd).unwrap();
+    crate::pr_associations::link_local("native", &legacy_cwd, public_url, "feature").unwrap();
+    assert_eq!(f.call("git.prLinkBranch", link(enterprise_url)).unwrap()["sessionAssociated"], true);
     std::fs::remove_dir(cwd).unwrap();
     for url in [public_url, enterprise_url] {
         assert_eq!(f.call("git.prLinkBranch", link(url)).unwrap()["sessionAssociated"], true);
@@ -800,6 +806,8 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
         {"url": public_url, "number": 1, "head": "feature", "repo": "feature-tree", "linked": true},
         {"url": enterprise_url, "number": 2, "head": "feature", "repo": "feature-tree", "linked": true},
     ]));
+    let legacy = json!({"repo": rows["associations"][0]["repo"], "number": 1, "url": public_url});
+    assert_eq!(f.call("git.prs", legacy).unwrap()["prs"][0]["url"], public_url);
 
     let exact = json!({"repo": "feature-tree", "number": 2, "url": enterprise_url});
     assert_eq!(f.call("git.prs", exact.clone()).unwrap()["prs"][0]["url"], enterprise_url);
@@ -822,12 +830,22 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
     assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
     assert_eq!(read()["associations"][0]["url"], enterprise_url);
     save_pr(1, public_url, "OPEN", false);
-    let existing = f.call("git.prCreate", json!({
+    let legacy_create = json!({
         "repo": "feature-tree", "title": "Existing", "base": "main", "branch": "feature", "sessionId": "native",
-    })).unwrap();
+    });
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let existing = f.call("git.prCreate", create).unwrap();
     assert_eq!(existing["existing"], true);
     assert_eq!(existing["sessionAssociated"], false);
     assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], true);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 2);
+    assert_eq!(read()["associations"][0]["url"], public_url);
+    assert!(!f.gh_calls().contains(r#"["pr", "create","#));
 }
 
 #[test]

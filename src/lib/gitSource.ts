@@ -353,7 +353,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     createPr: async ({ title, body, base, draft, sessionId, branch }) => {
       const runtimeId = fromMachine && sessionId ? runtimeSessionIn(input.workspaceKey, sessionId) : null;
       if (fromMachine && sessionId && !runtimeId) throw new Error("This session belongs to a different workspace.");
-      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId } : {}) });
+      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId, associateExisting: false } : {}) });
       if (runtimeId && result.existing && result.sessionAssociated === false) return `Pull request #${result.pr.number} is already open. Use Link existing branch PR to add it to this session.`;
       if (runtimeId && !result.sessionAssociated) return `Pull request #${result.pr.number} is open on GitHub. This machine runtime could not save it to the session.`;
       if (sessionId && !fromMachine) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);

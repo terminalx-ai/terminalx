@@ -381,7 +381,7 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string; associateExisting?: boolean }): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }
