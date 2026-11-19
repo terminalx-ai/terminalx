@@ -337,17 +337,26 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// models.dev's providers, from OpenCode's copy or, without one, the site.
 fn catalog_value(paths: &Paths, fetch: bool) -> Result<Map<String, Value>, String> {
+    static FETCHED: std::sync::Mutex<Option<Map<String, Value>>> = std::sync::Mutex::new(None);
+    catalog_from(paths, fetch, &FETCHED, || {
+        let agent = crate::data_privacy::http_agent().timeout(CATALOG_TIMEOUT).build();
+        let value = agent.get(CATALOG_URL).call().map_err(|error| format!("Couldn’t download the provider list from models.dev: {error}"))?
+            .into_json::<Value>().map_err(|error| format!("models.dev sent a provider list TerminalX can’t read: {error}"))?;
+        value.as_object().cloned().ok_or_else(|| "models.dev sent a provider list TerminalX can’t read.".to_owned())
+    })
+}
+
+/// [`catalog_value`] with its in-process copy and its download given. A list
+/// already downloaded this run serves `fetch: false` too, so the overview an
+/// action returns sees the same providers as the one before it.
+fn catalog_from(paths: &Paths, fetch: bool, fetched: &std::sync::Mutex<Option<Map<String, Value>>>, download: impl FnOnce() -> Result<Map<String, Value>, String>) -> Result<Map<String, Value>, String> {
     if let Some(cached) = std::fs::read_to_string(paths.catalog_file()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_object().cloned()) {
         return Ok(cached);
     }
+    if let Some(copy) = fetched.lock().unwrap_or_else(|poison| poison.into_inner()).clone() { return Ok(copy); }
     if !fetch { return Err("OpenCode has not downloaded its provider list yet.".into()); }
-    static FETCHED: std::sync::Mutex<Option<Map<String, Value>>> = std::sync::Mutex::new(None);
-    if let Some(cached) = FETCHED.lock().unwrap().clone() { return Ok(cached); }
-    let agent = crate::data_privacy::http_agent().timeout(CATALOG_TIMEOUT).build();
-    let value = agent.get(CATALOG_URL).call().map_err(|error| format!("Couldn’t download the provider list from models.dev: {error}"))?
-        .into_json::<Value>().map_err(|error| format!("models.dev sent a provider list TerminalX can’t read: {error}"))?;
-    let map = value.as_object().cloned().ok_or("models.dev sent a provider list TerminalX can’t read.")?;
-    *FETCHED.lock().unwrap() = Some(map.clone());
+    let map = download()?;
+    *fetched.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(map.clone());
     Ok(map)
 }
 
@@ -587,24 +596,22 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
     let entry = config.value.get("provider").and_then(|providers| providers.get(id)).cloned().unwrap_or(Value::Null);
     let has_key = entry.pointer("/options/apiKey").is_some();
     let maybe_server = entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some();
-    let remove_server = maybe_server && match catalog_value(paths, true) {
+    // The providers the list was built from: OpenCode's copy or the one downloaded this run, never a new download.
+    let remove_server = maybe_server && match catalog_value(paths, false) {
         Ok(catalog) => own_server(id, &entry, &catalog),
-        Err(_) if id == OLLAMA => true,
-        // Without the catalogue a hand-made server can't be told from a gateway, which must stay.
-        Err(problem) => return Err(format!("{problem} TerminalX needs it to tell this provider’s address from a gateway; try again once OpenCode has it.")),
+        // Without the catalogue a hand-made server can't be told from a gateway, which must
+        // stay: the keys still go, the address and SDK are left for a later Disconnect.
+        Err(_) => id == OLLAMA,
     };
     let edits_config = has_key || remove_server;
     // The config is checked first so a file that can't be written leaves auth.json alone too.
     if edits_config {
         if let Some(problem) = config.problem { return Err(problem); }
     }
-    match read_auth(paths) {
-        Ok(mut auth) => if auth.remove(id).is_some() { write_json(&paths.auth_file(), &Value::Object(auth), true)?; },
-        // A key file that can't be read is left alone; only a provider set up in the
-        // config can still be disconnected, and the tab says why the file is untouched.
-        Err(problem) if !edits_config => return Err(problem),
-        Err(_) => {}
-    }
+    // Read before anything changes: a key file that can't be read may hold this
+    // provider's key, and Disconnect must not say it is gone while OpenCode still has it.
+    let mut auth = read_auth(paths)?;
+    if auth.remove(id).is_some() { write_json(&paths.auth_file(), &Value::Object(auth), true)?; }
     if edits_config {
         edit_config(paths, |config| {
             let entry = provider_entry(config, id)?;
@@ -890,7 +897,16 @@ mod tests {
     #[test]
     fn a_config_file_that_cannot_be_read_is_not_taken_as_missing() {
         let (_dir, paths) = paths();
+        // A provider whose key would be checked at its catalogue address, here on this Mac.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut catalog: Value = serde_json::from_str(&std::fs::read_to_string(paths.catalog_file()).unwrap()).unwrap();
+        catalog["probed"] = json!({"id": "probed", "name": "Probed", "env": ["PROBED_KEY"], "npm": "@ai-sdk/openai-compatible", "api": format!("http://{}/v1", listener.local_addr().unwrap()), "models": {}});
+        std::fs::write(paths.catalog_file(), catalog.to_string()).unwrap();
+        assert!(probe_for("probed", Some("@ai-sdk/openai-compatible"), catalog["probed"]["api"].as_str(), None).is_some(), "this provider's key would be checked");
         std::fs::create_dir_all(paths.config_file()).unwrap();
+        assert!(connect_in(&paths, "probed", "probed-key-0123456789", None).unwrap_err().starts_with("Couldn’t read"));
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "the key went nowhere");
         let overview = overview_in(&paths, false);
         assert!(overview.config_exists);
         assert!(overview.config_problem.as_deref().is_some_and(|problem| problem.starts_with("Couldn’t read")), "{:?}", overview.config_problem);
@@ -900,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_key_file_does_not_block_what_never_writes_it() {
+    fn a_broken_key_file_blocks_only_what_may_touch_a_key() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         std::fs::write(paths.auth_file(), "{\"anthropic\": ").unwrap();
@@ -909,12 +925,56 @@ mod tests {
         let result = connect_in(&paths, OLLAMA, "", Some(&url)).unwrap();
         served.join().unwrap();
         assert!(result.overview.connected.iter().any(|provider| provider.id == OLLAMA));
-        // A server set up by hand lives in the config alone.
-        let after = disconnect_in(&paths, OLLAMA).unwrap();
-        assert!(!after.connected.iter().any(|provider| provider.id == OLLAMA));
+        // Disconnect can't tell whether that file holds the provider's key, so it waits for a readable one.
+        assert!(disconnect_in(&paths, OLLAMA).unwrap_err().contains("isn’t valid JSON"));
+        assert!(overview_in(&paths, false).connected.iter().any(|provider| provider.id == OLLAMA), "nothing was half done");
         assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), "{\"anthropic\": ");
-        // A provider whose key is in that file can't be disconnected until it can be read.
-        assert!(disconnect_in(&paths, "anthropic").unwrap_err().contains("isn’t valid JSON"));
+    }
+
+    #[test]
+    fn disconnect_never_says_a_key_is_gone_while_an_unreadable_key_file_may_hold_it() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let config = json!({"provider": {"openrouter": {"options": {"apiKey": "sk-or-0123456789abcdef"}}}}).to_string();
+        std::fs::write(paths.config_file(), &config).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.auth_file(), "{\"openrouter\": {\"type\": \"api\", \"ke").unwrap();
+        assert!(disconnect_in(&paths, "openrouter").unwrap_err().contains("isn’t valid JSON"));
+        assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config, "the config key stays until both can go");
+    }
+
+    #[test]
+    fn disconnect_without_the_catalogue_removes_the_keys_and_keeps_the_address() {
+        let (_dir, paths) = paths();
+        std::fs::remove_file(paths.catalog_file()).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_file(), json!({"provider": {"openrouter": {"npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "https://gateway.example.internal/v1", "apiKey": "gw-0123456789abcdef"}}}}).to_string()).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.auth_file(), json!({"openrouter": {"type": "api", "key": "sk-or-0123456789abcdef"}, "anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1}}).to_string()).unwrap();
+        disconnect_in(&paths, "openrouter").unwrap();
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        assert!(auth.get("openrouter").is_none() && auth.get("anthropic").is_some());
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
+        let kept = &config["provider"]["openrouter"];
+        assert!(kept["options"].get("apiKey").is_none());
+        assert_eq!((kept["npm"].as_str(), kept["options"]["baseURL"].as_str()), (Some("@ai-sdk/openai-compatible"), Some("https://gateway.example.internal/v1")), "it may be a gateway, so it stays");
+    }
+
+    #[test]
+    fn a_list_downloaded_this_run_serves_the_overviews_actions_return() {
+        let (_dir, paths) = paths();
+        std::fs::remove_file(paths.catalog_file()).unwrap();
+        let fetched = std::sync::Mutex::new(None);
+        let downloads = std::cell::Cell::new(0);
+        let download = || { downloads.set(downloads.get() + 1); Ok(json!({"openrouter": {"name": "OpenRouter"}}).as_object().cloned().unwrap()) };
+        assert!(catalog_from(&paths, false, &fetched, download).unwrap_err().contains("has not downloaded"));
+        assert!(catalog_from(&paths, true, &fetched, download).unwrap().contains_key("openrouter"));
+        assert!(catalog_from(&paths, false, &fetched, download).unwrap().contains_key("openrouter"), "no fetch, but the copy from this run");
+        assert_eq!(downloads.get(), 1);
+        // OpenCode's own copy, once it has one, comes first.
+        std::fs::write(paths.catalog_file(), json!({"anthropic": {"name": "Anthropic"}}).to_string()).unwrap();
+        assert!(catalog_from(&paths, false, &fetched, download).unwrap().contains_key("anthropic"));
     }
 
     #[test]
