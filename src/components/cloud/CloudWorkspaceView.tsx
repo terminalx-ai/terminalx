@@ -3,7 +3,7 @@ import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlu
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
-import { type AgentFocus, type AgentProjects, CloudAgentsView } from "./CloudAgents";
+import { type AgentProjects, CloudAgentSessions } from "./CloudAgents";
 import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
@@ -48,8 +48,6 @@ export interface OpenedWorkspace {
   provider: string | null;
   /** The API state when it was opened (ready, suspended, provisioning); null for a paired machine. */
   workspaceState: string | null;
-  /** A resume of it is under way (asked for, or running by the list): its stopped state is on its way out. */
-  waking?: boolean;
   /**
    * Set for a paired machine: its record, and what its own connection says
    * while the view is not connected (a sentence, and a word for a chip). Every
@@ -123,10 +121,10 @@ type WorkspaceViewProps = {
   state: WorkspaceConnectionState;
   agentRequest?: number;
   initialAgent?: boolean;
-  /** A session to show in the agent view (a machine session row, PRO-346): its tab, or its first one. */
-  focusAgent?: AgentFocus | null;
-  /** A paired machine's projects, which a new agent tab is created in (PRO-346). */
+  /** A paired machine's projects, which a new agent session is created in (PRO-346). */
   agentProjects?: AgentProjects | null;
+  /** Open one of the workspace's agent sessions in the shared session view (#1289). */
+  onOpenSession: (sessionId: string, tabId: string | null) => void;
 };
 
 /** The view, with the machine it runs on (if it is one) known to every tab. */
@@ -142,7 +140,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
   );
 }
 
-function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = false, focusAgent = null, agentProjects = null }: WorkspaceViewProps) {
+function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = false, agentProjects = null, onOpenSession }: WorkspaceViewProps) {
   const { connection } = opened;
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
@@ -150,21 +148,8 @@ function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = fal
   const { terminals, selected } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: initialAgent ? "agent" : "terminal" });
   useEffect(() => { if (agentRequest > 0) setView({ kind: "agent" }); }, [agentRequest]);
-  useEffect(() => { if (focusAgent) setView({ kind: "agent" }); }, [focusAgent?.sessionId]);
   // The sidebar's + on a machine: the agent view, with its new-agent form open.
   useEffect(() => { if (agentProjects?.request) setView({ kind: "agent" }); }, [agentProjects?.request?.nonce]);
-  // This window asked for a wake (a command went out) and it has neither connected nor failed yet.
-  // Not latched: a wake that fails, like a Resume refused at the running limit, reads stopped again.
-  const [woke, setWoke] = useState(false);
-  const wake = useCallback(() => {
-    setWoke(true);
-    void connection.activate("wake").catch(() => setWoke(false));
-  }, [connection]);
-  useEffect(() => {
-    if (state.state === "connected") setWoke(false);
-  }, [state.state]);
-  useEffect(() => setWoke(false), [connection]);
-  const waking = woke || !!opened.waking;
   // The sidebar marks the terminal's row only while the terminal is what shows.
   const terminalShown = view.kind === "terminal";
   useEffect(() => {
@@ -395,9 +380,8 @@ function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = fal
         </div>
       )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
-      {/* Terminal views and the agent tab stay mounted across reconnects and
-          view switches: they live on the runtime, and their streams resume
-          from the last byte or cursor. */}
+      {/* Terminal views stay mounted across reconnects and view switches:
+          they live on the runtime, and their streams resume from the last byte. */}
       <div className={view.kind === "terminal" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
         {active ? (
           <CloudTerminalPane
@@ -424,20 +408,20 @@ function WorkspaceViewBody({ opened, state, agentRequest = 0, initialAgent = fal
           </div>
         )}
       </div>
-      <div className={view.kind === "agent" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-        <CloudAgentsView
-          scope={{ organizationId: agentScope.organizationId, workspaceId: agentScope.workspaceId }}
-          client={client}
-          state={state}
-          workspaceState={opened.workspaceState}
-          wakeWorkspace={wake}
-          waking={waking}
-          collabKey={key}
-          active={view.kind === "agent"}
-          focus={focusAgent}
-          projects={agentProjects}
-        />
-      </div>
+      {/* The workspace's agent sessions; each opens in the same session view as a local one (#1289). */}
+      {view.kind === "agent" && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <CloudAgentSessions
+            scope={{ organizationId: agentScope.organizationId, workspaceId: agentScope.workspaceId }}
+            client={client}
+            state={state}
+            workspaceState={opened.workspaceState}
+            collabKey={key}
+            projects={agentProjects}
+            onOpenSession={onOpenSession}
+          />
+        </div>
+      )}
       {/* Mounted once first shown, then kept: open files and unsaved text stay. */}
       {filesShown && (
         <div className={view.kind === "files" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
