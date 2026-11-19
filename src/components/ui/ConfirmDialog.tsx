@@ -68,30 +68,46 @@ export function ConfirmDialogHost() {
     const window = getCurrentWebviewWindow();
     if (window.label !== "main") return;
     let stopped = false;
+    // Only a card Rust accepted is active. Any web view with event access can
+    // emit "quit-prompt", so an event alone never dismisses or replaces it.
     let active: { id: string; controller: AbortController } | undefined;
+    const send = (id: string, reply: "opened" | "heartbeat" | ConfirmAnswer) =>
+      invoke<boolean>("reply_to_quit_prompt", { id, reply });
     const unlisten = window.listen<[string, ConfirmRequest | null]>("quit-prompt", async ({ payload: [id, request] }) => {
       if (stopped) return;
       if (!request) {
-        if (active?.id === id) active.controller.abort();
+        // A withdrawal counts only if Rust no longer waits on this card.
+        const withdrawn = active;
+        if (withdrawn?.id !== id) return;
+        try {
+          if (await send(id, "heartbeat")) return;
+        } catch {
+          // Unknown: the regular heartbeat decides.
+          return;
+        }
+        if (active === withdrawn) withdrawn.controller.abort();
         return;
       }
       if (active?.id === id) return;
+      // Rust holds one prompt at a time: a claim it accepts for this ID means
+      // the active card's prompt is gone. A rejected claim leaves it alone.
+      if (!await send(id, "opened").catch((error) => {
+        console.error("Quit confirmation failed", error);
+        return false;
+      }) || stopped) return;
       active?.controller.abort();
       const controller = new AbortController();
       active = { id, controller };
       const { signal } = controller;
-      const send = (reply: "opened" | "heartbeat" | ConfirmAnswer) =>
-        invoke<boolean>("reply_to_quit_prompt", { id, reply });
 
       try {
-        if (!await send("opened") || signal.aborted) return;
         // Keep one heartbeat in flight. Stop renewing as soon as a choice is made.
         let renewing = false;
         const heartbeat = setInterval(async () => {
           if (renewing || signal.aborted) return;
           renewing = true;
           try {
-            if (!await send("heartbeat")) controller.abort();
+            if (!await send(id, "heartbeat")) controller.abort();
           } catch {
             // The next heartbeat can renew the wait if IPC recovers.
           } finally {
@@ -101,10 +117,10 @@ export function ConfirmDialogHost() {
         const answer = await chooseInApp(request, signal).finally(() => clearInterval(heartbeat));
         if (signal.aborted) return;
         try {
-          await send(answer);
+          await send(id, answer);
         } catch {
           // The ID makes a retry safe if Rust already received the answer.
-          if (!signal.aborted) await send(answer);
+          if (!signal.aborted) await send(id, answer);
         }
       } catch (error) {
         console.error("Quit confirmation failed", error);
