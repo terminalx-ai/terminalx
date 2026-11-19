@@ -5018,22 +5018,35 @@ impl SessionManager {
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
     pub fn answer_questions(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<()> {
+        self.answer_questions_with_mobile(session_id, tab_id, request_id, answers, None)
+    }
+
+    pub(crate) fn answer_questions_with_mobile(&self, session_id: &str, tab_id: &str, request_id: &str,
+        answers: HashMap<String, String>, mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let ask = rt.pending.get(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let tool_use_id = ask.tool_use_id.clone();
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision: Decision::Answers(input), mobile: Some(MobileDecision {
+                        permit: permit.clone(), label: "Answered".into(), session_command: String::new(),
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
+                    return Ok(());
+                }
                 tx.send(Decision::Answers(input)).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
             }
             _ => bail!("that agent does not ask questions this way"),
         }
-        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
+        rt.pending.remove(request_id);
+        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         drop(rt);
         self.observer.answered(session_id, tab_id);
         Ok(())
@@ -8256,6 +8269,7 @@ impl SessionManager {
         drop(parked);
         let mut rt = rt_arc.lock().unwrap();
         if !mine(&rt) {
+            if answer.is_some_and(|queued| queued.mobile.is_some()) { return reply_for(kind, gate, Decision::Deny); }
             return HookReply::default();
         }
         if let Engine::Cli(p) = &mut rt.engine {
@@ -8272,12 +8286,21 @@ impl SessionManager {
                 let manager = self.clone();
                 let runtime = rt_arc.clone();
                 let MobileDecision { permit, label, session_command } = mobile;
-                let complete = move |delivered| {
+                let deliver = move |write: &mut dyn FnMut(bool) -> bool| {
+                    // Take the phone grant before the tab lock, as at admission. Keep
+                    // both until the bounded write settles so cancellation and
+                    // revocation cannot pass the last check before delivery.
+                    let grant = permit.enter().ok();
                     let mut rt = runtime.lock().unwrap();
-                    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == generation && cli.origin.token == token) {
+                    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == generation && cli.origin.token == token)
+                        || !rt.pending.contains_key(&request_id) {
+                        drop(rt);
+                        drop(grant);
+                        write(false);
                         return;
                     }
-                    let Some(ask) = rt.pending.remove(&request_id) else { return; };
+                    let delivered = write(grant.is_some()) && grant.is_some();
+                    let ask = rt.pending.remove(&request_id).expect("checked under tab lock");
                     if delivered && !session_command.is_empty() {
                         manager.session_commands.lock().unwrap().entry(rt.key()).or_default().insert(session_command);
                     }
@@ -8285,6 +8308,7 @@ impl SessionManager {
                         request_id, tool_use_id: Some(ask.tool_use_id), allowed: delivered && allow,
                         label: if delivered { label } else { "Cancelled".into() }, automatic: !delivered,
                     }, None);
+                    if !delivered { return; }
                     if rt.pending.is_empty() {
                         manager.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                         manager.set_status(&mut rt, TabStatus::InProgress);
@@ -8293,7 +8317,7 @@ impl SessionManager {
                     drop(rt);
                     manager.observer.answered(&session, &tab);
                 };
-                if crate::hooks::guard_mobile_reply(permit, denied.clone(), complete) { reply } else { denied }
+                if crate::hooks::guard_mobile_reply(denied.clone(), deliver) { reply } else { denied }
             }
             Some(QueuedDecision { decision, mobile: None }) => {
                 if rt.pending.is_empty() {

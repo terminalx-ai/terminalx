@@ -704,6 +704,13 @@ impl ApprovalPhone {
         })).unwrap();
     }
 
+    pub(crate) fn answer_question(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, request: &str) {
+        execute(manager, &self.lifetime, "questions", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "requestId": request, "answers": {"Which branch?": "main"},
+        })).unwrap();
+    }
+
     pub(crate) fn send(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, text: &str) {
         execute(manager, &self.lifetime, "send", serde_json::json!({
             "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
@@ -862,11 +869,16 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     if let Some(result) = controls(manager, &actor, &grant, method, &params) {
         return result;
     }
-    if method == "permission" {
+    if matches!(method, "permission" | "questions") {
         let (session, tab) = (string("sessionId")?, string("tabId")?);
         let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
         let _admitted = permit.enter()?;
-        manager.respond_permission_from_phone(session, tab, string("requestId")?, string("optionId")?, &permit)?;
+        if method == "questions" {
+            let answers = serde_json::from_value(params["answers"].clone()).context("answers must map each question to its answer")?;
+            manager.answer_questions_with_mobile(session, tab, string("requestId")?, answers, Some(&permit))?;
+        } else {
+            manager.respond_permission_from_phone(session, tab, string("requestId")?, string("optionId")?, &permit)?;
+        }
         return Ok(serde_json::json!({"status":"answered"}));
     }
     let _admitted = grant.enter()?;
@@ -899,20 +911,12 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         }
         "unobserve" => Ok(serde_json::json!({"removed":grant.observations.unsubscribe(string("subscriptionId")?)})),
         "output" => grant.observations.poll(),
-        "reconcile" | "questions" | "terminalRead" => {
+        "reconcile" | "terminalRead" => {
             let session = string("sessionId")?;
             let tab = string("tabId")?;
             let entry = crate::store::index::get(session)?;
             if entry.tab(tab).is_none() { bail!("The tab does not belong to this session."); }
             match method {
-                // The desktop's own answer (`answer_questions`): the same
-                // format, the same refusal once the question is closed.
-                "questions" => {
-                    grant.driver()?;
-                    let answers = serde_json::from_value(params["answers"].clone()).context("answers must map each question to its answer")?;
-                    manager.answer_questions(session, tab, string("requestId")?, answers)?;
-                    Ok(serde_json::json!({"status":"answered"}))
-                }
                 "reconcile" => {
                     manager.load_events(session, tab)?;
                     Ok(Value::Null)

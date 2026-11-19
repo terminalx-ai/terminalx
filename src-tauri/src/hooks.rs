@@ -864,14 +864,8 @@ fn answer_frame(stream: std::os::unix::net::UnixStream, busy: Busy, answer: impl
     let then = AFTER_REPLY.with(|after| after.borrow_mut().take());
     let mobile = MOBILE_REPLY.with(|guard| guard.borrow_mut().take());
     let mut stream = stream;
-    if let Some(MobileReply { permit, denied, complete }) = mobile {
-        match permit.enter() {
-            Ok(_grant) => complete(write_frame_reply(&mut stream, &reply, true)),
-            Err(_) => {
-                write_frame_reply(&mut stream, &denied, true);
-                complete(false);
-            }
-        }
+    if let Some(MobileReply { denied, deliver }) = mobile {
+        deliver(&mut |authorized| write_frame_reply(&mut stream, if authorized { &reply } else { &denied }, true));
         drop(busy);
     } else {
         drop(busy);
@@ -907,10 +901,12 @@ fn write_frame_reply(stream: &mut std::os::unix::net::UnixStream, reply: &Value,
 }
 
 #[cfg(unix)]
+type MobileDelivery = Box<dyn FnOnce(&mut dyn FnMut(bool) -> bool)>;
+
+#[cfg(unix)]
 struct MobileReply {
-    permit: crate::local_runtime::mobile::WritePermit,
     denied: Value,
-    complete: Box<dyn FnOnce(bool)>,
+    deliver: MobileDelivery,
 }
 
 #[cfg(unix)]
@@ -919,17 +915,17 @@ thread_local! {
 }
 
 /// Carry mobile authority to the hook transport's actual reply write.
-pub(crate) fn guard_mobile_reply(permit: crate::local_runtime::mobile::WritePermit, denied: HookReply,
-    complete: impl FnOnce(bool) + 'static) -> bool {
+pub(crate) fn guard_mobile_reply(denied: HookReply,
+    deliver: impl FnOnce(&mut dyn FnMut(bool) -> bool) + 'static) -> bool {
     #[cfg(unix)]
     if FRAME.with(|frame| frame.borrow().is_some()) {
         MOBILE_REPLY.with(|guard| *guard.borrow_mut() = Some(MobileReply {
-            permit, denied: serde_json::to_value(denied).unwrap_or_default(), complete: Box::new(complete),
+            denied: serde_json::to_value(denied).unwrap_or_default(), deliver: Box::new(deliver),
         }));
         return true;
     }
-    let _ = (permit, denied);
-    complete(false);
+    let _ = denied;
+    deliver(&mut |_| false);
     false
 }
 
