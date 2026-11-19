@@ -153,8 +153,13 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
         let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
         runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
     };
+    let branch_base = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchBase", &params).unwrap().unwrap()
+    };
     let base = git(&checkout, &["rev-parse", "HEAD"]);
-    assert_eq!(diff_size(), json!({ "additions": 0, "deletions": 0, "aheadOfBase": 0, "head": base }));
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 0, "head": base }));
+    assert_eq!(diff_size(), json!({ "additions": 0, "deletions": 0, "head": base }));
     std::fs::write(checkout.join("committed.txt"), "committed\n").unwrap();
     git(&checkout, &["add", "committed.txt"]);
     git(&checkout, &["commit", "-qm", "topic"]);
@@ -169,11 +174,12 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
     let objects = git(&project, &["count-objects", "-v"]);
     let head = git(&checkout, &["rev-parse", "HEAD"]);
 
-    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1, "aheadOfBase": 1, "head": head }));
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 1, "head": head }));
+    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1, "head": head }));
     std::fs::write(checkout.join("draft.txt"), "one\ntwo\n").unwrap();
-    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1, "aheadOfBase": 1, "head": head }));
+    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1, "head": head }));
     std::fs::remove_file(checkout.join("draft.txt")).unwrap();
-    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1, "aheadOfBase": 1, "head": head }));
+    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1, "head": head }));
     assert_eq!(git(&project, &["count-objects", "-v"]), objects);
     assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
     assert!(!checkout.join("filter-ran").exists());
@@ -182,6 +188,30 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
 #[test]
 fn branch_diff_size_refuses_to_start_after_its_deadline() {
     assert_eq!(branch_diff_size(Path::new("."), "main", Instant::now()).unwrap_err().code, "timeout");
+}
+
+#[test]
+fn commit_and_push_refuse_a_changed_checkout_or_head() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["checkout", "-qb", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({
+        "repo": "app", "message": "work", "author": me(),
+        "expectedBranch": "main", "expectedHead": head
+    });
+    assert_eq!(f.code("git.commit", params.clone()), "conflict");
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    git(&checkout, &["checkout", "-q", "main"]);
+    let commit = f.call("git.commit", params).unwrap();
+    assert_eq!(commit["branch"], "main");
+    assert_ne!(commit["commit"], head);
+    let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
+    assert_eq!(f.code("git.push", push(json!(head))), "conflict");
+    assert_eq!(f.call("git.push", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]), commit["commit"]);
 }
 
 #[test]
@@ -319,8 +349,8 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "x", "author": me() })).unwrap();
     let answer = f
         .git
-        .push_with(&json!({ "repo": "app" }), |repo, branch| {
-            git(&repo.dir, &["push", "-q", "origin", branch]);
+        .push_with(&json!({ "repo": "app" }), |repo, branch, head| {
+            git(&repo.dir, &["push", "-q", "origin", &format!("{head}:refs/heads/{branch}")]);
             Ok(Ran { ok: false, stdout: String::new(), stderr: "fatal: the remote end hung up unexpectedly".into(), timed_out: false })
         })
         .unwrap();
@@ -331,7 +361,7 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "y", "author": me() })).unwrap();
     let error = f
         .git
-        .push_with(&json!({ "repo": "app" }), |_, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
+        .push_with(&json!({ "repo": "app" }), |_, _, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
         .unwrap_err();
     assert_eq!(error.code, "outcome_unknown");
 }

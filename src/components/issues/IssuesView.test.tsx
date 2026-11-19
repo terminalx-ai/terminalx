@@ -416,13 +416,21 @@ async function pickModel(name: string) {
   await closeMenus();
 }
 
+/** Opens the row's submenu (Agent, Model, Effort) and returns it. */
+async function rowMenu(row: RegExp) {
+  const top = await openAgentMenu();
+  fireEvent.keyDown(within(top).getByRole("menuitem", { name: row }), { key: "ArrowRight" });
+  await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true }).length).toBe(2));
+  return screen.getAllByRole("menu", { hidden: true }).at(-1)!;
+}
+
 async function pickEffort(name: string) {
-  fireEvent.click(within(await openAgentMenu()).getByRole("menuitemradio", { name }));
+  fireEvent.click(within(await rowMenu(/^Effort/)).getByRole("menuitemradio", { name, hidden: true }));
   await closeMenus();
 }
 
 async function pickAgent(name: string) {
-  fireEvent.click(within(await openAgentMenu()).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+  fireEvent.click(within(await rowMenu(/^Agent/)).getByRole("menuitem", { name: new RegExp(`^${name}`), hidden: true }));
   await closeMenus();
 }
 
@@ -849,7 +857,7 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     await pickEffort("Extra high");
     await pickModel("GPT-5.6 Sol");
     expect(shownEffort()).toBe("High");
-    expect(within(await openAgentMenu()).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Medium", "High"]);
+    expect(within(await rowMenu(/^Effort/)).getAllByRole("menuitemradio", { hidden: true }).map((item) => item.textContent)).toEqual(["Medium", "High"]);
     await closeMenus();
     expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
   });
@@ -888,7 +896,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     await waitFor(() => expect(document.activeElement).toBe(button));
     expect(shownModel()).toBe("GPT-6 Astra");
     fireEvent.keyDown(button, { key: " " });
-    const extraHigh = await screen.findByRole("menuitemradio", { name: "Extra high" });
+    fireEvent.keyDown(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Effort/ }), { key: "ArrowRight" });
+    const extraHigh = await screen.findByRole("menuitemradio", { name: "Extra high", hidden: true });
     extraHigh.focus();
     fireEvent.keyDown(extraHigh, { key: "Enter" });
     await waitFor(() => expect(document.activeElement).toBe(button));

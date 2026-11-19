@@ -33,7 +33,8 @@ runtime.
 | --- | --- | --- |
 | `git.repositories` | participate | `[{ repo, branch, head, remote, defaultBranch }]` (credentials stripped from `remote`), `truncated`. |
 | `git.status` | participate | Porcelain files, `branch`, `upstream`, `ahead`/`behind`, `defaultBranch`, `aheadOfBase`, `conflicted` (unmerged paths), `operation` (`merge`/`rebase`/`cherry-pick` in progress). `{ repository: false }` when the workspace has none and no `repo` was named. |
-| `git.branchDiffSize` | participate | `additions` and `deletions` between the worktree and its merge base with `base`, preferring the origin ref. Also returns the measured `head` and its commit count `aheadOfBase`. Includes untracked files without storing their contents as Git objects. |
+| `git.branchBase` | participate | The measured `head` and its commit count `aheadOfBase` against `base`, preferring the origin ref. Reads only commit history. |
+| `git.branchDiffSize` | participate | `additions` and `deletions` between the worktree and its merge base with `base`, with the measured `head`. Includes untracked files without storing their contents as Git objects. |
 | `git.diff` | participate | Unified diff (≤ 768 KiB, `truncated`). |
 | `git.workingChanges` | participate | The desktop's `working_changes`: HEAD's tree and the changed files against it, untracked included (≤ 2000). Optional `hideWhitespace: true` uses `diff -w` for line counts. |
 | `git.reviewRange` | participate | Stable `base` and live snapshot `head` tree ids for workspace review, including untracked files. `uncommitted: true` compares against HEAD (empty tree in an unborn repository); otherwise `target` selects the merge base with HEAD. Without a target, prefer origin/HEAD, then the default local branch. Returns the resolved target name; invalid targets fail. |

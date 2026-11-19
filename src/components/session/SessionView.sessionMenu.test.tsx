@@ -38,7 +38,7 @@ vi.mock("@/components/chat/Composer", () => ({ Composer: () => <div data-testid=
 const { backend, FEATURE, session: sessionEntry, tab } = await import("@/test/tabsBackend");
 const { bootSessions, refreshEverything, getSessionStore } = await import("@/lib/sessions");
 const { setPrefs } = await import("@/lib/prefs");
-const { bindingsOf, keycaps } = await import("@/lib/shortcuts");
+const { SHORTCUT_ACTIONS, bindingsOf, keycaps, saveShortcut } = await import("@/lib/shortcuts");
 const { openLinkIssue, openRenameSession } = await import("@/lib/dialogs");
 const { SessionView } = await import("./SessionView");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
@@ -102,6 +102,28 @@ describe("the title bar's session menu", () => {
       expect(element.textContent).toBe(keycaps(bindings[0]).join(""));
     }
     expect(menu.querySelector('[data-row="terminal-view"] [data-shortcut="session.toggleTerminalView"]')).not.toBeNull();
+  });
+
+  // Optional bindings appear in the menu and work with the menu closed.
+  it("shows the keys the reader gave the rows, each a registered action, and the keys work with the menu closed", async () => {
+    const rows = { "link-issue": "session.linkIssue", "copy-link": "session.copyLink", "terminal-view": "session.toggleTerminalView", archive: "session.archive" } as const;
+    const chords = { "session.linkIssue": "mod+alt+i", "session.copyLink": "mod+alt+shift+c", "session.archive": "mod+alt+shift+a" } as const;
+    for (const [id, chord] of Object.entries(chords)) expect(saveShortcut(id as keyof typeof chords, [chord]), id).toEqual({ ok: true });
+    const menu = await show();
+    const registered = new Set(SHORTCUT_ACTIONS.map((action) => action.id));
+    for (const [row, id] of Object.entries(rows)) {
+      expect(registered.has(id), id).toBe(true);
+      const shown = menu.querySelector<HTMLElement>(`[data-row="${row}"] [data-shortcut]`);
+      expect(shown?.dataset.shortcut, row).toBe(id);
+      expect(shown?.textContent, row).toBe(keycaps(bindingsOf(id)[0]).join(""));
+    }
+    // Nothing else in the menu shows keys.
+    expect([...menu.querySelectorAll<HTMLElement>("[data-shortcut]")].map((element) => element.dataset.shortcut)).toEqual(Object.values(rows));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await flush();
+    fireEvent.keyDown(window, { key: "i", code: "KeyI", ctrlKey: true, altKey: true });
+    expect(openLinkIssue).toHaveBeenCalledWith("menu");
+    // Archive's keys are the app shell's (AppShell), as before this menu had the row.
   });
 
   it("names the target branch in mono and in its own case, with no uppercase label", async () => {

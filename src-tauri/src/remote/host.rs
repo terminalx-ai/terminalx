@@ -40,6 +40,15 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// the bootstrap's refresh interval, and access changes apply this promptly
 /// (contract §21.5).
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
+// Worktree scans share a small process-wide budget across direct and relay peers.
+static BRANCH_DIFF_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+// Commit history has separate slots, so a slow diff cannot hold up Create PR.
+static BRANCH_BASE_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+fn try_branch_read_slot(slots: &tokio::sync::Semaphore, pending: bool) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    if pending { return None; }
+    slots.try_acquire().ok()
+}
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
     "environment.report",
@@ -50,6 +59,7 @@ const SLOW_METHODS: &[&str] = &[
     "git.checkout",
     "git.repositories",
     "git.status",
+    "git.branchBase",
     "git.branchDiffSize",
     "git.workingChanges",
     "git.reviewRange",
@@ -1646,7 +1656,8 @@ where
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
-    let (answers_tx, mut answers) = mpsc::unbounded_channel::<Value>();
+    let (answers_tx, mut answers) = mpsc::unbounded_channel::<(Value, Option<usize>)>();
+    let mut branch_read_pending = [false; 2];
     let result = async {
         loop {
             tokio::select! {
@@ -1664,12 +1675,13 @@ where
                     send_sealed(socket, session, &notification).await?;
                 }
                 answer = answers.recv() => {
-                    if let Some(answer) = answer {
+                    if let Some((answer, branch_read)) = answer {
                         let Some(sent) = before_rpc_close(cancel, peer, send_sealed(socket, session, &answer)).await else {
                             // Drop the socket without flushing a partially queued reply.
                             return Ok(());
                         };
                         sent?;
+                        if let Some(index) = branch_read { branch_read_pending[index] = false; }
                     }
                 }
                 incoming = socket.next() => {
@@ -1701,10 +1713,33 @@ where
                                     continue;
                                 }
                                 Some(method) if SLOW_METHODS.contains(&method) => {
+                                    let branch_read = match method {
+                                        "git.branchDiffSize" => Some((0, &BRANCH_DIFF_SLOTS)),
+                                        "git.branchBase" => Some((1, &BRANCH_BASE_SLOTS)),
+                                        _ => None,
+                                    };
+                                    let slot = if let Some((index, slots)) = branch_read {
+                                        let permit = try_branch_read_slot(slots, branch_read_pending[index]);
+                                        let Some(permit) = permit else {
+                                            let id = request["id"].as_str().unwrap_or("");
+                                            let busy = protocol::RpcError::new("busy", "Branch comparison already in progress. Try again shortly.");
+                                            let answer = protocol::failure(id, &busy);
+                                            let Some(sent) = before_rpc_close(cancel, peer, send_sealed(socket, session, &answer)).await else {
+                                                return Ok(());
+                                            };
+                                            sent?;
+                                            continue;
+                                        };
+                                        branch_read_pending[index] = true;
+                                        Some(permit)
+                                    } else {
+                                        None
+                                    };
                                     let answer = rpc.handle_owned(peer.clone(), request);
                                     let answers = answers_tx.clone();
                                     tokio::spawn(async move {
-                                        let _ = answers.send(answer.await);
+                                        let _slot = slot;
+                                        let _ = answers.send((answer.await, branch_read.map(|(index, _)| index)));
                                     });
                                     continue;
                                 }
@@ -1795,6 +1830,18 @@ mod tests {
         let (close, mut cancel) = mpsc::unbounded_channel();
         close.send(()).unwrap();
         assert_eq!(before_rpc_close(&mut cancel, &peer, std::future::ready("diff")).await, None);
+    }
+
+    #[test]
+    fn branch_diff_admission_limits_each_connection_and_the_host() {
+        let slots = tokio::sync::Semaphore::new(2);
+        let first = try_branch_read_slot(&slots, false).unwrap();
+        assert!(try_branch_read_slot(&slots, true).is_none());
+        let second = try_branch_read_slot(&slots, false).unwrap();
+        assert!(try_branch_read_slot(&slots, false).is_none());
+        drop(first);
+        assert!(try_branch_read_slot(&slots, false).is_some());
+        drop(second);
     }
 
     #[test]

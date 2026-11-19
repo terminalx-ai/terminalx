@@ -697,14 +697,21 @@ As built (PRO-340):
   `pipelineSettings`: a machine keeps its own project settings, and a caller
   does not replace them. Its pipelines run on the machine's own host
   (`LocalHost::new`), so they merge with its `gh`.
-- A project's worktrees outside its folder (an absolute `worktreeDir`) are
-  named by absolute path, in `fs/1` and as `repo` in `git/1`, as
-  `git.repositories` lists them. Only the project's own `git worktree list`
-  entries in that folder are reachable, never the folder itself, which holds
-  every project's worktrees. A worktree inside the project is a relative path
-  as before. Any other absolute path is `path_forbidden`.
+- A project's registered linked worktrees outside its folder are named by
+  absolute path in `fs/1` and as `repo` in `git/1`. The registered project
+  must be a checkout root to serve its Git registry. The runtime checks the
+  checkout, its registration and their common Git directory before admitting
+  an external checkout.
+  `worktreeDir` controls creation. A worktree inside the project uses a
+  relative path. Other absolute paths are `path_forbidden`.
 - A machine project's `git.repositories` is its checkout (`.`) and its
-  worktrees, at most 100, not clones found below its folder.
+  linked worktrees, up to 100 rows. `preferredRepo` keeps a known checkout in
+  that response. An explicit `repo` can name any verified checkout. Git
+  operations require the repository's effective top-level directory to
+  match the authorized checkout.
+- File rename and delete refuse directories that contain a registered
+  project or linked checkout, including a checkout with a damaged marker
+  whose registration still names the directory.
 - `cleanup/1` and `workspace/2` on a machine use the local runtime's own
   clean-up host: every open project, archived ones protected, as Settings →
   Storage does (`local_runtime::workspaces::host`).
@@ -776,6 +783,8 @@ the pull request that adds it.
 | `mirror.manifest` | `mirror/1` | Not served | The offline mirror of a cloud workspace (PRO-25); a machine session reads live and shows its last known state while unreachable (PRO-352) |
 | `git.repositories` | `git/1` | Needs a project | The project's checkout and its worktrees |
 | `git.status` | `git/1` | Needs a project | |
+| `git.branchBase` | `git/1` | Needs a project | |
+| `git.branchDiffSize` | `git/1` | Needs a project | |
 | `git.diff` | `git/1` | Needs a project | |
 | `git.workingChanges` | `git/1` | Needs a project | |
 | `git.reviewRange` | `git/1` | Needs a project | |
@@ -2124,21 +2133,18 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 
 ### As built (PRO-405)
 
-- **A worktree outside the project.** When Settings keeps worktrees in an
-  absolute folder, `git.repositories` names the project's own worktrees there
-  by canonical absolute path, and `fs/1` takes exactly those absolute paths
-  for the project (`WorkspaceFiles::lexical`/`existing_path`, re-read on each
-  `git.repositories`); any other absolute path, another project's worktree
-  beside it, or one that climbs or links out is `path_forbidden`
-  (`remote::machine_tests`, `machines_e2e`). No `sessionId` scope is needed:
-  the runtime's check is against the project's worktrees either way.
-- **Files and Changes agree.** `sessionFilesBase` roots Files, the editor and
-  search at the repository `sessionRepository` picks for Changes: `""`, a
-  relative worktree, or that absolute path. A worktree inside the project is
-  rooted before the list arrives; one outside waits for it. A
-  `cloudFileSource` with an absolute base opts in to absolute paths
-  (`remoteFilePath(path, true)`, no `.` or `..` part); every other source
-  still sends only workspace-relative ones.
+- **A worktree outside the project.** The runtime discovers linked
+  worktrees from the project's Git registry. Existing checkouts keep their
+  scope when the creation setting changes. Every external path lookup checks
+  the live checkout and its registration through `WorkspaceFiles`.
+- **Files and Changes agree.** The runtime returns the enclosing checkout as
+  `fileRoot` and its exact Git name as `fileRepository`. Both are resolved
+  against the project and its live worktrees before being sent. Files, the
+  editor, search and the default Changes view use this checkout, including
+  for sessions in a subdirectory and checkouts beyond the repository list
+  limit. When a saved starting subdirectory is missing or has become a
+  file, the runtime can recover the checkout from the session's verified saved root. The panel
+  reports when the checkout is unavailable.
 - **Live commands.** The machine's agent scope (no organization) sends
   `session.send/steer/stop/decide` with a `clientRequestId` when
   `agent-commands/1` is granted. A decision keeps one id per request across

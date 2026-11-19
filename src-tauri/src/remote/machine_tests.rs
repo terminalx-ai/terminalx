@@ -213,6 +213,8 @@ async fn a_new_session_is_cut_from_the_chosen_branch_once() {
     // Without a worktree there is nothing to cut, and the base is not used.
     let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
     assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);
+    assert_eq!(here["session"]["fileRoot"], "");
+    assert_eq!(here["session"]["fileRepository"], ".");
     // Never something git could read as an option or a revision expression.
     for bad in ["-x", "main..feature", "feature@{1}", "a b", "", "HEAD~1"] {
         let refused = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "useWorktree": true, "baseRef": bad, "clientRequestId": format!("create-bad-{}", bad.len()) })).await;
@@ -277,6 +279,7 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     assert_eq!(names, vec![".", "nested/inside", api_one.to_str().unwrap()], "{repositories}");
     let status = call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await.unwrap();
     assert_eq!(status["branch"], "api-one", "{status}");
+    assert!(status["files"].as_array().unwrap().iter().any(|file| file["path"] == "notes.md"), "{status}");
     let web_one = std::fs::canonicalize(shared.join("web-one")).unwrap();
     assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": web_one })).await), "not_found");
     // Writes, listings and searches hold to the same rule.
@@ -285,6 +288,80 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     let found = call(&m.rpc, &peer, "fs.search", json!({ "projectId": api_id, "searchId": "search-0001", "query": "worktree", "path": shared.join("api-one") })).await.unwrap();
     let hits: Vec<&str> = found["hits"].as_array().unwrap().iter().filter_map(|hit| hit["path"].as_str()).collect();
     assert_eq!(hits, vec![api_worktree.as_str()], "{found}");
+    // Moving the creation setting leaves existing, registered worktrees accessible.
+    let future = m.path("future-worktrees");
+    std::fs::create_dir(&future).unwrap();
+    settings.worktree_dir = future.to_string_lossy().into_owned();
+    crate::store::settings::save(&settings).unwrap();
+    let repositories = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.unwrap();
+    assert!(repositories["repositories"].as_array().unwrap().iter().any(|repo| repo["repo"] == json!(api_one)));
+    assert_eq!(read(&api_id, &api_worktree).await.unwrap()["text"], "api worktree");
+    #[cfg(unix)]
+    {
+        let alias = m.path("worktree-alias");
+        std::os::unix::fs::symlink(&shared, &alias).unwrap();
+        let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": api_id, "clientRequestId": "session-aliased-worktree" })).await.unwrap();
+        let session_id = made["sessionId"].as_str().unwrap();
+        std::fs::create_dir(api_one.join("src")).unwrap();
+        let cwd = alias.join("api-one/src");
+        crate::store::index::update_session(session_id, |session| {
+            session.cwd = cwd.to_string_lossy().into_owned();
+            Ok(())
+        }).unwrap();
+        let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+        assert_eq!(session["session"]["cwd"], json!(cwd));
+        assert_eq!(session["session"]["fileRoot"], json!(api_one));
+        assert_eq!(session["session"]["fileRepository"], json!(api_one));
+        let listing = call(&m.rpc, &peer, "fs.list", json!({ "projectId": api_id, "path": session["session"]["fileRoot"] })).await.unwrap();
+        assert!(listing["entries"].as_array().unwrap().iter().any(|entry| entry["path"] == api_worktree));
+
+        let unrelated = m.path("unrelated");
+        std::fs::create_dir_all(unrelated.join("api-one/src")).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &alias).unwrap();
+        let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+        assert_eq!(session["session"]["cwd"], json!(cwd));
+        assert!(session["session"]["fileRoot"].is_null(), "{session}");
+        assert!(session["session"]["fileRepository"].is_null(), "{session}");
+        let listed = call(&m.rpc, &peer, "session.list", json!({})).await.unwrap();
+        let row = listed["sessions"].as_array().unwrap().iter().find(|row| row["id"] == session_id).unwrap();
+        assert!(row["fileRoot"].is_null(), "{row}");
+
+        let internal = api.join("nested/inside/src");
+        std::fs::create_dir(&internal).unwrap();
+        index::update_session(session_id, |session| {
+            session.cwd = internal.to_string_lossy().into_owned();
+            Ok(())
+        }).unwrap();
+        let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+        assert_eq!(session["session"]["fileRoot"], "nested/inside");
+        assert_eq!(session["session"]["fileRepository"], "nested/inside");
+    }
+    // Verify the file service with its current cached registration, before
+    // the next project lookup can refresh that cache.
+    let files = m.rpc.project(&peer, &json!({ "projectId": api_id })).unwrap().files.clone();
+    let request = json!({ "path": api_worktree });
+    assert!(files.read(&request).is_ok());
+    let admin = crate::git::run(&api_one, &["rev-parse", "--absolute-git-dir"]).unwrap();
+    let common_file = Path::new(admin.trim()).join("commondir");
+    let common = std::fs::read(&common_file).unwrap();
+    std::fs::write(&common_file, format!("{}\n", web.join(".git").display())).unwrap();
+    assert_eq!(files.read(&request).unwrap_err().code, "path_forbidden");
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await), "not_found");
+    std::fs::write(&common_file, common).unwrap();
+    // Warm the authorization cache again after restoring the checkout.
+    assert!(call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.is_ok());
+    assert!(files.read(&request).is_ok());
+    git(&api, &["config", "extensions.worktreeConfig", "true"]);
+    git(&api_one, &["config", "--worktree", "core.worktree", web.to_str().unwrap()]);
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await), "not_found");
+    let repositories = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.unwrap();
+    assert!(repositories["repositories"].as_array().unwrap().iter().all(|repo| repo["repo"] != json!(api_one)));
+    git(&api_one, &["config", "--worktree", "--unset", "core.worktree"]);
+    std::fs::rename(&api_one, shared.join("saved-api-one")).unwrap();
+    std::fs::create_dir(&api_one).unwrap();
+    std::fs::write(&api_worktree, "replacement").unwrap();
+    assert_eq!(files.read(&request).unwrap_err().code, "path_forbidden");
     // A file call names its project.
     assert_eq!(code(call(&m.rpc, &peer, "fs.read", json!({ "path": "README.md" })).await), "invalid_params");
     assert_eq!(code(call(&m.rpc, &peer, "fs.read", json!({ "projectId": "AAAAAAAAAAAAAAAA", "path": "README.md" })).await), "not_found");
@@ -296,6 +373,166 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     // A project removed from the machine is no longer served.
     crate::store::projects::remove(&web.to_string_lossy()).unwrap();
     assert_eq!(code(read(&web_id, "secret.txt").await), "not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_project_does_not_inherit_its_enclosing_repository() {
+    let m = machine_rpc();
+    let parent = m.path("unregistered");
+    std::fs::create_dir(&parent).unwrap();
+    crate::cloud_agents::launch::init_blank_repository(&parent, "main").unwrap();
+    let folder = parent.join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("local.txt"), "in the registered folder").unwrap();
+    let project = crate::store::projects::add(folder.to_str().unwrap()).unwrap();
+    let id = machine::project_id(&project.path);
+    let external = m.path("parent-worktree");
+    git(&parent, &["worktree", "add", "--quiet", "--detach", external.to_str().unwrap()]);
+    let (peer, _events, _) = computer(&m.rpc).await;
+
+    let projects = call(&m.rpc, &peer, "machine.projects", json!({})).await.unwrap();
+    assert_eq!(projects["projects"][0]["kind"], "folder");
+    assert!(projects["projects"][0]["defaultBranch"].is_null());
+    let listed = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": id })).await.unwrap();
+    assert_eq!(listed["repositories"], json!([]));
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": id, "repo": "." })).await), "not_found");
+    assert_eq!(code(call(&m.rpc, &peer, "fs.list", json!({ "projectId": id, "path": external })).await), "path_forbidden");
+    let visible = call(&m.rpc, &peer, "fs.read", json!({ "projectId": id, "path": "local.txt" })).await.unwrap();
+    assert_eq!(visible["text"], "in the registered folder");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_mutations_preserve_contained_checkouts_and_projects() {
+    let m = machine_rpc();
+    let (api, id) = project(&m.path("code"), "api");
+    let outer = m.path("outer");
+    git(&api, &["worktree", "add", "--quiet", "--detach", outer.to_str().unwrap()]);
+    let (peer, _events, _) = computer(&m.rpc).await;
+    // Establish the scope before the nested checkout appears.
+    call(&m.rpc, &peer, "fs.list", json!({ "projectId": id, "path": outer })).await.unwrap();
+    let container = outer.join("container");
+    let inner = container.join("inner");
+    std::fs::create_dir(&container).unwrap();
+    git(&api, &["worktree", "add", "--quiet", "--detach", inner.to_str().unwrap()]);
+    let registered_parent = outer.join("registered");
+    let registered = registered_parent.join("folder");
+    std::fs::create_dir_all(&registered).unwrap();
+    crate::store::projects::add(registered.to_str().unwrap()).unwrap();
+
+    for (index, path) in [&container, &registered_parent].into_iter().enumerate() {
+        let refused = call(&m.rpc, &peer, "fs.delete", json!({
+            "projectId": id, "path": path, "recursive": true, "clientRequestId": format!("delete-protected-{index}")
+        })).await;
+        assert_eq!(code(refused), "path_forbidden");
+        let refused = call(&m.rpc, &peer, "fs.rename", json!({
+            "projectId": id, "from": path, "to": outer.join("moved"), "clientRequestId": format!("move-protected-{index}")
+        })).await;
+        assert_eq!(code(refused), "path_forbidden");
+    }
+    assert!(inner.join(".git").is_file());
+    assert!(registered.is_dir());
+
+    let marker = inner.join(".git");
+    let git_link = std::fs::read(&marker).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    let refused = call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": id, "path": container, "recursive": true, "clientRequestId": "delete-damaged-checkout"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    let refused = call(&m.rpc, &peer, "fs.rename", json!({
+        "projectId": id, "from": container, "to": outer.join("moved"), "clientRequestId": "move-damaged-checkout"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    std::fs::write(&marker, git_link).unwrap();
+
+    let linked = crate::store::projects::add(inner.to_str().unwrap()).unwrap();
+    let linked_id = machine::project_id(&linked.path);
+    call(&m.rpc, &peer, "fs.list", json!({ "projectId": linked_id, "path": outer })).await.unwrap();
+    let refused = call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": linked_id, "path": container, "recursive": true, "clientRequestId": "delete-linked-project"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    assert!(inner.join(".git").is_file());
+
+    let ordinary = outer.join("ordinary");
+    std::fs::create_dir(&ordinary).unwrap();
+    call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": id, "path": ordinary, "recursive": true, "clientRequestId": "delete-ordinary"
+    })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_start_directory_keeps_its_saved_checkout() {
+    let m = machine_rpc();
+    let (api, id) = project(&m.path("code"), "api");
+    let checkout = m.path("worktree");
+    git(&api, &["worktree", "add", "--quiet", "--detach", checkout.to_str().unwrap()]);
+    let cwd = checkout.join("src");
+    std::fs::create_dir(&cwd).unwrap();
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "clientRequestId": "session-saved-checkout" })).await.unwrap();
+    let session_id = made["sessionId"].as_str().unwrap();
+    index::update_session(session_id, |session| {
+        session.cwd = cwd.to_string_lossy().into_owned();
+        session.set_checkout_root(checkout.to_str());
+        Ok(())
+    }).unwrap();
+    std::fs::remove_dir(&cwd).unwrap();
+
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(session["session"]["cwd"], json!(cwd));
+    assert_eq!(session["session"]["fileRoot"], json!(checkout));
+    assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    std::fs::write(&cwd, "a file at the previous starting directory").unwrap();
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(session["session"]["fileRoot"], json!(checkout));
+    assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    std::fs::remove_file(&cwd).unwrap();
+    git(&api, &["worktree", "remove", checkout.to_str().unwrap()]);
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert!(session["session"]["fileRoot"].is_null());
+    assert!(session["session"]["fileRepository"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_checkout_remains_addressable_beyond_repository_discovery_limit() {
+    use super::super::git::MAX_PROJECT_REPOSITORIES;
+
+    let m = machine_rpc();
+    let (api, api_id) = project(&m.path("code"), "api");
+    let pool = m.path("worktrees");
+    std::fs::create_dir(&pool).unwrap();
+    for index in 0..MAX_PROJECT_REPOSITORIES {
+        let path = pool.join(format!("{index:03}"));
+        git(&api, &["worktree", "add", "--quiet", "--detach", "--no-checkout", path.to_str().unwrap()]);
+    }
+    let checkout = pool.join(format!("{:03}", MAX_PROJECT_REPOSITORIES - 1));
+    let (peer, _events, _) = computer(&m.rpc).await;
+    let made = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": api_id, "clientRequestId": "session-last-checkout" })).await.unwrap();
+    let session_id = made["sessionId"].as_str().unwrap();
+    index::update_session(session_id, |session| {
+        session.cwd = checkout.to_string_lossy().into_owned();
+        Ok(())
+    }).unwrap();
+
+    let listed = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.unwrap();
+    assert_eq!(listed["truncated"], true);
+    let repositories = listed["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), MAX_PROJECT_REPOSITORIES);
+    assert!(repositories.iter().all(|repo| repo["repo"] != json!(checkout)));
+
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(session["session"]["fileRoot"], json!(checkout));
+    assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    let status = call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": checkout })).await.unwrap();
+    assert_eq!(status["repo"], json!(checkout));
+    assert!(call(&m.rpc, &peer, "fs.list", json!({ "projectId": api_id, "path": checkout })).await.is_ok());
+
+    let preferred = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id, "preferredRepo": checkout })).await.unwrap();
+    assert_eq!(preferred["truncated"], true);
+    let repositories = preferred["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), MAX_PROJECT_REPOSITORIES);
+    assert!(repositories.iter().any(|repo| repo["repo"] == json!(checkout)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1156,17 +1393,40 @@ async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
     assert_eq!(listed["session"]["tabs"][0]["usage"]["models"][0]["costUsd"], json!(0.42), "{listed}");
     assert!(listed["session"]["tabs"][0].get("accountLabel").is_none(), "one account: no label: {listed}");
 
+    let prepare = || call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id }));
+    let refused = prepare().await.unwrap_err();
+    assert_eq!(refused.0, "internal");
+    assert!(refused.1.contains("No usable saved context"), "{refused:?}");
+
+    // The runtime can hand off recent messages from the saved app log when
+    // the provider has no complete transcript for this tab.
+    let prompt = "Review usage";
+    let reply = "The machine retained this exchange.";
     let log = crate::store::log_path(&session_id, &tab_id).unwrap();
-    let prompt = json!({
-        "id": "request", "seq": 1, "ts": index::now(), "sessionId": session_id, "tabId": tab_id,
-        "harness": "claude", "payload": { "type": "user_message", "text": "Review usage", "images": [], "queued": false },
-    });
-    crate::store::append_line(&log, &prompt.to_string()).unwrap();
-    let context = call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id })).await.unwrap();
+    for (seq, payload) in [
+        (1, json!({ "type": "user_message", "text": prompt, "images": [], "queued": false })),
+        (2, json!({ "type": "assistant_text", "text": reply })),
+    ] {
+        let event = json!({
+            "id": format!("saved-{seq}"),
+            "seq": seq,
+            "ts": index::now(),
+            "sessionId": session_id,
+            "tabId": tab_id,
+            "harness": "claude",
+            "payload": payload,
+        });
+        crate::store::append_line(&log, &event.to_string()).unwrap();
+    }
+    let context = prepare().await.unwrap();
     assert_eq!(context["tabId"], json!(tab_id), "{context}");
     assert_eq!(context["provider"], "claude", "{context}");
-    assert_eq!(context["lastPrompt"], "Review usage", "{context}");
     assert_eq!(context["cwd"], json!(path), "the machine's own folder: {context}");
+    assert_eq!(context["lastPrompt"], prompt, "{context}");
+    assert_eq!(context["lastUpdate"], reply, "{context}");
+    assert!(context["transcriptPath"].is_null(), "{context}");
+    let capture = context["partialCapture"].as_str().unwrap();
+    assert!(capture.ends_with(&format!("User: {prompt}\n\nAssistant: {reply}")), "{context}");
     assert_eq!(code(call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": "tab-nope" })).await), "not_found");
     assert_eq!(code(call(&m.rpc, &peer, "session.usage", json!({ "sessionId": "session-nope" })).await), "not_found");
 

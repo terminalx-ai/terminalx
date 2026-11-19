@@ -38,8 +38,9 @@ function makeSource(): GitSource {
     workStatus: vi.fn(async () => ({ ...status })),
     fetch: vi.fn(async () => null),
     prs: vi.fn(async () => { if (prsFail) throw prsFail; return prs; }),
-    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9, aheadOfBase: status.aheadOfBase, head: status.head })),
-    commit: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1 }; return null; }),
+    branchBase: vi.fn(async () => ({ aheadOfBase: status.aheadOfBase, head: status.head })),
+    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9, head: status.head })),
+    commitForPush: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1, head: MOVED }; return MOVED; }),
     push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
     pull: vi.fn(async () => null),
     createPr: vi.fn(async () => { prs = [pr()]; return null; }),
@@ -123,9 +124,18 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     expect(screen.getByTestId("pr-count").textContent).toBe("1");
   });
 
+  it("keeps Create PR available for a release branch when its worktree diff times out", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render(idle, "release/2.x");
+    git.branchDiffSize.mockRejectedValue(new Error("timeout"));
+    expect(await screen.findByRole("button", { name: "Create PR" })).toBeTruthy();
+    expect(git.branchBase).toHaveBeenCalledWith("release/2.x");
+    expect(screen.queryByTestId("machine-diff-size")).toBeNull();
+  });
+
   it("offers no publishing action on a fresh branch from a release base", async () => {
     render(idle, "origin/release/2.x");
-    git.branchDiffSize.mockResolvedValue({ additions: 0, deletions: 0, aheadOfBase: 0, head: HEAD });
+    git.branchBase.mockResolvedValue({ aheadOfBase: 0, head: HEAD });
     await waitFor(() => expect(screen.getByTestId("current-branch").textContent).toBe("feature"));
     expect(screen.queryByTestId("machine-branch-button")).toBeNull();
     expect(git.push).not.toHaveBeenCalled();
@@ -137,7 +147,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
     fireEvent.click(await screen.findByRole("menuitem", { name: /Create PR/ }));
     const dialog = await screen.findByRole("dialog");
-    git.branchDiffSize.mockResolvedValue({ additions: 0, deletions: 0, aheadOfBase: 0, head: HEAD });
+    git.branchBase.mockResolvedValue({ aheadOfBase: 0, head: HEAD });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
     expect((await screen.findByRole("alert")).textContent).toContain("The branch changed");
     expect(git.push).not.toHaveBeenCalled();
@@ -162,7 +172,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
     await waitFor(() => expect(git.createPr).toHaveBeenCalled());
-    expect(git.push).toHaveBeenCalledWith("feature");
+    expect(git.push).toHaveBeenCalledWith("feature", HEAD);
     expect(git.push.mock.invocationCallOrder[0]).toBeLessThan(git.createPr.mock.invocationCallOrder[0]);
   });
 
@@ -176,7 +186,8 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     fireEvent.change(within(dialog).getByLabelText("Commit message"), { target: { value: "Add markers" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Commit and push" }));
     await waitFor(() => expect(git.push).toHaveBeenCalled());
-    expect(git.commit).toHaveBeenCalledWith("Add markers");
+    expect(git.commitForPush).toHaveBeenCalledWith("Add markers", "feature", HEAD);
+    expect(git.push).toHaveBeenCalledWith("feature", MOVED);
   });
 
   it("says the commit is safe on the machine when only its push failed", async () => {

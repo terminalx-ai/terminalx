@@ -848,7 +848,8 @@ describe("what the new-session view says about the project and the agents (PRO-2
     expect(screen.queryByTestId("agent-setup-notice")).toBeNull();
 
     fireEvent.click(screen.getByTestId("agent-menu"));
-    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Codex/ }));
+    fireEvent.keyDown(screen.getByTestId("agent-menu-agent"), { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Codex/, hidden: true }));
     const notice = await screen.findByTestId("agent-setup-notice");
     expect(screen.getAllByTestId("agent-setup-notice")).toHaveLength(1);
     expect(notice.textContent).toContain("Codex is signed out.");
@@ -897,7 +898,8 @@ describe("what the new-session view says about the project and the agents (PRO-2
     await waitFor(() => expect(screen.getByTestId("agent-menu").getAttribute("title")).toBe("Claude · Bypass"));
     const pick = async (name: string) => {
       fireEvent.click(screen.getByTestId("agent-menu"));
-      fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+      fireEvent.keyDown(screen.getByTestId("agent-menu-agent"), { key: "ArrowRight" });
+      fireEvent.click(await screen.findByRole("menuitem", { name: new RegExp(`^${name}`), hidden: true }));
       for (const menu of screen.queryAllByRole("menu", { hidden: true }).reverse()) fireEvent.keyDown(menu, { key: "Escape" });
     };
 

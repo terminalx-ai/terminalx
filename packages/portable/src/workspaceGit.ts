@@ -223,8 +223,8 @@ export function hasUnpublishedWork(facts: RepositoryFacts): boolean {
 }
 
 /** The repositories of a cloud workspace. */
-export async function listRepositories(client: WorkspaceRpcClient): Promise<RemoteRepository[]> {
-  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories");
+export async function listRepositories(client: WorkspaceRpcClient, preferredRepo?: string): Promise<RemoteRepository[]> {
+  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories", preferredRepo ? { preferredRepo } : undefined);
   return listed.repositories;
 }
 
@@ -280,7 +280,11 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
-  branchDiffSize(base: string): Promise<{ additions: number; deletions: number; aheadOfBase: number; head: string | null }> {
+  branchBase(base: string): Promise<{ aheadOfBase: number; head: string | null }> {
+    return this.read("git.branchBase", { base });
+  }
+
+  branchDiffSize(base: string): Promise<{ additions: number; deletions: number; head: string | null }> {
     return this.read("git.branchDiffSize", { base });
   }
 
@@ -344,7 +348,7 @@ export class RemoteGit {
   }
 
   /** Stages everything (or only `paths`) and commits it as `author`. */
-  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean } = {}): Promise<{ commit: string; branch: string | null }> {
+  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean; expectedBranch?: string; expectedHead?: string } = {}): Promise<{ commit: string; branch: string | null }> {
     return this.write("git.commit", { message, author, ...options });
   }
 
@@ -360,8 +364,8 @@ export class RemoteGit {
     return this.write("git.pull");
   }
 
-  push(branch?: string): Promise<RemotePushResult> {
-    return this.write("git.push", branch ? { branch } : {});
+  push(branch?: string, head?: string): Promise<RemotePushResult> {
+    return this.write("git.push", { ...(branch ? { branch } : {}), ...(head ? { head } : {}) });
   }
 
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {

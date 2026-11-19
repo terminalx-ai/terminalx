@@ -44,11 +44,11 @@ describe("the repository Changes shows for a machine session", () => {
     expect(sessionRepository(withNested, project, session(`${project.path}/${nested}/src`))).toBe(nested);
     expect(sessionRepository(withNested, project, session(`${project.path}/${nested}-other/src`))).toBe(".raccoon/worktrees/read");
     expect(sessionRepository(repositories, project, session("/Users/me/worktrees/elsewhere/src"))).toBe("/Users/me/worktrees/elsewhere");
-    expect(sessionRepository(repositories, project, session("/Users/me/worktrees/elsewhere-other/src"))).toBe(".");
+    expect(sessionRepository(repositories, project, session("/Users/me/worktrees/elsewhere-other/src"))).toBeNull();
   });
 
-  it("falls back to the project's own repository, then the first one", () => {
-    expect(sessionRepository(repositories, project, session("/Users/me/worktrees/gone"))).toBe(".");
+  it("uses a default for a project with no session loaded", () => {
+    expect(sessionRepository(repositories, project, null)).toBe(".");
     expect(sessionRepository([repository("lib")], project, null)).toBe("lib");
     expect(sessionRepository([], project, null)).toBeNull();
   });
@@ -57,22 +57,48 @@ describe("the repository Changes shows for a machine session", () => {
 describe("where a machine session's Files are rooted (PRO-405)", () => {
   it.each([
     ["project root", project.path, "", ""],
-    ["project subfolder", `${project.path}/src`, "src", "src"],
+    ["project subfolder", `${project.path}/src`, "src", ""],
     ["internal worktree root", `${project.path}/.raccoon/worktrees/read`, ".raccoon/worktrees/read", ".raccoon/worktrees/read"],
-    ["internal worktree subfolder", `${project.path}/.raccoon/worktrees/read/src/lib`, ".raccoon/worktrees/read/src/lib", ".raccoon/worktrees/read/src/lib"],
+    ["internal worktree subfolder", `${project.path}/.raccoon/worktrees/read/src/lib`, ".raccoon/worktrees/read/src/lib", ".raccoon/worktrees/read"],
     ["external worktree root", "/Users/me/worktrees/elsewhere", null, "/Users/me/worktrees/elsewhere"],
-    ["external worktree subfolder", "/Users/me/worktrees/elsewhere/src/lib/", null, "/Users/me/worktrees/elsewhere/src/lib"],
-    ["unlisted external folder", "/Users/me/worktrees/elsewhere-other/src", null, ""],
-    ["external cwd with parent traversal", "/Users/me/worktrees/elsewhere/../other", null, ""],
+    ["external worktree subfolder", "/Users/me/worktrees/elsewhere/src/lib/", null, "/Users/me/worktrees/elsewhere"],
+    ["unlisted external folder", "/Users/me/worktrees/elsewhere-other/src", null, null],
+    ["external cwd with parent traversal", "/Users/me/worktrees/elsewhere/../other", null, null],
   ])("resolves the %s before and after repository discovery", (_name, cwd, loading, populated) => {
     expect(sessionFilesBase(null, project, session(cwd))).toBe(loading);
     expect(sessionFilesBase(repositories, project, session(cwd))).toBe(populated);
   });
 
-  it("is the project's folder when nothing names the worktree", () => {
-    expect(sessionFilesBase([], project, session("/Users/me/worktrees/elsewhere"))).toBe("");
+  it("waits for a session and uses its internal cwd even when Git discovery returns no repositories", () => {
+    expect(sessionFilesBase([], project, session("/Users/me/worktrees/elsewhere"))).toBeNull();
     expect(sessionFilesBase([], project, session("/Users/me/code/terminalx/.raccoon/worktrees/read"))).toBe(".raccoon/worktrees/read");
-    expect(sessionFilesBase(null, project, null)).toBe("");
+    expect(sessionFilesBase(null, project, null)).toBeNull();
+  });
+
+  it("uses the runtime's canonical path for both Files and Changes when the cwd uses an alias", () => {
+    const fileRoot = "/Users/me/worktrees/elsewhere";
+    const aliased = { ...session("/Users/me/worktree-alias/elsewhere/src"), fileRoot, fileRepository: fileRoot };
+    expect(sessionFilesBase(null, project, aliased)).toBe(fileRoot);
+    expect(sessionFilesBase(repositories, project, aliased)).toBe(aliased.fileRoot);
+    expect(sessionRepository(repositories, project, aliased)).toBe("/Users/me/worktrees/elsewhere");
+  });
+
+  it.each(["/Users/me/worktrees/late", ".raccoon/worktrees/late"])("uses %s even when the repository list omits it", (fileRoot) => {
+    const beyondLimit = { ...session("unused"), fileRoot, fileRepository: fileRoot };
+    expect(sessionFilesBase(repositories, project, beyondLimit)).toBe(fileRoot);
+    expect(sessionRepository(repositories, project, beyondLimit)).toBe(fileRoot);
+  });
+
+  it("uses Files at a folder project without a Git repository", () => {
+    const folder = { ...session(project.path), fileRoot: "", fileRepository: null };
+    expect(sessionFilesBase(null, project, folder)).toBe("");
+    expect(sessionRepository(repositories, project, folder)).toBeNull();
+  });
+
+  it("does not open the project for a removed checkout", () => {
+    const removed = { ...session("/Users/me/worktrees/elsewhere"), fileRoot: null };
+    expect(sessionFilesBase(repositories, project, removed)).toBeNull();
+    expect(sessionRepository(repositories, project, removed)).toBeNull();
   });
 });
 

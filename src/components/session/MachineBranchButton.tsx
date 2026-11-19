@@ -83,6 +83,8 @@ export function useMachineBranch(input: MachineBranchInput) {
     let hostedState: { key: string; pr: ReturnType<typeof branchPr>; count: number | null } | null = null;
     let running: Promise<MachineBranchSnapshot | null> | null = null;
     let again: boolean | null = null;
+    let diffKey: string | null = null;
+    let diffPending = false;
 
     const once = async (hosted: boolean): Promise<MachineBranchSnapshot | null> => {
       setRead((current) => ({ ...current, refreshing: true }));
@@ -116,16 +118,32 @@ export function useMachineBranch(input: MachineBranchInput) {
         const prCount = hostedState?.count ?? null;
         const pr = hostedState?.pr ?? null;
         const base = machineBranchBase(work, pr, baseRef);
-        const size = work.isRepo && base ? await source.branchDiffSize?.(base).catch(() => null) : null;
+        const comparison = work.isRepo && work.head && base && base !== work.defaultBranch
+          ? await source.branchBase?.(base).catch(() => null)
+          : null;
         if (disposed) return null;
-        const comparison = size && size !== "unsupported" ? size : null;
-        const current = comparison?.head === work.head ? comparison : null;
-        const aheadOfBase = comparison ? current?.aheadOfBase ?? null : undefined;
+        const aheadOfBase = comparison ? (comparison.head === work.head ? comparison.aheadOfBase : null) : undefined;
         const snapshot = composeMachineSnapshot({ work, remote, pr, known: prCount !== null, working: workingRef.current, baseRef, aheadOfBase });
-        const diff = current && base ? { additions: current.additions, deletions: current.deletions, base } : null;
-        setRead({ currentBranch, prCount, snapshot, diff, diffNeedsUpdate: size === "unsupported", error: null, refreshing: false });
+        const key = work.isRepo && base ? JSON.stringify([currentBranch, work.head, base]) : null;
+        const sameDiff = key === diffKey;
+        diffKey = key;
+        setRead((current) => ({
+          ...current, currentBranch, prCount, snapshot, diff: sameDiff ? current.diff : null, error: null, refreshing: false,
+        }));
+        if (key && base && source.branchDiffSize && !diffPending) {
+          diffPending = true;
+          void source.branchDiffSize(base).then((size) => {
+            if (disposed || key !== diffKey) return;
+            const diff = size !== "unsupported" && size.head === work.head
+              ? { additions: size.additions, deletions: size.deletions, base } : null;
+            setRead((current) => ({ ...current, diff, diffNeedsUpdate: size === "unsupported" }));
+          }).catch(() => {
+            if (!disposed && key === diffKey) setRead((current) => ({ ...current, diff: null }));
+          }).finally(() => { diffPending = false; });
+        }
         return snapshot;
       } catch (error) {
+        diffKey = null;
         if (!disposed) setRead({ ...EMPTY_READ, error: errorText(source, error) });
         return null;
       }
@@ -278,17 +296,18 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
         const pr = now.pr?.state === "OPEN" ? now.pr : null;
         switch (request.action) {
           case "commitPush": {
-            await source.commit(text.message.trim());
-            try { result = await source.push(now.branch); }
+            if (!source.commitForPush) throw new Error("Commit and push is unavailable for this checkout.");
+            const committed = await source.commitForPush(text.message.trim(), now.branch, now.head);
+            try { result = await source.push(now.branch, committed); }
             catch (reason) { throw new Error(`Committed on ${machineName}, but the push failed: ${errorText(source, reason)} Your commit is safe; refresh to see the next step.`); }
             break;
           }
           case "push":
-            result = await source.push(now.branch);
+            result = await source.push(now.branch, now.head);
             break;
           case "createPr": {
             // The machine opens a pull request only for a pushed head: publish first, as a local Create PR does.
-            if (now.state === "ahead") await source.push(now.branch);
+            if (now.state === "ahead") await source.push(now.branch, now.head);
             if (!alive.current || activeSource.current !== source) return;
             result = await source.createPr({ title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id, branch: now.branch });
             break;

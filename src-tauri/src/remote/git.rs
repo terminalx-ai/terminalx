@@ -230,46 +230,51 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     }
 }
 
-/// Compare the worktree to the merge base. An intent-to-add index brings
-/// untracked files into the diff without writing their contents as objects.
-/// The index and any synthetic empty blob live in private scratch storage.
-fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, RpcError> {
-    let run = |mut command: Command, args: &[&str]| {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RpcError::new("timeout", "Reading the branch diff took too long."));
-        }
-        command.args(args);
-        let output = run_bounded(command, remaining).map_err(RpcError::internal)?;
-        if output.timed_out || Instant::now() >= deadline {
-            return Err(RpcError::new("timeout", "Reading the branch diff took too long."));
-        }
-        if !output.ok {
-            return Err(failure_error("git diff size", &output.text(), Failure::Other));
-        }
-        Ok(output.stdout)
-    };
-    let read = |args: &[&str]| run(git_command(cwd), args);
+fn bounded_branch_git(mut command: Command, args: &[&str], deadline: Instant) -> Result<String, RpcError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
+    }
+    command.args(args);
+    let output = run_bounded(command, remaining).map_err(RpcError::internal)?;
+    if output.timed_out || Instant::now() >= deadline {
+        return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
+    }
+    if !output.ok {
+        return Err(failure_error("git branch comparison", &output.text(), Failure::Other));
+    }
+    Ok(output.stdout)
+}
+
+fn comparison_refs(cwd: &Path, base: &str, deadline: Instant) -> Result<Option<(String, String)>, RpcError> {
+    let read = |args: &[&str]| bounded_branch_git(git_command(cwd), args, deadline);
     let head = match read(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) {
-        Ok(sha) => Some(sha.trim().to_string()),
-        Err(error) if error.code == "git_failed" => None,
+        Ok(sha) => sha.trim().to_string(),
+        Err(error) if error.code == "git_failed" => return Ok(None),
         Err(error) => return Err(error),
     };
-    let (base_commit, ahead_of_base) = if let Some(head) = &head {
-        let remote = format!("refs/remotes/origin/{base}^{{commit}}");
-        let local = format!("refs/heads/{base}^{{commit}}");
-        let target = read(&["rev-parse", "--verify", "--end-of-options", &remote])
-            .or_else(|error| if error.code == "git_failed" {
-                read(&["rev-parse", "--verify", "--end-of-options", &local])
-            } else {
-                Err(error)
-            })?;
-        let target = target.trim();
-        let count = read(&["rev-list", "--count", &format!("{target}..{head}")])?;
-        let count = count.trim().parse::<u64>().map_err(RpcError::internal)?;
-        (read(&["merge-base", head, target])?, count)
-    } else {
-        (read(&["hash-object", "-t", "tree", "--stdin"])?, 0)
+    let remote = format!("refs/remotes/origin/{base}^{{commit}}");
+    let local = format!("refs/heads/{base}^{{commit}}");
+    let target = read(&["rev-parse", "--verify", "--end-of-options", &remote])
+        .or_else(|error| if error.code == "git_failed" {
+            read(&["rev-parse", "--verify", "--end-of-options", &local])
+        } else {
+            Err(error)
+        })?;
+    Ok(Some((head, target.trim().to_string())))
+}
+
+/// Compare the worktree to the merge base using an intent-to-add index so
+/// untracked contents are never written as objects.
+fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, RpcError> {
+    let run = |command, args: &[&str]| bounded_branch_git(command, args, deadline);
+    let read = |args: &[&str]| run(git_command(cwd), args);
+    let (head, base_commit) = match comparison_refs(cwd, base, deadline)? {
+        Some((head, target)) => {
+            let merge_base = read(&["merge-base", &head, &target])?;
+            (Some(head), merge_base)
+        }
+        None => (None, read(&["hash-object", "-t", "tree", "--stdin"])?),
     };
 
     let mut scratch = tempfile::Builder::new();
@@ -326,7 +331,7 @@ fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, 
             _ => return Err(RpcError::internal("Malformed Git diff statistics")),
         }
     }
-    Ok(json!({ "additions": additions, "deletions": deletions, "aheadOfBase": ahead_of_base, "head": head }))
+    Ok(json!({ "additions": additions, "deletions": deletions, "head": head }))
 }
 
 /// Only app-owned network operations use this boundary. Local Git inspection,
@@ -470,8 +475,9 @@ impl WorkspaceGit {
     pub fn handle(&self, method: &str, params: &Value) -> Option<Result<Value, RpcError>> {
         let _request = crate::github_process::scope();
         let result = match method {
-            "git.repositories" => Ok(self.list()),
+            "git.repositories" => Ok(self.list(params)),
             "git.status" => self.status(params),
+            "git.branchBase" => self.branch_base(params),
             "git.branchDiffSize" => self.branch_diff_size(params),
             "git.diff" => self.diff(params),
             "git.workingChanges" => self.working_changes(params),
@@ -506,7 +512,7 @@ impl WorkspaceGit {
     /// beside an older blank root. Symlinks, hidden and build directories are skipped.
     pub fn repositories(&self) -> (Vec<String>, bool) {
         if self.project {
-            return self.project_repositories();
+            return self.listed_project_repositories(None);
         }
         // The root itself, or a directory inside a checkout (a package of a
         // monorepo as the target directory, development runtimes).
@@ -544,22 +550,50 @@ impl WorkspaceGit {
 
     /// A machine project: its checkout, then each of its worktrees. The ones
     /// outside its folder are also the only absolute paths `fs/1` takes for it.
-    fn project_repositories(&self) -> (Vec<String>, bool) {
-        if !(self.root.join(".git").exists() || crate::git::is_repo(&self.root)) {
-            self.files.set_worktrees(Vec::new());
-            return (Vec::new(), false);
-        }
+    fn project_repositories(&self) -> Vec<String> {
         let worktrees = super::machine::worktrees(&self.root);
-        self.files.set_worktrees(worktrees.iter().filter(|worktree| !worktree.starts_with(&self.root)).cloned().collect());
         let mut found = vec![".".to_string()];
-        found.extend(worktrees.iter().map(|worktree| self.files.relative(worktree)));
+        found.extend(worktrees.iter().map(|worktree| self.files.relative(&worktree.path)));
+        self.files.set_worktrees(worktrees);
+        if !self.project_has_git() {
+            return Vec::new();
+        }
+        found
+    }
+
+    pub(super) fn project_has_git(&self) -> bool {
+        super::machine::owns_git_checkout(&self.root)
+    }
+
+    fn limit_project_repositories(mut found: Vec<String>, preferred: Option<&str>) -> (Vec<String>, bool) {
         let truncated = found.len() > MAX_PROJECT_REPOSITORIES;
+        if let Some(index) = preferred.and_then(|preferred| found.iter().position(|name| name == preferred)) {
+            if truncated && index >= MAX_PROJECT_REPOSITORIES {
+                found.swap(index, MAX_PROJECT_REPOSITORIES - 1);
+            }
+        }
         found.truncate(MAX_PROJECT_REPOSITORIES);
         (found, truncated)
     }
 
-    fn list(&self) -> Value {
-        let (names, truncated) = self.repositories();
+    /// Git configuration can redirect a registered worktree's working
+    /// directory. Verify the effective checkout before using it for Git.
+    fn verified_machine_repo(&self, name: &str) -> bool {
+        !self.project || crate::git::is_own_worktree(&self.dir(name))
+    }
+
+    fn listed_project_repositories(&self, preferred: Option<&str>) -> (Vec<String>, bool) {
+        let (mut names, truncated) = Self::limit_project_repositories(self.project_repositories(), preferred);
+        names.retain(|name| self.verified_machine_repo(name));
+        (names, truncated)
+    }
+
+    fn list(&self, params: &Value) -> Value {
+        let (names, truncated) = if self.project {
+            self.listed_project_repositories(params["preferredRepo"].as_str())
+        } else {
+            self.repositories()
+        };
         let repositories: Vec<Value> = names
             .iter()
             .map(|name| {
@@ -588,7 +622,13 @@ impl WorkspaceGit {
 
     /// The repository a call names, or the only one there is.
     fn repo(&self, params: &Value) -> Result<Repo, RpcError> {
-        let (names, _) = self.repositories();
+        // A named machine checkout is resolved against the full registration
+        // set. The listing limit only bounds the response to discovery.
+        let names = if self.project && params["repo"].is_string() {
+            self.project_repositories()
+        } else {
+            self.repositories().0
+        };
         match params.get("repo") {
             None | Some(Value::Null) => match names.len() {
                 0 => Err(RpcError::not_found("this workspace has no Git repository")),
@@ -602,7 +642,7 @@ impl WorkspaceGit {
                 let name = if name.is_empty() { "." } else { name.trim_end_matches('/') };
                 names
                     .iter()
-                    .find(|known| known.as_str() == name)
+                    .find(|known| known.as_str() == name && self.verified_machine_repo(known))
                     .map(|known| Repo { dir: self.dir(known), name: known.clone() })
                     .ok_or_else(|| RpcError::not_found(format!("{name} is not a repository in this workspace")))
             }
@@ -754,6 +794,19 @@ impl WorkspaceGit {
         let truncated = files.len() > MAX_CHANGED_FILES;
         files.truncate(MAX_CHANGED_FILES);
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
+    }
+
+    fn branch_base(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
+        let deadline = Instant::now() + HEADER_DIFF_TIMEOUT;
+        let Some((head, target)) = comparison_refs(&repo.dir, base, deadline)? else {
+            return Ok(json!({ "head": null, "aheadOfBase": 0 }));
+        };
+        let range = format!("{target}..{head}");
+        let count = bounded_branch_git(git_command(&repo.dir), &["rev-list", "--count", &range], deadline)?;
+        let ahead = count.trim().parse::<u64>().map_err(RpcError::internal)?;
+        Ok(json!({ "head": head, "aheadOfBase": ahead }))
     }
 
     fn branch_diff_size(&self, params: &Value) -> Result<Value, RpcError> {
@@ -908,6 +961,20 @@ impl WorkspaceGit {
 
     fn commit(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
+        let expected = match (optional_ref(params, "expectedBranch")?, params.get("expectedHead")) {
+            (None, None) => None,
+            (Some(branch), Some(Value::String(head))) if valid_object_id(head) => Some((branch, head.as_str())),
+            _ => return Err(RpcError::invalid("expectedBranch and expectedHead are required together")),
+        };
+        let check_checkout = || {
+            let Some((branch, head)) = expected else { return Ok(()) };
+            let expected_ref = format!("refs/heads/{branch}");
+            let current_ref = self.git(&repo, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+            if current_ref.as_deref().map(str::trim) != Some(expected_ref.as_str()) || self.local_head(&repo, branch)? != head {
+                return Err(RpcError::new("conflict", "The checkout changed before the commit. Refresh and try again."));
+            }
+            Ok(())
+        };
         let message = required_str(params, "message")?;
         if message.trim().is_empty() || message.len() > 64 * 1024 {
             return Err(RpcError::invalid("a commit message is required"));
@@ -924,6 +991,7 @@ impl WorkspaceGit {
             Some(Value::Null) | None => None,
             Some(_) => Some(Self::path_list(params)?),
         };
+        check_checkout()?;
         match &paths {
             Some(paths) => {
                 let mut args = vec!["add", "-A", "--"];
@@ -952,11 +1020,26 @@ impl WorkspaceGit {
             args.push("--");
             args.extend(paths.iter().map(String::as_str));
         }
+        check_checkout()?;
         self.git_timed(&repo, &args, LOCAL_TIMEOUT, &env)?;
+        let commit = crate::git::head_commit(&repo.dir);
+        let branch = crate::git::current_branch(&repo.dir);
+        if let Some((expected_branch, previous)) = expected {
+            let verified = if let Some(commit) = &commit {
+                branch.as_deref() == Some(expected_branch) && commit != previous
+                    && self.local_head(&repo, expected_branch)? == *commit
+                    && self.git(&repo, &["rev-parse", &format!("{commit}^1")])?.trim() == previous
+            } else {
+                false
+            };
+            if !verified {
+                return Err(RpcError::new("conflict", "Git committed, but the new commit could not be verified on the selected branch. Check the checkout before pushing."));
+            }
+        }
         Ok(json!({
             "repo": repo.name,
-            "commit": crate::git::head_commit(&repo.dir),
-            "branch": crate::git::current_branch(&repo.dir),
+            "commit": commit,
+            "branch": branch,
             "author": { "name": name, "email": email },
         }))
     }
@@ -1000,19 +1083,26 @@ impl WorkspaceGit {
     }
 
     fn push(&self, params: &Value) -> Result<Value, RpcError> {
-        self.push_with(params, |repo, branch| {
-            let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        self.push_with(params, |repo, branch, head| {
+            let source = if params.get("head").is_some() { head.to_owned() } else { format!("refs/heads/{branch}") };
+            let refspec = format!("{source}:refs/heads/{branch}");
             self.run_git(&repo.dir, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
         })
     }
 
-    fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
+    fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let branch = match optional_ref(params, "branch")? {
             Some(branch) => branch.to_string(),
             None => crate::git::current_branch(&repo.dir).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch to push"))?,
         };
         let local = self.local_head(&repo, &branch)?;
+        if let Some(head) = params.get("head") {
+            let head = head.as_str().filter(|head| valid_object_id(head)).ok_or_else(|| RpcError::invalid("head is a commit id"))?;
+            if head != local {
+                return Err(RpcError::new("conflict", "The branch moved before the push. Refresh and try again."));
+            }
+        }
         let answer = |pushed: bool, reconciled: bool| {
             json!({ "repo": repo.name, "branch": branch, "head": local, "pushed": pushed, "reconciled": reconciled })
         };
@@ -1021,7 +1111,7 @@ impl WorkspaceGit {
             self.track(&repo, &branch);
             return Ok(answer(false, true));
         }
-        let ran = push(&repo, &branch)?;
+        let ran = push(&repo, &branch, &local)?;
         if ran.ok {
             self.track(&repo, &branch);
             return Ok(answer(true, false));

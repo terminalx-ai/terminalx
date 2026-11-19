@@ -184,6 +184,8 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.app.togglePanel",
   "shortcuts.app.quickChat",
   "shortcuts.session.archive",
+  "shortcuts.session.linkIssue",
+  "shortcuts.session.copyLink",
   "shortcuts.session.newTab",
   "shortcuts.session.newBrowserTab",
   "shortcuts.session.forkTab",
