@@ -917,6 +917,8 @@ export function TabView({
         (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
         (e) => showError("Couldn't fork the conversation", e)) : undefined}
       onSaveSnippet={setSnippetPrompt}
+      // What a local tab offers and this one cannot, shown off with why (#1289).
+      unavailable={readOnly ? undefined : backend.unavailable}
       turnSettings={turnSettings}
       agent={chatAgent}
       onGoalCommand={tab.harness === "codex" && !readOnly && backend.caps.write && !gate?.blocked ? sendGoalCommand : undefined}

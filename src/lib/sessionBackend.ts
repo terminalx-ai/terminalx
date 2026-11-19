@@ -2,7 +2,7 @@ import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, Workspa
 import { agent, attachments, errorMessage, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { FileRef } from "@/types/events";
 import { showError } from "@/lib/errorToasts";
-import { applyEvent, loadTab, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
+import { applyEvent, getTabLog, loadTab, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
 import {
   attachCloudAgentTab,
@@ -62,6 +62,37 @@ export interface SessionBackendCaps {
    */
   interrupt: boolean;
 }
+
+/**
+ * Why an option a local session has is off for this one (#1289). The control
+ * is shown disabled with the reason where a local session has it, instead of
+ * being left out. A key that is absent is either offered or does not apply.
+ */
+export interface SessionUnavailable {
+  /** Turn menu: Fork to a new tab or session (PRO-379). */
+  fork?: string;
+  /** Turn menu: Reset chat to here. */
+  reset?: string;
+  /** Turn footer: a second opinion from another agent. */
+  secondOpinion?: string;
+  /** A failed turn: Retry in a new chat. */
+  retryInNewChat?: string;
+  /** Header: the project's saved actions and previews (PRO-363). */
+  runMenu?: string;
+}
+
+/** What a session that runs on a workspace runtime or a paired machine cannot do yet, and why. */
+export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
+  fork: "Fork is not available here yet: this session's runtime does not offer forking a conversation.",
+  reset: "Reset is not available here yet: this session's runtime does not offer resetting a conversation.",
+  secondOpinion: "A second opinion is not available here yet: this session's runtime cannot hand a turn to another agent.",
+  retryInNewChat: "Retry in a new chat is not available here yet: this session's runtime cannot open a chat with this prompt. Retry sends it again in this chat.",
+  runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
+});
+
+/** Why a message cannot be sent again from its place in the chat. */
+export const RESEND_ATTACHMENTS = "This message had attachments, which are not kept to send again. Attach them again in the composer and send it from there.";
+export const RESEND_MISSING = "That message is not in this tab's conversation any more.";
 
 /** Whether a tab's terminal view is offered, and why not when it is not. */
 export interface TerminalViewOffer {
@@ -139,7 +170,12 @@ export interface SessionBackend {
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
   resendUnsent?(tabId: string): Promise<SendResult>;
-  /** Local only: send the message at `seq`, which the agent dropped unanswered, again as a new message (#722). */
+  /**
+   * Send the message at `seq` again as a new message: one the agent dropped
+   * unanswered (#722), or a failed turn's prompt (Retry). A cloud tab sends
+   * its text through the mailbox as any message (#1289); one with
+   * attachments is refused, since they are not kept to send again.
+   */
   resendMessage?(tabId: string, seq: number): Promise<SendResult>;
   /**
    * Escape, as the agent's own screen takes it (#427): the running turn is
@@ -173,6 +209,8 @@ export interface SessionBackend {
    * it is signed in. Null when it can sign in.
    */
   signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string; machine?: string } | null;
+  /** Options a local session has that this one cannot take, each with why (#1289). Absent on a local session. */
+  unavailable?: Readonly<SessionUnavailable>;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /** The workspace client for model discovery, independent of collaboration capabilities. */
@@ -475,6 +513,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) && (!client || client.hasCapability("composer/4")), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
+    unavailable: REMOTE_UNAVAILABLE,
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,
     modelClient: cloudAsleep(ctx.state, ctx.workspaceState) ? null : client,
@@ -518,6 +557,16 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),
+    // Retry and Send again (#1289): the message's own text, as a new message through the mailbox.
+    resendMessage: async (tabId, seq) => {
+      guard();
+      const event = getTabLog(ctx.sessionId, tabId).events.find((candidate) => candidate.seq === seq && candidate.payload.type === "user_message");
+      if (!event || event.payload.type !== "user_message") throw new Error(RESEND_MISSING);
+      const { text, images, files } = event.payload;
+      if (images?.length || files?.length) throw new Error(RESEND_ATTACHMENTS);
+      await interactive(() => sendToCloudAgent(scope, tabId, text, client, []));
+      return { events: [], queued: true };
+    },
     // Never through the mailbox: a queued Escape would land in some later turn. A runtime that cannot take it is left alone.
     interrupt: async (tabId) => {
       guard();

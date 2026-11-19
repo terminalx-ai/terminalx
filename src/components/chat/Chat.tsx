@@ -117,6 +117,7 @@ export function Chat({
   onReset,
   onRetryInNewChat,
   onRetry,
+  unavailable,
   agent,
   onGoalCommand,
   onEditGoal,
@@ -172,6 +173,11 @@ export function Chat({
    * standing leaves the tab idle, and sending wakes the agent as the composer would.
    */
   onRetry?: (seq: number) => void;
+  /**
+   * Why each turn action this session cannot take here is off (#1289): it is
+   * shown disabled, with the reason, where it would have been offered.
+   */
+  unavailable?: ChatActionsUnavailable;
   /** The agent's name, for what a message it took mid-turn says. */
   agent?: { id: string; name: string };
   /** Sends Codex's `/goal pause` or `/goal resume` from the goal card. */
@@ -517,6 +523,10 @@ export function Chat({
                 // A failed last turn can go again: its prompt, sent as a new message.
                 onRetry={isLast && !t.live && !sending ? onRetry : undefined}
                 onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
+                forkUnavailable={unavailable?.fork}
+                resetUnavailable={!isLast && !live && !sending ? unavailable?.reset : undefined}
+                secondOpinionUnavailable={unavailable?.secondOpinion}
+                retryInNewChatUnavailable={isLast && !sending ? unavailable?.retryInNewChat : undefined}
                 agent={agent}
               />
             );
@@ -586,6 +596,14 @@ export function Chat({
 }
 
 /** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+/** Why each turn action a session cannot take here is off; absent ones are offered or simply not shown. */
+export interface ChatActionsUnavailable {
+  fork?: string;
+  reset?: string;
+  secondOpinion?: string;
+  retryInNewChat?: string;
+}
+
 export interface ResetTarget {
   turn: number;
   removed: number[];
