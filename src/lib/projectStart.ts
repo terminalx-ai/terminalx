@@ -5,7 +5,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { setPrefs } from "@/lib/prefs";
 import { announceProjectAdded } from "@/lib/projectAdded";
 import { addProject, startSessionIn } from "@/lib/sessions";
-import type { Project } from "@/types/session";
+import type { Project, SessionEntry } from "@/types/session";
 
 /**
  * The three ways to a local project: a folder already on this computer, a
@@ -125,6 +125,49 @@ export async function attachProject(path: string, { openSession = true }: { open
   if (openSession) startSessionIn(project.path, null);
   announceProjectAdded(project);
   if (openSession) focusComposer();
+  return project;
+}
+
+/** How many projects the start screen lists under Recent projects (PRO-130). */
+export const RECENT_PROJECT_LIMIT = 5;
+
+/** A project the start screen offers again, with when it was last opened or worked in. */
+export interface RecentProject {
+  project: Project;
+  /** Epoch milliseconds; 0 when nothing says. */
+  openedAt: number;
+}
+
+const time = (iso: string | null | undefined) => {
+  const parsed = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+/**
+ * The projects opened or worked in most lately, newest first: when a
+ * project was last opened, or a session in it last changed, whichever is
+ * later, as the command palette ranks them. Archived projects are left out.
+ */
+export function recentProjects(projects: readonly Project[], sessions: readonly Pick<SessionEntry, "projectPath" | "modified">[], limit = RECENT_PROJECT_LIMIT): RecentProject[] {
+  const worked = new Map<string, number>();
+  for (const session of sessions) worked.set(session.projectPath, Math.max(worked.get(session.projectPath) ?? 0, time(session.modified)));
+  return projects
+    .filter((project) => !project.archived)
+    .map((project) => ({ project, openedAt: Math.max(time(project.lastOpened), worked.get(project.path) ?? 0) }))
+    .sort((a, b) => b.openedAt - a.openedAt || a.project.name.localeCompare(b.project.name))
+    .slice(0, limit);
+}
+
+/**
+ * Open a recent project with one click: it is marked opened now and lands on
+ * its new-session view, ready to type, as a project opened from its folder
+ * does. A folder that has gone away is refused by the backend.
+ */
+export async function openRecentProject(path: string): Promise<Project> {
+  const project = await addProject(path);
+  setPrefs({ lastProject: project.path });
+  startSessionIn(project.path, null);
+  focusComposer();
   return project;
 }
 
