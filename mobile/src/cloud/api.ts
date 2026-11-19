@@ -33,11 +33,20 @@ const CONTRACT_HEADERS = {
   "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
 } as const;
 
+/**
+ * Why a request got no usable answer, beside its code: `timeout` (no answer in
+ * time, so the server may still have acted on it), `network` (it never left
+ * the phone or the connection failed), `unreadable` (an error answer that was
+ * not the service's JSON).
+ */
+export type CloudApiFailureReason = "timeout" | "network" | "unreadable";
+
 export class CloudApiError extends Error {
   constructor(
     readonly code: string,
     /** The HTTP status; null when the request never got an answer (offline, timed out). */
     readonly status: number | null,
+    readonly reason: CloudApiFailureReason | null = null,
   ) {
     super(code);
     this.name = "CloudApiError";
@@ -222,7 +231,10 @@ export class CloudApi {
    * with the workspace and the queued operation; the list says when it runs.
    */
   async resume(orgId: string, workspaceId: string): Promise<CloudWorkspaceSnapshot> {
-    const snapshot = snapshotSchema.parse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/resume`, {}));
+    const parsed = snapshotSchema.safeParse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/resume`, {}));
+    // An answer this app cannot read is said as such, not as a failure with no reason (#1290).
+    if (!parsed.success) throw new CloudApiError("cloud_workspace_invalid_response", 200);
+    const snapshot = parsed.data;
     // An answer about another workspace is not the answer to this request.
     if (snapshot.workspace.id !== workspaceId || snapshot.workspace.orgId !== orgId) throw new CloudApiError("cloud_workspace_invalid_response", 200);
     return snapshot;
@@ -300,7 +312,11 @@ export class CloudApi {
     const token = await this.options.accessToken();
     if (!token) throw new CloudApiError("account_signed_out", 401);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.options.timeoutMs ?? 30_000);
     let response: Response;
     try {
       response = await this.fetcher(`${this.options.origin}${path}`, {
@@ -310,7 +326,7 @@ export class CloudApi {
         signal: controller.signal,
       });
     } catch {
-      throw new CloudApiError("cloud_workspace_unavailable", null);
+      throw new CloudApiError("cloud_workspace_unavailable", null, timedOut ? "timeout" : "network");
     } finally {
       clearTimeout(timer);
     }
@@ -325,9 +341,10 @@ export class CloudApi {
       parsed = null;
     }
     if (!response.ok) {
-      const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : "cloud_workspace_unavailable";
+      const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : null;
       // Only a plain token crosses to the UI as a code.
-      throw new CloudApiError(/^[a-z0-9_.-]{1,96}$/i.test(code) ? code : "cloud_workspace_unavailable", response.status);
+      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code)) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
+      throw new CloudApiError(code, response.status);
     }
     if (parsed === null && response.status !== 204) throw new CloudApiError("cloud_workspace_invalid_response", response.status);
     return parsed;

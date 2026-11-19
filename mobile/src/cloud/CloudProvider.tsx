@@ -68,7 +68,7 @@ export function CloudProvider({ children }: PropsWithChildren) {
           return outcome.status === "rejected" ? null : outcome.session.accessToken;
         },
       });
-      const create = () => new CloudCatalog({ api, secrets, storage, clientInstallationId, appVersion: APP_VERSION });
+      const create = () => new CloudCatalog({ api, secrets, storage, clientInstallationId, appVersion: APP_VERSION, log: (level, message, detail) => app.connection.note(level, message, detail) });
       // What is kept belongs to the person who was signed in when it was kept.
       // Signed out (now, or while the app was closed), or someone else signed
       // in: nothing of the cloud stays on the phone.
@@ -91,7 +91,7 @@ export function CloudProvider({ children }: PropsWithChildren) {
       // Connections are let go; what is kept is removed only by the check above.
       made?.close();
     };
-  }, [app.ready, userId]);
+  }, [app.connection, app.ready, userId]);
 
   useEffect(() => {
     if (!catalog) return;

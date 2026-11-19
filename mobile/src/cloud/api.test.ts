@@ -225,3 +225,35 @@ describe("the phone's cloud API client", () => {
     expect(await flaky.client.doNotWake()).toBe(true);
   });
 });
+
+describe("why a resume got no usable answer (#1290)", () => {
+  it("tells a timeout from a network failure, and an error body that is not the service's JSON from a code", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // No answer in 30 s: aborted, and said as a timeout (the server may still have acted on it).
+      const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted")))));
+      const slow = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: fetcher as never });
+      const timedOut = slow.resume("org-1", "ws-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await timedOut).toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "timeout", unreachable: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    const offline = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => { throw new TypeError("Network request failed"); }) as never });
+    await expect(offline.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "network" });
+
+    const html = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => ({ ok: false, status: 502, text: async () => "<html>Bad gateway</html>" })) as never });
+    await expect(html.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: 502, reason: "unreadable" });
+    const coded = api(() => ({ status: 409, body: { error: "cloud_provider_state_conflict" } }));
+    const refusal = await coded.client.resume("org-1", "ws-1").catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(CloudApiError);
+    expect(refusal).toMatchObject({ code: "cloud_provider_state_conflict", status: 409, reason: null });
+  });
+
+  it("says an answer it cannot parse as such, not as an error with no code", async () => {
+    const { client } = api(() => ({ status: 202, body: { workspace: { id: "ws-1" }, operation: null } }));
+    const error = await client.resume("org-1", "ws-1").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CloudApiError);
+    expect(error).toMatchObject({ code: "cloud_workspace_invalid_response" });
+  });
+});

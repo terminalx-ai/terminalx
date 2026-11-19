@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudScreen from "../app/(tabs)/cloud";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
 import CloudSharesScreen from "../app/cloud/shares";
+import { CloudApiError } from "./cloud/api";
 
 const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
@@ -96,7 +97,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
-    start: vi.fn(async () => undefined),
+    start: vi.fn(async () => "started"),
     refresh: vi.fn(async () => undefined),
     watch: vi.fn(() => unwatch),
     workspace: () => listed,
@@ -389,7 +390,7 @@ describe("a cloud workspace screen", () => {
     expect(session.send).toHaveBeenCalledWith("t1", "continue");
   });
 
-  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }, { state: "failed", action: "resume", errorCode: "cloud_provider_credential_invalid" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
+  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
     world({ state: "attention-required", role: "manager" });
     mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
     await show(<CloudWorkspaceScreen />);
@@ -458,12 +459,14 @@ describe("a cloud workspace screen", () => {
 
   it("says a workspace is starting once Start was pressed, and the server's word when it would not start it (#988)", async () => {
     world({ state: "suspended", role: "manager" });
-    mocks.catalog.start.mockRejectedValueOnce(Object.assign(new Error("forbidden"), { code: "cloud_workspace_manager_required" }));
+    mocks.catalog.start.mockRejectedValueOnce(new CloudApiError("cloud_workspace_manager_required", 403));
     await show(<CloudWorkspaceScreen />);
     await click("Start");
     await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
-    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe("Only this workspace's creator or an organization owner or admin can do that.");
-    expect(button("Start").disabled).toBe(false);
+    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe("Only this workspace's creator or an organization owner or admin can start it.");
+    // Asking again cannot help: no button that would only be refused again.
+    expect(() => button("Start")).toThrow();
+    expect(() => button("Try again")).toThrow();
 
     // The list says it is starting: the bar says so, and the composer is not back yet.
     world({ state: "resuming", role: "manager", connection: "waitingForRuntime" });
@@ -472,6 +475,79 @@ describe("a cloud workspace screen", () => {
     expect(startBar().textContent).toBe("Starting the workspace…The composer appears when it is running.Starting…");
     expect(button("Starting…").disabled).toBe(true);
     expect(container.querySelector("input")).toBeNull();
+  });
+
+  it("says each way a resume fails in plain words, with Try again where asking again can help (#1290)", async () => {
+    const failures: [unknown, string, boolean][] = [
+      [new CloudApiError("cloud_workspace_unavailable", null, "network"), "This phone could not reach the service. Check its connection, then try again.", true],
+      [new CloudApiError("cloud_workspace_unavailable", null, "timeout"), "The service did not answer in time, and the list does not show the workspace starting. Try again.", true],
+      [new CloudApiError("cloud_workspace_unavailable", 502, "unreadable"), "The service had a problem and did not start the workspace. Try again in a moment.", true],
+      [new CloudApiError("cloud_workspace_invalid_response", 200), "The service answered in a way this version of the app cannot read. The workspace may be starting anyway; update the app to follow it here.", false],
+      [new CloudApiError("cloud_brand_new_code", 409), "The service would not start this workspace. Try again; if it keeps failing, open it on the desktop to see why.", true],
+      [new Error("no code at all"), "This phone could not send the request to start the workspace. Try again.", true],
+    ];
+    for (const [error, said, retry] of failures) {
+      await show(null);
+      mocks.alert.mockClear();
+      world({ state: "suspended", role: "manager" });
+      mocks.catalog.start.mockRejectedValueOnce(error);
+      await show(<CloudWorkspaceScreen />);
+      await click("Start");
+      await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+      expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe(said);
+      expect(startBar().textContent).toContain("The workspace did not start");
+      expect(startBar().textContent).not.toContain("That did not work");
+      if (retry) {
+        await click("Try again");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Try starting again?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalledTimes(2);
+        mocks.catalog.start.mockClear();
+      } else {
+        expect(() => button("Try again")).toThrow();
+        mocks.catalog.start.mockClear();
+      }
+    }
+  });
+
+  it("shows a resume that got no answer but is starting as under way, not as a failure (#1290)", async () => {
+    world({ state: "suspended", role: "manager" });
+    let finish!: (outcome: string) => void;
+    mocks.catalog.start.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await show(<CloudWorkspaceScreen />);
+    await click("Start");
+    await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+    // Asked once however often the button would be pressed meanwhile: it is disabled while asking.
+    expect(button("Starting…").disabled).toBe(true);
+    const start = mocks.catalog.start;
+    await act(async () => finish("in-progress"));
+    expect(start).toHaveBeenCalledTimes(1);
+    // The list, read again, shows it resuming: said as starting, with no failure.
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].workspace.state = "resuming";
+    mocks.catalog.workspace().state = "resuming";
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')).toBeNull();
+    expect(startBar().textContent).toContain("Starting the workspace…The service has not confirmed yet, but the workspace is starting.");
+  });
+
+  it.each(["cloud_provider_state_conflict", "cloud_provider_credential_invalid", null, "cloud_brand_new_code"])("offers Retry resume after any failed resume, with what failed: %s (#1290)", async (errorCode) => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode };
+    await show(<CloudWorkspaceScreen />);
+    const said = startBar().textContent!;
+    expect(said).toContain(errorCode === "cloud_provider_state_conflict" ? "does not allow resuming yet" : errorCode === "cloud_provider_credential_invalid" ? "An admin can repair it" : "The last resume did not finish.");
+    expect(said).toContain("Retry resume, or open it on the desktop to see more.");
+    expect(said).not.toContain("This workspace needs attention.This workspace needs attention.");
+    await click("Retry resume");
+    expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+  });
+
+  it("says why the service refused to connect this phone to a running workspace, with Reconnect (#1290)", async () => {
+    world({ role: "manager", connection: "stopped", problem: { kind: "api", code: "cloud_brand_new_code", unreachable: false } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("The service would not connect this phone to the workspace.");
+    expect(text()).not.toContain("Not connected.");
+    expect(button("Reconnect")).toBeTruthy();
   });
 
   it("puts Sharing in the session's own bar as a glass icon button with a 44 pt target, and the role as plain text (#988, 22.06)", async () => {

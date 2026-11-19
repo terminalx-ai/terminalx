@@ -44,7 +44,10 @@ export function whoCanStart(creator: string | null): string {
   return `${starters} Anyone who can send to it starts it by sending a message.`;
 }
 
-/** The failure the service reported, with a safe fallback for codes this app does not know. */
+/**
+ * The failure the service reported for a workspace that needs attention after
+ * a failed resume, with a safe fallback for codes this app does not know.
+ */
 export function attentionDetail(code: string | null | undefined): string {
   switch (code) {
     case "cloud_workspace_runtime_bootstrap_failed": return "The workspace’s runtime could not be set up on its machine.";
@@ -52,7 +55,11 @@ export function attentionDetail(code: string | null | undefined): string {
     case "cloud_provider_permission_denied": return "The provider refused the action. Check its permissions.";
     case "cloud_provider_unavailable": return "The provider did not answer.";
     case "cloud_provider_rate_limited": return "The provider is rate limiting requests.";
-    default: return "This workspace needs attention.";
+    case "cloud_provider_state_conflict": return "The provider reports the workspace's machine in a state that does not allow resuming yet.";
+    case "cloud_provider_connection_attention_required": return "The organization's provider connection needs attention. An admin can repair it.";
+    case "cloud_workspace_provisioning_timeout": return "The workspace's machine took too long to start.";
+    // A failed resume with no code, or one this app does not know: what failed is still said (#1290).
+    default: return "The last resume did not finish.";
   }
 }
 
@@ -149,8 +156,15 @@ export function connectionLine(connection: WorkspaceConnectionState, listedState
     const offline = problem?.kind === "api" && problem.unreachable;
     return { tone: "warn", text: offline ? "Offline. Reconnecting…" : "Reconnecting…", short: offline ? "Offline" : "Reconnecting…" };
   }
-  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : ((problem?.kind === "api" ? codeText(problem.code) : null) ?? "Not connected."), short: "Not connected" };
+  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : problem?.kind === "api" ? openRefusalText(problem.code) : "Not connected to this workspace.", short: "Not connected" };
   return { tone: "idle", text: "Connecting…", short: "Connecting…" };
+}
+
+/** Why the service would not connect this phone to a workspace (#1290): its own word, never a bare "Not connected". */
+export function openRefusalText(code: string): string {
+  const known = CODES[code];
+  if (known) return known;
+  return "The service would not connect this phone to the workspace.";
 }
 
 /** Why a workspace that was asked for cannot be shown, by what the list says of this person's access. */
