@@ -129,7 +129,8 @@ try {
       // The sidebar's destination is "Overview, <counts>" (PRO-384); it was "Dashboard" (#484) and "Agent Dashboard" before.
       await page.getByRole("button", { name: /^Overview/ }).click();
       // PRO-385: the toolbar row (02.01) replaced the "Agents" heading and its total.
-      await page.getByRole("button", { name: "New session", exact: true }).waitFor();
+      // In the page, not the sidebar: the sidebar's destination is named "New session" too (PRO-384).
+      await page.getByRole("main").getByRole("button", { name: "New session", exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();
       assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, "layout fixture reports no available update");
       await page.evaluate(async ({ textScale }) => {

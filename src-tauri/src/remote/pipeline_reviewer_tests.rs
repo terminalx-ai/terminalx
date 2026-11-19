@@ -35,7 +35,10 @@ async fn reviewer_rpc_survives_real_list_limits_replacement_and_history_eviction
     let listed = request(&rpc, &peer, "pipeline.list", json!({})).await;
     assert_eq!(listed["pipelines"].as_array().unwrap().len(), 50);
     assert_eq!(listed["truncated"], true);
-    assert!(!listed.to_string().contains("r000"));
+    // As a whole JSON string: the project path is in the listing too, and a
+    // temporary directory's name may contain the letters (a macOS runner's
+    // ends in "r0000gn").
+    assert!(!listed.to_string().contains("\"r000\""));
     let identities = request(&rpc, &peer, "pipeline.reviewers", json!({})).await;
     assert_eq!(identities["sessionIds"].as_array().unwrap().len(), 61);
     assert!(identities["sessionIds"].as_array().unwrap().contains(&json!("r000")));

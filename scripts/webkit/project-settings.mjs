@@ -24,6 +24,9 @@ const fixture = `
   stub.github_repo = "terminalx-ai/terminalx";
   stub.experimental_settings = { nativeCodex: false };
   stub.merged_cleanup_sweep = { unreadable: [], statuses: [] };
+  // What the page saves: leaving Files to copy commits the edit (#1156).
+  window.__SAVES__ = [];
+  stub.update_project = ({ patch }) => { window.__SAVES__.push(patch); Object.assign(project, patch); return { ...project }; };
   window.__PW_NOTHING__ = false;
   stub.repository_files_preview = ({ patterns }) => {
     const list = patterns ?? [];
@@ -95,6 +98,11 @@ try {
     checks["no match: the patterns field turns amber"] = (await patterns.getAttribute("class")).includes("border-warning");
     await patterns.scrollIntoViewIfNeeded();
     if (shots) await page.screenshot({ path: join(shots, `files-to-copy-none-${mode}.png`) });
+
+    // Leaving the field saves the edit, and Settings keeps the page until it is saved (#1156).
+    await patterns.blur();
+    await page.waitForFunction(() => window.__SAVES__.length > 0);
+    checks["leaving Files to copy saves exactly the patterns typed"] = JSON.stringify(await page.evaluate(() => window.__SAVES__)) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env.production", "config/secrets/*.json"] } }]);
 
     // Design 11.10: Settings files, the shared file open, and the Open menu.
     await pages.getByRole("button", { name: "Settings files" }).click();

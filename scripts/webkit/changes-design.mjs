@@ -55,7 +55,8 @@ if (scene === 'empty') saveChangesChoice(key, { scope: 'commit', target: null, c
 const source = {
   key, cloud: false, canWrite: true,
   branches: async () => [{ name: 'raccoon/session-overview', current: true, remote: false }, { name: 'main', current: false, remote: false }, { name: 'origin/main', current: false, remote: true }],
-  logCommits: async (from, limit) => from ? commits.filter((c) => c.sha.startsWith(from)).concat(from.startsWith('p') ? [{ ...commits[0], sha: 'p'.repeat(40), parent: null, tree: 'parent' }] : []) : commits.slice(0, limit),
+  // The scope popover asks for the branch's own commits, '<target>..HEAD' (c3f9ec9b); a sha asks for that commit; null for the history.
+  logCommits: async (from, limit) => from === 'origin/main..HEAD' ? commits.slice(0, limit) : from ? commits.filter((c) => c.sha.startsWith(from)).concat(from.startsWith('p') ? [{ ...commits[0], sha: 'p'.repeat(40), parent: null, tree: 'parent' }] : []) : commits.slice(0, limit),
   reviewRange: async (target, uncommitted) => ({ base: uncommitted ? 'work' : 'base', head: uncommitted ? 'work-head' : 'head', target: target || 'origin/main' }),
   changesBetween: async (base, head) => scene === 'merge' ? mergeFiles : head === 'empty' ? [] : head === 'work-head' ? files.slice(0, 3) : base === 'b3' ? files.slice(0, 2) : base === 'b2' ? files : base === 'b1' ? files.slice(5) : files,
   fileContentsAt: async (path) => path.endsWith('.json') ? { before: 'x', after: '<file too large to show>' } : { before: long, after: changed },

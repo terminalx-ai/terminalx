@@ -281,8 +281,8 @@ function ConversationContent({ source, row, active, refresh, onEdited, onSummary
 /** A section's small uppercase heading, a summary after it and its action at the right (design 05.08). */
 export function SectionHead({ title, summary, action }: { title: string; summary?: ReactNode; action?: ReactNode }) {
   return <div className="flex min-h-5 min-w-0 items-center gap-2">
-    <h3 className="shrink-0 text-[11px] font-normal uppercase tracking-[.08em] text-faint">{title}</h3>
-    {summary != null && summary !== "" && <span className="min-w-0 truncate text-[11.5px] text-muted-foreground">{summary}</span>}
+    <h3 className="shrink-0 text-xs font-normal uppercase tracking-[.08em] text-faint">{title}</h3>
+    {summary != null && summary !== "" && <span className="min-w-0 truncate text-xs text-muted-foreground">{summary}</span>}
     {action && <span className="ml-auto flex shrink-0 items-center gap-2.5">{action}</span>}
   </div>;
 }

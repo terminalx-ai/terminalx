@@ -1,26 +1,36 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Popover } from "radix-ui";
 import { PlugZap } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { openForwardCount, usePortForwards } from "@/lib/portForwards";
 import { PortsPopover } from "./PortsPopover";
-import type { PortsInputs } from "./CloudPorts";
+import { observe, type PortsInputs } from "./CloudPorts";
 
 /**
  * The header's forward chip (14.10, 21.08): a plug and how many ports are
  * forwarded to this Mac now, opening "Forward ports to this Mac". The count
  * follows the desktop's `cloud_port_forwards_changed`, so it is right while
  * the popover and the Ports tab are closed and nothing polls.
+ *
+ * With nothing forwarded it is left out of a narrow header (SessionView, "gives
+ * way in order", step 7): there it costs the title its first 12 characters, and
+ * the Ports tab beside it forwards a port just the same. It is back with the
+ * first forward.
  */
 export function PortForwardChip({ follow, ...inputs }: Omit<PortsInputs, "active"> & { follow: boolean }) {
   const [open, setOpen] = useState(false);
-  const { forwards } = usePortForwards(inputs.connectionId, follow);
+  const { forwards, loaded } = usePortForwards(inputs.connectionId, follow);
+  // The views remember what was open to say what has expired; this is drawn while they are not.
+  const { workspaceKey } = inputs;
+  useEffect(() => {
+    if (follow && loaded) observe(workspaceKey, forwards);
+  }, [follow, loaded, forwards, workspaceKey]);
   const count = openForwardCount(forwards);
   const label = count ? `${count} port${count === 1 ? "" : "s"} forwarded to this Mac` : "Forward ports to this Mac";
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <span className="flex items-center px-1">
+      <span className={cn("flex items-center px-1", count === 0 && !open && "@max-[480px]/session-header:hidden")}>
         <WithTooltip label={label}>
           <Popover.Trigger asChild>
             <button
