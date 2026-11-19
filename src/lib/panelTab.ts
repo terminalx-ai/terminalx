@@ -1,4 +1,5 @@
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { resetLastView, savePanelTab, savedPanelTab } from "@/lib/lastView";
 
 /** The tabs of a session's right panel. Ports is a cloud session's only, for someone who may use previews; Browser and Computer a local session's. */
 export type PanelTab = "branch" | "changes" | "files" | "browser" | "ports" | "computer";
@@ -30,23 +31,26 @@ export function onPanelTab(listener: (tab: PanelTab) => void): () => void {
 }
 
 /**
- * The tab a cloud session's panel last showed, per session. That panel is
- * replaced while the workspace is not connected and drawn anew when it is
- * back; it reopens on the tab that was shown (Ports included) instead of
- * Changes.
+ * The tab a session's panel last showed, per session (PRO-130). Going back
+ * to a session, or launching the app on it, opens its panel on that tab; a
+ * cloud session's panel, drawn anew when its workspace reconnects, too
+ * (Ports included). Kept with the last view, so it outlives a quit.
  */
 const shown = new Map<string, PanelTab>();
 
 export function rememberPanelTab(sessionId: string, tab: PanelTab) {
+  if (shown.get(sessionId) === tab) return;
   shown.set(sessionId, tab);
+  savePanelTab(sessionId, tab);
 }
 
 export function rememberedPanelTab(sessionId: string): PanelTab | null {
-  return shown.get(sessionId) ?? null;
+  return shown.get(sessionId) ?? savedPanelTab(sessionId);
 }
 
 /** Forgets every remembered and asked-for tab (tests). */
 export function resetPanelTabs() {
   shown.clear();
   pending = null;
+  resetLastView();
 }
