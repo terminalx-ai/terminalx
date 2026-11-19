@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { AlertCircle, Bot, Check, CheckCircle2, CircleX, Copy, ExternalLink, FileX, GitBranch, GitBranchPlus, MessageCircleQuestion, Play, RotateCw, Target, TriangleAlert, X } from "@/icons";
+import { AlertCircle, Bot, Check, CheckCircle2, CircleX, Copy, ExternalLink, FileX, GitBranch, GitBranchPlus, GlobeLock, Link2Off, MessageCircleQuestion, Play, RotateCw, Target, TriangleAlert, X } from "@/icons";
 import { MachineNoticeCard, MachineToasts } from "@/components/machines/MachineToasts";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
@@ -110,6 +110,10 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
         <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-add" />
       ) : toast.icon === "branch" ? (
         <GitBranch aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      ) : toast.icon === "link-off" ? (
+        <Link2Off aria-hidden className={cn("mt-0.5 size-4 shrink-0", toast.tone === "warning" ? "text-warning" : "text-destructive")} />
+      ) : toast.icon === "globe-lock" ? (
+        <GlobeLock aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
       ) : toast.icon === "target" ? (
         // Not a failure: a goal sent where goals do not work, said in the colour of a warning.
         <Target aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -156,6 +160,7 @@ function ErrorToastCard({ toast }: { toast: ErrorToast }) {
             {action.icon === "branch-plus" ? <GitBranchPlus className="size-3.5" /> : null}
             {action.icon === "external" ? <ExternalLink className="size-3.5" /> : null}
             {action.icon === "bot" ? <Bot className="size-3.5" /> : null}
+            {action.icon === "copy" ? <Copy className="size-3.5" /> : null}
             {action.label}
           </button>
         ))}
