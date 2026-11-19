@@ -643,7 +643,8 @@ impl WorkspaceGit {
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
-            "git.prAssociations" => self.pr_associations(params),
+            "git.prAssociations" => self.pr_associations(params, false),
+            "git.prRecoverLegacy" => self.pr_recover_legacy(params),
             "git.prLanded" => self.pr_landed(params),
             "git.prCreate" => self.pr_create(params),
             "git.prReady" => self.pr_ready(params),
@@ -1463,11 +1464,60 @@ impl WorkspaceGit {
         Ok(entry)
     }
 
-    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
+    pub(super) fn pr_associations(&self, params: &Value, include_recovery: bool) -> Result<Value, RpcError> {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        Ok(self.locate_pr_associations(associations))
+        let mut response = self.locate_pr_associations(associations);
+        // Disable recovery if withdrawal history cannot be read, while still
+        // serving the current associations.
+        let withdrawn = (self.project && include_recovery)
+            .then(|| crate::pr_associations::withdrawn(&session.id)).and_then(Result::ok);
+        if let Some(withdrawn) = withdrawn {
+            response["withdrawn"] = json!(withdrawn);
+        }
+        Ok(response)
+    }
+
+    fn pr_recover_legacy(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project {
+            return Err(RpcError::forbidden("Legacy desktop PR recovery is only available on paired machines."));
+        }
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        let repo = self.repo(params)?;
+        let repo_root = repo.dir.canonicalize().map_err(RpcError::internal)?;
+        let matches_checkout = match Path::new(&session.cwd).canonicalize() {
+            Ok(cwd) => cwd == repo_root || (cwd.starts_with(&repo_root)
+                && crate::git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
+                    .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_ref() == Some(&repo_root)),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                session.checkout_root().and_then(|root| Path::new(root).canonicalize().ok()).as_ref() == Some(&repo_root)
+            }
+            Err(_) => false,
+        };
+        if session.worktree_removed || !matches_checkout {
+            return Err(RpcError::invalid("Select the session's checkout to recover its pull request."));
+        }
+        let requested = crate::pr_associations::identity(required_str(params, "url")?)
+            .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
+        let branch = required_str(params, "branch")?;
+        let checkout_matches = || crate::git::current_branch(&repo.dir).as_deref() == Some(branch);
+        if !checkout_matches() {
+            return Err(RpcError::invalid("The session's checkout is no longer on the pull request branch."));
+        }
+        let found = self.list_prs(&repo, branch, "open", NETWORK_TIMEOUT)?.into_iter().find(|pr| {
+            pr.state == "OPEN" && pr.head == branch
+                && crate::pr_associations::identity(&pr.url).is_ok_and(|url| url == requested)
+        });
+        if found.is_none() || !checkout_matches() {
+            return Err(RpcError::not_found("GitHub did not verify an open pull request on the session's branch."));
+        }
+        let saved = crate::pr_associations::record_recovered(&session.id, &repo.dir, &requested, branch)
+            .map_err(RpcError::internal)?;
+        if !saved {
+            return Err(RpcError::invalid("This pull request was linked or withdrawn on the machine."));
+        }
+        Ok(json!({ "sessionAssociated": true }))
     }
 
     fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {

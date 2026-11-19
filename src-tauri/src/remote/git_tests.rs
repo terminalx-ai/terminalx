@@ -738,6 +738,76 @@ fn machine_pr_creation_records_the_native_session_association() {
 }
 
 #[test]
+fn machine_legacy_pr_recovery_verifies_the_session_branch_and_persists_only_eligible_prs() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, ".");
+    f.git.project = true;
+    git(&repo, &["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
+    git(&repo, &["checkout", "-qb", "feature"]);
+    git(&repo, &["worktree", "add", "-qb", "other", "other"]);
+    let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": cwd, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    let cwd = repo.join("subdir");
+    std::fs::create_dir(&cwd).unwrap();
+    let mut native = session("native", &repo, &cwd);
+    native.set_checkout_root(repo.to_str());
+    crate::store::index::save(&[native, session("outside", &f.base, &repo)]).unwrap();
+    let url = |number| format!("https://github.com/acme/widgets/pull/{number}");
+    let save_pr = |number, state, fork| {
+        std::fs::create_dir_all(&f.state).unwrap();
+        std::fs::write(f.state.join(format!("pr-{number}.json")), json!({
+            "url": url(number), "number": number, "title": "Legacy PR", "headRefName": "feature",
+            "state": state, "isCrossRepository": fork,
+        }).to_string()).unwrap();
+    };
+    save_pr(1, "OPEN", false);
+    save_pr(2, "OPEN", false);
+    save_pr(3, "CLOSED", false);
+    save_pr(4, "OPEN", true);
+    let recover = |number| json!({"sessionId": "native", "repo": ".", "branch": "feature", "url": url(number)});
+    let read = || f.git.pr_associations(&json!({"sessionId": "native"}), true).unwrap();
+    let mut wrong_scope = recover(1);
+    wrong_scope["sessionId"] = json!("outside");
+    assert_eq!(f.code("git.prRecoverLegacy", wrong_scope), "not_found");
+    let mut wrong_checkout = recover(1);
+    wrong_checkout["repo"] = json!("other");
+    assert_eq!(f.code("git.prRecoverLegacy", wrong_checkout), "invalid_params");
+    let mut wrong_branch = recover(1);
+    wrong_branch["branch"] = json!("main");
+    assert_eq!(f.code("git.prRecoverLegacy", wrong_branch), "invalid_params");
+    let mut wrong_url = recover(1);
+    wrong_url["url"] = json!("https://github.com/acme/another-repo/pull/1");
+    assert_eq!(f.code("git.prRecoverLegacy", wrong_url), "not_found");
+    for number in [3, 4] {
+        assert_eq!(f.code("git.prRecoverLegacy", recover(number)), "not_found");
+    }
+    assert_eq!(read()["associations"], json!([]));
+
+    crate::pr_associations::link("native", crate::pr_associations::Association {
+        url: url(2), number: 2, head: "feature".into(), linked: false,
+        scope: crate::pr_associations::Scope::Local { cwd: repo.to_string_lossy().into_owned() },
+    }).unwrap();
+    assert_eq!(f.code("git.prRecoverLegacy", recover(2)), "invalid_params");
+    assert_eq!(read()["associations"][0]["linked"], true);
+    crate::pr_associations::unlink("native", &url(2)).unwrap();
+    assert_eq!(f.code("git.prRecoverLegacy", recover(2)), "invalid_params");
+    assert_eq!(read()["withdrawn"], json!([url(2)]));
+    assert!(f.call("git.prAssociations", json!({"sessionId": "native"})).unwrap().get("withdrawn").is_none());
+
+    assert_eq!(f.call("git.prRecoverLegacy", recover(1)).unwrap()["sessionAssociated"], true);
+    std::fs::remove_dir(cwd).unwrap();
+    assert_eq!(f.call("git.prRecoverLegacy", recover(1)).unwrap()["sessionAssociated"], true);
+    std::fs::remove_file(f.state.join("pr-1.json")).unwrap();
+    assert_eq!(read()["associations"], json!([{
+        "url": url(1), "number": 1, "head": "feature", "repo": ".", "linked": false,
+    }]));
+    assert!(!f.gh_calls().contains("\"create\""));
+}
+
+#[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
     let remote = f.remote("origin");

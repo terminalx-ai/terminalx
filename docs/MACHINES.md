@@ -794,7 +794,7 @@ the pull request that adds it.
 | `git.prConversation` | `git/1` | Needs a project | |
 | `git.prReviewerSearch` | `git/1` | Needs a project | |
 | `git.prConversationAction` | `git/1` | Needs a project | |
-| `git.prAssociations` | `git/1` | Needs a project | |
+| `git.prAssociations` | `git/1` | Needs a project | Includes recorded withdrawals for managers on runtimes that support legacy recovery |
 | `git.prLanded` | `git/1` | Needs a project | |
 | `git.checkout` | `git/1` | Needs a project | |
 | `git.commit` | `git/1` | Needs a project | |
@@ -806,6 +806,7 @@ the pull request that adds it.
 | `git.pushHead` | `git/1` | Needs a project | Pushes the confirmed commit with the machine's git sign-in |
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
+| `git.prRecoverLegacy` | `git/1` | Needs a project | After manager confirmation, verifies an open PR on the session's checkout and records it with the machine's registry |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |
 | `git.prMerge` | `git/1` | Needs a project | With the machine's `gh` |
 | `cleanup.scan` | `cleanup/1` | Served | Every project of the machine, as Settings → Storage scans every local project; each row names its project |

@@ -1,4 +1,5 @@
 import { reviewFileReader } from "./reviewThreads";
+import { prIdentity } from "./sessionPrs";
 import { cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey, parseMachineKey } from "@/types/target";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
@@ -42,7 +43,8 @@ export interface GitSource {
   branchBase?(base: string): ReturnType<RemoteGit["branchBase"]>;
   branchDiffSize?(base: string): Promise<Awaited<ReturnType<RemoteGit["branchDiffSize"]>> | "unsupported">;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
-  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  prAssociations?(sessionId: string, checkLegacy?: boolean): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean; legacyCandidates?: PrAssociation[] }>;
+  recoverLegacyPr?(sessionId: string, url: string, branch: string): Promise<void>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
@@ -193,10 +195,11 @@ export function runtimeSessionIn(workspaceKey: string, sessionKey: string): stri
  * (the person's own Git identity from this computer); the workspace's GitHub
  * credentials never leave the runtime.
  */
-export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null> }): GitSource {
+export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null>; sessionCheckout?: boolean }): GitSource {
   let servesBranchDiffSize = true;
   const { remote } = input;
   const fromMachine = !!parseMachineKey(input.workspaceKey);
+  const canRecoverLegacyPr = fromMachine && input.canWrite && input.sessionCheckout;
   const statusOf = async (): Promise<SourceStatus> => {
     const status = await remote.status();
     return {
@@ -283,7 +286,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     fetch: () => remote.fetch().then(() => null),
     ghAvailable: () => Promise.resolve(true),
     prs: (branch) => remote.prs(branch).then((answer) => answer.prs),
-    prAssociations: async (sessionId) => {
+    prAssociations: async (sessionId, checkLegacy) => {
       const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
       if (!runtimeId) throw new Error("This session belongs to a different workspace.");
       let response;
@@ -301,9 +304,17 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         linked: entry.linked ?? (fromMachine ? true : undefined),
         scope: { kind: "cloud" as const, workspace: input.workspaceKey, repo: entry.repo ?? "" },
       }));
-      // A live machine reply is authoritative, including when a link has
-      // been removed. Desktop associations cannot establish machine ownership.
-      if (fromMachine) return { associations: runtimeRows };
+      if (fromMachine) {
+        if (!checkLegacy || !canRecoverLegacyPr || !response.withdrawn) return { associations: runtimeRows };
+        const excluded = new Set([...runtimeRows.map((entry) => entry.url), ...response.withdrawn].map(prIdentity));
+        // Old cache rows without a linked bit are ambiguous. Offer explicit
+        // recovery separately and use only the live rows for PR actions.
+        const cached = await gh.associations(sessionId).catch(() => []);
+        return { associations: runtimeRows, legacyCandidates: cached.filter((entry) =>
+          !entry.linked && entry.scope.kind === "cloud" && entry.scope.workspace === input.workspaceKey &&
+          entry.scope.repo === remote.repo && !excluded.has(prIdentity(entry.url)),
+        ) };
+      }
       const cached = await gh.associations(sessionId, runtimeRows);
       // The cache may predate the linked bit.
       const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
@@ -312,6 +323,14 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         return flag === undefined ? entry : { ...entry, linked: flag };
       }) };
     },
+    ...(canRecoverLegacyPr && {
+      recoverLegacyPr: async (sessionId: string, url: string, branch: string) => {
+        const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
+        if (!runtimeId) throw new Error("This session belongs to a different workspace.");
+        const result = await remote.recoverLegacyPr(runtimeId, url, branch);
+        if (!result.sessionAssociated) throw new Error("The machine did not save the pull request to this session.");
+      },
+    }),
     prScope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo },
     prAccess: (association) => {
       if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey) throw new Error("Reconnect this PR's workspace to refresh it.");

@@ -331,8 +331,12 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
+  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[]; withdrawn?: string[] }> {
     return this.read("git.prAssociations", { sessionId });
+  }
+
+  recoverLegacyPr(sessionId: string, url: string, branch: string): Promise<{ sessionAssociated: boolean }> {
+    return this.write("git.prRecoverLegacy", { sessionId, url, branch });
   }
 
   prLanded(): Promise<{ safe: boolean; head: string | null; branch: string | null }> {

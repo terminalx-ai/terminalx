@@ -87,12 +87,49 @@ fn merge(all: &mut Associations, session: &str, additions: Vec<Association>) -> 
 }
 
 pub fn record_local(session: &str, cwd: &Path, url: &str, head: &str) -> Result<()> {
+    update(&registry()?, session, vec![local_association(cwd, url, head)?])?;
+    Ok(())
+}
+
+fn local_association(cwd: &Path, url: &str, head: &str) -> Result<Association> {
     let url = identity(url)?;
     let number = url.rsplit('/').next().unwrap().parse()?;
-    update(&crate::store::root()?.join("session-pr-associations.json"), session, vec![Association {
+    Ok(Association {
         url, number, head: head.into(), scope: Scope::Local { cwd: cwd.to_string_lossy().into_owned() }, linked: false,
-    }])?;
-    Ok(())
+    })
+}
+
+// Keep withdrawals beside the registry so older builds can still read its
+// original format. An explicit local link can be made again, but recovery
+// must never turn a previously withdrawn link into permanent ownership.
+type Withdrawals = BTreeMap<String, BTreeSet<String>>;
+
+fn withdrawals_path(path: &Path) -> std::path::PathBuf {
+    path.with_file_name("session-pr-withdrawals.json")
+}
+
+pub fn withdrawn(session: &str) -> Result<BTreeSet<String>> {
+    let mut rows: Withdrawals = crate::store::read_json(&withdrawals_path(&registry()?))?.unwrap_or_default();
+    Ok(rows.remove(session).unwrap_or_default())
+}
+
+pub fn record_recovered(session: &str, cwd: &Path, url: &str, head: &str) -> Result<bool> {
+    let entry = local_association(cwd, url, head)?;
+    let path = registry()?;
+    transaction(&path, || {
+        let mut all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
+        if let Some(saved) = all.get(session).and_then(|rows| rows.get(&entry.url)) {
+            return Ok(!saved.linked);
+        }
+        let withdrawals: Withdrawals = crate::store::read_json(&withdrawals_path(&path))?.unwrap_or_default();
+        if withdrawals.get(session).is_some_and(|urls| urls.contains(&entry.url)) {
+            return Ok(false);
+        }
+        if merge(&mut all, session, vec![entry])? {
+            crate::store::write_json(&path, &all)?;
+        }
+        Ok(true)
+    })
 }
 
 /// The normalized journal is written even with no panel mounted. Recover only
@@ -368,6 +405,13 @@ fn unlink_in(path: &Path, session: &str, url: &str) -> Result<Vec<Association>> 
             None => {}
             Some(entry) if !entry.linked => bail!("This session opened #{}; only a linked pull request can be unlinked", entry.number),
             Some(_) => {
+                // Write the withdrawal first while holding the registry lock.
+                // An interrupted unlink can be retried with the link intact.
+                let withdrawals = withdrawals_path(path);
+                let mut rows: Withdrawals = crate::store::read_json(&withdrawals)?.unwrap_or_default();
+                if rows.entry(session.into()).or_default().insert(url.clone()) {
+                    crate::store::write_json(&withdrawals, &rows)?;
+                }
                 entries.remove(&url);
                 if entries.is_empty() { all.remove(session); }
                 crate::store::write_json(path, &all)?;

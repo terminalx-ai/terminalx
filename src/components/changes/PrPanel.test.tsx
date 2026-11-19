@@ -531,6 +531,53 @@ it.each([true, false])("shows a linked machine PR without offering a desktop unl
   expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_unlink")).toBe(false);
 });
 
+it("offers recovery for a legacy branch PR and enables its actions after the machine saves it", async () => {
+  const workspaceKey = "machine:mini:project";
+  const sessionId = `${workspaceKey}:author`;
+  const legacy = { ...followup, head: "feature", isDraft: true };
+  const withdrawn = { ...legacy, number: 99, url: "https://github.com/acme/widgets/pull/99" };
+  const runtimeRow = (pr: PullRequest) => ({ url: pr.url, number: pr.number, head: pr.head, repo: "app" });
+  let cached = [legacy, withdrawn].map((pr) => ({
+    ...runtimeRow(pr), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" },
+  }));
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "pr_associations") return cached;
+    throw Error(command);
+  });
+  let saved = false;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(legacy.head, 3);
+    if (method === "git.prAssociations") return {
+      associations: saved ? [{ ...runtimeRow(legacy), linked: false }] : [],
+      withdrawn: [withdrawn.url],
+    };
+    if (method === "git.prs") return { prs: [legacy, withdrawn] };
+    if (method === "git.prConversation") return { ...legacy, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async () => {
+    saved = true;
+    cached = [];
+    return { sessionAssociated: true };
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null, sessionCheckout: true });
+  const panel = <PrPanel source={source} sessionId={sessionId} branch={legacy.head} active busy={false} inline />;
+  const view = render(panel);
+  const recover = await screen.findByRole("button", { name: `Recover PR #${legacy.number}` });
+  expect(screen.queryByRole("button", { name: "Recover PR #99" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Mark ready" })).toBeNull();
+  expect(mutate).not.toHaveBeenCalled();
+  fireEvent.click(recover);
+  expect(await screen.findByRole("button", { name: "Mark ready" })).toBeTruthy();
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prRecoverLegacy", {
+    sessionId: "author", repo: "app", url: legacy.url, branch: legacy.head,
+  });
+  view.unmount();
+  render(panel);
+  expect(await screen.findByRole("button", { name: "Mark ready" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Recover PR/ })).toBeNull();
+});
+
 it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-created %s merge", async () => {
   const sessionId = "cloud:org:workspace:author";
   let saved: unknown[] = [];

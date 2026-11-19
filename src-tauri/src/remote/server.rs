@@ -1782,6 +1782,9 @@ impl WorkspaceRpc {
             },
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
             "pipeline.noteTracker" => self.pipeline_note_tracker(params),
+            "git.prAssociations" if self.is_machine() && self.authority(peer) == Authority::Manage => {
+                project()?.git.pr_associations(&params, true)
+            }
             git if git.starts_with("git.") => project()?
                 .git
                 .handle(git, &params)
