@@ -474,7 +474,7 @@ fn create_session_workspace(req: NewSession, name: Option<&str>, account: Option
                 None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
             }
         };
-        entry.set_checkout_root(Some(&wt.path));
+        entry.bind_checkout_root(&wt.path);
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
         entry.branch = Some(wt.branch);
@@ -524,7 +524,7 @@ fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str)
         return Ok(false);
     }
     entry.cwd = cwd.to_string_lossy().into_owned();
-    entry.set_checkout_root(Some(&top.to_string_lossy()));
+    entry.bind_checkout_root(&top.to_string_lossy());
     entry.branch = git::current_branch(&cwd);
     if top != project {
         entry.worktree_name = top.file_name().map(|name| name.to_string_lossy().into_owned());
@@ -779,7 +779,11 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
         session.kind = SessionKind::Project;
         session.project_path = project.clone();
         session.cwd = workspace.cwd.clone();
-        session.set_checkout_root(workspace.checkout_root());
+        if let Some(root) = workspace.checkout_root() {
+            session.bind_checkout_root(root);
+        } else {
+            session.set_checkout_root(None);
+        }
         session.branch = workspace.branch.clone();
         session.worktree_name = workspace.worktree_name.clone();
         session.worktree_removed = false;

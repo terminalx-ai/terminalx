@@ -6,7 +6,7 @@
 //! is spawned — a session whose agent fails to start is still visible.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -580,7 +580,23 @@ impl SessionEntry {
             self.unknown.insert("checkoutRoot".into(), serde_json::Value::String(root.into()));
         } else {
             self.unknown.remove("checkoutRoot");
+            self.unknown.remove("checkoutIdentity");
         }
+    }
+
+    /// Bind a newly attached checkout while Git and the directory are available.
+    pub(crate) fn bind_checkout_root(&mut self, root: &str) {
+        self.set_checkout_root(Some(root));
+        self.unknown.remove("checkoutIdentity");
+        if let Some(identity) = crate::git::worktree_identity::WorktreeIdentity::capture(
+            Path::new(&self.project_path), Path::new(root),
+        ).and_then(|identity| serde_json::to_value(identity).ok()) {
+            self.unknown.insert("checkoutIdentity".into(), identity);
+        }
+    }
+
+    pub(crate) fn checkout_identity(&self) -> Option<crate::git::worktree_identity::WorktreeIdentity> {
+        serde_json::from_value(self.unknown.get("checkoutIdentity")?.clone()).ok()
     }
     /// Whether this session was started as an orchestration run's worker
     /// (`orchestration::guard`): it never pushes, merges or deploys.
