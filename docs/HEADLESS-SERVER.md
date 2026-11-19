@@ -112,6 +112,19 @@ server then appears under Machines on your computer, with its projects.
   `terminalx-serve logout` signs the server out again. The relay carries
   end-to-end encrypted traffic.
 
+  Signing out also removes the server from your account's machines. If
+  that step fails (no network, the account service is down), the server is
+  already signed out locally and `terminalx-serve logout` finishes the
+  removal when you run it again; `login` waits until it has. If the
+  account service has ended the saved session (it expired or was revoked),
+  no retry can finish, and `logout` says so. Run
+  `terminalx-serve logout --forget-ended` to delete the saved session
+  anyway. The account service is not told, so the server stays listed
+  under that account: `login` reminds you, signing in as the same account
+  takes the entry over again, and another account can be refused until it
+  is removed there. `--forget-ended` does nothing more than a plain
+  `logout` while the removal can still succeed.
+
 ## Add a project
 
 Sessions run in a project: a folder on the server, usually a Git clone. Add
