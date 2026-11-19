@@ -105,6 +105,32 @@ def main(args):
     prs = load_all()
     if args[:2] == ["api", "graphql"]:
         query = option(args, "-f", "")
+        variables = dict(
+            args[index + 1].split("=", 1)
+            for index, arg in enumerate(args[:-1]) if arg == "-f"
+        )
+        if "id" in variables:
+            pr = next((item for item in prs if item.get("id") == variables["id"]), None)
+            if pr is None:
+                fail("GraphQL: unknown pull request ID")
+            if "node(id:" in query:
+                print(json.dumps({"data": {"node": {**pr, "isMergeQueueEnabled": flag("merge-queue")}}}))
+                return
+            if variables.get("head", pr.get("headRefOid")) != pr.get("headRefOid"):
+                fail("GraphQL: Head branch was modified.")
+            if "markPullRequestReadyForReview(" in query:
+                pr["isDraft"] = False
+            elif "mergePullRequest(" in query:
+                pr["state"] = "MERGED"
+            elif "enqueuePullRequest(" in query:
+                pr["mergeQueueEntry"] = {"position": 2, "state": "QUEUED"}
+            elif "enablePullRequestAutoMerge(" in query:
+                pr["autoMergeRequest"] = {"enabledAt": "2026-11-19T00:00:00Z"}
+            else:
+                fail("fake-gh: unexpected node mutation")
+            save(pr)
+            print(json.dumps({"data": {"change": {"pullRequest": pr, "mergeQueueEntry": pr.get("mergeQueueEntry")}}}))
+            return
         match = re.search(r"pullRequest\(number:(\d+)\)", query)
         pr = next((pr for pr in prs if match and pr["number"] == int(match[1])), None)
         if flag("queue-offline"):
@@ -141,6 +167,7 @@ def main(args):
         mergeable = open(path("mergeable")).read().strip() if flag("mergeable") else "MERGEABLE"
         checks = json.load(open(path("checks.json"))) if flag("checks.json") else []
         pr = {
+            "id": "PR_fixture_%d" % number,
             "number": number,
             "title": option(rest, "--title", ""),
             "body": option(rest, "--body", ""),

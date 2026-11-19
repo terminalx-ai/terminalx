@@ -325,7 +325,9 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       };
       const writeTarget = async () => {
         if (repository.supportsPrUrl) return association.url;
-        if (fromMachine) throw new Error("Update this machine's runtime to change an associated pull request.");
+        if (fromMachine && !association.url.toLowerCase().startsWith("https://github.com/")) {
+          throw new Error("Update this machine's runtime to change an Enterprise pull request.");
+        }
         // Older cloud runtimes accept only a number. Check their current
         // route even if branch discovery already showed this PR in the UI.
         await read();

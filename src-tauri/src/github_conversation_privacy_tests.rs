@@ -40,11 +40,14 @@ fi
 case "$*" in
  'repo view '*) printf '{"url":"https://github.com/acme/widgets"}\n' ;;
  *'assignableUsers('*) printf '{"data":{"repository":{"assignableUsers":{"nodes":[{"login":"ada"}]}}}}\n' ;;
+ *'updatePullRequest(input:'*)
+   printf 'mutation\n' >> "$TERMINALX_HOME/mutations"
+   printf '{"data":{"updatePullRequest":{"pullRequest":{"id":"PR_fixture"}}}}\n' ;;
  'api graphql '*)
    case " $* " in *' timeline=next '*) exec /bin/cat "$TERMINALX_HOME/page2" ;; *) exec /bin/cat "$TERMINALX_HOME/page1" ;; esac ;;
- 'pr view '*) printf '{"url":"https://github.com/acme/widgets/pull/799","title":"Title","body":"Body"}\n' ;;
+ 'pr view '*) printf '{"id":"PR_fixture","url":"https://github.com/acme/widgets/pull/799","title":"Title","body":"Body"}\n' ;;
  'api --hostname github.com user') printf '{"type":"User","login":"reviewer"}\n' ;;
- 'pr edit '*|'pr review '*|*'requested_reviewers'*) printf 'mutation\n' >> "$TERMINALX_HOME/mutations" ;;
+ 'pr review '*|*'requested_reviewers'*) printf 'mutation\n' >> "$TERMINALX_HOME/mutations" ;;
  *) printf 'Unexpected gh call: %s\n' "$*" >&2; exit 9 ;;
 esac
 "#).unwrap();

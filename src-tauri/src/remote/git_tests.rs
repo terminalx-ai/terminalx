@@ -797,6 +797,9 @@ fn machine_pr_creation_records_the_native_session_association() {
     let merged = f.call("git.prMerge", json!({ "repo": resolved, "url": url, "method": "squash" })).unwrap();
     assert_eq!(merged["pr"]["url"], url);
     assert_eq!(merged["pr"]["state"], "MERGED");
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("markPullRequestReadyForReview(") && line.contains("\"id=PR_fixture_1\"") && !line.contains(url)));
+    assert!(calls.lines().any(|line| line.contains("mergePullRequest(") && line.contains("\"id=PR_fixture_1\"") && !line.contains(url)));
     let untouched: Value = serde_json::from_slice(&std::fs::read(alternate.join("pr-1.json")).unwrap()).unwrap();
     assert_eq!(untouched, alternate_pr);
 
@@ -817,12 +820,108 @@ fn machine_pr_creation_records_the_native_session_association() {
     for verb in ["ready", "merge", "edit"] {
         assert!(!calls[calls_before.len()..].contains(&format!("[\"pr\", \"{verb}\"")));
     }
+    assert!(!calls[calls_before.len()..].contains("mutation("));
 
     git(&f.root, &["worktree", "remove", locator]);
     git(&f.root, &["remote", "set-url", "origin", "https://github.com/octo/repo.git"]);
     let unavailable = read();
     assert_eq!(unavailable["associations"][0]["url"], association["url"]);
     assert!(unavailable["associations"][0]["repo"].is_null());
+}
+
+#[test]
+fn legacy_machine_pull_request_locators_bind_numeric_actions_to_the_public_github_pr() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let session = serde_json::from_value(json!({
+        "id": "legacy", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    let url = "https://github.com/octo/repo/pull/7";
+    crate::pr_associations::record_local("legacy", &f.root, url, "feature").unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.com/octo/repo").unwrap();
+    std::fs::write(f.state.join("pr-7.json"), json!({
+        "id": "PR_public", "number": 7, "url": url, "state": "OPEN", "isDraft": true, "headRefName": "feature"
+    }).to_string()).unwrap();
+    let conversation = include_str!("../fixtures/github_pr_conversation.json")
+        .replace("https://github.com/acme/widgets/pull/799", url);
+    std::fs::write(f.state.join("conversation.json"), conversation).unwrap();
+    let call = |method, params| f.git.handle_negotiated(method, &params, false).unwrap();
+    let rows = call("git.prAssociations", json!({ "sessionId": "legacy" })).unwrap();
+    let repo = &rows["associations"][0]["repo"];
+    assert!(repo.as_str().unwrap().starts_with(LEGACY_PR_REPO_PREFIX));
+    assert_eq!(call("git.prs", json!({ "repo": repo, "number": 7 })).unwrap()["prs"][0]["url"], url);
+    assert_eq!(call("git.prConversation", json!({ "repo": repo, "url": url })).unwrap()["url"], url);
+    assert_eq!(call("git.prReady", json!({ "repo": repo, "number": 7 })).unwrap()["pr"]["isDraft"], false);
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 8 })).unwrap_err().code, "invalid_params");
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 7, "method": "squash" })).unwrap()["pr"]["state"], "MERGED");
+    std::fs::write(f.state.join("repo-url"), "https://github.com/another/repo").unwrap();
+    let before = f.gh_calls();
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 7 })).unwrap_err().code, "invalid_params");
+    assert!(!f.gh_calls()[before.len()..].contains("mutation("));
+}
+
+#[test]
+fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let remote = f.remote("origin");
+    let fallback = f.clone(&remote, "a-fallback");
+    let recorded = f.clone(&remote, "z-recorded");
+    git(&fallback, &["config", "terminalx.testGithubRepoUrl", "https://github.com/octo/unrelated"]);
+    git(&recorded, &["config", "terminalx.testGithubRepoUrl", "https://github.com/octo/valid"]);
+    let session = serde_json::from_value(json!({
+        "id": "recorded", "projectPath": f.root, "cwd": recorded, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    crate::pr_associations::record_local("recorded", &f.base, "https://github.com/octo/stale/pull/1", "old").unwrap();
+    crate::pr_associations::record_local("recorded", &recorded, "https://github.com/octo/valid/pull/1", "new").unwrap();
+    let shim = f.base.join("gh");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    let log = f.state.join("checkouts");
+    std::fs::write(&shim, script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\npwd -P >> '{}'\n", log.display()), 1)).unwrap();
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
+    assert!(rows["associations"][0]["repo"].is_null());
+    assert_eq!(rows["associations"][1]["repo"], "z-recorded");
+    assert_eq!(std::fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(), [recorded.to_str().unwrap(), fallback.to_str().unwrap()]);
+}
+
+#[test]
+fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let url = "https://github.test/octo/repo/pull/1";
+    let original = json!({
+        "id": "PR_original", "number": 1, "url": url, "state": "OPEN", "isDraft": true, "headRefName": "feature"
+    });
+    let replacement_state = f.base.join("replacement");
+    std::fs::create_dir(&replacement_state).unwrap();
+    let mut replacement = original.clone();
+    replacement["id"] = json!("PR_replacement");
+    let pr_file = f.state.join("pr-1.json");
+    let replacement_file = replacement_state.join("pr-1.json");
+    std::fs::write(&pr_file, original.to_string()).unwrap();
+    std::fs::write(&replacement_file, replacement.to_string()).unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.test/octo/repo").unwrap();
+    let rebound = f.base.join("rebound");
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
+    // The URL resolves to a second PR as soon as the verification view finishes.
+    std::fs::write(f.base.join("gh"), format!(
+        "#!/bin/sh\nstate='{}'\nif [ \"$1\" = pr ] && [ -f '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" '{}' \"$@\"\nstatus=$?\nif [ \"$1\" = pr ] && [ \"$2\" = view ]; then touch '{}'; fi\nexit \"$status\"\n",
+        f.state.display(), rebound.display(), replacement_state.display(), fake.display(), rebound.display(),
+    )).unwrap();
+    assert_eq!(f.call("git.prReady", json!({ "repo": "app", "url": url })).unwrap()["pr"]["isDraft"], false);
+    std::fs::remove_file(rebound).unwrap();
+    assert_eq!(f.call("git.prMerge", json!({ "repo": "app", "url": url, "method": "squash" })).unwrap()["pr"]["state"], "MERGED");
+    let saved: Value = serde_json::from_slice(&std::fs::read(pr_file).unwrap()).unwrap();
+    let untouched: Value = serde_json::from_slice(&std::fs::read(replacement_file).unwrap()).unwrap();
+    assert_eq!(saved["state"], "MERGED");
+    assert_eq!(saved["isDraft"], false);
+    assert_eq!(untouched, replacement);
 }
 
 #[test]
@@ -889,7 +988,7 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let remote = f.remote("origin");
     f.clone(&remote, "app");
     let pr = json!({
-        "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
+        "id": "PR_queue", "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
         "state": "OPEN", "headRefName": "main", "baseRefName": "develop", "headRefOid": "fake-head",
         "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
         "statusCheckRollup": [{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""}],
@@ -909,6 +1008,17 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
     assert_eq!(listed["prs"][0]["state"], "OPEN");
     assert_eq!(listed["prs"][0]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    std::fs::write(f.state.join("repo-url"), "https://github.test/octo/repo").unwrap();
+    let queue = || f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":"queue"})).unwrap();
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+    assert_eq!(queue()["pr"]["autoMergeEnabled"], true);
+    let mut clean = pr.clone();
+    clean["mergeStateStatus"] = json!("CLEAN");
+    std::fs::write(f.state.join("pr-7.json"), clean.to_string()).unwrap();
+    assert_eq!(queue()["pr"]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("enablePullRequestAutoMerge(") && line.contains("\"id=PR_queue\"")));
+    assert!(calls.lines().any(|line| line.contains("enqueuePullRequest(") && line.contains("\"id=PR_queue\"")));
     f.fault("queue-offline");
     let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
     assert_eq!(listed["prs"][0]["number"], 7);

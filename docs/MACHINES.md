@@ -794,7 +794,7 @@ the pull request that adds it.
 | `git.prConversation` | `git/1` | Needs a project | |
 | `git.prReviewerSearch` | `git/1` | Needs a project | |
 | `git.prConversationAction` | `git/1` | Needs a project | |
-| `git.prAssociations` | `git/1` | Needs a project | Actionable locators require `git-pr-target/1`, which also enables URL targets for `git.prs`, `git.prReady`, and `git.prMerge` |
+| `git.prAssociations` | `git/1` | Needs a project | Enterprise locators require `git-pr-target/1`, which also enables URL targets for `git.prs`, `git.prReady`, and `git.prMerge`. Older clients can use GitHub.com locators bound to the associated PR. |
 | `git.prLanded` | `git/1` | Needs a project | |
 | `git.checkout` | `git/1` | Needs a project | |
 | `git.commit` | `git/1` | Needs a project | |

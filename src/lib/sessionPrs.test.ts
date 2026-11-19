@@ -89,16 +89,21 @@ describe("session PR transport", () => {
   });
 });
 
-it.each([false, true])("uses the legacy PR write path only after a matching cloud read (machine: %s)", async (machine) => {
+it.each([
+  { machine: false, enterprise: false },
+  { machine: true, enterprise: false },
+  { machine: true, enterprise: true },
+])("checks legacy routing before PR writes (machine: $machine, Enterprise: $enterprise)", async ({ machine, enterprise }) => {
   const workspaceKey = machine ? "machine:mini:project" : "cloud:org:workspace";
-  const association: PrAssociation = { ...reference(a), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } };
+  const url = enterprise ? a.url.replace("github.com", "github.example.com") : a.url;
+  const association: PrAssociation = { ...reference(a), url, scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } };
   const sameNumber = { ...a, url: "https://github.com/acme/other/pull/1" };
   const call = vi.fn().mockResolvedValueOnce({ prs: [sameNumber] }).mockResolvedValue({ prs: [a] });
   const mutate = vi.fn(async () => ({}));
   const client = { call, mutate, hasCapability: () => false } as unknown as WorkspaceRpcClient;
   const source = cloudGitSource({ workspaceKey, remote: new RemoteGit(client, "."), canWrite: true, author: async () => null });
   const access = source.prAccess!(association);
-  if (machine) {
+  if (enterprise) {
     await expect(access.ready()).rejects.toThrow("Update this machine");
     await expect(access.merge("squash")).rejects.toThrow("Update this machine");
     expect(call).not.toHaveBeenCalled();
