@@ -54,6 +54,8 @@ const fixture = (ports) => `(() => {
   const emit = window.__PW_STUB__.emit;
   const VERSION = ${ports ? '"0.2.33"' : '"0.2.27"'};
   answers.experimental_settings = { nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false };
+  // This desktop's version, which the header compares with the machine's since PRO-352; the stub's generic plugin answer is not a string.
+  answers["plugin:app|version"] = "0.2.33";
   answers.machines_list = [{ machineId: "m-mini", name: "Mac mini", os: { family: "macos", version: "26.1" }, version: VERSION, publicKeyB64: "a2V5",
     directEndpoints: ["ws://192.168.1.20:6768/machine/1"], route: "relayAndNearby", pairedAt: Date.parse("2026-11-10T09:00:00Z"), lastSeenAt: Date.now(), lastRoute: null, relay: null }];
   let view = { state: "direct", route: { kind: "tailscale", endpoint: "ws://100.64.0.7:6768/machine/1" }, since: Date.now(), rttMs: 9 };
@@ -205,7 +207,7 @@ const rowStates = (scope) =>
 
 async function openSession(page) {
   await sidebar(page);
-  const row = page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`);
+  const row = page.locator(`[data-testid="machine-session-row"][title="read-markers · ${TITLE}"]`);
   await row.waitFor();
   await row.click();
   await page.locator('main [data-testid="machine-tab-strip"]').waitFor();

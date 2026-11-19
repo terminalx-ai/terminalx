@@ -91,7 +91,8 @@ try {
           "says where the action lives": (await dialog.getByTestId("link-pr-where").textContent()) === "Session more › Issue and pull request › Link pull request…",
         }, geometry);
       } else {
-        await page.getByRole("button", { name: "Branch", exact: true }).click();
+        // The panel's tab is "Checks" since PRO-394 (design 05.02); it was "Branch".
+        await page.getByRole("button", { name: "Checks", exact: true }).click();
         const section = page.getByTestId("branch-pull-request");
         if (mode === "merged") {
           await section.getByTestId("pr-merged-card").waitFor();

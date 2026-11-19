@@ -319,8 +319,10 @@ try {
 
       // 21.01: the sidebar's sections and the overview with every machine.
       await page.getByRole("button", { name: /^(Overview|Dashboard)/ }).first().click();
-      const table = page.getByRole("button", { name: "Table", exact: true });
-      if (await table.count()) await table.click();
+      // The overview's view is chosen in its Display menu since PRO-385 (02.15).
+      await page.getByRole("button", { name: "Display", exact: true }).click();
+      await page.getByRole("button", { name: "Table", exact: true }).click();
+      await page.keyboard.press("Escape");
       await page.locator("tbody tr[data-session]").nth(6).waitFor();
       await page.waitForTimeout(300);
       await take(page, "21.01-sidebar-overview", "21.01.png");
@@ -328,7 +330,7 @@ try {
       failed += report(`21.01 sidebar and overview (${mode})`, common(m, [/this mac/i, "Mac mini", "dev-server", "tx-review-lab", "terminalx-server", "PR #212", "PR #790"]), { small: m.small });
 
       // 21.08: the Mac mini session, its changes and a terminal on the machine.
-      await page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`).click();
+      await page.locator(`[data-testid="machine-session-row"][title="read-markers · ${TITLE}"]`).click();
       const strip = page.locator('main [data-testid="machine-tab-strip"]');
       await strip.waitFor();
       await page.locator("main [data-chat-scroller]").getByText("The feed now carries a readAt marker").waitFor();
@@ -404,7 +406,8 @@ try {
       const settings = page.getByRole("main", { name: "Settings", exact: true });
       await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Machines", exact: true }).click();
       await settings.getByTestId("machines-settings").waitFor();
-      await page.locator('[data-testid="machine-needs-update"]').waitFor();
+      // The card says its state itself since the designed page (PRO-349, #1029): ci-box's reads Needs update.
+      await settings.locator('[data-testid="paired-machine"][data-machine="m-ci"][data-state="needsUpdate"]').getByText("Needs update", { exact: true }).waitFor();
       await settings.getByTestId("machines-settings").getByText("Offline").first().waitFor();
       await page.waitForTimeout(300);
       await take(page, "21.02-settings-machines", "21.02.png");
