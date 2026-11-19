@@ -7,7 +7,7 @@
     "new-user-warmup": 7,
     "memory-command": 31
   },
-  "userID": "0f3c9d1e6b2a4c58a7e1d2f3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7",
+  "userID": "example-user-id",
   "projects": {
     "/Users/example/code/app": {
       "allowedTools": [],

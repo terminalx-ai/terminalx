@@ -76,6 +76,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "general.promptMap",
   "general.autocorrect",
   "general.useWorktree",
+  "general.copyAgentConfigs",
   "general.browser",
   "general.startupDiagnostics",
   "general.floatingOnTop",

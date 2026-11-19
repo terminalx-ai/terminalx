@@ -568,6 +568,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.useWorktree" },
   }),
   defineSetting({
+    id: "general.copyAgentConfigs", section: "general", title: "Copy agent configs",
+    description: "Compare MCP servers, slash commands and skills between Claude Code and Codex, and copy what's missing.",
+    searchTerms: ["copy", "agent", "configs", "mcp", "servers", "slash", "commands", "prompts", "skills", "claude", "codex", "compare", "sync"], scope: "user",
+    storage: { kind: "file", location: "~/.claude.json, ~/.claude/commands, ~/.claude/skills, ~/.codex/config.toml, ~/.codex/prompts, ~/.codex/skills" },
+  }),
+  defineSetting({
     id: "general.browser", section: "general", title: "Built-in browser",
     description: "Install and inspect the built-in agent-browser and Chromium runtime.",
     searchTerms: ["general", "built-in", "browser"], scope: "user",

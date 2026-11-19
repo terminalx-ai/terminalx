@@ -42,6 +42,7 @@ import type {
   LeftoverRemoval,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
+import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
@@ -2620,6 +2621,13 @@ export const skills = {
   list: (projectPath?: string | null, refresh = false) =>
     invoke<DiscoveredSkill[]>("list_skills", { projectPath: projectPath ?? null, refresh }),
   detail: (dirPath: string) => invoke<SkillDetail>("skill_detail", { dirPath }),
+};
+
+/** Copy MCP servers, slash commands and skills between Claude Code and Codex (PRO-153). */
+export const agentConfigs = {
+  compare: () => invoke<AgentConfigComparison>("agent_configs_compare"),
+  preview: (changes: AgentConfigChange[]) => invoke<AgentConfigPreview>("agent_configs_preview", { changes }),
+  apply: (changes: AgentConfigChange[], token: string) => invoke<AgentConfigWritten[]>("agent_configs_apply", { changes, token }),
 };
 
 // ---- git actions & pull requests
