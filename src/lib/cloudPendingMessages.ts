@@ -126,9 +126,18 @@ export function pendingCloudMessages(
   };
   const sorted = [...entries].filter((entry) => MESSAGE_KINDS.has(entry.kind)).sort((a, b) => a.createdAt - b.createdAt);
   const held = new Set(followUps.map((followUp) => followUp.clientCommandId));
-  // A message not delivered and sent again (Send again, or the same words from the composer) is the later one now.
+  // A message not delivered and sent again (Send again, or the same words from the composer) is the later one now:
+  // one on its way, or delivered. A later one that was not delivered either took nothing over: each keeps its card
+  // and its own reason (the same refused words sent twice are two refusals).
   const sentAgain = (failed: OutboxEntry) =>
-    sorted.some((later) => later.createdAt > failed.createdAt && later.state !== "cancelled" && (later.text ?? "") === (failed.text ?? "") && (later.images ?? 0) === (failed.images ?? 0));
+    sorted.some(
+      (later) =>
+        later.createdAt > failed.createdAt &&
+        later.state !== "cancelled" &&
+        !FAILED_STATES.has(later.state) &&
+        (later.text ?? "") === (failed.text ?? "") &&
+        (later.images ?? 0) === (failed.images ?? 0),
+    );
   const typed: PendingCloudMessage[] = [];
   const later: PendingCloudMessage[] = [];
   for (const entry of sorted) {

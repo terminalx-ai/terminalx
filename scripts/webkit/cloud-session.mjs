@@ -503,6 +503,10 @@ function headerChecks(measured, { collapsed, terminalSwitch = false }) {
     "nothing in the header overlaps": overlapping.length === 0,
     "the header is inside the window": measured.header.right <= measured.viewport + SLACK && measured.right.right <= measured.viewport + SLACK,
   };
+  // Run, Git and Share (#1289) are in a header with room for them, and left out of one without (the side panel and the workspace menu have what they do).
+  const actions = measured.parts.filter((part) => ["cloud-run-menu-unavailable", "cloud-git-button", "cloud-share-button"].includes(part.name));
+  if (collapsed) checks["Run, Git and Share gave way to the title and the chips"] = actions.length === 0;
+  else checks["with room, Run, Git and Share show whole, inside the header"] = actions.length === 3 && actions.every((part) => part.width >= 36 && part.right <= measured.header.right + SLACK);
   if (collapsed) checks["the chips gave way to the title: no chip shows a clipped stub of its label"] = measured.chips.every((chip) => chip.labelShown === 0 || chip.labelShown >= 14);
   else checks["with room, the project and both chips show, with their labels"] = measured.project > 20 && measured.chips.length === 2 && measured.chips.every((chip) => chip.labelShown >= 30);
   return checks;
