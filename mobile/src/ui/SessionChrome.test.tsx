@@ -34,7 +34,10 @@ beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.app = {
     refreshSessions: vi.fn(async () => undefined),
+    connectionStage: "connected",
+    connection: { note: vi.fn() },
     api: {
+      awaitConnected: vi.fn(async () => true),
       tabControls: vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "plan" })),
       models: vi.fn(async () => [{ id: "opus", harness: "claude" }, { id: "gpt-5", harness: "codex" }]),
       continueInNewTab: vi.fn(async () => ({ started: true, tabId: "c", delivered: true, inInput: false })),
