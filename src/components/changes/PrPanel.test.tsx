@@ -592,6 +592,41 @@ it("links a legacy PR by an explicitly entered URL and ignores a pre-upgrade wit
   expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_associations")).toBe(false);
 });
 
+it("links an existing machine branch PR while retained history is unavailable", async () => {
+  const workspaceKey = "machine:mini:project";
+  const branchPr = { ...followup, head: "feature", url: `https://github.com/acme/widgets/pull/${followup.number}` };
+  const history = { number: 97, url: "https://github.com/acme/old/pull/97", head: "previous", repo: null, linked: false };
+  let linked = false;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(branchPr.head, 3);
+    if (method === "git.prs") return { prs: [branchPr] };
+    if (method === "git.prAssociations") return {
+      associations: linked ? [history, { ...branchPr, repo: "app", linked: true }] : [history],
+      branchPrLinks: true,
+    };
+    if (method === "git.prConversation") return { ...branchPr, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async () => {
+    linked = true;
+    return { sessionAssociated: true };
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null, sessionCheckout: true });
+  render(<PrPanel source={source} sessionId={`${workspaceKey}:author`} branch={branchPr.head} active busy={false} inline />);
+
+  expect(await screen.findByText("Could not refresh this pull request.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Unlink #97" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Link existing branch PR" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Pull request URL" }), { target: { value: branchPr.url } });
+  fireEvent.click(screen.getByRole("button", { name: "Link pull request" }));
+
+  expect(await screen.findByText(branchPr.title)).toBeTruthy();
+  expect(screen.getByText("Could not refresh this pull request.")).toBeTruthy();
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prLinkBranch", {
+    sessionId: "author", repo: "app", url: branchPr.url, branch: branchPr.head,
+  });
+});
+
 it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-created %s merge", async () => {
   const sessionId = "cloud:org:workspace:author";
   let saved: unknown[] = [];

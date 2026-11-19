@@ -452,7 +452,8 @@ export function PrPanel({
   const ownWork = (row: SessionPr) => row.current || !row.association?.linked;
   const open = visibleRows.filter((row) => ownWork(row) && row.pr?.state === "OPEN");
   const currentBranch = status?.branch ?? branch;
-  const fresh = loadedSelection === selection && !loading && (!error || errorFrom === "action") && !visibleRows.some((row) => row.error);
+  const branchFresh = loadedSelection === selection && !loading && (!error || errorFrom === "action");
+  const fresh = branchFresh && !visibleRows.some((row) => row.error);
   const currentOpen = visibleRows.some((row) => row.current && row.pr?.state === "OPEN");
   const workLanded = status?.aheadOfBase === 0 || !!(landed?.safe && landed.head === status?.head && landed.branch === currentBranch);
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
@@ -462,7 +463,8 @@ export function PrPanel({
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
   const linkBranchPr = source.linkBranchPr;
-  const canLinkBranchPr = branchPrLinks && !selectedPr && fresh && !currentOpen && sessionId && currentBranch && status?.defaultBranch && currentBranch !== status.defaultBranch && linkBranchPr;
+  // The runtime verifies the submitted URL against the current branch.
+  const canLinkBranchPr = branchPrLinks && !selectedPr && branchFresh && !currentOpen && sessionId && currentBranch && status?.defaultBranch && currentBranch !== status.defaultBranch && linkBranchPr;
   const disposition = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
     ? checkedWorkspace.disposition : null;
