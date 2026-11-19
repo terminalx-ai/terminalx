@@ -4,7 +4,8 @@ import { OrganizationPresenceCount } from "./WorkspaceFollowingSection";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeftRight, Check, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Plus, RefreshCw, Trash2, X } from "@/icons";
+import { ArrowLeftRight, Check, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Plus, RefreshCw, Settings, Trash2, X } from "@/icons";
+import { openOrganizationSettings } from "@/lib/settingsLinks";
 import { confirmInApp } from "@/lib/confirm";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -252,6 +253,12 @@ function OrganizationSection({
             </DropdownMenuContent>
           </DropdownMenu>
         )}
+        {/* Every member: the settings page itself limits what each role may change (#1286). */}
+        <WithTooltip label={`Settings for ${name}`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`Settings for ${name}`} onClick={() => openOrganizationSettings(org.id)} data-testid="cloud-org-settings">
+            <Settings />
+          </Button>
+        </WithTooltip>
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
             <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${name}`}>
@@ -281,6 +288,9 @@ function OrganizationSection({
                 <ArrowLeftRight /> Switch to show cloud sessions
               </DropdownMenuItem>
             )}
+            <DropdownMenuItem onSelect={() => openOrganizationSettings(org.id)} data-testid="cloud-org-settings-item">
+              <Settings /> Organization settings…
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             {prefs.organizationDisplay === "one" ? (
               // One organization at a time: which one, chosen here; nothing changes on the server and nothing wakes.
