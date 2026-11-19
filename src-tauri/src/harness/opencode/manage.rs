@@ -223,6 +223,9 @@ struct Config {
     exists: bool,
     value: Map<String, Value>,
     problem: Option<String>,
+    /// `value` is what the file says (or it is missing). False when it couldn't be read
+    /// or parsed: then `value` is empty, not the truth, and nothing may be decided from it.
+    known: bool,
 }
 
 fn shown(path: &Path) -> String {
@@ -236,18 +239,18 @@ fn read_config(paths: &Paths) -> Config {
     let path = paths.config_file();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Config { path, exists: false, value: Map::new(), problem: None },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Config { path, exists: false, value: Map::new(), problem: None, known: true },
         // Not "missing": its gateway would be ignored and the file replaced.
-        Err(error) => { let problem = Some(format!("Couldn’t read {}: {error}. TerminalX won’t change it until it can.", shown(&path))); return Config { path, exists: true, value: Map::new(), problem }; }
+        Err(error) => { let problem = Some(format!("Couldn’t read {}: {error}. TerminalX won’t change it until it can.", shown(&path))); return Config { path, exists: true, value: Map::new(), problem, known: false }; }
     };
     let (plain, commented) = strip_jsonc(&text);
     match serde_json::from_str::<Value>(if plain.trim().is_empty() { "{}" } else { &plain }) {
         Ok(Value::Object(value)) => {
             let problem = commented.then(|| format!("{} has comments, which TerminalX would lose by rewriting it. Make this change in the file, or remove its comments first.", shown(&path)));
-            Config { path, exists: true, value, problem }
+            Config { path, exists: true, value, problem, known: true }
         }
-        Ok(_) => Config { path: path.clone(), exists: true, value: Map::new(), problem: Some(format!("{} is not a JSON object. Fix it in an editor first.", shown(&path))) },
-        Err(error) => Config { path: path.clone(), exists: true, value: Map::new(), problem: Some(format!("{} can’t be read: {error}. Fix it in an editor first.", shown(&path))) },
+        Ok(_) => Config { path: path.clone(), exists: true, value: Map::new(), problem: Some(format!("{} is not a JSON object. Fix it in an editor first.", shown(&path))), known: false },
+        Err(error) => Config { path: path.clone(), exists: true, value: Map::new(), problem: Some(format!("{} can’t be read: {error}. Fix it in an editor first.", shown(&path))), known: false },
     }
 }
 
@@ -408,8 +411,14 @@ fn model_list(entry: Option<&Value>) -> Option<Vec<String>> {
 /// an address) and unknown to the catalogue: Ollama, or one made by hand. It
 /// is listed without a key, and Disconnect removes it. A catalogue provider's
 /// address is a gateway instead, and stays.
+///
+/// Without the catalogue (`catalog` empty) only a server with a name counts:
+/// OpenCode's docs give a hand-made provider one, and TerminalX never writes
+/// one for a gateway, so a gateway whose keys are gone doesn't look connected.
 fn own_server(id: &str, entry: &Value, catalog: &Map<String, Value>) -> bool {
-    entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some() && (id == OLLAMA || !catalog.contains_key(id))
+    let server = entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some();
+    let named = entry.get("name").and_then(Value::as_str).is_some_and(|name| !name.trim().is_empty());
+    server && (id == OLLAMA || if catalog.is_empty() { named } else { !catalog.contains_key(id) })
 }
 
 fn connected(config: &Map<String, Value>, auth: &Map<String, Value>, catalog: &Map<String, Value>) -> Vec<Connected> {
@@ -593,26 +602,35 @@ pub fn connect_in(paths: &Paths, id: &str, key: &str, base_url: Option<&str>) ->
 /// address set for a catalogue provider stay, for when it is connected again.
 pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
     let config = read_config(paths);
+    // A config that couldn't be read may hold this provider's key; nothing is decided from its empty stand-in.
+    if !config.known { return Err(config.problem.unwrap_or_default()); }
+    // Likewise a key file that can't be read may hold it: Disconnect must not say it
+    // is gone while OpenCode still has it.
+    let mut auth = read_auth(paths)?;
     let entry = config.value.get("provider").and_then(|providers| providers.get(id)).cloned().unwrap_or(Value::Null);
     let has_key = entry.pointer("/options/apiKey").is_some();
     let maybe_server = entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some();
     // The providers the list was built from: OpenCode's copy or the one downloaded this run, never a new download.
-    let remove_server = maybe_server && match catalog_value(paths, false) {
-        Ok(catalog) => own_server(id, &entry, &catalog),
+    let catalogue = catalog_value(paths, false);
+    let remove_server = maybe_server && match &catalogue {
+        Ok(catalog) => own_server(id, &entry, catalog),
         // Without the catalogue a hand-made server can't be told from a gateway, which must
         // stay: the keys still go, the address and SDK are left for a later Disconnect.
         Err(_) => id == OLLAMA,
     };
+    let in_auth = auth.remove(id).is_some();
     let edits_config = has_key || remove_server;
-    // The config is checked first so a file that can't be written leaves auth.json alone too.
-    if edits_config {
-        if let Some(problem) = config.problem { return Err(problem); }
+    if !in_auth && !edits_config {
+        if let (Err(problem), true) = (&catalogue, maybe_server) {
+            return Err(format!("{problem} Without it TerminalX can’t tell whether {id}’s address is a server set up by hand or a gateway to keep, so nothing was removed. Try again once OpenCode has its provider list, or remove it from {} yourself.", shown(&config.path)));
+        }
+        return Ok(overview_in(paths, false));
     }
-    // Read before anything changes: a key file that can't be read may hold this
-    // provider's key, and Disconnect must not say it is gone while OpenCode still has it.
-    let mut auth = read_auth(paths)?;
-    if auth.remove(id).is_some() { write_json(&paths.auth_file(), &Value::Object(auth), true)?; }
     if edits_config {
+        // Both files change or neither: the config first (it may refuse, say for comments),
+        // then auth.json, with the config's earlier text put back if that write fails.
+        if let Some(problem) = config.problem { return Err(problem); }
+        let before = std::fs::read(&config.path).map_err(|error| format!("Couldn’t read {}: {error}", shown(&config.path)))?;
         edit_config(paths, |config| {
             let entry = provider_entry(config, id)?;
             if remove_server { entry.remove("npm"); }
@@ -622,6 +640,16 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
             }
             Ok(())
         })?;
+        if in_auth {
+            if let Err(problem) = write_json(&paths.auth_file(), &Value::Object(auth), true) {
+                return Err(match crate::store::write_atomic(&config.path, &before) {
+                    Ok(()) => format!("{problem} Nothing was disconnected."),
+                    Err(error) => format!("{problem} The config file changed already and couldn’t be put back ({error:#}); connect {id} again to restore it."),
+                });
+            }
+        }
+    } else {
+        write_json(&paths.auth_file(), &Value::Object(auth), true)?;
     }
     Ok(overview_in(paths, false))
 }
@@ -952,13 +980,60 @@ mod tests {
             "options": {"baseURL": "https://gateway.example.internal/v1", "apiKey": "gw-0123456789abcdef"}}}}).to_string()).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         std::fs::write(paths.auth_file(), json!({"openrouter": {"type": "api", "key": "sk-or-0123456789abcdef"}, "anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1}}).to_string()).unwrap();
-        disconnect_in(&paths, "openrouter").unwrap();
+        let after = disconnect_in(&paths, "openrouter").unwrap();
+        assert!(!after.connected.iter().any(|provider| provider.id == "openrouter"), "a gateway without keys doesn't look connected");
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
         assert!(auth.get("openrouter").is_none() && auth.get("anthropic").is_some());
         let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
         let kept = &config["provider"]["openrouter"];
         assert!(kept["options"].get("apiKey").is_none());
         assert_eq!((kept["npm"].as_str(), kept["options"]["baseURL"].as_str()), (Some("@ai-sdk/openai-compatible"), Some("https://gateway.example.internal/v1")), "it may be a gateway, so it stays");
+    }
+
+    #[test]
+    fn disconnect_without_the_catalogue_says_why_when_it_can_remove_nothing() {
+        let (_dir, paths) = paths();
+        std::fs::remove_file(paths.catalog_file()).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let config = json!({"provider": {"lmstudio": {"npm": "@ai-sdk/openai-compatible", "name": "LM Studio", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "models": {"qwen3": {}}}}}).to_string();
+        std::fs::write(paths.config_file(), &config).unwrap();
+        assert!(overview_in(&paths, false).connected.iter().any(|provider| provider.id == "lmstudio"), "a named server is listed without the catalogue");
+        let problem = disconnect_in(&paths, "lmstudio").unwrap_err();
+        assert!(problem.contains("nothing was removed"), "{problem}");
+        assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disconnect_puts_the_config_back_when_the_key_file_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let config = json!({"provider": {"openrouter": {"options": {"apiKey": "sk-or-0123456789abcdef"}}}}).to_string();
+        std::fs::write(paths.config_file(), &config).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let auth = json!({"openrouter": {"type": "api", "key": "sk-or-fedcba9876543210"}}).to_string();
+        std::fs::write(paths.auth_file(), &auth).unwrap();
+        std::fs::set_permissions(&paths.data_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = disconnect_in(&paths, "openrouter");
+        std::fs::set_permissions(&paths.data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.unwrap_err().contains("Nothing was disconnected"));
+        assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config, "the config key is back");
+        assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), auth);
+    }
+
+    #[test]
+    fn disconnect_refuses_while_the_config_cannot_be_read() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        // Broken JSON that still holds a key, which would reconnect it once repaired.
+        let config = "{\"provider\": {\"openrouter\": {\"options\": {\"apiKey\": \"sk-or-0123456789abcdef\"}}}";
+        std::fs::write(paths.config_file(), config).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let auth = json!({"openrouter": {"type": "api", "key": "sk-or-fedcba9876543210"}}).to_string();
+        std::fs::write(paths.auth_file(), &auth).unwrap();
+        assert!(disconnect_in(&paths, "openrouter").unwrap_err().contains("can’t be read"));
+        assert_eq!((std::fs::read_to_string(paths.config_file()).unwrap(), std::fs::read_to_string(paths.auth_file()).unwrap()), (config.to_owned(), auth), "nothing changed");
     }
 
     #[test]
