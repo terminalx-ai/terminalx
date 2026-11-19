@@ -115,6 +115,10 @@ ring = "0.17"
 subtle = "2.6"
 zeroize = "1.8"
 toml = "0.9"
+# Edits ~/.codex/config.toml in place, comments and all (PRO-153); already in the tree.
+toml_edit = "0.25"
+# Keeps ~/.claude.json's key order when a server is added (PRO-153); already in the tree.
+indexmap = { version = "2", features = ["serde"] }
 url = "2"
 # The phone pairing QR `terminalx-serve pair --phone` prints (PRO-359); no image support.
 qrcode = { version = "0.14.1", default-features = false }

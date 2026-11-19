@@ -5,6 +5,8 @@ import type { OrganizationSummary } from "@/lib/api";
 
 const consoleOpen = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@/lib/api", () => ({ api: { organizationConsoleOpen: consoleOpen } }));
+const copyText = vi.hoisted(() => vi.fn(async (_text: string) => {}));
+vi.mock("@/lib/clipboard", () => ({ copyText }));
 
 const organization: OrganizationSummary = { id: "org-test", name: "Test organization", role: "owner", isPersonal: false };
 const deferred = () => {
@@ -42,6 +44,33 @@ describe("OrganizationDelete", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     await act(async () => sent.resolve());
     expect(onDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the name selectable, copies it in one click, and a pasted copy with stray spaces enables deletion of the exact name", async () => {
+    const remove = vi.fn(async () => {});
+    render(<OrganizationDelete organization={organization} contextRevision="r1" remove={remove} onDeleted={vi.fn()} />);
+    open();
+    const name = screen.getByTestId("organization-delete-name");
+    expect(name.textContent).toBe(organization.name);
+    expect(name.className).toContain("select-text");
+    fireEvent.click(screen.getByRole("button", { name: "Copy name" }));
+    await waitFor(() => expect(copyText).toHaveBeenCalledExactlyOnceWith(organization.name));
+    expect(await screen.findByText("Copied")).toBeTruthy();
+    typeName(`  ${organization.name} `);
+    expect(confirm().disabled).toBe(false);
+    fireEvent.click(confirm());
+    // The server compares exactly: the organization's own name is sent, never the typed text.
+    expect(remove).toHaveBeenCalledExactlyOnceWith({ organizationId: "org-test", contextRevision: "r1", confirmationName: "Test organization" });
+  });
+
+  it("explains a failed copy without blocking typing", async () => {
+    copyText.mockRejectedValueOnce(new Error("denied"));
+    render(<OrganizationDelete organization={organization} contextRevision="r1" remove={vi.fn()} onDeleted={vi.fn()} />);
+    open();
+    fireEvent.click(screen.getByRole("button", { name: "Copy name" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Could not copy the name");
+    typeName();
+    expect(confirm().disabled).toBe(false);
   });
 
   it("cancel spends the typed name without sending", () => {
@@ -88,7 +117,7 @@ describe("OrganizationDelete", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).toBeNull();
     open();
-    expect(screen.getByText("Type Beta to confirm deletion")).toBeTruthy();
+    expect(screen.getByTestId("organization-delete-name").textContent).toBe("Beta");
   });
 
   it("revoking the owner role removes the confirmation", () => {

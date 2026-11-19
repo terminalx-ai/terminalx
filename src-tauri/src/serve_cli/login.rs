@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 
-use crate::machine_account::{self, Api, Refused};
+use crate::machine_account::{self, Api, Refused, SessionEnded};
 
 const LOGIN_USAGE: &str = "\
 Usage: terminalx-serve login [--data-dir <dir>]
@@ -20,10 +20,14 @@ the address it prints, on any device where you are signed in, and waits until
 you approve it there.";
 
 const LOGOUT_USAGE: &str = "\
-Usage: terminalx-serve logout [--data-dir <dir>]
+Usage: terminalx-serve logout [--forget-ended] [--data-dir <dir>]
 
 Sign this machine out of your TerminalX account. Computers paired by code
-keep working over this network and Tailscale.";
+keep working over this network and Tailscale.
+
+  --forget-ended   When the account service no longer accepts this machine's
+                   saved session (it expired or was revoked), delete it here
+                   anyway. The machine stays listed under that account.";
 
 /// Run `terminalx-serve login` with the arguments after its name.
 pub fn run(args: &[String]) -> i32 {
@@ -32,10 +36,14 @@ pub fn run(args: &[String]) -> i32 {
 
 /// Run `terminalx-serve logout` with the arguments after its name.
 pub fn run_logout(args: &[String]) -> i32 {
-    command("logout", LOGOUT_USAGE, args, logout)
+    let forget_ended = args.iter().any(|arg| arg == FORGET_ENDED);
+    let rest: Vec<String> = args.iter().filter(|arg| *arg != FORGET_ENDED).cloned().collect();
+    command("logout", LOGOUT_USAGE, &rest, |data| logout(data, forget_ended))
 }
 
-fn command(name: &str, usage: &str, args: &[String], act: fn(&Path) -> Result<i32>) -> i32 {
+const FORGET_ENDED: &str = "--forget-ended";
+
+fn command(name: &str, usage: &str, args: &[String], act: impl Fn(&Path) -> Result<i32>) -> i32 {
     let result = super::take_data_dir(args).and_then(|(flag, rest)| match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => act(&super::resolve_data_dir(flag.as_deref())?),
         ["-h" | "--help" | "help"] => {
@@ -59,6 +67,10 @@ fn login(data: &Path) -> Result<i32> {
         println!("This machine is already signed in as {}.", session.who());
         println!("To use another account, run `terminalx-serve logout` first.");
         return Ok(0);
+    }
+    if let Some(who) = machine_account::directory::left_bound_to(data)? {
+        println!("{}", still_listed(&who));
+        println!();
     }
     let api = Api::new(&machine_account::api_base_url());
     let code = api.device_code(&machine_label(), platform())?;
@@ -87,17 +99,46 @@ fn login(data: &Path) -> Result<i32> {
     Ok(0)
 }
 
-fn logout(data: &Path) -> Result<i32> {
+/// What stays true after a sign-out the account service never saw.
+fn still_listed(who: &str) -> String {
+    format!(
+        "This machine is still listed under {who}: that sign-out could not remove it from the account. \
+         Signing in as that account takes it over again; another account can be refused until it is removed there."
+    )
+}
+
+fn logout(data: &Path, forget_ended: bool) -> Result<i32> {
     let api = Api::new(&machine_account::api_base_url());
-    let Some(session) = machine_account::directory::sign_out(&api, data)
-        .map_err(|error| anyhow!("Could not finish signing out ({error:#}). Run `terminalx-serve logout` to retry."))? else {
-        println!("This machine is not signed in.");
-        return Ok(0);
+    let signed_out = match machine_account::directory::sign_out(&api, data, forget_ended) {
+        Ok(Some(signed_out)) => signed_out,
+        Ok(None) => {
+            println!("This machine is not signed in.");
+            return Ok(0);
+        }
+        Err(error) if error.is::<SessionEnded>() => {
+            eprintln!(
+                "terminalx-serve logout: the account service no longer accepts this machine's saved session \
+                 (it expired or was revoked), so this machine cannot be removed from the account and retrying will not help."
+            );
+            eprintln!(
+                "Run `terminalx-serve logout {FORGET_ENDED}` to delete the saved session anyway. \
+                 The machine then stays listed under that account."
+            );
+            return Ok(1);
+        }
+        Err(error) => return Err(anyhow!("Could not finish signing out ({error:#}). Run `terminalx-serve logout` to retry.")),
     };
+    let who = signed_out.session.who();
+    if signed_out.left_bound {
+        // The service already refused this session: there is nothing to tell it.
+        println!("Deleted the saved session for {who} from this machine.");
+        eprintln!("warning: the account service was not told. {}", still_listed(&who));
+        return Ok(0);
+    }
     // Forgotten here whatever the service says: a machine that cannot reach
     // it must still be able to sign out. The session then lapses there.
-    let told = api.logout(&session);
-    println!("Signed out {} on this machine.", session.who());
+    let told = api.logout(&signed_out.session);
+    println!("Signed out {who} on this machine.");
     if let Err(error) = told {
         eprintln!("warning: the account service was not told ({error:#}); the session ends there when it expires.");
     }

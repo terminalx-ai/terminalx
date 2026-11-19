@@ -342,13 +342,13 @@ impl PairingManager {
                     _ => None,
                 };
                 let context = PairingConnectionContext::Direct { direct_auth_id: Uuid::new_v4().simple().to_string(), forwarded_id };
-                self.handle_e2ee_socket(socket, context, None, None).await
+                self.handle_e2ee_socket(socket, context, None, None).await.map(drop)
             }
             // The window opens the relay data leg itself.
             Forwarded::Relay { cell_url, relay_host_id, generation, connection } => {
                 let connection = super::relay::ConnectionOpen::forwarded(connection)?;
                 let keypair = self.host_key(false)?;
-                wire::with_relay_route(stream, self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection))
+                wire::with_relay_route(stream, async { self.handle_relay_connection(cell_url, relay_host_id, generation, keypair, connection).await.map(drop) })
                     .await.unwrap_or(Ok(()))
             }
         }

@@ -152,8 +152,10 @@ describe("settings in the command palette", () => {
     const results = screen.getAllByRole("option");
     const pages = within(screen.getByRole("group", { name: "Settings pages" })).getAllByRole("option");
     // Orchestrator and Local VMs are behind their Experimental switches, which are off.
-    expect(pages).toHaveLength(16);
+    expect(pages).toHaveLength(17);
     expect(pages.map((row) => row.id)).toContain("palette:settings-page:machines");
+    // PRO-157: Advanced (design 09.29), with the agents' executables.
+    expect(pages.map((row) => row.id)).toContain("palette:settings-page:advanced");
     expect(results).toHaveLength(pages.length + 1);
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:orchestrator");
     expect(results.map((row) => row.id)).not.toContain("palette:settings-page:localVms");

@@ -218,7 +218,10 @@ describe("a workspace that stops and comes back", () => {
   const flush = async (ms = 0) => {
     await vi.advanceTimersByTimeAsync(ms);
   };
-  const wakes = () => mocks.workspaceConnection.mock.calls.filter((call) => call[1] === "wake").length + attached.reduce((sum, connection) => sum + connection.activate.mock.calls.length, 0);
+  const activations = (connection: ReturnType<typeof fakeConnection>, level: string) => (connection.activate.mock.calls as unknown[][]).filter((call) => call[0] === level).length;
+  const wakes = () => mocks.workspaceConnection.mock.calls.filter((call) => call[1] === "wake").length + attached.reduce((sum, connection) => sum + activations(connection, "wake"), 0);
+  /** The parked transport cannot be told to open again: the manager attaches anew instead. */
+  const refuseFollow = (connection: ReturnType<typeof fakeConnection>) => connection.activate.mockRejectedValue(new Error("cloud_remote_not_found"));
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -245,15 +248,51 @@ describe("a workspace that stops and comes back", () => {
     return lease;
   }
 
-  it("attaches a held connection fresh with connect when a newer list says it runs again, and never wakes", async () => {
+  // #1288: tearing the parked connection down blanked every view of it and
+  // ran a whole new attach; its own supervisor opens again on the same one.
+  it("tells a held parked connection to open again with connect when a newer list says it runs, without a teardown, and never wakes", async () => {
     const undo = vi.fn();
     const seen = vi.fn(() => undo);
     const stop = manager.onCloudConnected(seen);
     const lease = await heldThenStopped();
     expect(lease.state()).toEqual({ state: "suspended" });
-    expect(attached).toHaveLength(1);
+    mocks.detachCloudTerminals.mockClear();
 
     // Someone else woke it: a list asked for after the transport parked says it runs.
+    now += 5_000;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush();
+    expect(attached).toHaveLength(1);
+    expect(attached[0]!.close).not.toHaveBeenCalled();
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+    expect(attached[0]!.activate).toHaveBeenCalledWith("connect");
+    expect(mocks.detachCloudTerminals).not.toHaveBeenCalled();
+    expect(lease.current()).toBe(attached[0]);
+    expect(manager.cloudConnectionInfo(key)).toMatchObject({ reattaching: false, refs: 1, woke: false });
+    // Later lists while it opens ask nothing more of it.
+    attached[0]!.emit({ state: "opening" });
+    now += 10;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush(60_000);
+    expect(attached[0]!.activate).toHaveBeenCalledTimes(1);
+
+    attached[0]!.emit({ ...connected, runtimeGeneration: 2 });
+    expect(lease.state()).toMatchObject({ state: "connected", runtimeGeneration: 2 });
+    expect(manager.cloudConnectionInfo(key)).toMatchObject({ state: "connected", reattaching: false, connects: 2 });
+    expect(manager.connectedCloudClient(key)).toBe(attached[0]!.client);
+    expect(seen).toHaveBeenCalledTimes(2);
+    expect(wakes()).toBe(0);
+    lease.release();
+    stop();
+  });
+
+  it("attaches a held connection fresh with connect when its transport cannot open again, and never wakes", async () => {
+    const undo = vi.fn();
+    const seen = vi.fn(() => undo);
+    const stop = manager.onCloudConnected(seen);
+    const lease = await heldThenStopped();
+    refuseFollow(attached[0]!);
+
     now += 5_000;
     manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
     await flush();
@@ -399,6 +438,7 @@ describe("a workspace that stops and comes back", () => {
 
   it("tries an attach that is refused again, backing off, and connects once it goes through", async () => {
     const lease = await heldThenStopped();
+    refuseFollow(attached[0]!);
     let refuse = 2;
     mocks.workspaceConnection.mockImplementation(async (connectionTarget: { workspaceId: string }) => {
       if (refuse-- > 0) throw new Error("cloud_workspace_network_unavailable");
@@ -412,6 +452,7 @@ describe("a workspace that stops and comes back", () => {
     await flush();
     // The first try was refused: the lease has no connection, and never reads connected.
     expect(attempts()).toBe(2);
+    expect(attached[0]!.close).toHaveBeenCalledTimes(1);
     expect(lease.current()).toBeNull();
     expect(lease.state()).toEqual({ state: "idle" });
     expect(manager.cloudConnectionInfo(key)).toMatchObject({ reattaching: true, refs: 1 });
@@ -438,6 +479,7 @@ describe("a workspace that stops and comes back", () => {
 
   it("a wait follows the lease to the new connection, and ends at once when it is closed for good", async () => {
     const lease = await heldThenStopped();
+    refuseFollow(attached[0]!);
     const waiting = manager.waitCloudConnected(lease, 60_000);
     now += 10;
     manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
@@ -470,31 +512,53 @@ describe("a workspace that stops and comes back", () => {
     lease.release();
   });
 
-  it("backs off while an attach keeps ending stopped, and only tries again on a newer list", async () => {
+  it("backs off while an open keeps ending stopped, and only tries again on a newer list", async () => {
     const lease = await heldThenStopped();
+    const follows = () => activations(attached[0]!, "connect");
     const relist = () => {
       now += 10;
       manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
     };
     relist();
     await flush();
-    expect(attached).toHaveLength(2);
-    // The new attach finds it stopped as well.
-    attached[1]!.emit({ state: "suspended" });
+    expect(follows()).toBe(1);
+    // Its open finds it stopped as well.
+    attached[0]!.emit({ state: "opening" });
+    now += 10;
+    attached[0]!.emit({ state: "suspended" });
     await flush(manager.REATTACH_MAX_MS);
-    expect(attached).toHaveLength(2);
+    expect(follows()).toBe(1);
     relist();
     await flush(manager.REATTACH_FIRST_MS - 100);
-    expect(attached).toHaveLength(2);
+    expect(follows()).toBe(1);
     await flush(200);
-    expect(attached).toHaveLength(3);
-    attached[2]!.emit({ state: "suspended" });
+    expect(follows()).toBe(2);
+    attached[0]!.emit({ state: "opening" });
+    now += 10;
+    attached[0]!.emit({ state: "suspended" });
     relist();
     await flush(manager.REATTACH_FIRST_MS * 2 - 100);
-    expect(attached).toHaveLength(3);
+    expect(follows()).toBe(2);
     await flush(200);
-    expect(attached).toHaveLength(4);
+    expect(follows()).toBe(3);
+    expect(attached).toHaveLength(1);
     expect(wakes()).toBe(0);
+    lease.release();
+  });
+
+  // #1288: a list that says the machine is coming up (provisioned or resumed) is not a stop.
+  it("never probes a connection made while the list said the machine was still coming up", async () => {
+    const lease = await manager.retainCloudConnection(target("w1"));
+    attached[0]!.emit(connected);
+    now += 100;
+    // The list lags the runtime: still provisioning, though the runtime already answered.
+    manager.noteCloudWorkspaceListed(target("w1"), { running: false, starting: true, at: now });
+    now += 100;
+    manager.noteCloudWorkspaceListed(target("w1"), { running: true, at: now });
+    await flush(manager.PROBE_WITHIN_MS * 2);
+    expect(attached[0]!.client.call).not.toHaveBeenCalled();
+    expect(attached).toHaveLength(1);
+    expect(lease.state().state).toBe("connected");
     lease.release();
   });
 

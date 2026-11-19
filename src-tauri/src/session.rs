@@ -484,6 +484,44 @@ const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(12
 /// into the terminal.
 const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a queued prompt whose wait ran out is still known by its words
+/// (#1284). A CLI that takes it after all, behind a turn the tab saw end
+/// early or a queue it was slow to deliver, is answering that message.
+const LAPSED_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How many lapsed queued prompts are kept to tell a late take by.
+const LAPSED_ECHOES: usize = 8;
+
+/// Queued prompts whose echo was given up on (#1284), still owed one. The
+/// chat drew each as a Queued card that only the CLI's record of it clears;
+/// were that record taken for a prompt typed into the terminal, the card
+/// would wait for good beside a second bubble of the same words. Matched
+/// only once nothing still awaited does, and only by the whole of its words:
+/// the same words typed in the terminal then end the card, which is the
+/// message they repeat.
+#[derive(Default)]
+struct LapsedEchoes(std::collections::VecDeque<(Instant, ComposerEcho)>);
+
+impl LapsedEchoes {
+    fn keep(&mut self, echoes: Vec<ComposerEcho>, now: Instant) {
+        for echo in echoes {
+            self.0.push_back((now, echo));
+        }
+        while self.0.len() > LAPSED_ECHOES {
+            self.0.pop_front();
+        }
+    }
+
+    /// The lapsed prompt `payload` records, taken out: the CLI has it.
+    fn take(&mut self, payload: &Payload, now: Instant) -> Option<Echoed> {
+        let Payload::UserMessage { text, .. } = payload else { return None };
+        self.0.retain(|(lapsed_at, _)| now.saturating_duration_since(*lapsed_at) <= LAPSED_ECHO_TTL);
+        let at = self.0.iter().position(|(_, echo)| echo.matches(text))?;
+        let (_, mut echo) = self.0.remove(at).expect("the matched echo exists");
+        echo.confirm_delivery();
+        Some(echo.echoed())
+    }
+}
+
 /// How long a CLI is given to answer a `/model` or `/effort` the app typed
 /// while it was idle. It answers within a second when it is going to.
 const SETTINGS_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
@@ -836,7 +874,7 @@ fn overtake_composer_prompts(pending: &mut std::collections::VecDeque<ComposerEc
 /// Returns the events of the reader's own queued prompts among them: typed
 /// and submitted behind a turn, and still not taken once that turn was over.
 /// Those may be sitting in the CLI's input, and the reader is owed a word.
-fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<u64> {
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<ComposerEcho> {
     if turn_open {
         for prompt in pending.iter_mut() {
             prompt.sent_at = now;
@@ -844,13 +882,15 @@ fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>
     }
     let before = pending.len();
     let mut unsent = Vec::new();
-    pending.retain(|prompt| {
-        let expired = prompt.expired(now);
-        if expired && prompt.queued && prompt.submitted && !prompt.command {
-            unsent.push(prompt.seq);
+    let mut kept = std::collections::VecDeque::with_capacity(pending.len());
+    for prompt in pending.drain(..) {
+        if !prompt.expired(now) {
+            kept.push_back(prompt);
+        } else if prompt.queued && prompt.submitted && !prompt.command {
+            unsent.push(prompt);
         }
-        !expired
-    });
+    }
+    *pending = kept;
     if pending.len() < before {
         log::warn!("{} composer prompt(s) expired without an echo", before - pending.len());
     }
@@ -916,6 +956,8 @@ pub struct CliTab {
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     echoed: std::collections::VecDeque<ComposerEcho>,
+    /// Queued prompts `echoed` gave up on, which the CLI may take yet (#1284).
+    lapsed: LapsedEchoes,
     /// Composer identities still awaiting acceptance from the provider's queue.
     held: Vec<u64>,
     /// The prompts the transcript has recorded, to tell one that took the
@@ -1062,6 +1104,17 @@ impl FirstStarts {
 }
 
 impl CliTab {
+    /// Forget composer prompts that waited too long for their echo
+    /// (`expire_composer_echoes`), keeping the queued ones among them for a
+    /// late take (#1284). The `seq`s of those, which the reader is owed a
+    /// word about.
+    fn expire_echoes(&mut self, turn_open: bool, now: Instant) -> Vec<u64> {
+        let unsent = expire_composer_echoes(&mut self.echoed, turn_open, now);
+        let seqs = unsent.iter().map(|echo| echo.seq).collect();
+        self.lapsed.keep(unsent, now);
+        seqs
+    }
+
     /// Whether this CLI went before it ever got going: within moments of the
     /// app starting it, and before it said it was up. What it printed then
     /// is why it went, unlike the last screen of a CLI the reader quit
@@ -1978,7 +2031,7 @@ impl SessionManager {
             // A prompt queued behind a turn that is over, and still not taken.
             if !rt.turn_open {
                 let unsent = match &mut rt.engine {
-                    Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, false, now),
+                    Engine::Cli(p) => p.expire_echoes(false, now),
                     _ => Vec::new(),
                 };
                 if self.queued_prompts_unsent(&mut rt, &unsent) {
@@ -5996,6 +6049,7 @@ impl SessionManager {
             recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
+            lapsed: Default::default(),
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,
@@ -6526,7 +6580,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let unsent = match &mut rt.engine {
-            Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, turn_open, Instant::now()),
+            Engine::Cli(p) => p.expire_echoes(turn_open, Instant::now()),
             _ => Vec::new(),
         };
         self.queued_prompts_unsent(&mut rt, &unsent);
@@ -6618,6 +6672,8 @@ impl SessionManager {
                         let joined = consume_composer_echoes_within(&mut p.echoed, &payload);
                         if joined.is_empty() { consume_awaited_echo_changed(&mut p.echoed, p.awaiting_delivery, &payload).into_iter().collect() } else { joined }
                     };
+                    // A queued prompt taken after its wait ran out (#1284).
+                    let echoed = if echoed.is_empty() { p.lapsed.take(&payload, Instant::now()).into_iter().collect() } else { echoed };
                     if !echoed.is_empty() {
                         forget_taken(p);
                     }
@@ -6987,7 +7043,7 @@ impl SessionManager {
     fn await_composer_echo(&self, rt: &mut TabRuntime, echo: ComposerEcho, agent_text: &str) {
         let (queued, seq) = (echo.queued, echo.seq);
         if let Engine::Cli(p) = &mut rt.engine {
-            expire_composer_echoes(&mut p.echoed, queued, Instant::now());
+            p.expire_echoes(queued, Instant::now());
             p.echoed.push_back(echo);
             if queued {
                 forget_taken(p);

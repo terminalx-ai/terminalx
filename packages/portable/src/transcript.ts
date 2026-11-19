@@ -305,6 +305,8 @@ export class TranscriptReducer {
   /** A replayed request cannot reopen an answer, even if it arrives after the decision. */
   private readonly decidedAsks = new Set<string>();
   private readonly calls = new Map<string, ToolCall>();
+  /** The seqs of the reader's messages read so far, each drawn once. */
+  private readonly messageSeqs = new Set<number>();
   /** The calls in `calls` that have no result yet: what a new prompt or a turn's end abandons. */
   private readonly unresolved = new Set<ToolCall>();
   /** The turn whose work holds a call (a subagent's calls are in none). */
@@ -461,6 +463,11 @@ export class TranscriptReducer {
           this.attachSummary(event, payload.text);
           break;
         }
+        // A second copy of a message already drawn (#1284) is not a second
+        // message: a late copy of a queued one would otherwise wait as a
+        // Queued card that nothing clears, after the agent has answered it.
+        if (this.messageSeqs.has(event.seq)) break;
+        this.messageSeqs.add(event.seq);
         const shell = shellRecord(visibleUserText(payload.text));
         if (shell) {
           this.addShell(event, shell);

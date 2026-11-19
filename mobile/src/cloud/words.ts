@@ -209,3 +209,7 @@ export function outboxLine(entry: OutboxEntry, stopped = false, nameOf: NameOf =
   if (entry.state === "outcome-unknown") return { tone: "warn", text: "It is not known whether this arrived." };
   return { tone: "warn", text: codeText(entry.category) ?? "The workspace refused this." };
 }
+
+const ORGANIZATION_ROLES: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
+/** A person's role in an organization, in words; a role this app does not know reads as Member. */
+export const organizationRoleName = (role: string): string => ORGANIZATION_ROLES[role] ?? "Member";

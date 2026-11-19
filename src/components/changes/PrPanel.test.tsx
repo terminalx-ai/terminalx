@@ -2,7 +2,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { cloudGitSource } from "@/lib/gitSource";
+import { useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
+import { useState } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrAssociation, PullRequest } from "@/lib/api";
@@ -14,6 +16,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const { PrPanel } = await import("./PrPanel");
+const { RightPanel } = await import("@/components/layout/RightPanel");
 const render = (ui: Parameters<typeof rtlRender>[0]) => rtlRender(ui, { wrapper: TooltipProvider });
 
 const cwd = "/repos/raccoon/.raccoon/worktrees/65-delete-workspace";
@@ -113,7 +116,7 @@ it.each([false, true])("once merged shows the merged card and summaries, not the
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
 });
 
-function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
+function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>, pendingCreation = false) {
   const projectKey = "machine:mini:project";
   const sessionId = `${projectKey}:session`;
   mocks.invoke.mockImplementation(async (command: string, args: { additions: unknown[] }) => {
@@ -124,7 +127,7 @@ function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
   const call = vi.fn(async (method: string) => {
     if (method === "git.status") return workStatus(mergedPr.head, 0);
     if (method === "git.prs") return { prs: [pr] };
-    if (method === "git.prAssociations") return { associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
+    if (method === "git.prAssociations") return { pendingCreation, associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
     if (method === "git.prConversation") return { ...pr, reviewers: [], activity: [] };
     throw Error(method);
   });
@@ -143,6 +146,13 @@ function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
 }
 
 describe("merged workspace action", () => {
+  it("holds removal of a merged branch while another PR creation is awaiting verification", async () => {
+    const { panel, workspace } = machinePrPanel(async () => cleanMerged, true);
+    render(panel());
+    await screen.findByText(/A recently created pull request is awaiting verification/);
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    expect(workspace.host.disposition).not.toHaveBeenCalled();
+  });
   it.each([
     { uncommitted: 0, unpushed: 0 },
     { uncommitted: 1, unpushed: 0 },
@@ -285,6 +295,79 @@ const followup: PullRequest = {
 };
 const association = (pr: PullRequest): PrAssociation => ({ url: pr.url, number: pr.number, head: pr.head, scope: { kind: "local", cwd } });
 const workStatus = (branch: string, aheadOfBase = 0) => ({ isRepo: true, dirty: false, branch, upstream: `origin/${branch}`, ahead: 0, behind: 0, defaultBranch: "main", aheadOfBase, head: "abc123" });
+
+it("pins inline publishing to the selected checkout and fixes checks through the session checkout after a picker change", async () => {
+  const workspaceKey = "machine:mini:project";
+  const sessionId = `${workspaceKey}:session`;
+  const otherRepo = "worktrees/other";
+  const own = { ...mergedPr, url: "https://github.com/acme/widgets/pull/62", state: "OPEN" as const, head: "feature", checks: [
+    { name: "build", state: "failure", url: "https://github.com/acme/widgets/actions/runs/12/job/34", actions: { runId: 12, jobId: 34 } },
+  ] };
+  const other = { ...own, number: 63, title: "Other worktree PR", url: "https://github.com/acme/widgets/pull/63", head: "picker-branch" };
+  let created = false;
+  const call = vi.fn(async (method: string, params: { repo?: string; branch?: string; number?: number }) => {
+    const sessionCheckout = params.repo === ".";
+    if (method === "git.status") {
+      return { ...workStatus(sessionCheckout ? own.head : other.head, 1), upstream: sessionCheckout && created ? `origin/${own.head}` : null,
+        ahead: sessionCheckout && created ? 0 : 1, head: (sessionCheckout ? "a" : "b").repeat(40) };
+    }
+    if (method === "git.prAssociations") {
+      return { associations: created ? [{ url: own.url, number: own.number, head: own.head, repo: ".", linked: false }] : [] };
+    }
+    if (method === "git.prs") return { prs: !created ? [] : sessionCheckout ? [own] : [other] };
+    if (method === "git.prConversation") return { ...own, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async (method: string, params: { repo: string }) => {
+    if (method !== "git.prCreateForSession") throw Error(`Unexpected mutation ${method}`);
+    if (params.repo !== ".") throw new WorkspaceRpcError("conflict", "Select this session's checkout before creating a pull request.", method);
+    created = true;
+    return { pr: own, created: true, existing: false, sessionAssociated: true };
+  });
+  const client = { call, mutate } as unknown as WorkspaceRpcClient;
+  const source = (repo: string) => cloudGitSource({ workspaceKey, remote: new RemoteGit(client, repo), canWrite: true, author: async () => null });
+  const checkoutSource = source(".");
+  const pickerSource = source(otherRepo);
+  const attach = vi.fn(async () => ({ path: "/attachments/failures.log", truncated: false }));
+  const send = vi.fn(async () => ({ events: [], queued: false }));
+  function Panel() {
+    const [repo, select] = useState<string | null>(".");
+    const fix = useFixCheckErrors({ sessionId, tabId: "agent", cwd, branch: own.head, enabled: true,
+      machine: { name: "Mac mini", source: checkoutSource, generation: "1", attach, send } });
+    return <RightPanel cwd={cwd} isGit sessionId={sessionId} key={repo} gitSource={repo === "." ? checkoutSource : pickerSource}
+      onFixErrors={fix.fix} fixBusy={fix.busy} repositories={{ list: [".", otherRepo], selected: repo, onSelect: select }} />;
+  }
+  const showChecks = () => fireEvent.click(screen.getByRole("button", { name: /^Checks/ }));
+  const submit = async () => {
+    fireEvent.change(await screen.findByLabelText("Title"), { target: { value: "New PR" } });
+    fireEvent.click(screen.getByRole("button", { name: "Push and create pull request" }));
+  };
+
+  render(<Panel />);
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: otherRepo } });
+  showChecks();
+  await submit();
+  await screen.findByText("Select this session's checkout before creating a pull request.");
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateForSession", expect.objectContaining({ repo: otherRepo, sessionId: "session", branch: other.head, pushHead: "b".repeat(40) }));
+
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "." } });
+  showChecks();
+  await submit();
+  await screen.findByRole("button", { name: "Fix errors" });
+  expect(mutate).toHaveBeenLastCalledWith("git.prCreateForSession", expect.objectContaining({ repo: ".", sessionId: "session", branch: own.head, pushHead: "a".repeat(40) }));
+  expect(mutate).toHaveBeenCalledTimes(2);
+
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: otherRepo } });
+  showChecks();
+  const fix = await screen.findByRole("button", { name: "Fix errors" });
+  expect(screen.queryByText(other.title)).toBeNull();
+  call.mockClear();
+  fireEvent.click(fix);
+  await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith("agent", expect.stringContaining(own.url)));
+  expect(call).toHaveBeenCalledWith("git.status", { repo: "." });
+  expect(call).toHaveBeenCalledWith("git.prs", { repo: ".", branch: own.head });
+  expect(attach).toHaveBeenCalledExactlyOnceWith("agent", own.url);
+});
 
 describe("session PR history", () => {
   it("loads recorded follow-up creation despite stale session metadata and refreshes its checks", async () => {

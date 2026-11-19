@@ -7,25 +7,18 @@ import {
   MAX_SELECTED_REPOSITORIES,
   REPOSITORY_STATE_LABEL,
   fixedOnGithub,
-  attemptErrorMessage,
   githubAppErrorCode,
   githubAppErrorMessage,
   organizationGithubApp,
   repositoryExplanation,
-  type ConnectAttempt,
+  type AttemptOutcome,
   type GithubAppSummary,
   type GithubInstallation,
   type LiveRepositories,
   type RepositoryChoice,
   type SelectedRepository,
 } from "@/lib/organizationGithubApp";
-
-const POLL_INTERVAL_MS = 2000;
-
-const ATTEMPT_END_MESSAGE: Record<string, string> = {
-  expired: "The connection attempt expired before GitHub finished. Connect again.",
-  canceled: "Connection canceled.",
-};
+import { CONNECT_POLL_INTERVAL_MS, useGithubConnectAttempt } from "@/lib/useGithubConnectAttempt";
 
 interface Chooser {
   installationId: string;
@@ -39,7 +32,7 @@ interface Chooser {
 
 export function OrganizationGithubApp({
   contextRevision,
-  pollIntervalMs = POLL_INTERVAL_MS,
+  pollIntervalMs = CONNECT_POLL_INTERVAL_MS,
 }: {
   /** The account's context revision; a change reloads the summary. */
   contextRevision: string;
@@ -59,7 +52,6 @@ export function OrganizationGithubApp({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState<ConnectAttempt | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
   const [chooser, setChooser] = useState<Chooser | null>(null);
   // Drops results that land after the account or organization changed.
@@ -67,9 +59,6 @@ export function OrganizationGithubApp({
   // Orders summary reads so an older one never overwrites a newer one.
   const loadSeq = useRef(0);
   const chooserSeq = useRef(0);
-  // Bumped whenever the panel ends or replaces an attempt itself, so a poll
-  // already in flight cannot bring it back.
-  const attemptSeq = useRef(0);
 
   const load = useCallback(async (keepError = false) => {
     const current = ++loadSeq.current;
@@ -105,10 +94,19 @@ export function OrganizationGithubApp({
     }
   }, []);
 
+  const showOutcome = (outcome: AttemptOutcome | null) => {
+    if (!outcome) return;
+    if (outcome.kind === "error") setError(outcome.message);
+    else setNotice(outcome.message);
+    if (outcome.kind === "connected") void load();
+  };
+  const connectAttempt = useGithubConnectAttempt({ pollIntervalMs, epoch: contextEpoch, onEnd: showOutcome });
+  const { attempt, waiting, reset: resetAttempt } = connectAttempt;
+
   useEffect(() => {
     setSummary(null);
     setNotConfigured(false);
-    setAttempt(null);
+    resetAttempt();
     setChooser(null);
     setConfirmDisconnect(null);
     setBusy(null);
@@ -118,45 +116,7 @@ export function OrganizationGithubApp({
     return () => {
       contextEpoch.current += 1;
     };
-  }, [contextRevision, load]);
-
-  // Poll a waiting connect attempt until GitHub redirects back and the server
-  // settles it.
-  useEffect(() => {
-    if (!attempt || attempt.state !== "waiting") return;
-    const context = contextEpoch.current;
-    const seq = attemptSeq.current;
-    let stopped = false;
-    const current = () => !stopped && context === contextEpoch.current && seq === attemptSeq.current;
-    const timer = setTimeout(async () => {
-      try {
-        const next = await organizationGithubApp.attempt(attempt.attemptId);
-        if (!current()) return;
-        setAttempt(next);
-        if (next.state === "connected") {
-          setNotice(`Connected ${next.installation?.accountLogin ?? "the installation"}. Choose which repositories cloud workspaces can use.`);
-          void load();
-        } else if (next.state === "failed") {
-          setError(attemptErrorMessage(next.errorCode));
-        } else if (ATTEMPT_END_MESSAGE[next.state]) {
-          setNotice(ATTEMPT_END_MESSAGE[next.state]);
-        }
-      } catch (failure) {
-        if (!current()) return;
-        // A network blip keeps polling; anything else ends the attempt.
-        if (githubAppErrorCode(failure) === "github_app_request_failed") {
-          setAttempt({ ...attempt });
-        } else {
-          setAttempt(null);
-          setError(githubAppErrorMessage(failure));
-        }
-      }
-    }, pollIntervalMs);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [attempt, load, pollIntervalMs]);
+  }, [contextRevision, load, resetAttempt]);
 
   // `{ value }` on success: a command that returns nothing resolves to null,
   // which must not read as a failure.
@@ -183,30 +143,11 @@ export function OrganizationGithubApp({
 
   const connect = async () => {
     const started = await act("connect", (revision) => organizationGithubApp.connect(revision));
-    if (started) {
-      attemptSeq.current += 1;
-      setAttempt(started.value);
-    }
+    if (started) connectAttempt.start(started.value);
   };
 
-  const cancelAttempt = async () => {
-    if (!attempt) return;
-    attemptSeq.current += 1;
-    const canceled = await act("cancel", (revision) => organizationGithubApp.cancelAttempt(attempt.attemptId, revision));
-    const ended = canceled?.value;
-    // A poll can start while the cancel is in flight (an earlier poll's
-    // answer re-arms it). Its answer still says "waiting", and landing after
-    // this one it would put the canceled attempt back on screen.
-    attemptSeq.current += 1;
-    if (!ended) {
-      // Not canceled: keep polling the attempt.
-      setAttempt((shown) => (shown ? { ...shown } : shown));
-    } else {
-      setAttempt(ended.state === "waiting" ? null : ended);
-      if (ended.state === "connected") void load();
-      else setNotice(ATTEMPT_END_MESSAGE.canceled);
-    }
-  };
+  const cancelAttempt = () =>
+    connectAttempt.cancel((attemptId) => act("cancel", (revision) => organizationGithubApp.cancelAttempt(attemptId, revision)));
 
   const loadChooser = useCallback(async (installationId: string, query: string, refresh: boolean) => {
     const current = ++chooserSeq.current;
@@ -325,7 +266,6 @@ export function OrganizationGithubApp({
   }
 
   const byInstallation = (installationId: string) => summary.repositories.filter((repository) => repository.installationId === installationId);
-  const waiting = attempt?.state === "waiting";
 
   return (
     <div className="rounded-lg border border-hairline p-3">
@@ -387,7 +327,7 @@ export function OrganizationGithubApp({
 
       {canManage && (
         <div className="mt-3 flex flex-col gap-1.5">
-          {waiting ? (
+          {waiting && attempt ? (
             <div className="rounded-md bg-well p-2 text-[11px]" role="status">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="size-3.5 animate-spin" />
