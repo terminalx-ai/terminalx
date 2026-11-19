@@ -2,7 +2,9 @@
 
 ## Acceptance decision
 
-For the evidence follow-up, the owner directed us to use the iPhone simulator and publish the comparison through a pull request. The simulator comparison is the accepted publication evidence for [GitHub issue #1206](https://github.com/terminalx-ai/terminalx/issues/1206). The original physical iPhone 17 Pro Max check remains an author-reported observation in [PR #1186](https://github.com/terminalx-ai/terminalx/pull/1186).
+For #1206, the owner waived publication of the physical-iPhone capture and approved the labeled simulator comparison as the publication evidence alongside frame 22.06-2. [Owner decision on #1206](https://github.com/terminalx-ai/terminalx/issues/1206#issuecomment-7011674879).
+
+The original physical iPhone 17 Pro Max check remains an author-reported observation. [PR #1186](https://github.com/terminalx-ai/terminalx/pull/1186).
 
 ## Verification
 
