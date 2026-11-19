@@ -1102,20 +1102,38 @@ impl WorkspaceGit {
         std::fs::create_dir_all(private_ref.parent().expect("a branch ref has a parent")).map_err(RpcError::internal)?;
         std::fs::write(private_ref, format!("{head}\n")).map_err(RpcError::internal)?;
         std::fs::write(scratch.path().join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
-        let config = format!("[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n");
-        std::fs::write(scratch.path().join("config"), config).map_err(RpcError::internal)?;
+        let config = scratch.path().join("config");
+        let mut format = format!("[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n");
+        let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true");
+        if include_worktree {
+            format.push_str("\tworktreeConfig = true\n");
+        }
+        std::fs::write(&config, format).map_err(RpcError::internal)?;
+
+        // Git assigns includes the scope of the file that loads them. Include
+        // from the private repository's config files and keep relative includes
+        // anchored at the original files.
+        let include_config = |file: &Path, source: &Path| {
+            let mut command = git_command(&repo.dir);
+            command.args(["config", "--file"]).arg(file).arg("include.path").arg(source);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
+            }
+            Ok(())
+        };
+        include_config(&config, &common.join("config"))?;
+        let worktree_config = git_dir.join("config.worktree");
+        if include_worktree && worktree_config.is_file() {
+            include_config(&scratch.path().join("config.worktree"), &worktree_config)?;
+        }
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
             std::fs::create_dir_all(scratch.path().join("info")).map_err(RpcError::internal)?;
             std::fs::copy(sparse_config, scratch.path().join("info/sparse-checkout")).map_err(RpcError::internal)?;
         }
 
-        // Include config from its original location so relative includes still
-        // resolve there. HEAD names the same branch for onbranch and hooks.
-        let common_config = format!("include.path={}", common.join("config").display());
-        let worktree_config = git_dir.join("config.worktree");
-        let include_worktree = self.git(repo, &["config", "--bool", "--get", "extensions.worktreeConfig"])
-            .is_ok_and(|value| value.trim() == "true") && worktree_config.is_file();
         let hooks = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
         let hooks_config = format!("core.hooksPath={}", hooks.display());
 
@@ -1124,11 +1142,7 @@ impl WorkspaceGit {
             command.env("GIT_DIR", scratch.path()).env_remove("GIT_COMMON_DIR")
                 .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
                 .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
-                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
-                .args(["-c", &common_config]);
-            if include_worktree {
-                command.args(["-c", &format!("include.path={}", worktree_config.display())]);
-            }
+                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email);
             command.args(["-c", &hooks_config, "-c", "core.bare=false", "-c", "core.splitIndex=false",
                 "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
