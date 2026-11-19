@@ -181,6 +181,10 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     let mut session = session_body();
     session["cloud"]["userId"] = json!("owner");
     machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    // Computer operation keeps the account copy after the last phone goes.
+    let mut settings = crate::store::settings::load();
+    settings.machines.allow_operating = true;
+    crate::store::settings::save(&settings).unwrap();
     // The poll and direct listener must work without either desktop or Relay.
     assert!(!rig.host.window_available());
     rig.relay.stop();
@@ -266,6 +270,73 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert_eq!(seen[4], seen[2]);
     assert_eq!(seen[5], seen[0]);
     assert_eq!(seen[6].0, format!("{root}/revoke-2/acknowledge"));
+    assert!(machine_account::load(&rig.host.data_dir).unwrap().is_some(), "computer operation still needs the account copy");
+}
+
+/// Revoke the only account-paired phone through a detached poll, with an
+/// approved explicit phone paired too when `other_phone`. Whether the
+/// runtime's account copy is still there once the binding settled.
+async fn account_copy_after_last_revocation(other_phone: bool) -> bool {
+    use crate::machine_account::{self, tests::{service_with_hook, session_body}, Api};
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    save_account_mirror(&AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(),
+        display_name: "Owner".into(), host_display_name: None, binding_generation: 5,
+    }).unwrap();
+    rig.phones.tick(now_ms());
+    rig.pair("phone", "token", true, true);
+    if other_phone {
+        rig.pair("other", "other-token", false, true);
+    }
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    assert!(!rig.host.window_available() && rig.host.phone_route().is_none());
+    assert!(!crate::store::settings::load().machines.allow_operating);
+
+    let (acked, ack) = tokio::sync::oneshot::channel();
+    let mut acked = Some(acked);
+    let (base, seen, handle) = service_with_hook(vec![
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ], move |path| {
+        if path.ends_with("/acknowledge") {
+            acked.take().unwrap().send(()).unwrap();
+        }
+    });
+    let authority = rig.phones.watch_account_revocations();
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority.clone(), Arc::new(Api::new(&base))));
+    tokio::time::timeout(Duration::from_secs(5), ack).await.expect("the revocation is acknowledged").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !authority.retired_binding_is_settled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the retired binding settles after one round");
+    let saved = machine_account::load(&rig.host.data_dir).unwrap();
+    poller.abort();
+    handle.join().unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2, "one fetch and one acknowledgement");
+    assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none(), "the account phone is revoked");
+    if let Some(saved) = &saved {
+        assert_eq!((saved.access_token.as_str(), saved.refresh_token.as_str()), ("access-1", "refresh-1"), "a kept copy is unchanged");
+    }
+    saved.is_some()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_last_phone_revocation_removes_the_runtime_account_tokens() {
+    assert!(!account_copy_after_last_revocation(false).await, "no phone or computer operation needs the access and refresh tokens");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_revocation_keeps_the_account_tokens_another_phone_needs() {
+    assert!(account_copy_after_last_revocation(true).await, "an approved phone still needs the account copy");
 }
 
 #[cfg(feature = "desktop")]

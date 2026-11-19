@@ -314,6 +314,19 @@ impl Phones {
         Ok(owner)
     }
 
+    /// Run `work` while no phone pairing code is live, holding the state so
+    /// none is made meanwhile: [`Self::create_code`] adds its device to
+    /// `devices.json` under this same lock. `None` while a code is live.
+    pub(super) fn without_pairing<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        let state = self.state.lock().unwrap();
+        if state.code.is_some() {
+            return None;
+        }
+        let result = work();
+        drop(state);
+        Some(result)
+    }
+
     /// Fence in-flight admission synchronously with a route or switch change.
     pub(crate) fn invalidate(&self) {
         let _state = self.state.lock().unwrap();
