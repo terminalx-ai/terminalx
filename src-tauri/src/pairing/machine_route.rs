@@ -306,7 +306,14 @@ impl PairingManager {
             }
         });
         let route = PhoneRoute { lease: attachment.lease.clone(), path: path.clone(), accept };
-        runtime.machine_host(wire::PHONE_ROUTE, json!({ "socket": path }))?;
+        match runtime.machine_host(wire::PHONE_ROUTE_BOUND, json!({ "socket": path })) {
+            Ok(_) => {}
+            Err(error) if error.chain().any(|cause| cause.downcast_ref::<crate::local_runtime::client::Refused>()
+                .is_some_and(|refused| refused.code == "unsupported")) => {
+                runtime.machine_host(wire::PHONE_ROUTE, json!({ "socket": path }))?;
+            }
+            Err(error) => return Err(error),
+        }
         self.machine.lock().unwrap().route = Some(route);
         if direct {
             let mut inner = self.inner.lock().unwrap();
@@ -327,10 +334,14 @@ impl PairingManager {
         let header = read_header(&mut stream).await?;
         match wire::decode_header(&header)? {
             // The phone's own bytes follow, from its HTTP upgrade request.
-            Forwarded::Direct { .. } => {
+            direct @ (Forwarded::Direct { .. } | Forwarded::DirectBound { .. }) => {
                 let socket =
                     tokio_tungstenite::accept_async_with_config(crate::data_privacy::NetworkIo::new(stream), Some(pairing_websocket_config())).await?;
-                let context = PairingConnectionContext::Direct { direct_auth_id: Uuid::new_v4().simple().to_string() };
+                let forwarded_id = match direct {
+                    Forwarded::DirectBound { forwarded_id, .. } => Some(forwarded_id),
+                    _ => None,
+                };
+                let context = PairingConnectionContext::Direct { direct_auth_id: Uuid::new_v4().simple().to_string(), forwarded_id };
                 self.handle_e2ee_socket(socket, context, None, None).await
             }
             // The window opens the relay data leg itself.

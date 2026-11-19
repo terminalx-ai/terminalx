@@ -669,7 +669,7 @@ impl SessionManager {
     /// it there as it would have been replied to (#765).
     pub(crate) fn resume_decision(&self, bridge: &crate::hooks::Bridge, wait: Wait, stream: std::os::unix::net::UnixStream) {
         let Wait { tab: rt_arc, ask, gate } = wait;
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         let local_owner = crate::local_runtime::permissions::enabled();
         let (kind, token, generation) = {
             let mut rt = rt_arc.lock().unwrap();

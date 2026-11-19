@@ -21,9 +21,17 @@ struct Verified {
     checked_at: Instant,
 }
 
+#[derive(PartialEq, Eq)]
+struct RetiredBinding {
+    user_id: String,
+    generation: u64,
+    devices: Vec<String>,
+}
+
 #[derive(Default)]
 pub(super) struct Authority {
     verified: Mutex<Option<Verified>>,
+    settled: Mutex<Option<RetiredBinding>>,
     wake: Notify,
 }
 
@@ -41,6 +49,11 @@ impl Authority {
 
     pub(super) fn hint(&self) {
         self.wake.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(super) fn retired_binding_is_settled(&self) -> bool {
+        self.settled.lock().unwrap().is_some()
     }
 }
 
@@ -63,8 +76,9 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
                 AccountLink::new(host.data_dir.clone(), *key.secret(), host.account_window());
             let host_id = key.host_id();
             drop(host);
+            let polling = authority.clone();
             let checked =
-                tokio::task::spawn_blocking(move || poll(&phones, &api, &link, &host_id)).await;
+                tokio::task::spawn_blocking(move || poll(&phones, &polling, &api, &link, &host_id)).await;
             let verified = match checked {
                 Ok(Ok(verified)) => verified,
                 Ok(Err(error)) => {
@@ -88,25 +102,38 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
 
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = authority.wake.notified() => {}
+            // Consume hints after the blocking round. A hint received while
+            // it runs must invalidate even the cache that round just wrote.
+            _ = authority.wake.notified() => { *authority.settled.lock().unwrap() = None; }
         }
     }
 }
 
-fn poll(phones: &Phones, api: &Api, link: &AccountLink, host_id: &str) -> Result<Option<Verified>> {
+fn poll(phones: &Phones, authority: &Authority, api: &Api, link: &AccountLink, host_id: &str) -> Result<Option<Verified>> {
     let registry = DeviceRegistry;
     let Some(account) = load_account_mirror()? else {
         return Ok(None);
     };
-    if !registry.list()?.iter().any(|device| {
-        device.provenance == DeviceProvenance::Automatic
-            && device.bound_user_id.as_deref() == Some(account.user_id.as_str())
-            && device.binding_generation == account.binding_generation
-    }) {
+    let devices = registry.automatic_binding_devices(&account)?;
+    if devices.is_empty() {
+        return Ok(None);
+    }
+    // On startup or after a failed acknowledgement, check retired records
+    // too. Once settled, wait for a hint or a change to the devices.
+    let retired = devices.iter().all(|device| device.revoked_at.is_some()).then(|| RetiredBinding {
+        user_id: account.user_id.clone(),
+        generation: account.binding_generation,
+        devices: devices.into_iter().map(|device| device.id).collect(),
+    });
+    if retired.is_some() && *authority.settled.lock().unwrap() == retired {
         return Ok(None);
     }
     let session = link.fresh_session()?;
-    apply(phones, api, &session, host_id, account).map(Some)
+    let (verified, all_acknowledged) = apply(phones, api, &session, host_id, account)?;
+    if all_acknowledged {
+        *authority.settled.lock().unwrap() = retired;
+    }
+    Ok(Some(verified))
 }
 
 fn apply(
@@ -115,7 +142,7 @@ fn apply(
     session: &Session,
     host_id: &str,
     account: AccountMirror,
-) -> Result<Verified> {
+) -> Result<(Verified, bool)> {
     ensure!(
         session.cloud.user_id == account.user_id,
         "phone binding and runtime session belong to different accounts"
@@ -140,26 +167,29 @@ fn apply(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
             "invalid phone revocation ID"
         );
-        let device = registry.automatic_for_grant(
+        let devices = registry.automatic_for_grant(
             &account.user_id,
+            generation,
             &revocation.client_installation_id,
             &revocation.grant_request_id,
         )?;
-        if let Some(device) = device.filter(|device| device.binding_generation == generation) {
-            // Persist the revocation and terminate existing sockets and grants
-            // before telling the account service it has been applied.
+        for device in devices {
+            // A window may have taken over during the fetch. The durable
+            // revocation fences admission and retires grants on every lease.
             phones.revoke(&device.id)?;
         }
         applied.push(revocation.revocation_id);
     }
+    let mut all_acknowledged = true;
     for id in applied {
         if let Err(error) = api.acknowledge_phone_revocation(session, host_id, generation, &id) {
             log::warn!("machine host: could not acknowledge a revoked phone: {error:#}");
+            all_acknowledged = false;
         }
     }
-    Ok(Verified {
+    Ok((Verified {
         user_id: account.user_id,
         generation,
         checked_at,
-    })
+    }, all_acknowledged))
 }

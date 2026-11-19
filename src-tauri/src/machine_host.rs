@@ -129,6 +129,7 @@ struct PhoneRoute {
     attachment: Arc<crate::local_runtime::Attachment>,
     lease: String,
     socket: PathBuf,
+    device_scoped: bool,
 }
 
 /// One open connection of a paired computer.
@@ -1214,8 +1215,12 @@ impl MachineHost {
 
     /// Where a phone goes: the window's route while its attachment is current.
     pub(crate) fn phone_route(&self) -> Option<PathBuf> {
+        self.direct_phone_route().map(|(socket, _)| socket)
+    }
+
+    fn direct_phone_route(&self) -> Option<(PathBuf, bool)> {
         let state = self.state.lock().unwrap();
-        state.phone_route.as_ref().filter(|route| route.attachment.valid()).map(|route| route.socket.clone())
+        state.phone_route.as_ref().filter(|route| route.attachment.valid()).map(|route| (route.socket.clone(), route.device_scoped))
     }
 
     fn attachment(&self, epoch: &str, lease: &str) -> Result<Arc<crate::local_runtime::Attachment>, ControlError> {
@@ -1609,13 +1614,13 @@ impl MachineHost {
                 self.settings_changed.notify_one();
                 Ok(json!({ "adopted": true }))
             }
-            wire::PHONE_ROUTE => {
+            wire::PHONE_ROUTE | wire::PHONE_ROUTE_BOUND => {
                 let route: wire::PhoneRoute = serde_json::from_value(params).map_err(|_| ControlError::invalid("epoch, lease and socket are required"))?;
                 let attachment = self.attachment(&route.epoch, &route.lease)?;
                 if let Err(error) = private_socket(&self.data_dir, &route.socket) {
                     return Err(ControlError::new("invalid_route", format!("{error:#}"), None::<String>));
                 }
-                self.register_phone_route(PhoneRoute { attachment, lease: route.lease, socket: route.socket })?;
+                self.register_phone_route(PhoneRoute { attachment, lease: route.lease, socket: route.socket, device_scoped: command == wire::PHONE_ROUTE_BOUND })?;
                 Ok(json!({ "registered": true }))
             }
             wire::REVOKE => {

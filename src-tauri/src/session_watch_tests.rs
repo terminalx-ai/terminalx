@@ -559,10 +559,94 @@ fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer
     {
         let rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &rt.engine else { unreachable!() };
-        p.decisions[&request].sender.send(answer).unwrap();
+        p.decisions[&request].sender.send(QueuedDecision { decision: answer, mobile: None }).ok().unwrap();
     }
     let reply = worker.join().unwrap();
     (serde_json::to_value(event.payload).unwrap(), reply)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_revoked_phone_cannot_deliver_its_cli_hook_approval() { withheld_mobile_reply(Withhold::RevokeApproval); }
+
+#[cfg(unix)]
+#[test]
+fn a_cancelled_hook_cannot_deliver_a_queued_phone_approval() { withheld_mobile_reply(Withhold::Cancel); }
+
+#[cfg(unix)]
+#[test]
+fn a_revoked_phone_cannot_deliver_its_claude_question_answer() { withheld_mobile_reply(Withhold::RevokeAnswer); }
+
+#[cfg(unix)]
+#[test]
+fn a_failed_hook_write_does_not_report_a_phone_answer() { withheld_mobile_reply(Withhold::Disconnect); }
+
+#[cfg(unix)]
+enum Withhold { RevokeApproval, RevokeAnswer, Cancel, Disconnect }
+
+#[cfg(unix)]
+fn withheld_mobile_reply(reason: Withhold) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let rig = Rig::in_mode(CliKind::Claude, "manual");
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = false;
+    store::settings::save(&settings).unwrap();
+    let phone = crate::local_runtime::mobile::ApprovalPhone::register(&rig.manager);
+    let manager = rig.manager.clone();
+    let (entered, paused) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let barrier = Mutex::new(Some((entered, released)));
+    let socket = crate::hooks::serve_private(crate::hooks::prepare_control().unwrap(), move |frame| {
+        let reply = manager.on_hook(frame);
+        let (entered, released) = barrier.lock().unwrap().take().unwrap();
+        entered.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(10)).unwrap();
+        let finished = finished.clone();
+        crate::hooks::after_reply(Box::new(move || finished.send(()).unwrap()));
+        reply
+    }, |_| unreachable!()).unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: if matches!(reason, Withhold::RevokeAnswer) {
+            json!({"cwd":"/workspace/app","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which branch?","header":"Branch","options":[]}]}})
+        } else {
+            json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"command": "printf hello"}})
+        },
+    };
+    writeln!(stream, "{}", serde_json::to_string(&frame).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    if matches!(reason, Withhold::RevokeAnswer) {
+        phone.answer_question(&rig.manager, SESSION, TAB, &request);
+    } else {
+        phone.answer(&rig.manager, SESSION, TAB, &request, "allow");
+    }
+    paused.recv_timeout(Duration::from_secs(10)).unwrap();
+    let status = rig.rt.lock().unwrap().status;
+    let mut peer = Some(stream);
+    match reason {
+        Withhold::Cancel => rig.manager.cancel_asks(&mut rig.rt.lock().unwrap()),
+        Withhold::Disconnect => drop(peer.take()),
+        _ => phone.revoke(&rig.manager),
+    }
+    release.send(()).unwrap();
+    completion.recv_timeout(Duration::from_secs(10)).unwrap();
+    if let Some(mut stream) = peer {
+        let mut line = String::new();
+        stream.read_to_string(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<HookReply>(&line).unwrap(), reply_for(CliKind::Claude, "PermissionRequest", Decision::Deny));
+    }
+    assert!(rig.rt.lock().unwrap().pending.is_empty());
+    assert_eq!(rig.rt.lock().unwrap().status, status);
+    assert!(rig.observer.answered.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -3625,6 +3709,7 @@ fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
 /// phone handler, and the agent gets what the desktop's card would have sent.
 /// A read-only phone, a tab of another session and a question already closed
 /// are each refused, and none of them answers anything.
+#[cfg(unix)]
 #[test]
 fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     use crate::local_runtime::{mobile, Lifetime};
@@ -3648,7 +3733,12 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
         session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
         payload: json!({"cwd": "/workspace/app", "tool_name": "AskUserQuestion", "tool_input": questions}),
     };
-    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    use std::io::Write;
+    let socket = crate::hooks::serve_private(crate::hooks::prepare_control().unwrap(),
+        move |frame| manager.on_hook(frame), |_| unreachable!()).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&frame).unwrap()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let request = loop {
         if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
@@ -3668,7 +3758,7 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "a refused answer leaves the question open");
 
     assert_eq!(answer("phone", TAB).unwrap(), json!({"status":"answered"}));
-    let reply = worker.join().unwrap().output.expect("the agent is answered");
+    let reply = serde_json::from_reader::<_, HookReply>(stream).unwrap().output.expect("the agent is answered");
     assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
     assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], answers);
     assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["questions"], questions["questions"], "the questions go back as they were asked");
