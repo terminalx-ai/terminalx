@@ -467,24 +467,19 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
       return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
       return (
-        <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
-          <div className="flex flex-wrap items-center gap-2">
-            <Clock className="size-3.5 shrink-0" />
-            {!item.withdrawn && <span className="text-xs">Queued</span>}
-            {item.author && <span className="min-w-0 wrap-anywhere" data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
-              <WithTooltip label="Interrupt the agent and send this now">
-                <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
-                  <Send /> Send now
-                </Button>
-              </WithTooltip>
-            )}
-          </div>
-          {item.files?.length ? <div className="mt-1.5"><MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /></div> : null}
-          <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
+        <QueuedCard
+          label={item.withdrawn ? null : "Queued"}
+          author={item.author}
+          text={item.text}
+          section={section}
+          linkContext={linkContext}
+          time={<MessageTime ts={item.messageTs} />}
+          files={item.files?.length ? <MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /> : null}
+          onSendNow={onSendQueuedNow && !item.inputOccupied && !item.withdrawn ? () => onSendQueuedNow(item.seq) : undefined}
+        >
           {item.inputOccupied && <InputOccupiedNote />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
-        </div>
+        </QueuedCard>
       );
     case "status":
       return (
@@ -549,6 +544,57 @@ function InitiatingPrompt({ name, text, linkContext }: { name: string; text: str
       <summary className="cursor-pointer rounded focus-visible:outline focus-visible:outline-2">Initiating prompt</summary>
       <div className="mt-2 whitespace-pre-wrap break-words select-text"><LinkedText text={text} context={linkContext} /></div>
     </details>
+  );
+}
+
+/**
+ * A message the agent has not taken yet: queued behind the running turn in a
+ * local session, or on its way to a cloud workspace (#1291). One card for
+ * both; what is under it (`children`) says why it waits.
+ */
+export function QueuedCard({
+  label,
+  author,
+  text,
+  section,
+  linkContext,
+  time,
+  files,
+  onSendNow,
+  children,
+  ...data
+}: {
+  /** "Queued", or what else it is ("Steer"); null for none (a message withdrawn). */
+  label: string | null;
+  author?: { userId: string; displayName: string } | null;
+  text: string;
+  section?: ReturnType<typeof useSearchSection>;
+  linkContext?: { sessionId: string; cwd: string };
+  time?: ReactNode;
+  files?: ReactNode;
+  /** Interrupt the agent's turn so this goes now; absent where it cannot. */
+  onSendNow?: () => void;
+  children?: ReactNode;
+  [key: `data-${string}`]: string | undefined;
+}) {
+  return (
+    <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message" {...data}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Clock className="size-3.5 shrink-0" />
+        {label && <span className="text-xs">{label}</span>}
+        {author && <span className="min-w-0 wrap-anywhere" data-user-id={author.userId}>{author.displayName}:</span>}
+        {onSendNow && (
+          <WithTooltip label="Interrupt the agent and send this now">
+            <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={onSendNow}>
+              <Send /> Send now
+            </Button>
+          </WithTooltip>
+        )}
+      </div>
+      {files ? <div className="mt-1.5">{files}</div> : null}
+      <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={text} context={linkContext} /></span>{time}</div>
+      {children}
+    </div>
   );
 }
 

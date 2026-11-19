@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import { collabGranted } from "@terminalx/portable/workspaceCollab";
@@ -154,6 +155,25 @@ export function cloudConnectionChip(
       if (workspaceState === "suspended") return { label: "Stopped", tone: "offline" };
       if (workspaceState === "archived") return { label: "Archived", tone: "offline" };
       return { label: "Not connected", tone: "offline" };
+  }
+}
+
+/** The chip's label as the status line under a queued message reads it (#1291). */
+export function cloudWorkspaceStatus(chip: ConnectionChip): WorkspaceStatus {
+  switch (chip.label) {
+    case STARTING_LABEL:
+      return "starting";
+    case RESUMING_LABEL:
+      return "resuming";
+    case CONNECTING_LABEL:
+    case RECONNECTING_LABEL:
+      return "connecting";
+    case "Live":
+      return "live";
+    case "Stopped":
+      return "stopped";
+    default:
+      return null;
   }
 }
 
@@ -619,6 +639,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     reattaching: managed.reattaching,
   });
   if (managed.woke && chip.label === WAKE_STEPS[1]) wakeFloor.current = 1;
+  const workspaceStatus = cloudWorkspaceStatus(chip);
   // Woken and back: the list still says stopped until it is read again.
   const wokeLive = managed.woke && state.state === "connected";
   useEffect(() => {
@@ -659,6 +680,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         authority,
         outbox: agents.outbox,
         followUps,
+        workspaceStatus,
         wake,
         you,
         collabClient: collabLive ? client : null,
@@ -669,7 +691,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         agentProcess,
         signIn,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
   );
 
   const ownTabs = useMemo(() => {

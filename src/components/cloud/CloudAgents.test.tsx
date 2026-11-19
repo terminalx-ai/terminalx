@@ -352,9 +352,19 @@ describe("cloud agent tabs", () => {
     await waitFor(() => expect(enqueued).toHaveLength(1));
     expect(enqueued[0]).toMatchObject({ organizationId: "org-1", workspaceId: "ws-1", tabId: "t-1", kind: "send", payload: { text: "hello" } });
     expect(client.nudgeMailbox).toHaveBeenCalled();
-    expect(await screen.findByText("Queued for the workspace")).toBeTruthy();
+    // #1291: the message is a Queued card at the transcript's end, its line following the workspace (live here).
+    const card = await waitFor(() => {
+      const found = screen.getAllByTestId("queued-message").find((node) => node.textContent?.includes("hello"));
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    expect(within(card).getByTestId("queued-status").textContent).toBe("Delivering to the agent…");
+    // Never also a row above the transcript.
+    expect(screen.queryByTestId("cloud-agent-outbox")).toBeNull();
+    // A refusal sending again cannot change is not offered again; one of unknown fate is.
+    expect(within(screen.getByText("Not delivered (tab-unknown)").closest<HTMLElement>('[data-testid="queued-message"]')!).queryByRole("button", { name: "Send again" })).toBeTruthy();
 
-    fireEvent.click(within(unknown.closest("li")!).getByRole("button", { name: "Send again" }));
+    fireEvent.click(within(unknown.closest<HTMLElement>('[data-testid="queued-message"]')!).getByRole("button", { name: "Send again" }));
     await waitFor(() => expect(enqueued).toHaveLength(2));
     expect(enqueued[1]).toMatchObject({ kind: "send", payload: { text: "deploy it" } });
   });
@@ -400,9 +410,9 @@ describe("cloud agent tabs", () => {
   it("shows follow-ups the runtime holds until the turn ends, and steers or stops the running turn", async () => {
     liveTabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-f", text: "then run the linter" }] })];
     render(view(connected()));
-    const followUp = await screen.findByTestId("cloud-agent-followup");
+    const followUp = await screen.findByTestId("queued-message");
     expect(followUp.textContent).toContain("then run the linter");
-    expect(followUp.textContent).toContain("sends when the agent finishes");
+    expect(followUp.textContent).toContain("Sends when the agent finishes its turn");
     // A /goal is never steered past the composer's check (PRO-380): no Steer now for it.
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal ship it" } });
     expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
@@ -665,7 +675,14 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
     expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
     expect(screen.getByText("Not sent: the workspace could not record it (its disk may be full)")).toBeTruthy();
-    expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
+    const followUp = screen.getAllByTestId("queued-message").find((node) => node.dataset.phase === "held")!;
+    expect(followUp.textContent).toContain("Alice:");
+    expect(followUp.textContent).toContain("then run the tests");
+    // A refusal for this person's rights or access is not offered again; one for the lease or a full disk is.
+    const again = (text: string) => within(screen.getByText(text).closest<HTMLElement>('[data-testid="queued-message"]')!).queryByRole("button", { name: "Send again" });
+    expect(again("Not sent: your access changed")).toBeNull();
+    expect(again("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeNull();
+    expect(again("Alice is driving — your message was not sent")).toBeTruthy();
   });
 
   it("keeps notes apart from the agent: posting one never enqueues a command", async () => {

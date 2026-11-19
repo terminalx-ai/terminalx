@@ -1,6 +1,7 @@
 import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { agent, attachments, errorMessage, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { FileRef } from "@/types/events";
+import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { showError } from "@/lib/errorToasts";
 import { applyEvent, loadTab, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
 import { patchTab } from "@/lib/sessions";
@@ -213,7 +214,9 @@ export interface SessionBackend {
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
-    followUps(tabId: string): { clientCommandId: string; text: string }[];
+    followUps(tabId: string): { clientCommandId: string; text: string; actorId?: string | null }[];
+    /** Where the workspace stands, for the line under a queued message (#1291); null where nothing says (a machine). */
+    workspaceStatus: WorkspaceStatus;
     deciding(requestId: string): boolean;
     sendAgain(entry: OutboxEntry): Promise<void>;
   };
@@ -405,7 +408,9 @@ export interface CloudSessionContext {
   /** What the connection granted, else what the list says opening would grant. */
   authority: string | null;
   outbox: OutboxEntry[];
-  followUps: (tabId: string) => { clientCommandId: string; text: string }[];
+  followUps: (tabId: string) => { clientCommandId: string; text: string; actorId?: string | null }[];
+  /** The header chip's state, for the line under a queued message (#1291). */
+  workspaceStatus?: WorkspaceStatus;
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
   wake: () => Promise<void>;
   /** What became of a tab's last setting change (see `SessionBackend.settingsNotice`). */
@@ -590,6 +595,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     outbox: {
       entries: (tabId) => ctx.outbox.filter((entry) => entry.tabId === tabId),
       followUps: ctx.followUps,
+      workspaceStatus: ctx.workspaceStatus ?? null,
       deciding: (requestId) => isDeciding(scope, requestId),
       sendAgain: (entry) => interactive(() => sendAgain(scope, entry, client)),
     },

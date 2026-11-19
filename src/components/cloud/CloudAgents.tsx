@@ -3,7 +3,8 @@ import { useCallback, useEffect, useState, useRef } from "react";
 import { Bot, ChevronDown, Folder, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
-import { LinkedText } from "@/components/chat/LinkedText";
+import { CloudPendingMessages, outboxStateText, usePendingCloudMessages } from "./CloudPendingMessages";
+import { isMessageCommand } from "@/lib/cloudPendingMessages";
 import { Composer } from "@/components/chat/Composer";
 import { goalCommand } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
@@ -59,7 +60,7 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { useMachinePlace } from "./workspacePlace";
 import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
@@ -702,6 +703,8 @@ function CloudAgentPane({
   const pendingMessage = useComposerSend(tab.tabId).pending?.message ?? null;
   const sending = pendingMessage && !hasArrived(conversation.events(), pendingMessage) ? pendingMessage : null;
   const entries = outboxFor(snapshot, tab.tabId);
+  // #1291: messages on their way, drawn at the transcript's end as Queued cards until the conversation has them.
+  const pendingMessages = usePendingCloudMessages(entries, info.followUps, conversation.events());
   const turnOpen = transcript.turns.length > 0 && !transcript.turns[transcript.turns.length - 1]!.completed;
   const endedMidTurn = exited && (info.status === "in_progress" || info.status === "waiting" || turnOpen);
   const deciding = entries.some((entry) => entry.kind === "permission-decision" && !TERMINAL_OUTBOX_STATES.has(entry.state));
@@ -759,6 +762,7 @@ function CloudAgentPane({
     },
     [sleeping, wakeWorkspace],
   );
+  const resend = (entry: OutboxEntry) => void interactive(() => sendAgain(scope, entry, connected ? client : null)).catch(() => undefined);
 
   const send = async (text: string, images: ImageInput[]) => {
     // Images are uploaded straight to the runtime: a stopped workspace is started for them and the message stays here.
@@ -854,12 +858,7 @@ function CloudAgentPane({
             Agent process ended — the saved conversation resumes on your next message.
           </p>
         )}
-        <CloudOutbox
-          entries={entries}
-          followUps={info.followUps}
-          nameOf={nameOf}
-          onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)}
-        />
+        <CloudOutbox entries={entries} nameOf={nameOf} onSendAgain={resend} />
         <div className="flex min-h-0 flex-1 flex-col">
           <Chat
             active={active}
@@ -875,6 +874,15 @@ function CloudAgentPane({
             onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
             onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
             sending={sending}
+            pending={
+              pendingMessages.length > 0 && <CloudPendingMessages
+                messages={pendingMessages}
+                // This pane has no header chip: connected is live; else the mailbox says whether the machine is starting.
+                workspace={connected ? "live" : sleeping ? "stopped" : "connecting"}
+                nameOf={nameOf}
+                onSendAgain={blocked ? undefined : resend}
+              />
+            }
             footer={
               <div className="flex flex-col">
                 {live && draft.trim() && goalCommand(draft) === null && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
@@ -929,87 +937,48 @@ function CloudAgentPane({
   );
 }
 
-const STATE_TEXT: Record<string, string> = {
-  unsent: "Not sent yet — will retry",
-  queued: "Queued for the workspace",
-  leased: "Delivering to the agent",
-  applied: "Delivered",
-  rejected: "Not delivered",
-  cancelled: "Cancelled",
-  "outcome-unknown": "May not have been sent",
-};
+const KIND_TEXT: Record<string, string> = { stop: "Stop", "permission-decision": "Decision" };
 
-const KIND_TEXT: Record<string, string> = { send: "Message", steer: "Steer", stop: "Stop", "permission-decision": "Decision" };
-
-/** Commands on their way, and the ones whose fate needs the reader. */
+/**
+ * Commands other than messages on their way, and the ones whose fate needs
+ * the reader: a stop, a decision. Messages are Queued cards in the
+ * transcript (#1291), never rows here too.
+ */
 export function CloudOutbox({
   entries,
-  followUps,
   nameOf,
   onSendAgain,
 }: {
   entries: OutboxEntry[];
-  followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
   nameOf: (userId: string | null | undefined) => string;
   onSendAgain: (entry: OutboxEntry) => void;
 }) {
-  const queuedIds = new Set(followUps.map((f) => f.clientCommandId));
   // Settled commands the transcript already shows are not repeated here.
   const shown = entries.filter(
-    (entry) => !TERMINAL_OUTBOX_STATES.has(entry.state) || entry.state === "rejected" || entry.state === "outcome-unknown",
+    (entry) => !isMessageCommand(entry) && (!TERMINAL_OUTBOX_STATES.has(entry.state) || entry.state === "rejected" || entry.state === "outcome-unknown"),
   );
-  if (!shown.length && !followUps.length) return null;
+  if (!shown.length) return null;
   return (
     // A bar of its own above the transcript: its own background, a bounded height
     // that scrolls, and rows whose reasons wrap rather than run off the pane.
     <ul className="flex max-h-40 shrink-0 flex-col gap-1 overflow-y-auto border-b border-hairline bg-veil-raised px-3 py-1.5 text-xs" data-testid="cloud-agent-outbox">
-      {followUps.map((f) => (
-        <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
-          <span className="shrink-0 text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
-          {/* A queued message of images alone has no text to show. */}
-          {f.text ? <span className="min-w-0 truncate">{f.text}</span> : <span className="min-w-0 truncate text-muted-foreground">(images)</span>}
-          <span className="ml-auto shrink-0 text-faint">sends when the agent finishes its turn</span>
+      {shown.map((entry) => (
+        <li
+          key={entry.clientCommandId}
+          className={cn("flex items-baseline gap-2", entry.state === "outcome-unknown" && "text-warning")}
+          data-testid="cloud-agent-command"
+          data-state={entry.state}
+        >
+          <span className="shrink-0 text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
+          <span className="min-w-0 flex-1 break-words">{outboxStateText(entry, nameOf)}</span>
+          {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
+            <Button size="xs" variant="outline" className="shrink-0 self-center" onClick={() => onSendAgain(entry)}>
+              Send again
+            </Button>
+          )}
         </li>
       ))}
-      {shown
-        .filter((entry) => !queuedIds.has(entry.clientCommandId))
-        .map((entry) => (
-          <li
-            key={entry.clientCommandId}
-            className={cn("flex items-baseline gap-2", entry.state === "outcome-unknown" && "text-warning")}
-            data-testid="cloud-agent-command"
-            data-state={entry.state}
-          >
-            <span className="shrink-0 text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text ? <span className="min-w-0 max-w-[40%] shrink-0 truncate"><LinkedText text={entry.text} /></span> : null}
-            {entry.kind === "send" && (entry.images || !entry.text) ? (
-              <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
-                {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}
-              </span>
-            ) : null}
-            <span className="min-w-0 flex-1 break-words">{outboxStateText(entry, nameOf)}</span>
-            {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
-              <Button size="xs" variant="outline" className="shrink-0 self-center" onClick={() => onSendAgain(entry)}>
-                Send again
-              </Button>
-            )}
-          </li>
-        ))}
     </ul>
   );
 }
 
-/** A command's state, in words; a refusal because of sharing says whose turn it is. */
-function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | undefined) => string): string {
-  if (entry.state === "rejected" && entry.category === "lease-held") {
-    const holder = entry.receipt?.holderId;
-    return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
-  }
-  if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
-  // The runtime could not write its record of the command (a full disk, most often), so it did not touch the agent.
-  if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
-  const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
-  if (refused) return refused;
-  const text = STATE_TEXT[entry.state] ?? entry.state;
-  return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
-}

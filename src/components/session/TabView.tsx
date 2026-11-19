@@ -8,6 +8,7 @@ import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput }
 import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
+import type { OutboxEntry } from "@/lib/cloudAgentApi";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
@@ -18,6 +19,7 @@ import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, SignInNotice, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
+import { CloudPendingMessages, usePendingCloudMessages } from "@/components/cloud/CloudPendingMessages";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
@@ -66,6 +68,8 @@ import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/compon
 
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
+const NO_ENTRIES: OutboxEntry[] = [];
+const NO_FOLLOW_UPS: { clientCommandId: string; text: string; actorId?: string | null }[] = [];
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
@@ -737,10 +741,19 @@ export function TabView({
   // A cloud tab's agent with no way to sign in in its workspace (PRO-78).
   const signIn = backend.signIn?.(tab.id) ?? null;
   // What Up and Down recall in the composer: this tab's own messages, plus a cloud tab's commands still on their way.
+  const outboxEntries = useMemo(() => outbox?.entries(tab.id) ?? NO_ENTRIES, [outbox, tab.id]);
+  const outboxFollowUps = useMemo(() => outbox?.followUps(tab.id) ?? NO_FOLLOW_UPS, [outbox, tab.id]);
   const history = useMemo(
-    () => sentMessages(transcript, outbox && { entries: outbox.entries(tab.id), followUps: outbox.followUps(tab.id) }),
-    [transcript, outbox, tab.id],
+    () => sentMessages(transcript, outbox && { entries: outboxEntries, followUps: outboxFollowUps }),
+    [transcript, outbox, outboxEntries, outboxFollowUps],
   );
+  // #1291: a cloud tab's messages on their way, drawn at the transcript's end as Queued cards until the conversation has them.
+  const pendingMessages = usePendingCloudMessages(outboxEntries, outboxFollowUps, events);
+  const resendCommand = useCallback((entry: OutboxEntry) => {
+    if (!outbox) return;
+    setError(null);
+    void outbox.sendAgain(entry).catch((e) => setError(commandError(e)));
+  }, [outbox]);
   const deciding = transcript.pendingAsks.some(ask => log.permissionResponses?.get(ask.requestId) === "sending" || outbox?.deciding(ask.requestId));
 
   // Signed out of the agent itself (not TerminalX's account): Claude Code signs in
@@ -906,6 +919,16 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
+      pending={outbox && pendingMessages.length > 0 && (
+        <CloudPendingMessages
+          messages={pendingMessages}
+          workspace={outbox.workspaceStatus}
+          nameOf={nameOf}
+          onSendAgain={!readOnly && !gate?.blocked ? resendCommand : undefined}
+          // Escape for the running turn; the runtime then sends what it holds.
+          onSendNow={interrupts && live && !readOnly && !gate?.blocked ? interrupt : undefined}
+        />
+      )}
       firstMessage={local && !readOnly && log.firstMessage && <FirstMessage message={log.firstMessage} session={session} agent={agentLabel} setup={setup} />}
       onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
       onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); } : undefined}
@@ -1138,7 +1161,7 @@ export function TabView({
     ) : (
       <SignInNotice info={{ harness: tab.harness, signIn: signIn.signIn }} organizationId={signIn.organizationId} />
     ))}
-    {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
+    {outbox && <CloudOutbox entries={outbox.entries(tab.id)} nameOf={nameOf} onSendAgain={resendCommand} />}
     {earlier.length > 0 && (
       // The tab held other conversations before this one: another agent was run in its terminal, or the same one on something else.
       <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="tab-conversations">
