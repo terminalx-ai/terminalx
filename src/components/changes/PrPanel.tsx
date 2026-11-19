@@ -139,6 +139,7 @@ export function PrPanel({
   const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
+  const [pendingCreation, setPendingCreation] = useState(false);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}\0${selectedPr?.url ?? ""}`;
   const selected = useRef({ key: selection, generation: 0 });
   if (selected.current.key !== selection) selected.current = { key: selection, generation: selected.current.generation + 1 };
@@ -221,7 +222,7 @@ export function PrPanel({
       : Promise.resolve(null);
     Promise.all([
       source.workStatus().then(async (workStatus) => {
-        const pullRequests: { rows: SessionPr[]; error?: string } = selectedPr
+        const pullRequests: Awaited<ReturnType<typeof sessionPrs>> = selectedPr
           ? { rows: [{ identity: selectedPr.url, association: selectedPr, current: workStatus.branch === selectedPr.head, pr: await source.prAccess!(selectedPr).read() }] }
           : await sessionPrs(source, sessionId, workStatus.branch !== workStatus.defaultBranch ? workStatus.branch : null, () => !cancelled);
         if (selectedPr && prIdentity(pullRequests.rows[0].pr!.url) !== prIdentity(selectedPr.url)) throw new Error("GitHub returned a different pull request.");
@@ -235,6 +236,7 @@ export function PrPanel({
       .then(([{ pullRequests, workStatus, landedWork }, workspaceCheck]) => {
         if (cancelled) return;
         setRows(pullRequests.rows);
+        setPendingCreation(!!pullRequests.pendingCreation);
         // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
         if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
         // The panel's Checks tab carries a red dot while the session's own open PR has a failing check (PRO-394).
@@ -246,7 +248,7 @@ export function PrPanel({
         setError(pullRequests.error ?? actionError.current);
         setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
         // The machine's cleanup check can finish independently of PR loading and actions.
-        if (machineWorkspace && workspaceKey && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
+        if (machineWorkspace && workspaceKey && !pullRequests.pendingCreation && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
           void machineWorkspace.host.disposition().then((disposition) => {
             if (!cancelled) setCheckedWorkspace({ key: workspaceKey, disposition });
           }).catch(() => {});
@@ -454,14 +456,14 @@ export function PrPanel({
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
   const canCreate = !selectedPr && fresh && (!needsLandedProof || landed !== null) && !workLanded && !currentOpen && status && status.defaultBranch && currentBranch && currentBranch !== status.defaultBranch && (status.aheadOfBase ?? 0) > 0;
   const latestCurrent = visibleRows.filter((row) => row.current && row.pr?.head === currentBranch).sort((a, b) => (b.pr?.number ?? 0) - (a.pr?.number ?? 0))[0]?.pr;
-  const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
+  const merged = fresh && !busy && !pendingCreation && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
   const disposition = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
     ? checkedWorkspace.disposition : null;
   const canDelete = canDeleteMergedWorkspace(disposition);
-  const deleteOnMachine = machineWorkspace && fresh && open.length === 0 && offersWorkspaceDelete(
+  const deleteOnMachine = machineWorkspace && fresh && !pendingCreation && open.length === 0 && offersWorkspaceDelete(
     disposition, busy || machineWorkspace.host.turnRunning(disposition?.sessionIds ?? []),
   ) ? () => openWorkspaceDelete(machineWorkspace.projectPath, machineWorkspace.path, machineWorkspace.name, machineWorkspace.host) : undefined;
 
@@ -480,6 +482,7 @@ export function PrPanel({
         <p className="px-4 text-xs text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
+      {loadedSelection === selection && pendingCreation && <p className="px-4 text-xs text-muted-foreground">A recently created pull request is awaiting verification. Retry creation from its branch before removing this workspace.</p>}
       {/* In the Branch tab, the merged card's WHAT NEXT says this (design 05.12). */}
       {!inline && (workspace || onSettle) && merged && (
         <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">

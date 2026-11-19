@@ -116,7 +116,7 @@ it.each([false, true])("once merged shows the merged card and summaries, not the
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
 });
 
-function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
+function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>, pendingCreation = false) {
   const projectKey = "machine:mini:project";
   const sessionId = `${projectKey}:session`;
   mocks.invoke.mockImplementation(async (command: string, args: { additions: unknown[] }) => {
@@ -127,7 +127,7 @@ function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
   const call = vi.fn(async (method: string) => {
     if (method === "git.status") return workStatus(mergedPr.head, 0);
     if (method === "git.prs") return { prs: [pr] };
-    if (method === "git.prAssociations") return { associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
+    if (method === "git.prAssociations") return { pendingCreation, associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
     if (method === "git.prConversation") return { ...pr, reviewers: [], activity: [] };
     throw Error(method);
   });
@@ -146,6 +146,13 @@ function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
 }
 
 describe("merged workspace action", () => {
+  it("holds removal of a merged branch while another PR creation is awaiting verification", async () => {
+    const { panel, workspace } = machinePrPanel(async () => cleanMerged, true);
+    render(panel());
+    await screen.findByText(/A recently created pull request is awaiting verification/);
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    expect(workspace.host.disposition).not.toHaveBeenCalled();
+  });
   it.each([
     { uncommitted: 0, unpushed: 0 },
     { uncommitted: 1, unpushed: 0 },

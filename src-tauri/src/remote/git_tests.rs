@@ -91,6 +91,7 @@ fn fixture() -> Fixture {
     }
     let mut workspace = WorkspaceGit::new(root.clone(), Arc::new(WorkspaceFiles::new(root.clone())));
     workspace.set_gh(shim);
+    workspace.github_origin_fixture = Some("github.test/octo/repo".into());
     Fixture { _dir: dir, base, root, state, git: workspace }
 }
 
@@ -720,8 +721,12 @@ fn machine_pr_creation_records_the_native_session_association() {
     let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
         "id": id, "projectPath": project, "cwd": cwd, "branch": "old-saved-branch", "title": "fixture", "created": "", "modified": ""
     })).unwrap();
+    let nested = checkout.join("subdirectory");
+    std::fs::create_dir(&nested).unwrap();
+    let mut native = session("native", &f.root, &nested);
+    native.set_checkout_root(checkout.to_str());
     crate::store::index::save(&[
-        session("native", &f.root, &checkout),
+        native,
         session("outside", &f.base, &checkout),
         session("other", &f.root, &f.root),
     ]).unwrap();
@@ -761,6 +766,7 @@ fn machine_pr_creation_records_the_native_session_association() {
     let calls = f.gh_calls();
     assert_eq!(f.code("git.prCreate", create(".", "native", "feature/pr")), "conflict");
     assert_eq!(f.gh_calls(), calls);
+    std::fs::remove_dir(nested).unwrap();
     let repeat = f.call("git.prCreate", create(repo, "native", "feature/pr")).unwrap();
     assert_eq!(repeat["existing"], true);
     assert_eq!(repeat["sessionAssociated"], true);
@@ -792,11 +798,30 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
     let remote = f.remote("origin");
     f.clone(&remote, ".");
     f.git.project = true;
-    let request = machine_pr_request(&f);
+    let checkout = f.base.join("pending-checkout");
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let mut request = machine_pr_request(&f, &checkout);
     f.fault("view-offline");
+    f.fault("live-pr-head");
+    std::fs::write(f.state.join("default-pr-repo"), "github.test/elsewhere/other").unwrap();
     assert_eq!(f.code("git.prCreateForSession", request.clone()), "outcome_unknown");
     let associations = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
     assert_eq!(associations()["associations"], json!([]));
+    assert_eq!(associations()["pendingCreation"], true);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some("https://github.test/octo/repo/pull/1"));
+    git(&checkout, &["checkout", "-qb", "merged-branch", "main"]);
+    assert!(crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err().contains("before removing this workspace"));
+    let removal = crate::session_ops::WorkspaceRemoval {
+        project_path: f.root.to_str().unwrap(), path: checkout.to_str().unwrap(),
+        sessions: crate::session_ops::SessionsFate::Delete, delete_branch: true,
+        confirmation: crate::session_ops::Confirmation::Forced, expected_sessions: None,
+        direct: crate::git::DirectDelete::Never, fetch: crate::landed::Fetch::Skip,
+        guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    let sink = crate::sink::BroadcastSink::new(8);
+    let refused = crate::session_ops::remove_workspace_fallible(&sink, &removal, &|_| panic!("pending PR must stop removal before stopping sessions"));
+    assert!(refused.unwrap_err().contains("before removing this workspace"));
+    assert!(checkout.is_dir() && crate::store::index::get("native").is_ok());
 
     let mut other: Value = serde_json::from_slice(&std::fs::read(f.state.join("pr-1.json")).unwrap()).unwrap();
     other["number"] = 2.into();
@@ -804,27 +829,45 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
     other["url"] = "https://github.test/octo/repo/pull/2".into();
     std::fs::write(f.state.join("pr-2.json"), serde_json::to_vec(&other).unwrap()).unwrap();
     std::fs::remove_file(f.state.join("view-offline")).unwrap();
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+    git(&checkout, &["commit", "-qm", "Advance before retry", "--allow-empty"]);
+    let next = git(&checkout, &["rev-parse", "HEAD"]);
+    request["pushHead"] = json!(next);
 
     let retried = f.call("git.prCreateForSession", request).unwrap();
     assert_eq!(retried["pr"]["number"], 1);
     assert_eq!(retried["sessionAssociated"], true);
     assert_eq!(retried["reconciled"], true);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), next);
     assert_eq!(associations()["associations"][0]["url"], retried["pr"]["url"]);
+    assert!(associations().get("pendingCreation").is_none());
     let calls = f.gh_calls();
     assert_eq!(calls.matches("\"https://github.test/octo/repo/pull/1\"").count(), 2);
     assert_eq!(calls.matches("\"list\"").count(), 1);
     assert_eq!(calls.matches("\"create\"").count(), 1);
+    assert!(calls.contains("\"--repo\", \"github.test/octo/repo\""));
 }
 
-fn machine_pr_request(f: &Fixture) -> Value {
+#[test]
+fn machine_pr_routing_uses_the_identity_of_the_fetch_url() {
+    assert_eq!(github_repository_from_origin("https://github.com/ACME/Widgets.git/").as_deref(), Some("github.com/acme/widgets"));
+    assert_eq!(github_repository_from_origin("https://github.example.test:8443/Acme/widgets").as_deref(), Some("github.example.test:8443/acme/widgets"));
+    for remote in ["file:///tmp/acme/widgets", "/tmp/acme/widgets", "https://github.com/acme/widgets/other"] {
+        assert_eq!(github_repository_from_origin(remote), None);
+    }
+}
+
+fn machine_pr_request(f: &Fixture, checkout: &Path) -> Value {
+    let repo = f.git.files.relative(checkout);
+    let repo = if repo.is_empty() { "." } else { &repo };
     let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
-        "id": "native", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+        "id": "native", "projectPath": f.root, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
     })).unwrap();
     crate::store::index::save(&[entry]).unwrap();
-    git(&f.root, &["checkout", "-qb", "feature/pr"]);
-    f.call("git.push", json!({ "repo": "." })).unwrap();
-    git(&f.root, &["commit", "-qm", "Advance feature", "--allow-empty"]);
-    json!({ "repo": ".", "sessionId": "native", "branch": "feature/pr", "pushHead": git(&f.root, &["rev-parse", "HEAD"]), "title": "Add pr", "base": "main" })
+    git(checkout, &["checkout", "-qb", "feature/pr"]);
+    f.call("git.push", json!({ "repo": repo })).unwrap();
+    git(checkout, &["commit", "-qm", "Advance feature", "--allow-empty"]);
+    json!({ "repo": repo, "sessionId": "native", "branch": "feature/pr", "pushHead": git(checkout, &["rev-parse", "HEAD"]), "title": "Add pr", "base": "main" })
 }
 
 #[test]
@@ -835,7 +878,7 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
     let separate = f.remote("push");
     f.clone(&origin, ".");
     f.git.project = true;
-    let request = machine_pr_request(&f);
+    let request = machine_pr_request(&f, &f.root);
     let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
     git(&f.root, &["remote", "set-url", "--push", "origin", separate.to_str().unwrap()]);
     assert_eq!(f.code("git.prCreateForSession", request.clone()), "unpushed");
@@ -847,7 +890,7 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
     std::fs::write(f.state.join("pr-head"), earlier).unwrap();
     assert_eq!(f.code("git.prCreateForSession", request.clone()), "conflict");
     assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
-    assert_eq!(f.call("git.prCreateForSession", request).unwrap()["sessionAssociated"], false);
+    assert_eq!(f.code("git.prCreateForSession", request), "conflict");
 }
 
 #[test]

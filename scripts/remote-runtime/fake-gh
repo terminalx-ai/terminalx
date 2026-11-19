@@ -17,6 +17,8 @@ Faults, by file in the state directory:
   drop-after-create  the next create lands, then reports a dropped connection
   view-offline       exact pull request reads fail to connect
   pr-head            override the head SHA reported on newly opened PRs
+  live-pr-head       read the PR's current head from origin on exact reads
+  default-pr-repo    override the default repository if --repo is omitted
   mergeable          its text is the mergeable state of new pull requests
   checks.json        statusCheckRollup of every pull request
   pr-<n>.json        a pull request; a test may write one (e.g. a fork's,
@@ -137,11 +139,13 @@ def main(args):
         number = len(prs) + 1
         mergeable = open(path("mergeable")).read().strip() if flag("mergeable") else "MERGEABLE"
         checks = json.load(open(path("checks.json"))) if flag("checks.json") else []
+        default_repo = open(path("default-pr-repo")).read().strip() if flag("default-pr-repo") else "github.test/octo/repo"
+        target_repo = option(rest, "--repo", default_repo)
         pr = {
             "number": number,
             "title": option(rest, "--title", ""),
             "body": option(rest, "--body", ""),
-            "url": "https://github.test/octo/repo/pull/%d" % number,
+            "url": "https://%s/pull/%d" % (target_repo, number),
             "state": "OPEN",
             "isDraft": "--draft" in rest,
             "baseRefName": base,
@@ -170,6 +174,8 @@ def main(args):
     if command == "view":
         if flag("view-offline"):
             fail("error connecting to api.github.com")
+        if flag("live-pr-head"):
+            pr["headRefOid"] = remote_head(pr["headRefName"])
         print(json.dumps(fields(pr, option(rest, "--json"))))
     elif command == "checks":
         print(json.dumps([{"name": name} for name in pr.get("requiredChecks", [])]))

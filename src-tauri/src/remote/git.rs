@@ -60,6 +60,8 @@ pub struct WorkspaceGit {
     /// A machine's project (`machine/1`): its repositories are its checkout
     /// and its own worktrees, not clones found below a workspace root.
     project: bool,
+    #[cfg(test)]
+    github_origin_fixture: Option<String>,
 }
 
 /// At most this many of a machine project's checkout and worktrees are listed.
@@ -100,6 +102,22 @@ fn pending_pr_creations<T>(change: impl FnOnce(&mut Vec<PendingPrCreation>) -> (
         if changed { crate::store::write_json(&path, &pending)?; }
         Ok(result)
     }).map_err(RpcError::internal)
+}
+
+pub(crate) fn pending_pr_creation_in(path: &Path) -> Result<Option<String>, RpcError> {
+    pending_pr_creations(|entries| (entries.iter().find(|entry| entry.checkout.path == path).map(|entry| entry.url.clone()), false))
+}
+
+fn github_repository_from_origin(remote: &str) -> Option<String> {
+    let parsed = url::Url::parse(&if remote.contains("://") { remote.to_owned() } else { format!("ssh://{}", remote.replacen(':', "/", 1)) }).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "ssh" | "git") || parsed.query().is_some() || parsed.fragment().is_some() { return None; }
+    let (owner, name) = parsed.path().trim_matches('/').split_once('/')?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    let valid = |part: &str| !part.is_empty() && !matches!(part, "." | "..")
+        && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !valid(owner) || !valid(name) { return None; }
+    let host = crate::github::hostname_from_remote(remote)?;
+    Some(format!("{host}/{owner}/{name}").to_ascii_lowercase())
 }
 
 #[cfg(unix)]
@@ -646,7 +664,8 @@ fn truncate_text(text: &mut String, max: usize) -> bool {
 impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
-        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false }
+        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false,
+            #[cfg(test)] github_origin_fixture: None }
     }
 
     /// The Git of one of a machine's projects (`machine/1`). `repo` names its
@@ -1373,8 +1392,12 @@ impl WorkspaceGit {
     /// The commit `origin` has for `branch`: `Some(None)` when it has no
     /// such branch, `Err` when it could not be asked.
     fn remote_head(&self, repo: &Repo, branch: &str, timeout: Duration) -> Result<Option<String>, RpcError> {
+        self.remote_head_at(repo, "origin", branch, timeout)
+    }
+
+    fn remote_head_at(&self, repo: &Repo, remote: &str, branch: &str, timeout: Duration) -> Result<Option<String>, RpcError> {
         let reference = format!("refs/heads/{branch}");
-        let out = self.git_timed(repo, &["ls-remote", "origin", &reference], timeout, &[])?;
+        let out = self.git_timed(repo, &["ls-remote", "--", remote, &reference], timeout, &[])?;
         Ok(out
             .lines()
             .find_map(|line| line.split_once('\t').filter(|(_, name)| *name == reference).map(|(sha, _)| sha.to_string())))
@@ -1498,9 +1521,11 @@ impl WorkspaceGit {
         });
     }
 
-    fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration) -> Result<Vec<crate::github::PullRequest>, RpcError> {
+    fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration, github_repo: Option<&str>) -> Result<Vec<crate::github::PullRequest>, RpcError> {
         let fields = format!("{},isCrossRepository", crate::github::FIELDS);
-        let out = self.gh(repo, &["pr", "list", "--head", branch, "--state", state, "--json", &fields, "--limit", "100"], timeout)?;
+        let mut args = vec!["pr", "list", "--head", branch, "--state", state, "--json", &fields, "--limit", "100"];
+        if let Some(github_repo) = github_repo { args.extend(["--repo", github_repo]); }
+        let out = self.gh(repo, &args, timeout)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr list: {error}")))?;
         let mut prs: Vec<_> = value.as_array().map(|prs| own_prs(prs).map(crate::github::parse_pr).collect()).unwrap_or_default();
         prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
@@ -1530,16 +1555,9 @@ impl WorkspaceGit {
         let refused = || RpcError::new("conflict", "Select this session's checkout before creating a pull request.");
         let entry = self.project_session(session)?;
         let path = repo.dir.canonicalize().map_err(|_| refused())?;
-        if entry.worktree_removed || !std::fs::canonicalize(&entry.cwd).is_ok_and(|cwd| cwd == path)
-            || !crate::git::is_own_worktree(&path) {
-            return Err(refused());
-        }
-        let registered = if repo.name == "." {
-            self.project_has_git()
-        } else {
-            super::machine::worktrees(&self.root).iter().any(|worktree| worktree.path == path)
-        };
-        if !registered {
+        let authorized = super::machine::session_checkout(&self.root, &self.files, &entry, || self.project_has_git())
+            .and_then(|(_, name)| name);
+        if authorized.as_deref() != Some(repo.name.as_str()) || !crate::git::is_own_worktree(&path) {
             return Err(refused());
         }
         if crate::git::current_branch(&repo.dir).as_deref() != Some(branch) {
@@ -1556,7 +1574,11 @@ impl WorkspaceGit {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        Ok(self.locate_pr_associations(associations))
+        let mut result = self.locate_pr_associations(associations);
+        if self.project && pending_pr_creations(|entries| (entries.iter().any(|entry| entry.session == session.id), false))? {
+            result["pendingCreation"] = json!(true);
+        }
+        Ok(result)
     }
 
     fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {
@@ -1622,7 +1644,7 @@ impl WorkspaceGit {
             return Ok(json!({ "repo": repo.name, "branch": pr.head, "prs": [pr] }));
         }
         let branch = self.branch_param(&repo, params)?;
-        let mut prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT)?;
+        let mut prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT, None)?;
         for pr in &mut prs { self.panel_pr(&repo, pr); }
         Ok(json!({ "repo": repo.name, "branch": branch, "prs": prs }))
     }
@@ -1648,6 +1670,14 @@ impl WorkspaceGit {
             self.branch_param(&repo, params)?
         };
         let checkout = session.map(|session| self.pr_creation_checkout(session, &repo, &branch)).transpose()?;
+        let _lease = checkout.as_ref().map(|checkout| crate::archive_script::RemovalLease::acquire(&checkout.path))
+            .transpose().map_err(|error| RpcError::new("conflict", error.to_string()))?;
+        let origin = if self.project {
+            Some(self.git(&repo, &["remote", "get-url", "origin"])?.trim().to_owned())
+        } else { None };
+        let github_repo = origin.as_deref().map(|origin| self.pr_creation_repository(origin)).transpose()?;
+        let github_repo = github_repo.as_deref();
+        let known_url = |url: &str| github_repo.is_none_or(|name| url.starts_with(&format!("https://{name}/pull/")));
         let verify_checkout = || {
             if let Some((session, expected)) = session.zip(checkout.as_ref()) {
                 if self.pr_creation_checkout(session, &repo, &branch)? != *expected {
@@ -1698,8 +1728,9 @@ impl WorkspaceGit {
         verify_publish()?;
         let read_created = |url: &str| {
             let unresolved = || RpcError::new("outcome_unknown", format!("GitHub reported {url}, but the pull request could not be verified yet. Try again."));
+            if !known_url(url) { return Err(RpcError::new("conflict", "The pull request belongs to a different repository than origin.")); }
             let pr = self.pr_view(&repo, url).map_err(|_| unresolved())?;
-            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) { return Err(unresolved()); }
+            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) || (self.project && pr.head_sha.is_empty()) { return Err(unresolved()); }
             Ok(pr)
         };
         let pending = if let Some((session, checkout)) = session.zip(checkout.as_ref()) {
@@ -1707,18 +1738,21 @@ impl WorkspaceGit {
                 entry.session == session && entry.checkout == *checkout && entry.branch == branch && entry.base == base
             ).cloned(), false))?
         } else { None };
-        let existing = if pending.is_none() {
-            open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?)
+        let recovered = if let Some(evidence) = pending {
+            let pr = read_created(&evidence.url)?;
+            Self::finish_pr_creation(&evidence, &pr, verify_checkout)?;
+            Some(pr)
+        } else { None };
+        let existing = if recovered.is_none() {
+            open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT, github_repo)?)
         } else { None };
         if let Some(head) = pinned_head {
             self.push_branch(&repo, &branch, head, |repo, branch, head| self.push_ref(repo, branch, head), verify_publish)?;
             // `git push` can use a separate URL. Confirm the source GitHub
             // reads through origin before relying on the successful push.
-            self.verify_pr_remote_head(&repo, &branch, head)?;
+            self.verify_pr_remote_head(&repo, origin.as_deref(), &branch, head)?;
         }
-        if let Some(evidence) = pending {
-            let pr = read_created(&evidence.url)?;
-            Self::finish_pr_creation(&evidence, &pr, verify_checkout)?;
+        if let Some(pr) = recovered {
             return answer(pr, false, true);
         }
         // A branch match can locate a PR, but only a successful create URL or
@@ -1730,23 +1764,25 @@ impl WorkspaceGit {
             head.to_owned()
         } else {
             let local = self.local_head(&repo, &branch)?;
-            self.verify_pr_remote_head(&repo, &branch, &local)?;
+            self.verify_pr_remote_head(&repo, origin.as_deref(), &branch, &local)?;
             local
         };
         let mut args = vec!["pr", "create", "--title", title, "--body", body, "--base", &base, "--head", &branch];
         if draft {
             args.push("--draft");
         }
+        if let Some(github_repo) = github_repo { args.extend(["--repo", github_repo]); }
         verify_publish()?;
         let reported = match self.gh(&repo, &args, NETWORK_TIMEOUT) {
             Ok(url) => url,
-            Err(error) => return match self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open) {
+            Err(error) => return match self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT, github_repo).map(open) {
                 Ok(Some(pr)) => answer(pr, false, true),
                 _ => Err(error),
             },
         };
         let url = crate::pr_associations::identity(reported.trim())
             .map_err(|_| RpcError::new("outcome_unknown", "GitHub did not return a valid URL for the new pull request."))?;
+        if !known_url(&url) { return Err(RpcError::new("conflict", "GitHub returned a pull request outside the origin repository.")); }
         let evidence = session.zip(checkout.as_ref()).filter(|_| verify_checkout().is_ok()).map(|(session, checkout)| PendingPrCreation {
             session: session.into(), checkout: checkout.clone(), branch: branch.clone(), base, head: local, url: url.clone(),
         });
@@ -1764,8 +1800,22 @@ impl WorkspaceGit {
         answer(pr, false, false)
     }
 
-    fn verify_pr_remote_head(&self, repo: &Repo, branch: &str, head: &str) -> Result<(), RpcError> {
-        if self.remote_head(repo, branch, NETWORK_TIMEOUT)?.as_deref() != Some(head) {
+    fn pr_creation_repository(&self, origin: &str) -> Result<String, RpcError> {
+        #[cfg(test)]
+        if let Some(fixture) = self.github_origin_fixture.as_ref().filter(|_| Path::new(origin).is_absolute()) {
+            return Ok(fixture.clone());
+        }
+        github_repository_from_origin(origin).ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))
+    }
+
+    fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {
+        if let Some(origin) = origin {
+            let effective = self.git(repo, &["ls-remote", "--get-url", "--", origin])?;
+            if effective.trim() != origin {
+                return Err(RpcError::new("conflict", "Git rewrote the verified origin URL. Check the repository's remote configuration."));
+            }
+        }
+        if self.remote_head_at(repo, origin.unwrap_or("origin"), branch, NETWORK_TIMEOUT)?.as_deref() != Some(head) {
             return Err(RpcError::new("unpushed", format!("push {branch} first: the remote does not have its latest commit")));
         }
         Ok(())
@@ -1779,11 +1829,13 @@ impl WorkspaceGit {
             crate::pr_associations::record_local(session, &checkout.path, url, branch)
                 .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
         }
-        pending_pr_creations(|entries| {
-            let count = entries.len();
-            entries.retain(|entry| &entry.session != session || &entry.url != url);
-            ((), entries.len() != count)
-        })?;
+        if matches || matches!(pr.state.as_str(), "CLOSED" | "MERGED") {
+            pending_pr_creations(|entries| {
+                let count = entries.len();
+                entries.retain(|entry| &entry.session != session || &entry.url != url);
+                ((), entries.len() != count)
+            })?;
+        }
         if !matches {
             return Err(RpcError::new("conflict", format!("GitHub opened {url} with a different head, base, or commit.")));
         }

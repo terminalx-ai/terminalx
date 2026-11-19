@@ -42,7 +42,7 @@ export interface GitSource {
   branchBase?(base: string): ReturnType<RemoteGit["branchBase"]>;
   branchDiffSize?(base: string): Promise<Awaited<ReturnType<RemoteGit["branchDiffSize"]>> | "unsupported">;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
-  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean; pendingCreation?: boolean }>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
@@ -323,7 +323,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       }));
       // A live machine reply is authoritative, including when a link has
       // been removed. Desktop associations cannot establish machine ownership.
-      if (fromMachine) return { associations: runtimeRows };
+      if (fromMachine) return { associations: runtimeRows, ...(response.pendingCreation ? { pendingCreation: true } : {}) };
       const cached = await gh.associations(sessionId, runtimeRows);
       // The cache may predate the linked bit.
       const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
