@@ -1211,7 +1211,7 @@ fn default_hostname() -> String {
     std::env::var("GH_HOST").ok().filter(|host| !host.is_empty()).unwrap_or_else(|| "github.com".into())
 }
 
-fn hostname_from_remote(remote: &str) -> Option<String> {
+pub(crate) fn hostname_from_remote(remote: &str) -> Option<String> {
     hostname_from_remote_with(remote, &mut |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
 }
 

@@ -184,11 +184,21 @@ export interface RemotePushResult {
   reconciled: boolean;
 }
 
+export interface RemotePrCreateInput {
+  title: string;
+  body: string;
+  base: string | null;
+  draft: boolean;
+  branch?: string;
+  sessionId?: string;
+  associateExisting?: boolean;
+}
+
 export interface RemotePrCreateResult {
   repo: string;
   pr: RemotePullRequest;
   created: boolean;
-  /** An open pull request for the branch already existed; it is linked, not duplicated. */
+  /** An open pull request for the branch already existed. */
   existing: boolean;
   reconciled?: boolean;
   /** The machine saved this pull request to the named session. */
@@ -331,7 +341,7 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[]; branchPrLinks?: boolean }> {
+  prAssociations(sessionId: string): Promise<{ pendingCreation?: boolean; branchPrLinks?: boolean; associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
   }
 
@@ -381,9 +391,14 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string; associateExisting?: boolean }): Promise<RemotePrCreateResult> {
+  createPr(input: RemotePrCreateInput): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
+  }
+
+  createSessionPr(input: Omit<RemotePrCreateInput, "associateExisting"> & { sessionId: string }, pushHead?: string): Promise<RemotePrCreateResult> {
+    const { base, ...rest } = input;
+    return this.write("git.prCreateForSession", { ...rest, ...(base ? { base } : {}), ...(pushHead === undefined ? {} : { pushHead }) });
   }
 
   readyPr(number: number, url?: string): Promise<unknown> {

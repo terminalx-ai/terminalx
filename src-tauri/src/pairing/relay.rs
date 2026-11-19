@@ -1161,7 +1161,10 @@ async fn control_loop(
                         let keypair = keypair.clone();
                         tauri::async_runtime::spawn(async move {
                             match manager.clone().handle_relay_connection(cell, host_id, generation, keypair, connection).await {
-                                Ok(()) => manager.record_relay_diagnostic(Event::PhoneClosed, 0, None),
+                                Ok(ended) => {
+                                    log::info!("phone session ended: {:?} close_code={:?}", ended.reason, ended.close_code);
+                                    manager.record_phone_end(Event::PhoneClosed, 0, None, Some(ended))
+                                }
                                 Err(error) => manager.record_relay_diagnostic(Event::PhoneFailed, 0, Some(Failure::from_error(&error))),
                             }
                         });

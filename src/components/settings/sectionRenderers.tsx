@@ -12,6 +12,7 @@ import { StorageTab } from "./StorageTab";
 import { RecoveryIncidentSettings } from "./RecoveryIncidentSettings";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { ExperimentalTab } from "./ExperimentalSettings";
+import { AdvancedTab } from "./AdvancedSettings";
 import { EnvironmentSettings } from "./EnvironmentSettings";
 import { RegisteredSetting } from "./settingsRegistry";
 import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
@@ -47,5 +48,6 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   storage: () => <><MergedCleanupSettings /><div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div><StorageTab /><RecoveryIncidentSettings /></>,
   shortcuts: () => <ShortcutsTab />,
   experimental: () => <ExperimentalTab />,
+  advanced: () => <AdvancedTab />,
   about: () => <AboutTab />,
 };

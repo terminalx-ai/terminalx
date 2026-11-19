@@ -92,6 +92,15 @@ function backend(command: string, args: Record<string, unknown> = {}) {
       return { agent: harness, accounts: [local, ...key], defaultAccount: usingKey ? "api-key" : "local", projectDefaults: {} };
     }
     case "stop_tab": return null;
+    // PRO-157: each tab's Executable and settings file rows.
+    case "agent_executable": {
+      const path = harness === "claude" ? claude.path! : harness === "codex" ? codex.path! : null;
+      return { harness, chosen: null, path, system: path, version: readiness[harness]?.version ?? null, problem: null };
+    }
+    case "agent_config_file":
+      return harness === "codex"
+        ? { path: "/Users/ada/.codex/config.toml", displayPath: "~/.codex/config.toml", exists: true }
+        : { path: "/Users/ada/.claude/settings.json", displayPath: "~/.claude/settings.json", exists: true };
     default: throw new Error(`unexpected command ${command}`);
   }
 }

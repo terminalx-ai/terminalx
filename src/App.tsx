@@ -1,3 +1,4 @@
+import { SupportReportDialog } from "@/components/SupportReportDialog";
 import { IssueConfirmation } from "@/components/issues/IssueConfirmation";
 import { LocalRuntimeNotice } from "@/components/LocalRuntimeNotice";
 import { StartupDiagnostics } from "@/components/StartupDiagnostics";
@@ -15,5 +16,5 @@ import { useNativeMenus } from "@/lib/nativeMenuBridge";
  */
 export default function App() {
   useNativeMenus();
-  return <TooltipProvider>{isCompactWindow() ? <FloatingShell /> : <><AppShell /><IssueConfirmation /></>}<LocalRuntimeNotice /><StartupDiagnostics /><ConfirmDialogHost /></TooltipProvider>;
+  return <TooltipProvider>{isCompactWindow() ? <FloatingShell /> : <><AppShell /><IssueConfirmation /><SupportReportDialog /></>}<LocalRuntimeNotice /><StartupDiagnostics /><ConfirmDialogHost /></TooltipProvider>;
 }

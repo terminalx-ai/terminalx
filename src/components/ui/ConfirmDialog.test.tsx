@@ -134,9 +134,7 @@ describe("the app's confirmation dialog", () => {
 
   it("renews a waiting quit card and stops when Rust withdraws it", async () => {
     vi.useFakeTimers();
-    desktop.isTauri.mockReturnValue(true);
-    desktop.listen.mockResolvedValue(() => {});
-    desktop.invoke.mockResolvedValue(true);
+    const rust = promptChannel("current");
     render(<ConfirmDialogHost />);
     const [, receive] = desktop.listen.mock.calls[0];
     const { answer } = await asking(() => receive({
@@ -146,6 +144,7 @@ describe("the app's confirmation dialog", () => {
     await act(() => receive({ payload: ["older", null] }));
     expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
     await act(() => vi.advanceTimersByTimeAsync(2_000));
+    rust.withdraw();
     await act(() => receive({ payload: ["current", null] }));
     await answer;
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -153,6 +152,109 @@ describe("the app's confirmation dialog", () => {
     expect(desktop.invoke.mock.calls).toEqual([
       ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
       ["reply_to_quit_prompt", { id: "current", reply: "heartbeat" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "heartbeat" }],
+    ]);
+  });
+
+  // Floating and chat web views may emit events too: only Rust's prompt state may dismiss or replace the card.
+  it("keeps the card and its heartbeat when a forged event names another prompt", async () => {
+    vi.useFakeTimers();
+    const rust = promptChannel("current");
+    render(<ConfirmDialogHost />);
+    const [, receive] = desktop.listen.mock.calls[0];
+    const request = { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" };
+    const { answer } = await asking(() => receive({ payload: ["current", request] }));
+
+    await act(() => receive({ payload: ["forged", { title: "Something else?", action: "Yes" }] }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Something else?" })).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(rust.heartbeats).toBe(1);
+
+    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Quit Anyway" })); });
+    await answer;
+    expect(rust.answer).toBe("action");
+    expect(desktop.invoke.mock.calls).toEqual([
+      ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "forged", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "heartbeat" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "action" }],
+    ]);
+  });
+
+  it("keeps the card when a withdrawal for it arrives while Rust still waits on it", async () => {
+    vi.useFakeTimers();
+    const rust = promptChannel("current");
+    render(<ConfirmDialogHost />);
+    const [, receive] = desktop.listen.mock.calls[0];
+    const { answer } = await asking(() => receive({
+      payload: ["current", { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" }],
+    }));
+
+    await act(() => receive({ payload: ["current", null] }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    // The probe failing over IPC says nothing either way: the card stays.
+    desktop.invoke.mockRejectedValueOnce(new Error("lost IPC reply"));
+    await act(() => receive({ payload: ["current", null] }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    expect(rust.heartbeats).toBe(2);
+
+    await act(async () => { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Keep Running" })); });
+    await answer;
+    expect(rust.answer).toBe("cancel");
+  });
+
+  it("replaces the card when Rust accepts the new prompt's claim", async () => {
+    vi.useFakeTimers();
+    const rust = promptChannel("first");
+    render(<ConfirmDialogHost />);
+    const [, receive] = desktop.listen.mock.calls[0];
+    const { answer: first } = await asking(() => receive({
+      payload: ["first", { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" }],
+    }));
+    rust.ask("second");
+    const { answer: second } = await asking(() => receive({
+      payload: ["second", { title: "Keep work running?", action: "Quit and Keep Running", alternative: "Quit and Stop All", cancel: "Cancel" }],
+    }));
+    await first;
+    expect(screen.queryByRole("dialog", { name: "Quit TerminalX?" })).toBeNull();
+    const dialog = screen.getByRole("dialog", { name: "Keep work running?" });
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Quit and Stop All" })); });
+    await second;
+    expect(rust.answer).toBe("alternative");
+    // The first card neither answered nor renewed once it was replaced.
+    expect(desktop.invoke.mock.calls).toEqual([
+      ["reply_to_quit_prompt", { id: "first", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "second", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "second", reply: "heartbeat" }],
+      ["reply_to_quit_prompt", { id: "second", reply: "alternative" }],
     ]);
   });
 });
+
+/** Rust's `PromptChannel` as the main web view sees it: one pending prompt, claimed once, then renewed or answered. */
+function promptChannel(id: string) {
+  desktop.isTauri.mockReturnValue(true);
+  desktop.listen.mockResolvedValue(() => {});
+  const rust = {
+    pending: id as string | null,
+    opened: false,
+    heartbeats: 0,
+    answer: undefined as string | undefined,
+    ask(next: string) { rust.pending = next; rust.opened = false; },
+    withdraw() { rust.pending = null; },
+  };
+  desktop.invoke.mockImplementation(async (command: string, { id, reply }: { id: string; reply: string }) => {
+    expect(command).toBe("reply_to_quit_prompt");
+    if (rust.pending !== id) return false;
+    if (reply === "opened") return !rust.opened && (rust.opened = true);
+    if (!rust.opened) return false;
+    if (reply === "heartbeat") { rust.heartbeats++; return true; }
+    rust.answer = reply;
+    rust.pending = null;
+    return true;
+  });
+  return rust;
+}
