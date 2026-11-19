@@ -71,21 +71,29 @@ const isString = (value: unknown): value is string => typeof value === "string";
  * characters that draw nothing or reorder what is drawn, which would tell
  * the agent words the confirmation does not show.
  */
-const HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/u;
+const HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/u;
 
 /** A prompt a `new` link may carry: some text, and nothing in it the dialog would not show. */
 export function isShownPrompt(prompt: string): boolean {
   return !!prompt.trim() && !HIDDEN.test(prompt) && !padsOutOfView(prompt);
 }
 
+/** A character that draws no ink: any Unicode white space and the blank braille pattern, as the native side's `is_blank`. */
+const BLANK = /[\s\u2800]/u;
+const isBlank = (c: string) => BLANK.test(c);
+
 /** Blank space that would push words below what the dialog shows at first, as the native side refuses it. */
 function padsOutOfView(prompt: string): boolean {
+  const lines = prompt.split(/\r\n|\r|\n/);
   let blankRun = 0;
-  for (const line of prompt.split(/\r\n|\r|\n/)) {
-    blankRun = line.trim() ? 0 : blankRun + 1;
+  for (const line of lines) {
+    blankRun = [...line].every(isBlank) ? blankRun + 1 : 0;
     if (blankRun > 2) return true;
   }
-  return /[ \t]{40}/.test(prompt);
+  return lines.some((line) => {
+    let run = 0;
+    return [...line].some((c) => (run = isBlank(c) ? run + 1 : 0) >= 40);
+  });
 }
 const isOptionalString = (value: unknown): value is string | null => value === null || typeof value === "string";
 

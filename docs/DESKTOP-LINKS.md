@@ -33,7 +33,7 @@ terminalx://new?project=%2FUsers%2Fme%2Fcode%2Fweb&branch=main&prompt=Fix+the+fl
   Session, except Bypass: a session from a link always starts with the agent
   asking first, and never with Merge when green on.
 - A prompt with control characters, invisible characters (zero-width, bidi,
-  Unicode tags), more than two blank lines in a row, or a run of 40 spaces is
+  Unicode tags), more than two blank lines in a row, or a run of 40 blank characters (any Unicode white space or U+2800) is
   refused, so nothing in it can hide from the dialog.
 - At least `prompt` or `linear` is required. A name given twice, or any other
   name, makes the link invalid.

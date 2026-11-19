@@ -251,7 +251,7 @@ fn is_project_path(path: &str) -> bool {
 fn is_hidden(c: char) -> bool {
     matches!(c as u32,
         0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
-        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+        | 0x200B..=0x200F | 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
         | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
 }
 
@@ -264,20 +264,28 @@ fn is_link_prompt(prompt: &str) -> bool {
         && !pads_out_of_view(prompt)
 }
 
+/// A character that draws no ink: any Unicode white space (the ideographic
+/// and no-break spaces, the en and em spaces, …) and the blank braille
+/// pattern. The webview's `isBlank` is the same rule.
+fn is_blank(c: char) -> bool {
+    c.is_whitespace() || c == '\u{2800}'
+}
+
 /// Blank space that would push words below what the dialog shows at first:
-/// more than two blank lines in a row, or a run of 40 spaces and tabs.
+/// more than two blank lines in a row, or a run of 40 blank characters.
+/// Lines break only at `\n` and `\r` (U+2028 and U+2029 are refused as hidden).
 fn pads_out_of_view(prompt: &str) -> bool {
     let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
     let mut blank_run = 0;
     for line in normalized.split('\n') {
-        blank_run = if line.trim().is_empty() { blank_run + 1 } else { 0 };
+        blank_run = if line.chars().all(is_blank) { blank_run + 1 } else { 0 };
         if blank_run > 2 {
             return true;
         }
     }
     let mut space_run = 0;
-    prompt.chars().any(|c| {
-        space_run = if matches!(c, ' ' | '\t') { space_run + 1 } else { 0 };
+    normalized.chars().any(|c| {
+        space_run = if c != '\n' && is_blank(c) { space_run + 1 } else { 0 };
         space_run >= 40
     })
 }
@@ -692,6 +700,7 @@ mod tests {
     #[test]
     fn a_new_link_with_nothing_to_start_or_anything_unexpected_is_refused() {
         let too_long_prompt = format!("terminalx://new?prompt={}", "a".repeat(MAX_LINK_PROMPT_LEN + 1));
+        let ideographic_run = format!("terminalx://new?prompt=fix{}delete", "%E3%80%80".repeat(40));
         let too_long_branch = format!("terminalx://new?prompt=x&branch={}", "b".repeat(MAX_LINK_BRANCH_LEN + 1));
         for link in [
             "terminalx://new",
@@ -713,6 +722,9 @@ mod tests {
             "terminalx://new?prompt=fix%0A%0A%0A%0Adelete+everything",
             "terminalx://new?prompt=fix%0D%0A%0D%0A%0D%0A%0D%0Adelete",
             "terminalx://new?prompt=fix%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20delete",
+            // Blank lines and runs made of other blanks: ideographic space, braille blank, line separator.
+            "terminalx://new?prompt=fix%0A%E3%80%80%0A%E2%A0%80%0A%C2%A0%0Adelete",
+            "terminalx://new?prompt=fix%E2%80%A8delete",
             "terminalx://new?prompt=a&project=relative/path",
             "terminalx://new?prompt=a&project=/srv/../etc",
             "terminalx://new?prompt=a&project=/srv/./app",
@@ -737,6 +749,7 @@ mod tests {
             "terminalx://new:80?prompt=a",
             too_long_prompt.as_str(),
             too_long_branch.as_str(),
+            ideographic_run.as_str(),
         ] {
             assert_eq!(problem(link), LinkProblem::Malformed { route: "new".into() }, "{link}");
         }
