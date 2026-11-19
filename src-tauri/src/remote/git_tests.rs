@@ -136,6 +136,147 @@ fn a_single_repository_is_used_without_naming_it_and_a_workspace_without_one_say
 }
 
 #[test]
+fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let project = f.clone(&origin, "app");
+    git(&project, &["checkout", "-qb", "release/2.x"]);
+    std::fs::write(project.join("release.txt"), "release only\n").unwrap();
+    std::fs::write(project.join(".gitattributes"), "draft.txt filter=test\n").unwrap();
+    std::fs::write(project.join(".gitignore"), "ignored.txt\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "release"]);
+    let checkout = project.join("worktrees/topic");
+    git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+    let diff_size = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
+    };
+    let branch_base = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchBase", &params).unwrap().unwrap()
+    };
+    let base = git(&checkout, &["rev-parse", "HEAD"]);
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 0, "head": base }));
+    assert_eq!(diff_size(), json!({ "additions": 0, "deletions": 0, "head": base }));
+    std::fs::write(checkout.join("committed.txt"), "committed\n").unwrap();
+    git(&checkout, &["add", "committed.txt"]);
+    git(&checkout, &["commit", "-qm", "topic"]);
+    std::fs::write(checkout.join("staged.txt"), "staged\n").unwrap();
+    git(&checkout, &["add", "staged.txt"]);
+    std::fs::write(checkout.join("README.md"), "edited\n").unwrap();
+    std::fs::write(checkout.join("ignored.txt"), "not counted\n").unwrap();
+    std::fs::write(checkout.join("draft.txt"), "one\n").unwrap();
+    git(&project, &["config", "filter.test.clean", "touch filter-ran && cat"]);
+    git(&project, &["config", "filter.test.required", "true"]);
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let objects = git(&project, &["count-objects", "-v"]);
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 1, "head": head }));
+    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1, "head": head }));
+    std::fs::write(checkout.join("draft.txt"), "one\ntwo\n").unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1, "head": head }));
+    std::fs::remove_file(checkout.join("draft.txt")).unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1, "head": head }));
+    assert_eq!(git(&project, &["count-objects", "-v"]), objects);
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    assert!(!checkout.join("filter-ran").exists());
+}
+
+#[test]
+fn branch_diff_size_refuses_to_start_after_its_deadline() {
+    assert_eq!(branch_diff_size(Path::new("."), "main", Instant::now()).unwrap_err().code, "timeout");
+}
+
+#[test]
+fn commit_and_push_refuse_a_changed_checkout_or_head() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["checkout", "-qb", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({
+        "repo": "app", "message": "work", "author": me(),
+        "expectedBranch": "main", "expectedHead": head
+    });
+    assert_eq!(f.code("git.commitForPush", params.clone()), "conflict");
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    git(&checkout, &["checkout", "-q", "main"]);
+    let commit = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(commit["branch"], "main");
+    assert_ne!(commit["commit"], head);
+    let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
+    assert_eq!(f.code("git.pushHead", push(json!(head))), "conflict");
+    assert_eq!(f.code("git.pushHead", json!({ "repo": "app", "branch": "main" })), "invalid_params");
+    assert_eq!(f.call("git.pushHead", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]), commit["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_hooks_see_the_named_branch_and_branch_specific_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["config", "includeIf.onbranch:main.path", "branch.conf"]);
+    std::fs::write(checkout.join(".git/branch.conf"), "[user]\n\tsigningKey = branch-specific\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git branch --show-current)\" = main\n",
+        "test \"$(git config --get user.signingKey)\" = branch-specific\n",
+        "test \"$(git rev-parse refs/remotes/origin/main)\" = \"$(git rev-parse HEAD)\"\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    let result = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(result["branch"], "main");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_the_real_head_during_commit_preparation_updates_neither_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["branch", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\n",
+        "env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git symbolic-ref HEAD refs/heads/other\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    assert_eq!(f.code("git.commitForPush", params), "conflict");
+    assert_eq!(git(&checkout, &["branch", "--show-current"]), "other");
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head);
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/other"]), head);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    assert!(!checkout.join(".git/index.lock").exists());
+}
+
+#[test]
+fn machine_base_lookup_reports_a_deleted_ref_separately_from_other_errors() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, "app");
+    assert_eq!(f.code("git.branchBase", json!({ "repo": "app", "base": "deleted/release" })), "base_not_found");
+    assert_eq!(f.call("git.branchBase", json!({ "repo": "app", "base": "main" })).unwrap()["aheadOfBase"], 0);
+}
+
+#[test]
 fn commits_carry_the_callers_identity_never_the_workspaces() {
     let f = fixture();
     let remote = f.remote("origin");
@@ -270,8 +411,8 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "x", "author": me() })).unwrap();
     let answer = f
         .git
-        .push_with(&json!({ "repo": "app" }), |repo, branch| {
-            git(&repo.dir, &["push", "-q", "origin", branch]);
+        .push_with(&json!({ "repo": "app" }), |repo, branch, head| {
+            git(&repo.dir, &["push", "-q", "origin", &format!("{head}:refs/heads/{branch}")]);
             Ok(Ran { ok: false, stdout: String::new(), stderr: "fatal: the remote end hung up unexpectedly".into(), timed_out: false })
         })
         .unwrap();
@@ -282,7 +423,7 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "y", "author": me() })).unwrap();
     let error = f
         .git
-        .push_with(&json!({ "repo": "app" }), |_, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
+        .push_with(&json!({ "repo": "app" }), |_, _, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
         .unwrap_err();
     assert_eq!(error.code, "outcome_unknown");
 }

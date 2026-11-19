@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PullRequest } from "@/lib/api";
-import type { GitSource, SourceStatus } from "@/lib/gitSource";
-import { agentPrompt, branchDiffSize, branchPr, composeMachineSnapshot, isGithubRemote, machineActions, resolveMachineStep, sameBranchState } from "./machineBranchStep";
+import type { SourceStatus } from "@/lib/gitSource";
+import { agentPrompt, branchPr, composeMachineSnapshot, isGithubRemote, machineActions, machineBranchBase, resolveMachineStep, sameBranchState } from "./machineBranchStep";
 
 const HEAD = "1".repeat(40);
 const REMOTE = "git@github.com:octo/app.git";
@@ -89,6 +89,13 @@ describe("composeMachineSnapshot (branch_step::compose)", () => {
     expect(snapshot).toMatchObject({ state: "noPr", actions: ["createPr"], base: "main", branch: "feature", head: HEAD });
   });
 
+  it("requires commits against the actual base before offering Create PR", () => {
+    const input = { work: work({ ahead: 2 }), remote: REMOTE, pr: null, known: true, working: false, baseRef: "release/2.x" };
+    expect(composeMachineSnapshot(input)?.actions).toEqual(["push"]);
+    expect(composeMachineSnapshot({ ...input, aheadOfBase: 0 })?.actions).toEqual(["push"]);
+    expect(composeMachineSnapshot({ ...input, aheadOfBase: 1 })?.actions).toEqual(["push", "createPr"]);
+  });
+
   it("keeps the local steps when GitHub could not be read, and never claims there is no PR", () => {
     expect(composeMachineSnapshot({ work: work({ ahead: 1 }), remote: REMOTE, pr: null, known: false, working: false })).toMatchObject({ state: "ahead", actions: ["push"] });
     expect(composeMachineSnapshot({ work: work(), remote: REMOTE, pr: null, known: false, working: false })).toBeNull();
@@ -162,35 +169,11 @@ describe("sameBranchState", () => {
   });
 });
 
-describe("branchDiffSize", () => {
-  function source(answers: { range?: Record<string, { base: string; head: string } | Error>; files?: { additions: number; deletions: number }[] | Error }): GitSource & { asked: string[] } {
-    const asked: string[] = [];
-    return {
-      asked,
-      reviewRange: async (target: string | null) => {
-        asked.push(String(target));
-        const answer = answers.range?.[String(target)];
-        if (!answer || answer instanceof Error) throw answer ?? new Error("unknown revision");
-        return { target: String(target), ...answer };
-      },
-      changesBetween: async () => {
-        if (answers.files instanceof Error) throw answers.files;
-        return (answers.files ?? []).map((file, index) => ({ path: `f${index}`, status: "modified", ...file }));
-      },
-    } as unknown as GitSource & { asked: string[] };
-  }
-
-  it("sums the branch's files against origin/<base>", async () => {
-    const git = source({ range: { "origin/main": { base: "b", head: "h" } }, files: [{ additions: 140, deletions: 9 }, { additions: 2, deletions: 0 }] });
-    expect(await branchDiffSize(git, "main")).toEqual({ additions: 142, deletions: 9 });
-    expect(git.asked).toEqual(["origin/main"]);
-  });
-
-  it("falls back to the local base, and gives no number it cannot count", async () => {
-    const local = source({ range: { main: { base: "b", head: "h" } }, files: [{ additions: 1, deletions: 1 }] });
-    expect(await branchDiffSize(local, "main")).toEqual({ additions: 1, deletions: 1 });
-    expect(local.asked).toEqual(["origin/main", "main"]);
-    expect(await branchDiffSize(source({}), "main")).toBeNull();
-    expect(await branchDiffSize(source({ range: { "origin/main": { base: "b", head: "h" } }, files: new Error("response_truncated") }), "main")).toBeNull();
+describe("machineBranchBase", () => {
+  it("uses the selected branch before a PR exists and follows the base of an open PR", () => {
+    expect(machineBranchBase(work(), null, "refs/remotes/origin/release/2.x")).toBe("release/2.x");
+    expect(machineBranchBase(work(), pr({ base: "develop" }), "origin/release/2.x")).toBe("develop");
+    expect(machineBranchBase(work(), pr({ state: "CLOSED" }), "refs/heads/release/2.x")).toBe("release/2.x");
+    expect(machineBranchBase(work(), null, "HEAD")).toBe("main");
   });
 });

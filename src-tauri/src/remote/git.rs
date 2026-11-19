@@ -44,6 +44,7 @@ const MAX_DIFF_BYTES: usize = 768 * 1024;
 const MAX_CONTENT_BYTES: usize = 384 * 1024;
 const MAX_CHANGED_FILES: usize = 2000;
 const MAX_BODY_BYTES: usize = 4096;
+const HEADER_DIFF_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Per repository in `lifecycle.dispositionFacts`.
@@ -229,6 +230,119 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     }
 }
 
+fn bounded_branch_output(mut command: Command, args: &[&str], deadline: Instant) -> Result<Ran, RpcError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
+    }
+    command.args(args);
+    let output = run_bounded(command, remaining).map_err(RpcError::internal)?;
+    if output.timed_out || Instant::now() >= deadline {
+        return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
+    }
+    Ok(output)
+}
+
+fn bounded_branch_git(command: Command, args: &[&str], deadline: Instant) -> Result<String, RpcError> {
+    let output = bounded_branch_output(command, args, deadline)?;
+    if !output.ok {
+        return Err(failure_error("git branch comparison", &output.text(), Failure::Other));
+    }
+    Ok(output.stdout)
+}
+
+fn comparison_refs(cwd: &Path, base: &str, deadline: Instant) -> Result<Option<(String, String)>, RpcError> {
+    let resolve = |reference: &str| {
+        let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", reference];
+        let output = bounded_branch_output(git_command(cwd), &args, deadline)?;
+        if output.ok {
+            Ok(Some(output.stdout.trim().to_string()))
+        } else if output.stderr.is_empty() {
+            Ok(None)
+        } else {
+            Err(failure_error("git branch comparison", &output.text(), Failure::Other))
+        }
+    };
+    let Some(head) = resolve("HEAD^{commit}")? else { return Ok(None) };
+    let remote = format!("refs/remotes/origin/{base}^{{commit}}");
+    let local = format!("refs/heads/{base}^{{commit}}");
+    let target = match resolve(&remote)? {
+        Some(target) => target,
+        None => resolve(&local)?.ok_or_else(|| RpcError::new("base_not_found", format!("The branch {base} could not be found.")))?,
+    };
+    Ok(Some((head, target)))
+}
+
+/// Compare the worktree to the merge base using an intent-to-add index so
+/// untracked contents are never written as objects.
+fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, RpcError> {
+    let run = |command, args: &[&str]| bounded_branch_git(command, args, deadline);
+    let read = |args: &[&str]| run(git_command(cwd), args);
+    let (head, base_commit) = match comparison_refs(cwd, base, deadline)? {
+        Some((head, target)) => {
+            let merge_base = read(&["merge-base", &head, &target])?;
+            (Some(head), merge_base)
+        }
+        None => (None, read(&["hash-object", "-t", "tree", "--stdin"])?),
+    };
+
+    let mut scratch = tempfile::Builder::new();
+    scratch.prefix("terminalx-git-diff-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        scratch.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+    let index = scratch.path().join("index");
+    let current_index = read(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+    let current_index = Path::new(current_index.strip_suffix('\n').unwrap_or(&current_index));
+    if current_index.exists() {
+        std::fs::copy(current_index, &index).map_err(RpcError::internal)?;
+    }
+    let objects = scratch.path().join("objects");
+    std::fs::create_dir_all(objects.join("info")).map_err(RpcError::internal)?;
+    let alternate = read(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+    let alternate = alternate.strip_suffix('\n').unwrap_or(&alternate);
+    if alternate.contains(['\r', '\n']) {
+        return Err(RpcError::invalid("Git object directory contains a line break"));
+    }
+    std::fs::write(objects.join("info/alternates"), format!("{alternate}\n")).map_err(RpcError::internal)?;
+    // A clean filter can write outside Git's object directory (for example,
+    // Git LFS). Do not run filters, index hooks or fsmonitor during polling.
+    let config = read(&["config", "--null", "--name-only", "--list"])?;
+    let filters: std::collections::BTreeSet<_> = config.split('\0')
+        .filter_map(|key| key.strip_prefix("filter.")?.rsplit_once('.').map(|(name, _)| name))
+        .collect();
+    let hooks = format!("core.hooksPath={}", scratch.path().join("hooks").display());
+    let command = || {
+        let mut command = git_command(cwd);
+        command.env("GIT_INDEX_FILE", &index).env("GIT_OBJECT_DIRECTORY", &objects)
+            .args(["-c", &hooks, "-c", "core.splitIndex=false", "-c", "core.fsmonitor=false"]);
+        for filter in &filters {
+            for setting in ["clean=", "process=", "required=false"] {
+                command.args(["-c", &format!("filter.{filter}.{setting}")]);
+            }
+        }
+        command
+    };
+    run(command(), &["add", "--intent-to-add", "-A", "--", "."])?;
+    let output = run(command(), &["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-M", base_commit.trim(), "--"])?;
+    let (mut additions, mut deletions) = (0, 0);
+    for line in output.lines() {
+        let mut fields = line.splitn(3, '\t');
+        match (fields.next(), fields.next()) {
+            (Some("-"), Some("-")) => {}
+            (Some(added), Some(deleted)) => {
+                additions += added.parse::<u64>().map_err(RpcError::internal)?;
+                deletions += deleted.parse::<u64>().map_err(RpcError::internal)?;
+            }
+            _ => return Err(RpcError::internal("Malformed Git diff statistics")),
+        }
+    }
+    Ok(json!({ "additions": additions, "deletions": deletions, "head": head }))
+}
+
 /// Only app-owned network operations use this boundary. Local Git inspection,
 /// edits and the agent process runner keep their existing execution paths.
 enum Network { Git, Github }
@@ -372,6 +486,8 @@ impl WorkspaceGit {
         let result = match method {
             "git.repositories" => Ok(self.list(params)),
             "git.status" => self.status(params),
+            "git.branchBase" => self.branch_base(params),
+            "git.branchDiffSize" => self.branch_diff_size(params),
             "git.diff" => self.diff(params),
             "git.workingChanges" => self.working_changes(params),
             "git.reviewRange" => self.review_range(params),
@@ -383,9 +499,12 @@ impl WorkspaceGit {
             "git.checkout" => self.checkout(params),
             "git.stage" => self.paths(params, &["add", "-A", "--"]),
             "git.unstage" => self.unstage(params),
-            "git.commit" => self.commit(params),
+            "git.commit" => self.commit(params, false),
+            "git.commitForPush" => self.commit(params, true),
             "git.fetch" => self.fetch(params),
             "git.push" => self.push(params),
+            "git.pushHead" if params.get("head").is_some() && params.get("branch").and_then(Value::as_str).is_some_and(valid_ref_name) => self.push(params),
+            "git.pushHead" => Err(RpcError::invalid("branch and head are required")),
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
@@ -689,6 +808,25 @@ impl WorkspaceGit {
         Ok(json!({ "repo": repo.name, "head": head, "files": files, "truncated": truncated }))
     }
 
+    fn branch_base(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
+        let deadline = Instant::now() + HEADER_DIFF_TIMEOUT;
+        let Some((head, target)) = comparison_refs(&repo.dir, base, deadline)? else {
+            return Ok(json!({ "head": null, "aheadOfBase": 0 }));
+        };
+        let range = format!("{target}..{head}");
+        let count = bounded_branch_git(git_command(&repo.dir), &["rev-list", "--count", &range], deadline)?;
+        let ahead = count.trim().parse::<u64>().map_err(RpcError::internal)?;
+        Ok(json!({ "head": head, "aheadOfBase": ahead }))
+    }
+
+    fn branch_diff_size(&self, params: &Value) -> Result<Value, RpcError> {
+        let repo = self.repo(params)?;
+        let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
+        branch_diff_size(&repo.dir, base, Instant::now() + HEADER_DIFF_TIMEOUT)
+    }
+
     fn review_range(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let target = params.get("target").and_then(Value::as_str);
@@ -833,8 +971,13 @@ impl WorkspaceGit {
         Ok(json!({ "repo": repo.name, "paths": paths }))
     }
 
-    fn commit(&self, params: &Value) -> Result<Value, RpcError> {
+    fn commit(&self, params: &Value, guarded: bool) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
+        let expected = match (optional_ref(params, "expectedBranch")?, params.get("expectedHead")) {
+            (None, None) if !guarded => None,
+            (Some(branch), Some(Value::String(head))) if valid_object_id(head) => Some((branch, head.as_str())),
+            _ => return Err(RpcError::invalid("expectedBranch and expectedHead are required together")),
+        };
         let message = required_str(params, "message")?;
         if message.trim().is_empty() || message.len() > 64 * 1024 {
             return Err(RpcError::invalid("a commit message is required"));
@@ -851,6 +994,12 @@ impl WorkspaceGit {
             Some(Value::Null) | None => None,
             Some(_) => Some(Self::path_list(params)?),
         };
+        if let Some((branch, head)) = expected {
+            if staged_only || paths.is_some() {
+                return Err(RpcError::invalid("A guarded branch commit includes all changes."));
+            }
+            return self.commit_to_branch(&repo, branch, head, message, name, email);
+        }
         match &paths {
             Some(paths) => {
                 let mut args = vec!["add", "-A", "--"];
@@ -880,12 +1029,129 @@ impl WorkspaceGit {
             args.extend(paths.iter().map(String::as_str));
         }
         self.git_timed(&repo, &args, LOCAL_TIMEOUT, &env)?;
+        let commit = crate::git::head_commit(&repo.dir);
+        let branch = crate::git::current_branch(&repo.dir);
         Ok(json!({
             "repo": repo.name,
-            "commit": crate::git::head_commit(&repo.dir),
-            "branch": crate::git::current_branch(&repo.dir),
+            "commit": commit,
+            "branch": branch,
             "author": { "name": name, "email": email },
         }))
+    }
+
+    /// Prepare with Git's ordinary commit machinery and hooks against a private
+    /// copy of the branch refs. Only the confirmed real ref can receive the commit,
+    /// via a compare-and-swap against the head the caller confirmed.
+    fn commit_to_branch(&self, repo: &Repo, branch: &str, head: &str, message: &str, name: &str, email: &str) -> Result<Value, RpcError> {
+        let reference = format!("refs/heads/{branch}");
+        let check_checkout = || {
+            let current = self.git(repo, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+            if current.as_deref().map(str::trim) != Some(reference.as_str()) || self.local_head(repo, branch)? != head {
+                return Err(RpcError::new("conflict", "The checkout changed before the commit. Refresh and try again."));
+            }
+            if crate::git::operation_in_progress(&repo.dir).map_err(git_error)?.is_some() {
+                return Err(RpcError::new("conflict", "Finish the Git operation before committing and pushing."));
+            }
+            Ok(())
+        };
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let git_dir = path(&["rev-parse", "--absolute-git-dir"])?;
+        let common = path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+        let mut lock_path = index.as_os_str().to_owned();
+        lock_path.push(".lock");
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                RpcError::new("busy", "Another Git operation is using the worktree index. Try again shortly.")
+            } else {
+                RpcError::internal(error)
+            }
+        })?;
+        let lock = tempfile::TempPath::try_from_path(lock_path).map_err(RpcError::internal)?;
+        check_checkout()?;
+
+        let mut scratch = tempfile::Builder::new();
+        scratch.prefix("terminalx-branch-commit-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            scratch.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+        let staged = scratch.path().join("index");
+        if index.exists() {
+            std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
+            // Expand the split index while Git can still find its shared part.
+            let mut command = git_command(&repo.dir);
+            command.env("GIT_INDEX_FILE", &staged).args(["update-index", "--no-split-index"]);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare commit index", &result.text(), Failure::Other));
+            }
+        }
+        let object_format = self.git(repo, &["rev-parse", "--show-object-format"])?;
+        let object_format = match object_format.trim() {
+            "sha1" => "sha1",
+            "sha256" => "sha256",
+            _ => return Err(RpcError::internal("Unsupported Git object format")),
+        };
+        let refs = self.git(repo, &["for-each-ref", "--sort=refname", "--format=%(objectname) %(refname)"])?;
+        std::fs::write(scratch.path().join("packed-refs"), refs).map_err(RpcError::internal)?;
+        let private_ref = scratch.path().join(&reference);
+        std::fs::create_dir_all(private_ref.parent().expect("a branch ref has a parent")).map_err(RpcError::internal)?;
+        std::fs::write(private_ref, format!("{head}\n")).map_err(RpcError::internal)?;
+        std::fs::write(scratch.path().join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
+        let config = format!("[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n");
+        std::fs::write(scratch.path().join("config"), config).map_err(RpcError::internal)?;
+        let sparse_config = git_dir.join("info/sparse-checkout");
+        if sparse_config.is_file() {
+            std::fs::create_dir_all(scratch.path().join("info")).map_err(RpcError::internal)?;
+            std::fs::copy(sparse_config, scratch.path().join("info/sparse-checkout")).map_err(RpcError::internal)?;
+        }
+
+        // Include config from its original location so relative includes still
+        // resolve there. HEAD names the same branch for onbranch and hooks.
+        let common_config = format!("include.path={}", common.join("config").display());
+        let worktree_config = git_dir.join("config.worktree");
+        let include_worktree = self.git(repo, &["config", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true") && worktree_config.is_file();
+        let hooks = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+        let hooks_config = format!("core.hooksPath={}", hooks.display());
+
+        let run = |args: &[&str]| {
+            let mut command = git_command(&repo.dir);
+            command.env("GIT_DIR", scratch.path()).env_remove("GIT_COMMON_DIR")
+                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
+                .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
+                .args(["-c", &common_config]);
+            if include_worktree {
+                command.args(["-c", &format!("include.path={}", worktree_config.display())]);
+            }
+            command.args(["-c", &hooks_config, "-c", "core.bare=false", "-c", "core.splitIndex=false",
+                "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare branch commit", &result.text(), Failure::Other));
+            }
+            Ok(result.stdout)
+        };
+        run(&["add", "-A", "--", "."])?;
+        if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
+            return Err(RpcError::invalid("nothing to commit"));
+        }
+        run(&["commit", "--quiet", "-m", message])?;
+        let output = run(&["rev-parse", "--verify", &reference])?;
+        let commit = output.trim();
+        if commit == head || run(&["rev-parse", &format!("{commit}^1")])?.trim() != head {
+            return Err(RpcError::new("conflict", "The prepared commit no longer matches the confirmed branch and head."));
+        }
+        check_checkout()?;
+        std::fs::copy(&staged, &lock).map_err(RpcError::internal)?;
+        self.git(repo, &["update-ref", "--no-deref", "-m", "commit: TerminalX", &reference, commit, head])?;
+        lock.persist(&index).map_err(|error| RpcError::internal(format!("Committed on {branch}, but could not update the worktree index: {error}")))?;
+        Ok(json!({ "repo": repo.name, "commit": commit, "branch": branch, "author": { "name": name, "email": email } }))
     }
 
     // ---- the remote ------------------------------------------------------
@@ -927,19 +1193,26 @@ impl WorkspaceGit {
     }
 
     fn push(&self, params: &Value) -> Result<Value, RpcError> {
-        self.push_with(params, |repo, branch| {
-            let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        self.push_with(params, |repo, branch, head| {
+            let source = if params.get("head").is_some() { head.to_owned() } else { format!("refs/heads/{branch}") };
+            let refspec = format!("{source}:refs/heads/{branch}");
             self.run_git(&repo.dir, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
         })
     }
 
-    fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
+    fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let branch = match optional_ref(params, "branch")? {
             Some(branch) => branch.to_string(),
             None => crate::git::current_branch(&repo.dir).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch to push"))?,
         };
         let local = self.local_head(&repo, &branch)?;
+        if let Some(head) = params.get("head") {
+            let head = head.as_str().filter(|head| valid_object_id(head)).ok_or_else(|| RpcError::invalid("head is a commit id"))?;
+            if head != local {
+                return Err(RpcError::new("conflict", "The branch moved before the push. Refresh and try again."));
+            }
+        }
         let answer = |pushed: bool, reconciled: bool| {
             json!({ "repo": repo.name, "branch": branch, "head": local, "pushed": pushed, "reconciled": reconciled })
         };
@@ -948,7 +1221,7 @@ impl WorkspaceGit {
             self.track(&repo, &branch);
             return Ok(answer(false, true));
         }
-        let ran = push(&repo, &branch)?;
+        let ran = push(&repo, &branch, &local)?;
         if ran.ok {
             self.track(&repo, &branch);
             return Ok(answer(true, false));

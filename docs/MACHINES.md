@@ -780,6 +780,8 @@ the pull request that adds it.
 | `mirror.manifest` | `mirror/1` | Not served | The offline mirror of a cloud workspace (PRO-25); a machine session reads live and shows its last known state while unreachable (PRO-352) |
 | `git.repositories` | `git/1` | Needs a project | The project's checkout and its worktrees |
 | `git.status` | `git/1` | Needs a project | |
+| `git.branchBase` | `git/1` | Needs a project | |
+| `git.branchDiffSize` | `git/1` | Needs a project | |
 | `git.diff` | `git/1` | Needs a project | |
 | `git.workingChanges` | `git/1` | Needs a project | |
 | `git.reviewRange` | `git/1` | Needs a project | |
@@ -796,10 +798,12 @@ the pull request that adds it.
 | `git.prLanded` | `git/1` | Needs a project | |
 | `git.checkout` | `git/1` | Needs a project | |
 | `git.commit` | `git/1` | Needs a project | |
+| `git.commitForPush` | `git/1` | Needs a project | |
 | `git.stage` | `git/1` | Needs a project | |
 | `git.unstage` | `git/1` | Needs a project | |
 | `git.fetch` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.push` | `git/1` | Needs a project | With the machine's git sign-in |
+| `git.pushHead` | `git/1` | Needs a project | Pushes the confirmed commit with the machine's git sign-in |
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |

@@ -8,11 +8,12 @@ import type { SessionBackend } from "@/lib/sessionBackend";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
-const { MachineBranchButton, MachineDiffSize, useMachineBranch } = await import("./MachineBranchButton");
+const { MACHINE_STATUS_EVERY_MS, MachineBranchButton, MachineDiffSize, useMachineBranch } = await import("./MachineBranchButton");
 
 const HEAD = "1".repeat(40);
 const MOVED = "2".repeat(40);
@@ -38,9 +39,9 @@ function makeSource(): GitSource {
     workStatus: vi.fn(async () => ({ ...status })),
     fetch: vi.fn(async () => null),
     prs: vi.fn(async () => { if (prsFail) throw prsFail; return prs; }),
-    reviewRange: vi.fn(async (target: string) => ({ target, base: "b".repeat(40), head: "c".repeat(40) })),
-    changesBetween: vi.fn(async () => [{ path: "a.ts", status: "modified", additions: 140, deletions: 9 }, { path: "b.ts", status: "added", additions: 2, deletions: 0 }]),
-    commit: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1 }; return null; }),
+    branchBase: vi.fn(async () => ({ aheadOfBase: status.aheadOfBase, head: status.head })),
+    branchDiffSize: vi.fn(async () => ({ additions: 142, deletions: 9, head: status.head })),
+    commitForPush: vi.fn(async () => { status = { ...status, dirty: false, ahead: 1, head: MOVED }; return MOVED; }),
     push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
     pull: vi.fn(async () => null),
     createPr: vi.fn(async () => { prs = [pr()]; return null; }),
@@ -53,22 +54,27 @@ function makeSource(): GitSource {
 
 const fileSource = { watch: (listener: (paths: string[] | null) => void) => { watchers.push(listener); return () => {}; } } as unknown as FileSource;
 
-function Harness({ tabs, source, workspace }: { tabs: TabEntry[]; source?: GitSource; workspace?: RemovableWorkspace }) {
-  const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs, baseRef: null } as unknown as SessionEntry;
+function Harness({ tabs, source, baseRef = null, workspace }: { tabs: TabEntry[]; source?: GitSource; baseRef?: string | null; workspace?: RemovableWorkspace }) {
+  const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs } as unknown as SessionEntry;
   const branch = useMachineBranch({
     session, machineName: "Mac mini", backend: { send } as unknown as SessionBackend, gitSource: source, fileSource,
-    remote: "git@github.com:octo/app.git", connected: true, tabId: "t1",
+    remote: "git@github.com:octo/app.git", connected: true, tabId: "t1", baseRef,
   });
-  return <div><MachineDiffSize branch={branch} /><MachineBranchButton branch={branch} workspace={workspace} /></div>;
+  return <div>
+    <span data-testid="current-branch">{branch.currentBranch}</span>
+    <span data-testid="pr-count">{branch.prCount}</span>
+    <MachineDiffSize branch={branch} />
+    <MachineBranchButton branch={branch} workspace={workspace} />
+  </div>;
 }
 
 const idle = [{ id: "t1", status: "completed" }] as TabEntry[];
-function render(tabs: TabEntry[] = idle) {
+function render(tabs: TabEntry[] = idle, baseRef: string | null = null) {
   const source = makeSource();
-  const view = renderView(<TooltipProvider delayDuration={0}><Harness tabs={tabs} source={source} /></TooltipProvider>);
+  const view = renderView(<TooltipProvider delayDuration={0}><Harness tabs={tabs} source={source} baseRef={baseRef} /></TooltipProvider>);
   return {
     ...view,
-    retab: (next: TabEntry[]) => view.rerender(<TooltipProvider delayDuration={0}><Harness tabs={next} source={source} /></TooltipProvider>),
+    retab: (next: TabEntry[]) => view.rerender(<TooltipProvider delayDuration={0}><Harness tabs={next} source={source} baseRef={baseRef} /></TooltipProvider>),
   };
 }
 beforeEach(() => {
@@ -99,23 +105,81 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     expect(screen.queryByRole("button", { name: "Git actions" })).toBeNull();
   });
 
-  it("shows the branch's diff size and Create PR, and opens the PR on the machine after pushing", async () => {
-    // A branch with commits the machine has not pushed yet and no pull request.
+  it("compares against the selected base and opens a PR for an already pushed branch", async () => {
     status = { ...status, upstream: "origin/feature", ahead: 0 };
-    render();
+    render(idle, "origin/release/2.x");
     expect((await screen.findByTestId("machine-diff-size")).textContent).toContain("+142 −9");
-    expect(git.reviewRange).toHaveBeenCalledWith("origin/main", false);
+    expect(git.branchDiffSize).toHaveBeenCalledWith("release/2.x");
     fireEvent.click(await screen.findByRole("button", { name: "Create PR" }));
     const dialog = await screen.findByRole("dialog");
     expect((dialog).textContent).toContain("Runs on Mac mini with its Git sign-in.");
+    expect(dialog.textContent).toContain("open a pull request into release/2.x");
     expect(((within(dialog).getByLabelText("PR title")) as HTMLInputElement).value).toBe("Add read markers to the catalog feed");
     fireEvent.change(within(dialog).getByLabelText("Description"), { target: { value: "Adds markers." } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
-    await waitFor(() => expect(git.createPr).toHaveBeenCalledWith({ title: "Add read markers to the catalog feed", body: "Adds markers.", base: "main", draft: false, sessionId: "machine:m1:p1:s1" }));
+    await waitFor(() => expect(git.createPr).toHaveBeenCalledWith({ title: "Add read markers to the catalog feed", body: "Adds markers.", base: "release/2.x", draft: false, sessionId: "machine:m1:p1:s1", branch: "feature" }));
     // Already on the remote: nothing is pushed again.
     expect(git.push).not.toHaveBeenCalled();
     // The PR state follows: the new PR is read back and is ready to merge.
     expect((await screen.findByRole("button", { name: "Merge" })).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByTestId("pr-count").textContent).toBe("1");
+  });
+
+  it("keeps Create PR available for a release branch when its worktree diff times out", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render(idle, "release/2.x");
+    git.branchDiffSize.mockRejectedValue(new Error("timeout"));
+    expect(await screen.findByRole("button", { name: "Create PR" })).toBeTruthy();
+    expect(git.branchBase).toHaveBeenCalledWith("release/2.x");
+    expect(screen.queryByTestId("machine-diff-size")).toBeNull();
+  });
+
+  it("falls back to the default for a missing recorded base before a PR exists", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render(idle, "origin/deleted/release");
+    git.branchBase.mockRejectedValue(new WorkspaceRpcError("base_not_found", "Missing branch", "git.branchBase"));
+    fireEvent.click(await screen.findByRole("button", { name: "Create PR" }));
+    expect((await screen.findByRole("dialog")).textContent).toContain("open a pull request into main");
+    expect(git.branchDiffSize).toHaveBeenCalledWith("main");
+  });
+
+  it("keeps an open PR's base even when the runtime cannot find the ref", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr({ base: "deleted/release" })];
+    render();
+    git.branchBase.mockRejectedValue(new WorkspaceRpcError("base_not_found", "Missing branch", "git.branchBase"));
+    await screen.findByTestId("machine-diff-size");
+    expect(git.branchDiffSize.mock.calls).toEqual([["deleted/release"]]);
+  });
+
+  it("offers no publishing action on a fresh branch from a release base", async () => {
+    render(idle, "origin/release/2.x");
+    git.branchBase.mockResolvedValue({ aheadOfBase: 0, head: HEAD });
+    await waitFor(() => expect(screen.getByTestId("current-branch").textContent).toBe("feature"));
+    expect(screen.queryByTestId("machine-branch-button")).toBeNull();
+    expect(git.push).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the selected base before publishing from a Create PR dialog", async () => {
+    render(idle, "origin/release/2.x");
+    await screen.findByRole("button", { name: "Push" });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Create PR/ }));
+    const dialog = await screen.findByRole("dialog");
+    git.branchBase.mockResolvedValue({ aheadOfBase: 0, head: HEAD });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("The branch changed");
+    expect(git.push).not.toHaveBeenCalled();
+    expect(git.createPr).not.toHaveBeenCalled();
+  });
+
+  it("shows a diff-specific update indication for an older machine", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render();
+    git.branchDiffSize.mockResolvedValue("unsupported");
+    expect((await screen.findByRole("status")).textContent).toBe("Update Mac mini for diff totals");
+    expect(screen.queryByTestId("machine-diff-size")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create PR" })).toBeTruthy();
   });
 
   it("pushes a branch the machine never pushed before opening its pull request", async () => {
@@ -127,6 +191,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
     await waitFor(() => expect(git.createPr).toHaveBeenCalled());
+    expect(git.push).toHaveBeenCalledWith("feature", HEAD);
     expect(git.push.mock.invocationCallOrder[0]).toBeLessThan(git.createPr.mock.invocationCallOrder[0]);
   });
 
@@ -140,7 +205,8 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     fireEvent.change(within(dialog).getByLabelText("Commit message"), { target: { value: "Add markers" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Commit and push" }));
     await waitFor(() => expect(git.push).toHaveBeenCalled());
-    expect(git.commit).toHaveBeenCalledWith("Add markers");
+    expect(git.commitForPush).toHaveBeenCalledWith("Add markers", "feature", HEAD);
+    expect(git.push).toHaveBeenCalledWith("feature", MOVED);
   });
 
   it("says the commit is safe on the machine when only its push failed", async () => {
@@ -217,10 +283,33 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     render();
     await screen.findByRole("button", { name: "Merge" });
     status = { ...status, dirty: true };
-    git.changesBetween.mockResolvedValue([{ path: "a.ts", status: "modified", additions: 150, deletions: 9 }]);
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9, aheadOfBase: 2, head: HEAD });
     await act(async () => { watchers.forEach((watch) => watch(["src/app.ts"])); await new Promise((resolve) => setTimeout(resolve, 900)); });
     expect((await screen.findByRole("button", { name: "Commit and push" })).hasAttribute("disabled")).toBe(false);
     expect((screen.getByTestId("machine-diff-size")).textContent).toContain("+150 −9");
+  });
+
+  it("refreshes edits to an already dirty checkout even if the file watch misses them", async () => {
+    vi.useFakeTimers();
+    status = { ...status, dirty: true };
+    await act(async () => { render(); });
+    expect(screen.getByTestId("machine-diff-size").textContent).toContain("+142 −9");
+    git.branchDiffSize.mockResolvedValue({ additions: 150, deletions: 9, aheadOfBase: 2, head: HEAD });
+    await act(async () => { await vi.advanceTimersByTimeAsync(MACHINE_STATUS_EVERY_MS); });
+    expect(screen.getByTestId("machine-diff-size").textContent).toContain("+150 −9");
+  });
+
+  it("reads the new branch and its PRs when the machine changes checkout", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr()];
+    render();
+    await screen.findByRole("button", { name: "Merge" });
+    status = { ...status, branch: "follow-up", head: MOVED, upstream: "origin/follow-up" };
+    await act(async () => { watchers.forEach((watch) => watch(null)); await new Promise((resolve) => setTimeout(resolve, 900)); });
+    expect(git.prs).toHaveBeenLastCalledWith("follow-up");
+    expect(screen.getByTestId("current-branch").textContent).toBe("follow-up");
+    expect(screen.getByTestId("pr-count").textContent).toBe("0");
+    expect(screen.getByRole("button", { name: "Create PR" }).hasAttribute("disabled")).toBe(false);
   });
 
   it("sends Fix checks to the agent tab on the machine and waits for it", async () => {

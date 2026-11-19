@@ -228,6 +228,8 @@ pub const METHODS: &[Method] = &[
     // workspace has exactly one (`remote/git.rs`).
     method("git.repositories", "git/1", Participate, false),
     method("git.status", "git/1", Participate, false),
+    method("git.branchBase", "git/1", Participate, false),
+    method("git.branchDiffSize", "git/1", Participate, false),
     method("git.diff", "git/1", Participate, false),
     method("git.workingChanges", "git/1", Participate, false),
     method("git.reviewRange", "git/1", Participate, false),
@@ -245,10 +247,12 @@ pub const METHODS: &[Method] = &[
     method("git.checkout", "git/1", Manage, true),
     // The author comes from the client; credentials never do.
     method("git.commit", "git/1", Manage, true),
+    method("git.commitForPush", "git/1", Manage, true),
     method("git.stage", "git/1", Manage, true),
     method("git.unstage", "git/1", Manage, true),
     method("git.fetch", "git/1", Manage, true),
     method("git.push", "git/1", Manage, true),
+    method("git.pushHead", "git/1", Manage, true),
     method("git.pull", "git/1", Manage, true),
     method("git.prCreate", "git/1", Manage, true),
     method("git.prReady", "git/1", Manage, true),

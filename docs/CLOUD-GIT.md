@@ -33,6 +33,8 @@ runtime.
 | --- | --- | --- |
 | `git.repositories` | participate | `[{ repo, branch, head, remote, defaultBranch }]` (credentials stripped from `remote`), `truncated`. |
 | `git.status` | participate | Porcelain files, `branch`, `upstream`, `ahead`/`behind`, `defaultBranch`, `aheadOfBase`, `conflicted` (unmerged paths), `operation` (`merge`/`rebase`/`cherry-pick` in progress). `{ repository: false }` when the workspace has none and no `repo` was named. |
+| `git.branchBase` | participate | The measured `head` and its commit count `aheadOfBase` against `base`, preferring the origin ref. Reads only commit history. |
+| `git.branchDiffSize` | participate | `additions` and `deletions` between the worktree and its merge base with `base`, with the measured `head`. Includes untracked files without storing their contents as Git objects. |
 | `git.diff` | participate | Unified diff (≤ 768 KiB, `truncated`). |
 | `git.workingChanges` | participate | The desktop's `working_changes`: HEAD's tree and the changed files against it, untracked included (≤ 2000). Optional `hideWhitespace: true` uses `diff -w` for line counts. |
 | `git.reviewRange` | participate | Stable `base` and live snapshot `head` tree ids for workspace review, including untracked files. `uncommitted: true` compares against HEAD (empty tree in an unborn repository); otherwise `target` selects the merge base with HEAD. Without a target, prefer origin/HEAD, then the default local branch. Returns the resolved target name; invalid targets fail. |
@@ -45,8 +47,10 @@ runtime.
 | `git.checkout` | manage | Switch, or `create` (optionally `from` a ref). |
 | `git.stage` / `git.unstage` | manage | Paths are repository-relative; `GIT_LITERAL_PATHSPECS` makes `:(top)`-style magic plain names. |
 | `git.commit` | manage | `message`, `author` (required); everything by default, `paths`, or `staged: true` for the index only. Nothing to commit is `invalid_params`. |
+| `git.commitForPush` | manage | Commits the worktree using `message` and `author` when `expectedBranch` and `expectedHead` match. Prepares the commit with the named branch and Git hooks in a private ref store and atomically updates only the confirmed branch. |
 | `git.fetch` / `git.pull` | manage | `fetch --prune origin`; `pull --ff-only` (divergence is `conflict`). |
 | `git.push` | manage | `branch` (default current) to `origin`, never forced. See below. |
+| `git.pushHead` | manage | Pushes exactly the confirmed `head` to the named `branch` on `origin`. Refuses if that branch's local head has changed. |
 | `git.prCreate` | manage | `title`, `body`, `base` (default: the default branch), `draft`. See below. |
 | `git.prReady` / `git.prMerge` | manage | Answered by what GitHub reports afterwards (a merge that went through before an error is a success). `git.prMerge` takes an optional `head` (a commit id): GitHub refuses the merge (`conflict`) once the pull request's head is another commit (PRO-404). |
 | `lifecycle.dispositionFacts` | participate | saas contract 10.2; see below. |

@@ -60,11 +60,13 @@ const fixture = (paired) => `(() => {
 
   const ago = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const project = { projectId: "p-tx", name: "terminalx", path: "/Users/paresh/code/terminalx", kind: "git", defaultBranch: "main", archived: false };
+  const worktree = ".raccoon/worktrees/read-markers";
   const tab = (id, status, title) => ({ id, harness: "claude", title, status, created: ago(90), lastMessageAt: null });
   const session = (id, title, minutes, tabs, cwd) => ({ id, projectId: "p-tx", projectPath: project.path, cwd, title, branch: "read-markers",
     created: ago(minutes + 60), modified: ago(minutes), lastMessageAt: ago(minutes), hasMessages: true, archived: false, pinned: false, tabs, activeTab: tabs[0].id });
   const sessions = [
-    session("s-read", "${TITLE}", 3, [tab("t-read", "completed", "Read markers")], project.path + "/.raccoon/worktrees/read-markers"),
+    { ...session("s-read", "${TITLE}", 3, [tab("t-read", "completed", "Read markers")], project.path + "/" + worktree),
+      worktreeBase: { from: "origin/release/2.x" } },
     session("s-flaky", "Bisect the flaky relay e2e", 11, [tab("t-flaky", "waiting", "Bisect")], project.path),
   ];
   const ASK = { requestId: "r-flaky", toolName: "Bash", input: { command: "git bisect run pnpm e2e:relay" },
@@ -148,7 +150,20 @@ const fixture = (paired) => `(() => {
         break;
       }
       case "fs.watch": reply(frame.id, { subscriptionId: "sub-" + ++sub }); break;
-      case "git.repositories": reply(frame.id, { repositories: [] }); break;
+      case "git.repositories":
+        reply(frame.id, { repositories: [{ repo: worktree, branch: "read-markers", head: "abc", remote: "https://github.com/terminalx-ai/terminalx.git", defaultBranch: "main" }] });
+        break;
+      case "git.status":
+        reply(frame.id, { repository: true, repo: worktree, branch: "read-markers-v2", head: "abc", upstream: "origin/read-markers-v2",
+          ahead: 0, behind: 0, aheadOfBase: 1, defaultBranch: "main", dirty: false, files: [] });
+        break;
+      case "git.fetch": reply(frame.id, { repo: worktree }); break;
+      case "git.branchBase": reply(frame.id, { aheadOfBase: 1, head: "abc" }); break;
+      case "git.branchDiffSize":
+        reply(frame.id, { additions: params.base === "release/2.x" ? 42 : 99, deletions: 0, aheadOfBase: 1, head: "abc" });
+        break;
+      case "git.workingChanges": reply(frame.id, { head: "abc", files: [], truncated: false }); break;
+      case "git.prs": reply(frame.id, { branch: params.branch, prs: [] }); break;
       case "fs.list": reply(frame.id, { path: params.path ?? "", entries: [] }); break;
       case "runtime.agents": reply(frame.id, { agents: [] }); break;
       // machine/8: this session has no usage kept on the machine yet.
@@ -182,6 +197,8 @@ for (const colorScheme of ["light", "dark"]) {
   const strip = page.locator('main [data-testid="machine-tab-strip"]');
   await strip.waitFor();
   await page.locator("main [data-chat-scroller]").getByText("The feed now carries a readAt marker").waitFor();
+  const header = page.locator("main header");
+  await header.getByRole("button", { name: "Create PR", exact: true }).waitFor();
   if (!(await page.locator("main aside").count())) await page.getByRole("button", { name: "Toggle panel" }).click();
   await page.waitForTimeout(250);
   await shoot(page, `21.08-session-${colorScheme}`);
@@ -212,6 +229,9 @@ for (const colorScheme of ["light", "dark"]) {
       "the header's chip names the machine and its route": /Mac mini/.test(m.chip ?? "") && /Direct/.test(m.chip ?? ""),
       "the chip comes before the title": m.chipBeforeTitle,
       "the title is the session's": m.title?.includes(TITLE) ?? false,
+      "Git shows the live branch, diff size and PR count": (await header.getByTestId("session-branch").textContent()) === "read-markers-v2"
+        && (await header.getByTestId("machine-diff-size").textContent()) === "+42"
+        && await header.getByText("0 PRs", { exact: true }).isVisible(),
       "the agent tab strip has the session's tab": m.tabs.some((t) => t?.includes("Read markers")),
       "no cloud location chip": !m.cloudLocation,
       "Runs on Mac mini sits under the strip": /Runs on Mac mini/.test(m.location ?? "") && m.locationUnderStrip,

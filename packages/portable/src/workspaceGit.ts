@@ -280,6 +280,14 @@ export class RemoteGit {
     return this.read("git.status");
   }
 
+  branchBase(base: string): Promise<{ aheadOfBase: number; head: string | null }> {
+    return this.read("git.branchBase", { base });
+  }
+
+  branchDiffSize(base: string): Promise<{ additions: number; deletions: number; head: string | null }> {
+    return this.read("git.branchDiffSize", { base });
+  }
+
   workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
     return this.read("git.workingChanges", hideWhitespace ? { hideWhitespace } : {});
   }
@@ -340,8 +348,12 @@ export class RemoteGit {
   }
 
   /** Stages everything (or only `paths`) and commits it as `author`. */
-  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean } = {}): Promise<{ commit: string; branch: string | null }> {
+  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean; expectedBranch?: string; expectedHead?: string } = {}): Promise<{ commit: string; branch: string | null }> {
     return this.write("git.commit", { message, author, ...options });
+  }
+
+  commitForPush(message: string, author: GitAuthor, expectedBranch: string, expectedHead: string): Promise<{ commit: string; branch: string }> {
+    return this.write("git.commitForPush", { message, author, expectedBranch, expectedHead });
   }
 
   checkout(branch: string, options: { create?: boolean; from?: string } = {}): Promise<unknown> {
@@ -356,7 +368,8 @@ export class RemoteGit {
     return this.write("git.pull");
   }
 
-  push(branch?: string): Promise<RemotePushResult> {
+  push(branch?: string, head?: string): Promise<RemotePushResult> {
+    if (head !== undefined) return this.write("git.pushHead", { branch, head });
     return this.write("git.push", branch ? { branch } : {});
   }
 

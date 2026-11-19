@@ -262,11 +262,14 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const defaultRepository = sessionRepository(repositories, project, ownSession);
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
   const gitSourceFor = useCallback(
-    (repo: string | null) => connected && projectClient && repo ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity }) : undefined,
-    [connected, projectClient, projectKey, manage],
+    (repo: string | null) => generation && projectClient?.hasCapability("git/1") && repo
+      ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity })
+      : undefined,
+    [generation, projectClient, projectKey, manage],
   );
   const checkoutGitSource = useMemo(() => gitSourceFor(checkoutRepository), [gitSourceFor, checkoutRepository]);
   const gitSource = useMemo(() => repository === checkoutRepository ? checkoutGitSource : gitSourceFor(repository), [repository, checkoutRepository, checkoutGitSource, gitSourceFor]);
+  const sessionRemote = repositories?.find((repo) => repo.repo === checkoutRepository)?.remote ?? null;
 
   // Files use the same checkout as the session's default Changes source.
   // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
@@ -457,7 +460,10 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState, checkoutGitSource, checkoutRepository },
+    machine: {
+      machineId, projectId, record: machine, name, state: machineState, checkoutGitSource, checkoutRepository,
+      branchGit: checkoutGitSource && { source: checkoutGitSource, remote: sessionRemote, baseRef: ownSession?.worktreeBase?.from ?? null },
+    },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,

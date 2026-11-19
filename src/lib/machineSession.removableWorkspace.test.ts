@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type RuntimeSession } from "@terminalx/portable/workspace";
+import * as workspaceGit from "@terminalx/portable/workspaceGit";
 import { invoke } from "@tauri-apps/api/core";
 import { removeWorkspace } from "@/lib/sessions";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
@@ -54,6 +55,7 @@ function session(id: string, cwd: string, worktreeName: string | null): RuntimeS
     id,
     cwd,
     worktreeName,
+    worktreeBase: worktreeName ? { from: "origin/release/2.x" } : null,
     projectId: "project",
     projectPath: projectRoot,
     title: id,
@@ -67,7 +69,7 @@ function session(id: string, cwd: string, worktreeName: string | null): RuntimeS
 
 function machine(name: string, sessions: RuntimeSession[]) {
   const runtime = new FakeAgentRuntime();
-  runtime.capabilities = ["workspace/1"];
+  runtime.capabilities = ["workspace/1", "git/1"];
   const client = new WorkspaceRpcClient(runtime);
   return { name, sessions, runtime, client };
 }
@@ -97,6 +99,27 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+it("keeps header Git on the session checkout when Changes selects another repository", async () => {
+  const { mini } = machines();
+  const remote = "https://github.com/owner/repo";
+  vi.spyOn(workspaceGit, "listRepositories").mockResolvedValue([
+    { repo: ".", remote, branch: "main", head: null, defaultBranch: "main" },
+    { repo: firstPath, remote, branch: "first", head: null, defaultBranch: "main" },
+  ]);
+  mini.runtime.connect();
+  const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
+  await waitFor(() => expect(result.current?.machine?.branchGit?.source.key).toBe(`machine:mini:project|${firstPath}`));
+  expect(result.current?.machine?.branchGit?.baseRef).toBe("origin/release/2.x");
+  const headerGit = result.current!.machine!.branchGit!.source;
+
+  act(() => result.current!.selectRepository("."));
+  expect(result.current?.gitSource?.key).toBe("machine:mini:project|.");
+  expect(result.current?.machine?.branchGit?.source).toBe(headerGit);
+
+  rerender("machine:mini:project:second");
+  expect(result.current?.machine?.branchGit).toBeUndefined();
 });
 
 it("keeps the machine's session checkout available for Fix errors when the panel switches repositories", async () => {

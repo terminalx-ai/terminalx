@@ -14,8 +14,9 @@ import { openWorkspaceDelete } from "@/lib/dialogs";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { SessionBackend } from "@/lib/sessionBackend";
-import { agentPrompt, branchDiffSize, branchPr, composeMachineSnapshot, isAgentAction, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
+import { agentPrompt, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, machineBranchBase, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
 import type { SessionEntry } from "@/types/session";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 
 /** How often the machine's `git.status` is read while the window shows; file changes on the machine read it sooner. */
@@ -35,12 +36,23 @@ export interface MachineBranchInput {
   fileSource: FileSource | undefined;
   /** `origin`'s URL on the machine, for the repository the session works in. */
   remote: string | null;
+  /** The branch the machine cut the worktree from. */
+  baseRef: string | null;
   connected: boolean;
   tabId?: string;
 }
 
-interface Read { snapshot: MachineBranchSnapshot | null; diff: { additions: number; deletions: number } | null; error: string | null; refreshing: boolean }
+interface Read {
+  currentBranch: string | null | undefined;
+  prCount: number | null;
+  snapshot: MachineBranchSnapshot | null;
+  diff: { additions: number; deletions: number; base: string } | null;
+  diffNeedsUpdate: boolean;
+  error: string | null;
+  refreshing: boolean;
+}
 
+const EMPTY_READ: Read = { currentBranch: undefined, prCount: null, snapshot: null, diff: null, diffNeedsUpdate: false, error: null, refreshing: false };
 const errorText = (source: GitSource | undefined, error: unknown) => (source ? source.errorMessage(error) : error instanceof Error ? error.message : String(error));
 
 /**
@@ -52,61 +64,96 @@ const errorText = (source: GitSource | undefined, error: unknown) => (source ? s
  * reconnect) drops what the last one said.
  */
 export function useMachineBranch(input: MachineBranchInput) {
-  const { gitSource: source, fileSource, remote, connected, session } = input;
+  const { gitSource: source, fileSource, remote, connected, session, baseRef } = input;
   const busyTabs = session.tabs.some((tab) => tab.status === "in_progress" || tab.status === "waiting");
   const [agentPending, setAgentPending] = useState(false);
   const working = agentPending || busyTabs;
-  const baseRef = input.session.baseRef ?? null;
-  const [read, setRead] = useState<Read>({ snapshot: null, diff: null, error: null, refreshing: false });
+  const [read, setRead] = useState<Read>(EMPTY_READ);
   const refreshRef = useRef<(hosted: boolean) => Promise<MachineBranchSnapshot | null>>(async () => null);
   const workingRef = useRef(working);
   workingRef.current = working;
   const refresh = useCallback((hosted = true) => refreshRef.current(hosted), []);
 
   useEffect(() => {
-    setRead({ snapshot: null, diff: null, error: null, refreshing: false });
+    setRead(EMPTY_READ);
     if (!source || !connected) {
       refreshRef.current = async () => null;
       return;
     }
     let disposed = false;
-    let pr: { value: ReturnType<typeof branchPr>; branch: string; known: boolean } | null = null;
-    let diffKey = "";
-    let fileTick = 0;
+    let hostedState: { key: string; pr: ReturnType<typeof branchPr>; count: number | null } | null = null;
     let running: Promise<MachineBranchSnapshot | null> | null = null;
     let again: boolean | null = null;
+    let diffKey: string | null = null;
+    let diffPending = false;
 
     const once = async (hosted: boolean): Promise<MachineBranchSnapshot | null> => {
       setRead((current) => ({ ...current, refreshing: true }));
       try {
         let work = await source.workStatus();
         if (disposed) return null;
-        if (work.branch && (hosted || !pr || pr.branch !== work.branch)) {
+        if (hosted && source.canWrite && source.fetch && work.branch && work.head && work.branch !== work.defaultBranch && isGithubRemote(remote)) {
           // Fetch first, as a local refresh does, so "behind" is what the remote has now.
-          if (hosted && source.canWrite && source.fetch) {
+          try {
+            await source.fetch();
+            if (disposed) return null;
+            work = await source.workStatus();
+          } catch { /* offline: the local steps still stand */ }
+          if (disposed) return null;
+        }
+        const currentBranch = work.branch;
+        if (currentBranch && work.head && currentBranch !== work.defaultBranch && isGithubRemote(remote)) {
+          const key = JSON.stringify([currentBranch, work.head, work.upstream, work.ahead, work.behind]);
+          if (hosted || hostedState?.key !== key) {
             try {
-              await source.fetch();
-              work = await source.workStatus();
-            } catch { /* offline: the local steps still stand */ }
+              const prs = (await source.prs(currentBranch)).filter((pr) => pr.head === currentBranch);
+              hostedState = { key, pr: branchPr(prs, currentBranch), count: prs.length };
+            } catch {
+              hostedState = { key, pr: null, count: null };
+            }
           }
-          const branch = work.branch!;
-          try { pr = { value: branchPr(await source.prs(branch), branch), branch, known: true }; }
-          catch { pr = { value: null, branch, known: false }; }
           if (disposed) return null;
+        } else {
+          hostedState = null;
         }
-        const known = !!pr && pr.branch === work.branch && pr.known;
-        const snapshot = composeMachineSnapshot({ work, remote, pr: known ? pr!.value : null, known, working: workingRef.current, baseRef });
-        let diff: Read["diff"] | undefined;
-        const key = snapshot ? `${snapshot.head}\0${snapshot.base}\0${work.dirty}\0${fileTick}` : "";
-        if (snapshot && key !== diffKey) {
-          diffKey = key;
-          diff = await branchDiffSize(source, snapshot.base);
-          if (disposed) return null;
+        const prCount = hostedState?.count ?? null;
+        const pr = hostedState?.pr ?? null;
+        let selectedBaseRef = baseRef;
+        let base = machineBranchBase(work, pr, selectedBaseRef);
+        const comparison = work.isRepo && work.head && base && base !== work.defaultBranch
+          ? await source.branchBase?.(base).catch((error: unknown) => {
+            if (pr?.state !== "OPEN" && error instanceof WorkspaceRpcError && error.code === "base_not_found") {
+              selectedBaseRef = null;
+              base = work.defaultBranch;
+            }
+            return null;
+          })
+          : null;
+        if (disposed) return null;
+        const aheadOfBase = comparison ? (comparison.head === work.head ? comparison.aheadOfBase : null) : undefined;
+        const snapshot = composeMachineSnapshot({ work, remote, pr, known: prCount !== null, working: workingRef.current, baseRef: selectedBaseRef, aheadOfBase });
+        const key = work.isRepo && base ? JSON.stringify([currentBranch, work.head, base]) : null;
+        const sameDiff = key === diffKey;
+        diffKey = key;
+        setRead((current) => ({
+          ...current, currentBranch, prCount, snapshot, diff: sameDiff ? current.diff : null, error: null, refreshing: false,
+        }));
+        if (key && base && source.branchDiffSize && !diffPending) {
+          const diffBase = base;
+          diffPending = true;
+          void source.branchDiffSize(diffBase).then((size) => {
+            if (disposed || key !== diffKey) return;
+            const diff = size !== "unsupported" && size.head === work.head
+              ? { additions: size.additions, deletions: size.deletions, base: diffBase } : null;
+            setRead((current) => ({ ...current, diff, diffNeedsUpdate: size === "unsupported" }));
+          }).catch(() => {
+            if (!disposed && key === diffKey) setRead((current) => ({ ...current, diff: null }));
+          }).finally(() => { diffPending = false; });
         }
-        setRead((current) => ({ snapshot, diff: snapshot ? (diff === undefined ? current.diff : diff) : null, error: null, refreshing: false }));
         return snapshot;
       } catch (error) {
-        if (!disposed) setRead({ snapshot: null, diff: null, error: errorText(source, error), refreshing: false });
+        diffKey = null;
+        if (!disposed) setRead({ ...EMPTY_READ, error: errorText(source, error) });
         return null;
       }
     };
@@ -131,7 +178,6 @@ export function useMachineBranch(input: MachineBranchInput) {
     const prTimer = setInterval(() => { if (!document.hidden) void run(true); }, MACHINE_PR_EVERY_MS);
     let settle: ReturnType<typeof setTimeout> | undefined;
     const stopWatch = fileSource?.watch?.(() => {
-      fileTick += 1;
       clearTimeout(settle);
       settle = setTimeout(() => void run(false), SETTLE_MS);
     });
@@ -155,7 +201,7 @@ export function useMachineBranch(input: MachineBranchInput) {
     };
   }, [source, fileSource, remote, connected, baseRef]);
 
-  // An agent step is over once its tab has worked and gone idle again; read the branch then.
+  // An agent step is over once its tab has worked and gone idle again.
   const agentRun = useRef<{ tabId: string; started: boolean } | null>(null);
   const [agentDone, setAgentDone] = useState(0);
   useEffect(() => {
@@ -167,13 +213,12 @@ export function useMachineBranch(input: MachineBranchInput) {
       agentRun.current = null;
       setAgentPending(false);
       setAgentDone((count) => count + 1);
-      void refresh(true);
     }
-  }, [session.tabs, refresh]);
-  // Any agent turn that ends may have changed the branch (a commit, a push): read it then, not at the next poll.
+  }, [session.tabs]);
+  // A completed turn may have committed, pushed, or opened a PR.
   const wasWorking = useRef(working);
   useEffect(() => {
-    if (wasWorking.current && !working) void refresh(false);
+    if (wasWorking.current && !working) void refresh(true);
     wasWorking.current = working;
   }, [working, refresh]);
   const agent = useMemo(() => ({
@@ -188,17 +233,21 @@ export type MachineBranch = ReturnType<typeof useMachineBranch>;
 
 /** The branch's lines added and removed against its base, after the branch chip (21.08). */
 export function MachineDiffSize({ branch, className }: { branch: MachineBranch; className?: string }) {
-  const { diff, snapshot } = branch;
-  if (!diff || !snapshot) return null;
+  const { diff, currentBranch } = branch;
+  if (branch.diffNeedsUpdate) {
+    const notice = `Update ${branch.input.machineName} for diff totals`;
+    return <span role="status" className={className}><span className="max-w-48 truncate text-xs text-warning" title={notice}>{notice}</span></span>;
+  }
+  if (!diff || (!diff.additions && !diff.deletions)) return null;
   return (
-    <span className={className} title={`Changes on ${snapshot.branch} against ${snapshot.base}, uncommitted work included`} data-testid="machine-diff-size">
+    <span className={className} title={`Changes on ${currentBranch ?? "detached HEAD"} against ${diff.base}, uncommitted work included`} data-testid="machine-diff-size">
       <DiffStats additions={diff.additions} deletions={diff.deletions} />
     </span>
   );
 }
 
 /** The pending confirmation: what will run, on which snapshot, and the merge method a Merge uses. */
-interface Pending { action: BranchAction; expected: MachineBranchSnapshot; method?: MergeMethod }
+interface Pending { action: BranchAction; expected: MachineBranchSnapshot; source: GitSource; method?: MergeMethod }
 
 /**
  * The header's branch actions for a session on a paired machine (21.08):
@@ -217,6 +266,8 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
   const [body, setBody] = useState("");
   const lock = useRef(false);
   const alive = useRef(true);
+  const activeSource = useRef(source);
+  activeSource.current = source;
   // Publishing from this session through the machine's sign-in, allowed once per branch while the view is open.
   const approved = useRef(new Set<string>());
   const keycaps = useShortcutKeycaps();
@@ -230,7 +281,7 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
     && (!isAgentAction(action, snapshot) || !!tabId);
 
   const run = async (request: Pending, text: { message: string; body: string }) => {
-    if (!source) return;
+    if (lock.current || !source) return;
     lock.current = true;
     setPending(null);
     setError(null);
@@ -238,8 +289,10 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
     const agent = isAgentAction(request.action, request.expected);
     setRunning(agent ? "Sending to agent…" : BRANCH_ACTIONS[request.action].progress);
     try {
+      if (request.source !== source) throw new Error("The machine reconnected while preparing the action. Refresh and try again.");
       // The branch is read again on the machine; an action prepared on an older state does not run.
       const now = await refresh(true);
+      if (!alive.current || activeSource.current !== source) return;
       if (!now || !sameBranchState(request.expected, now) || !now.actions.includes(request.action)) {
         throw new Error("The branch changed on the machine while preparing the action. Refresh and try again.");
       }
@@ -252,19 +305,20 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
         const pr = now.pr?.state === "OPEN" ? now.pr : null;
         switch (request.action) {
           case "commitPush": {
-            await source.commit(text.message.trim());
-            try { result = await source.push(); }
+            if (!source.commitForPush) throw new Error("Commit and push is unavailable for this checkout.");
+            const committed = await source.commitForPush(text.message.trim(), now.branch, now.head);
+            try { result = await source.push(now.branch, committed); }
             catch (reason) { throw new Error(`Committed on ${machineName}, but the push failed: ${errorText(source, reason)} Your commit is safe; refresh to see the next step.`); }
             break;
           }
           case "push":
-            result = await source.push();
+            result = await source.push(now.branch, now.head);
             break;
           case "createPr": {
             // The machine opens a pull request only for a pushed head: publish first, as a local Create PR does.
-            const status = await source.workStatus();
-            if (status.ahead > 0 || !status.upstream) await source.push();
-            result = await source.createPr({ title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id });
+            if (now.state === "ahead") await source.push(now.branch, now.head);
+            if (!alive.current || activeSource.current !== source) return;
+            result = await source.createPr({ title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id, branch: now.branch });
             break;
           }
           case "pull":
@@ -302,7 +356,7 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
     if (lock.current || pending || !snapshot || !enabled(action) || !source) return;
     setError(null);
     setNotice(null);
-    const request: Pending = { action, expected: snapshot };
+    const request: Pending = { action, expected: snapshot, source };
     if (action === "merge" && snapshot.pr) {
       lock.current = true;
       setRunning("Reading merge methods…");
@@ -315,7 +369,7 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
         lock.current = false;
         if (alive.current) setRunning(null);
       }
-      if (!alive.current) return;
+      if (!alive.current || activeSource.current !== source) return;
     }
     const publishes = !!BRANCH_ACTIONS[action].publishes;
     if (action === "commitPush" || action === "createPr" || action === "merge" || (publishes && !approved.current.has(snapshot.branch))) {

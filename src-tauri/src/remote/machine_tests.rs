@@ -209,6 +209,7 @@ async fn a_new_session_is_cut_from_the_chosen_branch_once() {
     assert_eq!(again["sessionId"], made["sessionId"]);
     let sessions = call(&m.rpc, &peer, "session.list", json!({})).await.unwrap();
     assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1, "{sessions}");
+    assert_eq!(sessions["sessions"][0]["worktreeBase"]["from"], "feature");
     // Without a worktree there is nothing to cut, and the base is not used.
     let here = call(&m.rpc, &peer, "session.create", json!({ "agent": "claude", "projectId": id, "baseRef": "feature", "clientRequestId": "create-on-main" })).await.unwrap();
     assert_eq!(PathBuf::from(here["session"]["cwd"].as_str().unwrap()), path);

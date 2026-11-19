@@ -548,9 +548,10 @@ export function SessionView({
     session,
     machineName: machine?.name ?? "",
     backend,
-    gitSource: machine && !cloud?.locked ? machine.checkoutGitSource : undefined,
+    gitSource: !cloud?.locked ? machine?.branchGit?.source : undefined,
     fileSource: machine ? cloud?.fileSource : undefined,
-    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === machine.checkoutRepository)?.remote) || null,
+    remote: machine?.branchGit?.remote ?? null,
+    baseRef: machine?.branchGit?.baseRef ?? null,
     connected: !!machine && !!cloud?.connected,
     tabId: activeTab?.id,
   });
@@ -588,7 +589,8 @@ export function SessionView({
     ? { toChat: "Show the last conversation", toTerminal: "Back to the terminal" }
     : { toChat: "Back to chat", toTerminal: "Show terminal view" };
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
-  const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
+  const workspaceLabel = session.worktreeRemoved ? workspaceName(session)
+    : machineBranch.currentBranch === undefined ? session.branch : machineBranch.currentBranch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
@@ -853,6 +855,11 @@ export function SessionView({
               </span>
             )}
             {machine && <MachineDiffSize branch={machineBranch} className={cn("ml-1.5 flex shrink-0 items-center", HEADER_TIGHT)} />}
+            {machine && machineBranch.prCount !== null && (
+              <span className={cn("ml-1.5 shrink-0 text-xs text-muted-foreground", HEADER_TIGHT)}>
+                {machineBranch.prCount} {machineBranch.prCount === 1 ? "PR" : "PRs"}
+              </span>
+            )}
             {/* The base commit is a detail (the branch's tooltip and the ··· menu have it); only a doubt about it stays on the bar. A cloud session has no menu, so it keeps the note. */}
             {session.worktreeBase && (session.worktreeBase.warning || !local) && (
               <span

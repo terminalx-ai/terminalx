@@ -1,6 +1,6 @@
 import type { PullRequest } from "@/lib/api";
 import { FAILING_CHECKS } from "@/lib/checks";
-import type { GitSource, SourceStatus } from "@/lib/gitSource";
+import type { SourceStatus } from "@/lib/gitSource";
 import type { BranchAction, BranchState } from "@/lib/branchStep";
 
 /**
@@ -59,6 +59,12 @@ export function branchPr(prs: readonly PullRequest[], branch: string): MachinePr
   return mine.find((pr) => pr.state === "OPEN") ?? mine[0] ?? null;
 }
 
+export function machineBranchBase(work: SourceStatus, pr: MachinePr | null, baseRef?: string | null): string | null {
+  if (pr?.state === "OPEN") return pr.base;
+  const recorded = baseRef?.replace(/^(refs\/heads\/|(?:refs\/remotes\/)?origin\/)/, "");
+  return recorded && recorded !== "HEAD" ? recorded : work.defaultBranch;
+}
+
 type Bucket = "pass" | "fail" | "pending";
 /** `issue_pipeline::gate::check_bucket`: anything not passed or failed is pending. */
 function bucket(state: string): Bucket {
@@ -69,14 +75,13 @@ function bucket(state: string): Bucket {
 type LocalStep = "conflicts" | "reconcile" | "pull" | "commit" | "push" | null;
 
 /** `branch_overview::next_step` for a supported branch (named, not the default, with a remote). */
-function localStep(work: SourceStatus, baseConflicts: boolean, aheadOfBase: number): LocalStep {
+function localStep(work: SourceStatus, baseConflicts: boolean, aheadOfBase: number | null): LocalStep {
   if (work.conflicted?.length || work.operation) return "conflicts";
   if (work.ahead > 0 && work.behind > 0) return "reconcile";
   if (work.behind > 0) return "pull";
   if (baseConflicts) return "conflicts";
   if (work.dirty) return "commit";
-  if (aheadOfBase === 0 && work.ahead === 0) return null;
-  if (work.ahead > 0 || !work.upstream) return "push";
+  if (work.ahead > 0 || (!work.upstream && (aheadOfBase ?? 0) > 0)) return "push";
   return null;
 }
 
@@ -87,7 +92,7 @@ export function resolveMachineStep(work: SourceStatus, pr: MachinePr | null, wor
   const current = pr && pr.state === "OPEN" && !!pr.headSha && work.head === pr.headSha ? pr : null;
   const baseConflicts = !!current && (current.mergeable === "CONFLICTING" || current.mergeState === "DIRTY");
   const baseBehind = !!current && current.mergeState === "BEHIND";
-  const local = localStep(work, baseConflicts, aheadOfBase ?? 1);
+  const local = localStep(work, baseConflicts, aheadOfBase);
   if (local === "conflicts") return "conflicts";
   if (local === "reconcile") return "diverged";
   if (local === "pull") return "behind";
@@ -132,21 +137,20 @@ export function machineActions(step: BranchState, pr: MachinePr | null): BranchA
  * the PR read succeeded; without it only local steps show, never Create PR or
  * a hosted state (`branch_step::compose`).
  */
-export function composeMachineSnapshot(input: { work: SourceStatus; remote: string | null; pr: MachinePr | null; known: boolean; working: boolean; baseRef?: string | null }): MachineBranchSnapshot | null {
+export function composeMachineSnapshot(input: { work: SourceStatus; remote: string | null; pr: MachinePr | null; known: boolean; working: boolean; baseRef?: string | null; aheadOfBase?: number | null }): MachineBranchSnapshot | null {
   const { work, known, working } = input;
   if (!work.isRepo || !work.branch || !work.head || work.branch === work.defaultBranch || !isGithubRemote(input.remote)) return null;
   const pr = known ? input.pr : null;
-  const recorded = input.baseRef && input.baseRef !== "HEAD" ? input.baseRef.replace(/^origin\//, "") : null;
-  const base = (pr?.state === "OPEN" ? pr.base : null) ?? recorded ?? work.defaultBranch;
-  if (!base) return null;
-  // `aheadOfBase` is counted against the default branch; another base is not counted, as branch_step's unwrap_or(1).
-  const aheadOfBase = base === work.defaultBranch ? work.aheadOfBase : null;
-  let state = resolveMachineStep(work, pr, working, aheadOfBase);
+  const base = machineBranchBase(work, pr, input.baseRef);
+  if (!base || base === work.branch) return null;
+  const aheadOfBase = input.aheadOfBase === undefined ? (base === work.defaultBranch ? work.aheadOfBase : null) : input.aheadOfBase;
+  const canCreate = known && (aheadOfBase ?? 0) > 0;
+  const state = resolveMachineStep(work, pr, working, aheadOfBase);
   if (!known && !["agentWorking", "conflicts", "diverged", "behind", "uncommitted", "ahead"].includes(state)) return null;
-  if (state === "noPr" && aheadOfBase === 0) return null;
+  if (state === "noPr" && !canCreate) return null;
   if (state === "hidden") return null;
   let actions = machineActions(state, pr);
-  if (!known) actions = actions.filter((action) => action !== "createPr");
+  if (!canCreate) actions = actions.filter((action) => action !== "createPr");
   return {
     branch: work.branch,
     head: work.head,
@@ -182,29 +186,9 @@ export function isAgentAction(action: BranchAction, snapshot: MachineBranchSnaps
   return action === "resolveConflicts" || action === "fixChecks" || action === "addressReview" || (action === "pull" && !!snapshot?.pullNeedsAgent);
 }
 
-/**
- * Lines added and removed on the branch against its base, uncommitted work
- * included: `git.reviewRange` from the merge base with `origin/<base>` (else
- * the local `<base>`) to the working tree. Null where it cannot be counted.
- */
-export async function branchDiffSize(source: GitSource, base: string): Promise<{ additions: number; deletions: number } | null> {
-  let range: { base: string; head: string } | null = null;
-  for (const target of [`origin/${base}`, base]) {
-    try { range = await source.reviewRange(target, false); break; } catch { /* the next candidate */ }
-  }
-  if (!range) return null;
-  try {
-    const files = await source.changesBetween(range.base, range.head);
-    return files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 });
-  } catch {
-    // Too many files to answer completely: no number rather than a wrong one.
-    return null;
-  }
-}
-
 /** The two snapshots describe the same branch state, so an action prepared on one may run on the other. */
 export function sameBranchState(expected: MachineBranchSnapshot, now: MachineBranchSnapshot | null): boolean {
   return !!now && now.branch === expected.branch && now.head === expected.head && now.base === expected.base && now.state === expected.state
-    && (now.pr?.number ?? null) === (expected.pr?.number ?? null) && (now.pr?.headSha ?? null) === (expected.pr?.headSha ?? null)
+    && now.pr?.number === expected.pr?.number && now.pr?.url === expected.pr?.url && now.pr?.headSha === expected.pr?.headSha
     && now.pullNeedsAgent === expected.pullNeedsAgent;
 }
