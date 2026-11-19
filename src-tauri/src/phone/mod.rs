@@ -13,12 +13,14 @@
 pub(crate) mod registry;
 pub(crate) mod rpc;
 pub(crate) mod send_ids;
+#[cfg(test)]
+mod serve_tests;
 pub(crate) mod sink;
 pub(crate) mod wire;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -37,6 +39,106 @@ use crate::sink::EventSink;
 
 /// The largest message a pairing socket reads or writes.
 pub(crate) const PAIRING_MESSAGE_BYTES_LIMIT: usize = 10 * 1024 * 1024;
+
+/// How many messages may wait for a phone's socket. Each is a notice or a
+/// streamed reply; invalidations do not queue here ([`Invalidations`]).
+pub(crate) const OUTBOUND_QUEUE: usize = 128;
+
+/// Why the host ended a phone's connection itself, for the relay
+/// diagnostics (#1282). The text is what the phone may be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Fault {
+    /// Its outbound queue was full: the phone did not read fast enough.
+    #[error("The mobile stream fell behind. Reconnect to load retained history.")]
+    FellBehind,
+    /// Closed on the host, by its terminal output failing or the owner letting it go.
+    #[error("The mobile stream disconnected. Reconnect to load retained history.")]
+    Closed,
+    /// The account binding changed under it.
+    #[error("The paired-device connection or account changed.")]
+    Changed,
+    /// A frame that did not decrypt or decode.
+    #[error("The phone sent a message this computer could not read.")]
+    Unreadable,
+    /// More requests waiting for an answer than one connection may hold.
+    #[error("The phone sent more requests than this computer holds unanswered.")]
+    TooManyRequests,
+}
+
+/// How a phone's connection ended without a fault (#1282).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EndReason {
+    /// The phone sent a close frame.
+    PhoneClosed,
+    /// The socket ended with no close frame: the relay or the network dropped it.
+    StreamEnded,
+    /// Disconnected on the Mac; the pairing stays.
+    DisconnectedOnMac,
+    /// Revoked, signed out or stopping.
+    Cancelled,
+    /// The host let the connection's queue go.
+    HostClosed,
+    /// A shared session's viewer left.
+    ShareEnded,
+}
+
+/// A connection's end: why, and the close code the phone's close frame carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ended {
+    pub reason: EndReason,
+    pub close_code: Option<u16>,
+}
+
+impl Ended {
+    pub(crate) fn by(reason: EndReason) -> Self {
+        Self { reason, close_code: None }
+    }
+}
+
+/// A change a phone reads again by itself: `sessions.changed`,
+/// `settings.changed`, `sync.capabilitiesChanged`. One pending of each says
+/// all a hundred would, so they collapse here instead of filling the
+/// outbound queue, which an agent's every event used to do (#1282).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Invalidation {
+    Capabilities = 1,
+    Settings = 2,
+    Sessions = 4,
+}
+
+#[derive(Default)]
+pub(crate) struct Invalidations {
+    pending: std::sync::atomic::AtomicU8,
+    raised: tokio::sync::Notify,
+}
+
+impl Invalidations {
+    pub(crate) fn raise(&self, which: Invalidation) {
+        let bit = which as u8;
+        if self.pending.fetch_or(bit, std::sync::atomic::Ordering::SeqCst) & bit == 0 {
+            self.raised.notify_one();
+        }
+    }
+
+    /// The notifications pending, in a fixed order, and none left pending.
+    pub(crate) fn take(&self) -> Vec<serde_json::Value> {
+        let bits = self.pending.swap(0, std::sync::atomic::Ordering::SeqCst);
+        [
+            (Invalidation::Capabilities, "sync.capabilitiesChanged"),
+            (Invalidation::Settings, "settings.changed"),
+            (Invalidation::Sessions, "sessions.changed"),
+        ]
+        .into_iter()
+        .filter(|(which, _)| bits & *which as u8 != 0)
+        .map(|(_, method)| serde_json::json!({ "method": method }))
+        .collect()
+    }
+
+    async fn raised(&self) {
+        self.raised.notified().await
+    }
+}
 
 /// The runtime did not answer a paired-device call in time. The window's
 /// relay diagnostics count it as a local-runtime failure.
@@ -270,10 +372,31 @@ where
     }
 }
 
+/// How many requests a connection holds while one is answered.
+const UNANSWERED_REQUESTS: usize = 64;
+/// How many queued messages go under one output permit, and for how long a
+/// batch keeps taking more: revocation waits for the permit (#1282).
+const OUTPUT_BATCH: usize = 32;
+const OUTPUT_BATCH_TIME: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Check a request's connection, then answer it. Off the serve loop, so the
+/// loop keeps the phone's queue draining while a slow request runs (#1282).
+async fn answer<F, R>(host: &Arc<PhoneHost>, connection: &Arc<rpc::MobileConnection>, respond: &F, request: serde_json::Value) -> Result<(bool, serde_json::Value)>
+where
+    F: Fn(serde_json::Value) -> R,
+    R: std::future::Future<Output = serde_json::Value>,
+{
+    connection.check_off_runtime(host).await?;
+    let forget = request["method"] == "pairing.forget";
+    Ok((forget, respond(request).await))
+}
+
 /// The phone's requests and the host's replies and notifications, until the
 /// phone closes, the host signals, or the connection falls behind. `respond`
-/// answers one request; every reply is checked again after it, so a reply
-/// queued meanwhile never discloses session data after a revocation.
+/// answers one request at a time, in the order they came; while it runs the
+/// loop still sends what is queued and reads what the phone sends. Every
+/// reply is checked again after it, so a reply queued meanwhile never
+/// discloses session data after a revocation.
 pub(crate) async fn serve_connection<S, F, R>(
     socket: &mut WebSocketStream<S>,
     session: &mut E2eeSession,
@@ -282,7 +405,7 @@ pub(crate) async fn serve_connection<S, F, R>(
     mut outbound: mpsc::Receiver<serde_json::Value>,
     mut signals: mpsc::UnboundedReceiver<ConnectionSignal>,
     respond: F,
-) -> Result<()>
+) -> Result<Ended>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: Fn(serde_json::Value) -> R,
@@ -292,60 +415,31 @@ where
     let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(1));
     grant_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut waiting = std::collections::VecDeque::new();
+    let mut answering = None;
     loop {
+        if answering.is_none() {
+            if let Some(request) = waiting.pop_front() {
+                answering = Some(Box::pin(answer(host, connection, &respond, request)));
+            }
+        }
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
             _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
             signal = signals.recv() => {
-                if signal == Some(ConnectionSignal::Disconnect) {
+                let reason = if signal == Some(ConnectionSignal::Disconnect) {
                     let _ = tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &disconnected_notification(), connection.wire())).await;
-                }
+                    EndReason::DisconnectedOnMac
+                } else {
+                    EndReason::Cancelled
+                };
                 connection.close();
                 let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
-                return Ok(());
+                return Ok(Ended::by(reason));
             }
-            outgoing = outbound.recv() => {
-                let Some(outgoing) = outgoing else {
-                    connection.close();
-                    return Ok(());
-                };
-                send_with_grant(host, connection, send_message(socket, session, &outgoing, connection.wire())).await?;
-            }
-            incoming = socket.next() => {
-                let Some(incoming) = incoming else {
-                    connection.close();
-                    return Ok(());
-                };
-                let plaintext = match incoming? {
-                    Message::Text(text) => {
-                        let bytes = decode_canonical_base64(&text)?;
-                        session.open(&bytes, PayloadKind::Text)?
-                    }
-                    Message::Binary(bytes) => {
-                        // Binary frames carry only the fragments of a request too
-                        // large for one frame (#669). Other binary application streams
-                        // are deliberately not attached to a workspace in this
-                        // foundation; authentication and framing still fail closed.
-                        let frame = session.open(&bytes, PayloadKind::Binary)?;
-                        match reassembly.push(&frame)? {
-                            Some(message) => message,
-                            None => continue,
-                        }
-                    }
-                    Message::Close(_) => {
-                        connection.close();
-                        return Ok(());
-                    }
-                    Message::Ping(bytes) => {
-                        send_pong(socket, bytes).await?;
-                        continue;
-                    }
-                    Message::Pong(_) | Message::Frame(_) => continue,
-                };
-                let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                connection.check_off_runtime(host).await?;
-                let forget = request["method"] == "pairing.forget";
-                let response = respond(request).await;
+            answered = async { answering.as_mut().expect("guarded").await }, if answering.is_some() => {
+                answering = None;
+                let (forget, response) = answered?;
                 // Revalidate after asynchronous work: queued replies must not
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
@@ -356,6 +450,81 @@ where
                 } else {
                     send_with_grant(host, connection, send).await?;
                 }
+            }
+            _ = connection.invalidations().raised() => {
+                let pending = connection.invalidations().take();
+                if !pending.is_empty() {
+                    let _permit = connection.output_permit(host).await?;
+                    for message in &pending {
+                        tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, message, connection.wire())).await??;
+                    }
+                }
+            }
+            outgoing = outbound.recv() => {
+                let Some(first) = outgoing else {
+                    connection.close();
+                    return Ok(Ended::by(EndReason::HostClosed));
+                };
+                // One permit for what is queued now, not a runtime round trip
+                // and a device file read for every message (#1282).
+                let _permit = connection.output_permit(host).await?;
+                let started = tokio::time::Instant::now();
+                let mut next = Some(first);
+                let mut sent = 0;
+                while let Some(message) = next.take() {
+                    tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &message, connection.wire())).await??;
+                    sent += 1;
+                    if sent < OUTPUT_BATCH && started.elapsed() < OUTPUT_BATCH_TIME {
+                        next = outbound.try_recv().ok();
+                    }
+                }
+            }
+            incoming = socket.next() => {
+                let Some(incoming) = incoming else {
+                    connection.close();
+                    return Ok(Ended::by(EndReason::StreamEnded));
+                };
+                use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+                let incoming = match incoming {
+                    // Dropped with no close frame: by the relay or the network.
+                    Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake)) => {
+                        connection.close();
+                        return Ok(Ended::by(EndReason::StreamEnded));
+                    }
+                    incoming => incoming?,
+                };
+                let plaintext = match incoming {
+                    Message::Text(text) => {
+                        let bytes = decode_canonical_base64(&text).context(Fault::Unreadable)?;
+                        session.open(&bytes, PayloadKind::Text).context(Fault::Unreadable)?
+                    }
+                    Message::Binary(bytes) => {
+                        // Binary frames carry only the fragments of a request too
+                        // large for one frame (#669). Other binary application streams
+                        // are deliberately not attached to a workspace in this
+                        // foundation; authentication and framing still fail closed.
+                        let frame = session.open(&bytes, PayloadKind::Binary).context(Fault::Unreadable)?;
+                        match reassembly.push(&frame).context(Fault::Unreadable)? {
+                            Some(message) => message,
+                            None => continue,
+                        }
+                    }
+                    Message::Close(frame) => {
+                        connection.close();
+                        let close_code = frame.map(|frame| u16::from(frame.code));
+                        return Ok(Ended { reason: EndReason::PhoneClosed, close_code });
+                    }
+                    Message::Ping(bytes) => {
+                        send_pong(socket, bytes).await?;
+                        continue;
+                    }
+                    Message::Pong(_) | Message::Frame(_) => continue,
+                };
+                let request: serde_json::Value = serde_json::from_slice(&plaintext).context(Fault::Unreadable)?;
+                if waiting.len() >= UNANSWERED_REQUESTS {
+                    return Err(Fault::TooManyRequests.into());
+                }
+                waiting.push_back(request);
             }
         }
     }
