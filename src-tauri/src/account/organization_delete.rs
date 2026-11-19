@@ -26,9 +26,13 @@ fn decode_success(bytes: &[u8], target: &str) -> Result<(), DeleteError> {
     Ok(())
 }
 
-fn decode_error(bytes: &[u8]) -> DeleteError {
+fn decode_error(status: u16, bytes: &[u8]) -> DeleteError {
     let body: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
     let code = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    // The mounted auth middleware refuses a missing/unresolvable bearer with
+    // 401 `unauthorized` before the deletion handler runs: an auth refusal,
+    // not an ambiguous outcome. Only that exact pair is normalized.
+    let code = if status == 401 && code == "unauthorized" { "invalid_access_token" } else { code };
     let known = matches!(code, "invalid_access_token" | "organization_not_found" | "organization_owner_required"
         | "organization_personal_protected" | "organization_confirmation_invalid" | "organization_delete_blocked" | "organization_delete_busy");
     let mut result = DeleteError::local(if known { code } else { "organization_delete_outcome_unknown" });
@@ -64,7 +68,7 @@ fn send(context: &AccountContext, target: &str, name: &str) -> Result<(), Delete
     match response {
         Ok(response) if response.status() == 200 => decode_success(&read_body(response)?, target),
         Ok(_) => Err(DeleteError::local("organization_delete_outcome_unknown")),
-        Err(ureq::Error::Status(_, response)) => Err(decode_error(&read_body(response)?)),
+        Err(ureq::Error::Status(status, response)) => Err(decode_error(status, &read_body(response)?)),
         Err(ureq::Error::Transport(_)) => Err(DeleteError::local("organization_delete_outcome_unknown")),
     }
 }
@@ -162,10 +166,32 @@ mod tests {
     }
     #[test]
     fn errors_allowlist_blockers_and_ignore_external_cleanup_urls() {
-        let error = decode_error(br#"{"error":"organization_delete_blocked","cleanupPath":"https://evil.invalid","blockers":[{"code":"provider_disconnect_required"},{"code":"arbitrary server text"}]}"#);
+        let error = decode_error(409, br#"{"error":"organization_delete_blocked","cleanupPath":"https://evil.invalid","blockers":[{"code":"provider_disconnect_required"},{"code":"arbitrary server text"}]}"#);
         assert_eq!(error.code, "organization_delete_blocked");
         assert_eq!(error.blockers, ["provider_disconnect_required"]);
-        assert_eq!(decode_error(br#"{"error":"secret server detail"}"#).code, "organization_delete_outcome_unknown");
+        assert_eq!(decode_error(500, br#"{"error":"secret server detail"}"#).code, "organization_delete_outcome_unknown");
+    }
+    #[test]
+    fn middleware_unauthorized_is_an_auth_refusal_that_keeps_membership() {
+        // SaaS desktopOrMobileAuth: 401 {"error":"unauthorized"} before the handler runs.
+        let refusal = decode_error(401, br#"{"error":"unauthorized"}"#);
+        assert_eq!(refusal.code, "invalid_access_token");
+        assert!(refusal.blockers.is_empty());
+        let manager = manager(); let context = context(&manager);
+        let mut sends = 0;
+        let error = manager.delete_organization_with(&context, "org-b", "Test organization", |_, _, _| {
+            sends += 1; Err(decode_error(401, br#"{"error":"unauthorized"}"#))
+        }).unwrap_err();
+        assert_eq!(error.code, "invalid_access_token");
+        assert_eq!(sends, 1, "a destructive request is never retried");
+        let inner = manager.inner.lock().unwrap(); let session = inner.session.as_ref().unwrap();
+        assert_eq!(session.organizations.iter().map(|o| o.org_id.as_str()).collect::<Vec<_>>(), ["org-a", "org-b"]);
+        assert_eq!(session.cloud.active_org_id.as_deref(), Some("org-a"));
+        drop(inner);
+        // Any other status, or an unreadable 401, stays ambiguous.
+        for (status, body) in [(403, br#"{"error":"unauthorized"}"#.as_slice()), (500, br#"{"error":"unauthorized"}"#), (401, b"not json"), (401, br#"{}"#)] {
+            assert_eq!(decode_error(status, body).code, "organization_delete_outcome_unknown", "{status}");
+        }
     }
     #[test]
     fn inactive_target_does_not_select_it_and_active_deletion_clears_without_fallback() {

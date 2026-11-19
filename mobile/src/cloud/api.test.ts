@@ -200,8 +200,14 @@ describe("the phone's cloud API client", () => {
     await expect(wrong.client.deleteOrganization("org-1", "x")).rejects.toMatchObject({ code: "organization_confirmation_invalid", blockers: [] });
   });
 
+  it("reads the auth middleware's 401 unauthorized as an auth refusal, sent once (#1349)", async () => {
+    const refused = api(() => ({ status: 401, body: { error: "unauthorized" } }));
+    await expect(refused.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "invalid_access_token", status: 401 });
+    expect(refused.calls).toHaveLength(1);
+  });
+
   it("reads any other deletion failure as an unknown outcome, as the desktop does", async () => {
-    for (const answer of [{ status: 409, body: { error: "organization_delete_unavailable" } }, { status: 409, body: { error: "account_context_changed" } }, { status: 500, body: { error: "internal" } }, { status: 401, body: { error: "unauthorized" } }]) {
+    for (const answer of [{ status: 409, body: { error: "organization_delete_unavailable" } }, { status: 409, body: { error: "account_context_changed" } }, { status: 500, body: { error: "internal" } }, { status: 403, body: { error: "unauthorized" } }]) {
       await expect(api(() => answer).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: answer.status });
     }
     await expect(api(() => Promise.reject(new Error("offline"))).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: null });
