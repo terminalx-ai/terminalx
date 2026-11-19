@@ -859,6 +859,57 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
 }
 
 #[test]
+fn a_nested_project_session_cannot_create_its_parents_pr() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let parent_remote = f.remote("origin");
+    let nested_remote = f.remote("nested");
+    f.clone(&parent_remote, ".");
+    f.git.project = true;
+    let nested = f.clone(&nested_remote, "nested");
+    // Both checkouts sit on the same branch name with pushed, unshared heads.
+    let mut heads = Vec::new();
+    for checkout in [&f.root, &nested] {
+        git(checkout, &["checkout", "-qb", "feature/pr"]);
+        git(checkout, &["commit", "-qm", "Advance feature", "--allow-empty"]);
+        heads.push(git(checkout, &["rev-parse", "HEAD"]));
+    }
+    git(&nested, &["push", "-q", "origin", "feature/pr"]);
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "nested-session", "projectPath": nested, "cwd": nested, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    assert!(super::super::session_target::owns_project(&f.root, nested.to_str().unwrap()));
+    let request = |repo: &str, head: &str| json!({
+        "repo": repo, "sessionId": "nested-session", "branch": "feature/pr", "pushHead": head, "title": "Add pr", "base": "main"
+    });
+
+    // The parent's checkout contains the nested cwd but is another repository.
+    assert_eq!(f.code("git.prCreateForSession", request(".", &heads[0])), "conflict");
+    assert_eq!(f.code("git.prCreate", request(".", &heads[0])), "conflict");
+    assert!(f.gh_calls().is_empty());
+    assert!(git(&parent_remote, &["branch", "--list", "feature/pr"]).is_empty());
+    assert!(git(&f.root, &["branch", "--list", "--format=%(upstream)", "feature/pr"]).is_empty());
+    assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "nested-session" })).unwrap()["associations"], json!([]));
+    assert_eq!(f.git.files.relative(&nested), "nested");
+    let served = |root: &Path| super::super::machine::session_checkout(root, &WorkspaceFiles::new(root.to_path_buf()), &crate::store::index::get("nested-session").unwrap(), || true);
+    assert_eq!(served(&f.root), Some((String::new(), None)));
+
+    // The nested project's own checkout is the session's.
+    assert_eq!(served(&nested), Some((String::new(), Some(".".into()))));
+    let mut own = WorkspaceGit::for_project(nested.clone(), Arc::new(WorkspaceFiles::new(nested.clone())));
+    own.set_gh(f.git.gh.clone().unwrap());
+    own.github_origin_fixture = f.git.github_origin_fixture.clone();
+    let created = own.handle("git.prCreateForSession", &request(".", &heads[1])).unwrap().unwrap();
+    assert_eq!(created["sessionAssociated"], true);
+    assert_eq!(created["pr"]["head"], "feature/pr");
+    assert_eq!(git(&nested_remote, &["rev-parse", "refs/heads/feature/pr"]), heads[1]);
+    assert!(git(&parent_remote, &["branch", "--list", "feature/pr"]).is_empty());
+    let owned = own.handle("git.prAssociations", &json!({ "sessionId": "nested-session" })).unwrap().unwrap();
+    assert_eq!(owned["associations"][0]["url"], created["pr"]["url"]);
+}
+
+#[test]
 fn machine_pr_routing_uses_the_identity_of_the_fetch_url() {
     assert_eq!(github_repository_from_origin("https://github.com/ACME/Widgets.git/").as_deref(), Some("github.com/acme/widgets"));
     assert_eq!(github_repository_from_origin("https://github.example.test:8443/Acme/widgets").as_deref(), Some("github.example.test:8443/acme/widgets"));
