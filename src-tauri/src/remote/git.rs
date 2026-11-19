@@ -30,7 +30,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::files::WorkspaceFiles;
@@ -60,6 +60,8 @@ pub struct WorkspaceGit {
     /// A machine's project (`machine/1`): its repositories are its checkout
     /// and its own worktrees, not clones found below a workspace root.
     project: bool,
+    #[cfg(test)]
+    github_origin_fixture: Option<String>,
 }
 
 /// At most this many of a machine project's checkout and worktrees are listed.
@@ -70,6 +72,68 @@ struct Repo {
     /// Workspace-relative, `.` for the root.
     name: String,
     dir: PathBuf,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct CheckoutIdentity {
+    path: PathBuf,
+    git_dir: PathBuf,
+    directory: DirectoryIdentity,
+    admin: DirectoryIdentity,
+}
+
+/// A successful create's URL, held until GitHub confirms its branch and commit.
+/// Unverified entries never participate in session PR discovery.
+#[derive(Clone, Deserialize, Serialize)]
+struct PendingPrCreation {
+    session: String,
+    checkout: CheckoutIdentity,
+    branch: String,
+    base: String,
+    head: String,
+    url: String,
+}
+
+fn pending_pr_creations<T>(change: impl FnOnce(&mut Vec<PendingPrCreation>) -> (T, bool)) -> Result<T, RpcError> {
+    let path = crate::store::root().map_err(RpcError::internal)?.join("pending-machine-pr-creations.json");
+    crate::store::transaction::run(&path.with_extension("lock"), Duration::from_secs(30), || {
+        let mut pending = crate::store::read_json(&path)?.unwrap_or_default();
+        let (result, changed) = change(&mut pending);
+        if changed { crate::store::write_json(&path, &pending)?; }
+        Ok(result)
+    }).map_err(RpcError::internal)
+}
+
+pub(crate) fn pending_pr_creation_in(path: &Path) -> Result<Option<String>, RpcError> {
+    pending_pr_creations(|entries| (entries.iter().find(|entry| entry.checkout.path == path).map(|entry| entry.url.clone()), false))
+}
+
+fn github_repository_from_origin(remote: &str) -> Option<String> {
+    let parsed = url::Url::parse(&if remote.contains("://") { remote.to_owned() } else { format!("ssh://{}", remote.replacen(':', "/", 1)) }).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "ssh" | "git") || parsed.query().is_some() || parsed.fragment().is_some() { return None; }
+    let (owner, name) = parsed.path().trim_matches('/').split_once('/')?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    let valid = |part: &str| !part.is_empty() && !matches!(part, "." | "..")
+        && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !valid(owner) || !valid(name) { return None; }
+    let host = crate::github::hostname_from_remote(remote)?;
+    Some(format!("{host}/{owner}/{name}").to_ascii_lowercase())
+}
+
+#[cfg(unix)]
+type DirectoryIdentity = (u64, u64);
+#[cfg(not(unix))]
+type DirectoryIdentity = std::time::SystemTime;
+
+fn directory_identity(path: &Path) -> std::io::Result<DirectoryIdentity> {
+    let meta = std::fs::metadata(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    meta.created()
 }
 
 /// What one Git or `gh` process did.
@@ -600,7 +664,8 @@ fn truncate_text(text: &mut String, max: usize) -> bool {
 impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
-        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false }
+        Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false,
+            #[cfg(test)] github_origin_fixture: None }
     }
 
     /// The Git of one of a machine's projects (`machine/1`). `repo` names its
@@ -644,8 +709,10 @@ impl WorkspaceGit {
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
             "git.prAssociations" => self.pr_associations(params),
+            "git.prLinkBranch" => self.pr_link_branch(params),
+            "git.prUnlink" => self.pr_unlink(params),
             "git.prLanded" => self.pr_landed(params),
-            "git.prCreate" => self.pr_create(params),
+            "git.prCreate" | "git.prCreateForSession" => self.pr_create(params, method == "git.prCreateForSession"),
             "git.prReady" => self.pr_ready(params),
             "git.prMerge" => self.pr_merge(params),
             _ => return None,
@@ -1327,8 +1394,12 @@ impl WorkspaceGit {
     /// The commit `origin` has for `branch`: `Some(None)` when it has no
     /// such branch, `Err` when it could not be asked.
     fn remote_head(&self, repo: &Repo, branch: &str, timeout: Duration) -> Result<Option<String>, RpcError> {
+        self.remote_head_at(repo, "origin", branch, timeout)
+    }
+
+    fn remote_head_at(&self, repo: &Repo, remote: &str, branch: &str, timeout: Duration) -> Result<Option<String>, RpcError> {
         let reference = format!("refs/heads/{branch}");
-        let out = self.git_timed(repo, &["ls-remote", "origin", &reference], timeout, &[])?;
+        let out = self.git_timed(repo, &["ls-remote", "--", remote, &reference], timeout, &[])?;
         Ok(out
             .lines()
             .find_map(|line| line.split_once('\t').filter(|(_, name)| *name == reference).map(|(sha, _)| sha.to_string())))
@@ -1341,18 +1412,25 @@ impl WorkspaceGit {
     }
 
     /// Point `branch` at `origin/<branch>` once the remote has it.
-    fn track(&self, repo: &Repo, branch: &str) {
+    fn track(&self, repo: &Repo, branch: &str, verify: impl Fn() -> Result<(), RpcError>) -> Result<(), RpcError> {
         let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+        verify()?;
         let _ = self.git_timed(repo, &["fetch", "--no-tags", "origin", &refspec], NETWORK_TIMEOUT, &[]);
+        verify()?;
         let _ = self.git(repo, &["branch", &format!("--set-upstream-to=origin/{branch}"), branch]);
+        Ok(())
     }
 
     fn push(&self, params: &Value) -> Result<Value, RpcError> {
         self.push_with(params, |repo, branch, head| {
             let source = if params.get("head").is_some() { head.to_owned() } else { format!("refs/heads/{branch}") };
-            let refspec = format!("{source}:refs/heads/{branch}");
-            self.run_git(&repo.dir, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
+            self.push_ref(repo, branch, &source)
         })
+    }
+
+    fn push_ref(&self, repo: &Repo, branch: &str, source: &str) -> Result<Ran, RpcError> {
+        let refspec = format!("{source}:refs/heads/{branch}");
+        self.run_git(&repo.dir, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
     }
 
     fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
@@ -1368,26 +1446,36 @@ impl WorkspaceGit {
                 return Err(RpcError::new("conflict", "The branch moved before the push. Refresh and try again."));
             }
         }
+        self.push_branch(&repo, &branch, &local, push, || Ok(()))
+    }
+
+    fn push_branch(
+        &self, repo: &Repo, branch: &str, local: &str,
+        push: impl FnOnce(&Repo, &str, &str) -> Result<Ran, RpcError>,
+        verify: impl Fn() -> Result<(), RpcError>,
+    ) -> Result<Value, RpcError> {
         let answer = |pushed: bool, reconciled: bool| {
             json!({ "repo": repo.name, "branch": branch, "head": local, "pushed": pushed, "reconciled": reconciled })
         };
+        let track = || self.track(repo, branch, &verify);
         // A resend, or a retry after an answer that never arrived: ask first.
-        if self.remote_head(&repo, &branch, NETWORK_TIMEOUT)?.as_deref() == Some(local.as_str()) {
-            self.track(&repo, &branch);
+        if self.remote_head(repo, branch, NETWORK_TIMEOUT)?.as_deref() == Some(local) {
+            track()?;
             return Ok(answer(false, true));
         }
-        let ran = push(&repo, &branch, &local)?;
+        verify()?;
+        let ran = push(repo, branch, local)?;
         if ran.ok {
-            self.track(&repo, &branch);
+            track()?;
             return Ok(answer(true, false));
         }
         let text = ran.text();
         let failure = classify(&text, ran.timed_out);
         if matches!(failure, Failure::Network | Failure::Other) {
             // It may have landed before the connection went.
-            if let Ok(Some(remote)) = self.remote_head(&repo, &branch, NETWORK_TIMEOUT) {
+            if let Ok(Some(remote)) = self.remote_head(repo, branch, NETWORK_TIMEOUT) {
                 if remote == local {
-                    self.track(&repo, &branch);
+                    track()?;
                     return Ok(answer(true, true));
                 }
             }
@@ -1435,9 +1523,11 @@ impl WorkspaceGit {
         });
     }
 
-    fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration) -> Result<Vec<crate::github::PullRequest>, RpcError> {
+    fn list_prs(&self, repo: &Repo, branch: &str, state: &str, timeout: Duration, github_repo: Option<&str>) -> Result<Vec<crate::github::PullRequest>, RpcError> {
         let fields = format!("{},isCrossRepository", crate::github::FIELDS);
-        let out = self.gh(repo, &["pr", "list", "--head", branch, "--state", state, "--json", &fields, "--limit", "100"], timeout)?;
+        let mut args = vec!["pr", "list", "--head", branch, "--state", state, "--json", &fields, "--limit", "100"];
+        if let Some(github_repo) = github_repo { args.extend(["--repo", github_repo]); }
+        let out = self.gh(repo, &args, timeout)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr list: {error}")))?;
         let mut prs: Vec<_> = value.as_array().map(|prs| own_prs(prs).map(crate::github::parse_pr).collect()).unwrap_or_default();
         prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
@@ -1463,14 +1553,109 @@ impl WorkspaceGit {
         Ok(entry)
     }
 
+    fn pr_creation_checkout(&self, session: &str, repo: &Repo) -> Result<CheckoutIdentity, RpcError> {
+        let refused = || RpcError::new("conflict", "Select this session's checkout before creating a pull request.");
+        let entry = self.project_session(session)?;
+        let path = repo.dir.canonicalize().map_err(|_| refused())?;
+        let authorized = super::machine::session_checkout(&self.root, &self.files, &entry, || self.project_has_git())
+            .and_then(|(_, name)| name);
+        if authorized.as_deref() != Some(repo.name.as_str()) || !crate::git::is_own_worktree(&path) {
+            return Err(refused());
+        }
+        let git_dir = self.git(repo, &["rev-parse", "--absolute-git-dir"]).map_err(|_| refused())?;
+        let git_dir = Path::new(git_dir.trim()).canonicalize().map_err(|_| refused())?;
+        let directory = directory_identity(&path).map_err(|_| refused())?;
+        let admin = directory_identity(&git_dir).map_err(|_| refused())?;
+        Ok(CheckoutIdentity { path, git_dir, directory, admin })
+    }
+
     fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        Ok(self.locate_pr_associations(associations))
+        let mut response = self.locate_pr_associations(&session, associations);
+        if self.project {
+            response["branchPrLinks"] = json!(true);
+            if pending_pr_creations(|entries| (entries.iter().any(|entry| entry.session == session.id), false))? {
+                response["pendingCreation"] = json!(true);
+            }
+        }
+        Ok(response)
     }
 
-    fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {
+    fn checkout_contains(root: &Path, cwd: &Path) -> bool {
+        cwd == root || (cwd.starts_with(root)
+            && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
+                .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_deref() == Some(root))
+    }
+
+    /// A prior branch may have contained the directory the link saved.
+    /// Walk back only through missing paths and verify the surviving directory.
+    fn existing_link_directory(cwd: &Path) -> Option<(PathBuf, bool)> {
+        for ancestor in cwd.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(path) if path.is_dir() => return Some((path, ancestor != cwd)),
+                Ok(_) => {}
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn pr_link_branch(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project {
+            return Err(RpcError::forbidden("Branch PR linking is only available on paired machines."));
+        }
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        let repo = self.repo(params)?;
+        let repo_root = repo.dir.canonicalize().map_err(RpcError::internal)?;
+        let matches_checkout = match Path::new(&session.cwd).canonicalize() {
+            Ok(cwd) => Self::checkout_contains(&repo_root, &cwd),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                session.checkout_root().and_then(|root| Path::new(root).canonicalize().ok()).as_ref() == Some(&repo_root)
+            }
+            Err(_) => false,
+        };
+        if session.worktree_removed || !matches_checkout {
+            return Err(RpcError::invalid("Select the session's checkout to link its pull request."));
+        }
+        let requested = crate::pr_associations::identity(required_str(params, "url")?)
+            .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
+        let branch = required_str(params, "branch")?;
+        let checkout_matches = || crate::git::current_branch(&repo.dir).as_deref() == Some(branch);
+        if !checkout_matches() {
+            return Err(RpcError::invalid("The session's checkout is no longer on the pull request branch."));
+        }
+        let found = self.list_prs(&repo, branch, "open", NETWORK_TIMEOUT, None)?.into_iter().find(|pr| {
+            pr.state == "OPEN" && pr.head == branch
+                && crate::pr_associations::identity(&pr.url).is_ok_and(|url| url == requested)
+        });
+        if found.is_none() || !checkout_matches() {
+            return Err(RpcError::not_found("GitHub did not verify an open pull request on the session's branch."));
+        }
+        crate::pr_associations::link_local(&session.id, &repo_root, &requested, branch).map_err(RpcError::internal)?;
+        Ok(json!({ "sessionAssociated": true }))
+    }
+
+    fn pr_unlink(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project {
+            return Err(RpcError::forbidden("PR unlinking is only available on paired machines."));
+        }
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        crate::pr_associations::unlink(&session.id, required_str(params, "url")?).map_err(RpcError::internal)?;
+        Ok(json!({}))
+    }
+
+    fn locate_pr_associations(&self, session: &crate::store::index::SessionEntry, associations: Vec<crate::pr_associations::Association>) -> Value {
+        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
+            self.project_repositories().into_iter().filter_map(|name| {
+                let root = self.dir(&name).canonicalize().ok()?;
+                Some((name, root))
+            }).collect()
+        } else {
+            vec![]
+        };
         let repositories: Vec<_> = self.repositories().0.into_iter().filter_map(|name| {
             let origin = crate::git::remote_url(&self.dir(&name))?;
             let identity = crate::issues::github_repo_from_url(&origin)?;
@@ -1480,7 +1665,28 @@ impl WorkspaceGit {
             // Match repository identity, never whichever checkout is live.
             // Keep unavailable identities too, so missing repositories cannot
             // turn an incomplete history into permission to clean up.
-            let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
+            let repo = match &association.scope {
+                // A machine link is verified in its saved checkout, which can
+                // have its own gh routing even when another shares its origin.
+                crate::pr_associations::Scope::Local { cwd } if self.project && association.linked => {
+                    Self::existing_link_directory(Path::new(cwd)).and_then(|(path, missing)| {
+                        let (name, root) = linked_checkouts.iter()
+                            .filter(|(_, root)| path.starts_with(root))
+                            .max_by_key(|(_, root)| root.components().count())?;
+                        // Never climb out of a removed worktree and use the
+                        // project checkout's GitHub configuration.
+                        if missing && (session.worktree_removed || match session.checkout_root() {
+                                Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
+                                None => name == "." && (session.worktree_name.is_some() || cwd != &session.cwd),
+                            })
+                        {
+                            return None;
+                        }
+                        (self.verified_machine_repo(name) && Self::checkout_contains(root, &path)).then_some(name)
+                    })
+                }
+                _ => repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name),
+            };
             json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }
@@ -1528,24 +1734,74 @@ impl WorkspaceGit {
     fn prs(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         if params.get("number").is_some() {
-            let mut pr = self.pr_view(&repo, &Self::pr_number(params)?)?;
+            let number = Self::pr_number(params)?;
+            let url = Self::pr_url(params, &number)?;
+            let mut pr = self.pr_view(&repo, &number)?;
+            if let Some(url) = url {
+                Self::verify_pr_url(&pr, &url)?;
+            }
             self.panel_pr(&repo, &mut pr);
             return Ok(json!({ "repo": repo.name, "branch": pr.head, "prs": [pr] }));
         }
         let branch = self.branch_param(&repo, params)?;
-        let mut prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT)?;
+        let mut prs = self.list_prs(&repo, &branch, "all", NETWORK_TIMEOUT, None)?;
         for pr in &mut prs { self.panel_pr(&repo, pr); }
         Ok(json!({ "repo": repo.name, "branch": branch, "prs": prs }))
     }
 
-    fn pr_create(&self, params: &Value) -> Result<Value, RpcError> {
+    fn pr_create(&self, params: &Value, for_session: bool) -> Result<Value, RpcError> {
+        if for_session && !self.project {
+            return Err(RpcError::invalid("This pull request operation requires a machine session"));
+        }
         let repo = self.repo(params)?;
-        let session = if self.project && params.get("sessionId").is_some() {
-            Some(self.project_session(required_str(params, "sessionId")?)?)
+        let session = if for_session || (self.project && params.get("sessionId").is_some()) {
+            Some(required_str(params, "sessionId")?)
         } else {
             None
         };
-        let branch = self.branch_param(&repo, params)?;
+        let pinned_head = if for_session && params.get("pushHead").is_some() {
+            let head = required_str(params, "pushHead")?;
+            if !valid_object_id(head) { return Err(RpcError::invalid("pushHead is a commit id")); }
+            Some(head)
+        } else { None };
+        let branch = if pinned_head.is_some() {
+            optional_ref(params, "branch")?.ok_or_else(|| RpcError::invalid("branch is required"))?.to_owned()
+        } else {
+            self.branch_param(&repo, params)?
+        };
+        let checkout = session.map(|session| self.pr_creation_checkout(session, &repo)).transpose()?;
+        let _lease = checkout.as_ref().map(|checkout| crate::archive_script::RemovalLease::acquire(&checkout.path))
+            .transpose().map_err(|error| RpcError::new("conflict", error.to_string()))?;
+        let origin = if self.project {
+            Some(self.git(&repo, &["remote", "get-url", "origin"])?.trim().to_owned())
+        } else { None };
+        let github_repo = origin.as_deref().map(|origin| self.pr_creation_repository(origin)).transpose()?;
+        let github_repo = github_repo.as_deref();
+        let known_url = |url: &str| github_repo.is_none_or(|name| url.starts_with(&format!("https://{name}/pull/")));
+        let verify_identity = || {
+            if let Some((session, expected)) = session.zip(checkout.as_ref()) {
+                if self.pr_creation_checkout(session, &repo)? != *expected {
+                    return Err(RpcError::new("conflict", "The session's checkout was replaced. Refresh and try again."));
+                }
+            }
+            Ok(())
+        };
+        let verify_checkout = || {
+            verify_identity()?;
+            if session.is_some() && crate::git::current_branch(&repo.dir).as_deref() != Some(&branch) {
+                return Err(RpcError::new("conflict", "The selected branch is no longer checked out in this session. Refresh and try again."));
+            }
+            Ok(())
+        };
+        let verify_publish = || {
+            verify_checkout()?;
+            if let Some(head) = pinned_head {
+                if crate::git::head_commit(&repo.dir).as_deref() != Some(head) {
+                    return Err(RpcError::new("conflict", "The branch no longer matches the commit shown in the pull request form. Refresh and try again."));
+                }
+            }
+            Ok(())
+        };
         let title = required_str(params, "title")?.trim();
         if title.is_empty() || title.len() > 1024 {
             return Err(RpcError::invalid("a title is required"));
@@ -1562,39 +1818,153 @@ impl WorkspaceGit {
             return Err(RpcError::invalid("the base branch is the branch itself"));
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        // Existing git/1 clients rely on Create attaching an open PR. The
+        // newer desktop leaves that choice to the explicit link action.
+        let legacy_link = match params.get("associateExisting") {
+            None => true,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(RpcError::invalid("associateExisting must be a boolean")),
+        };
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
         let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
             let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
-            if let Some(session) = &session {
-                crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
-                    .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
-                value["sessionAssociated"] = json!(true);
+            if let Some(session) = session {
+                let identity = crate::pr_associations::identity(&pr.url).map_err(RpcError::internal)?;
+                if !known_url(&identity) {
+                    return Err(RpcError::new("conflict", "GitHub returned a pull request outside the origin repository."));
+                }
+                let associated = if existing && !for_session && legacy_link && pr.head == branch && verify_identity().is_ok() {
+                    crate::pr_associations::reconcile_existing(session, &repo.dir, &identity, &pr.head)
+                        .map_err(RpcError::internal)?
+                } else {
+                    crate::pr_associations::for_session(session, vec![]).map_err(RpcError::internal)?
+                        .iter().any(|row| row.url == identity)
+                };
+                value["sessionAssociated"] = json!(associated);
             }
             if reconciled {
                 value["reconciled"] = json!(true);
             }
             Ok(value)
         };
-        // One open pull request per branch: a resend, or one made elsewhere, is answered with it.
-        if let Some(existing) = open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?) {
+        // Legacy callers can look up a removable link for another branch of
+        // the same checkout. The guarded method requires the live branch.
+        if for_session { verify_publish()?; } else { verify_identity()?; }
+        let read_created = |url: &str| {
+            let unresolved = || RpcError::new("outcome_unknown", format!("GitHub reported {url}, but the pull request could not be verified yet. Try again."));
+            if !known_url(url) { return Err(RpcError::new("conflict", "The pull request belongs to a different repository than origin.")); }
+            let pr = self.pr_view(&repo, url).map_err(|_| unresolved())?;
+            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) || (self.project && pr.head_sha.is_empty()) { return Err(unresolved()); }
+            Ok(pr)
+        };
+        let pending = if let Some((session, checkout)) = session.zip(checkout.as_ref()) {
+            pending_pr_creations(|entries| (entries.iter().rev().find(|entry|
+                entry.session == session && entry.checkout == *checkout && entry.branch == branch && entry.base == base
+            ).cloned(), false))?
+        } else { None };
+        let recovered = if let Some(evidence) = pending {
+            let pr = read_created(&evidence.url)?;
+            Self::finish_pr_creation(&evidence, &pr, verify_checkout)?;
+            Some(pr)
+        } else { None };
+        let existing = if recovered.is_none() {
+            open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT, github_repo)?)
+        } else { None };
+        if let Some(head) = pinned_head {
+            self.push_branch(&repo, &branch, head, |repo, branch, head| self.push_ref(repo, branch, head), verify_publish)?;
+            // `git push` can use a separate URL. Confirm the source GitHub
+            // reads through origin before relying on the successful push.
+            self.verify_pr_remote_head(&repo, origin.as_deref(), &branch, head)?;
+        }
+        if let Some(pr) = recovered {
+            return answer(pr, false, true);
+        }
+        // A branch match can locate a PR, but only a successful create URL or
+        // existing session evidence establishes ownership.
+        if let Some(existing) = existing {
             return answer(existing, true, false);
         }
-        let local = self.local_head(&repo, &branch)?;
-        if self.remote_head(&repo, &branch, NETWORK_TIMEOUT)?.as_deref() != Some(local.as_str()) {
-            return Err(RpcError::new("unpushed", format!("push {branch} first: the remote does not have its latest commit")));
-        }
+        verify_publish()?;
+        let local = if let Some(head) = pinned_head {
+            head.to_owned()
+        } else {
+            let local = self.local_head(&repo, &branch)?;
+            self.verify_pr_remote_head(&repo, origin.as_deref(), &branch, &local)?;
+            local
+        };
         let mut args = vec!["pr", "create", "--title", title, "--body", body, "--base", &base, "--head", &branch];
         if draft {
             args.push("--draft");
         }
-        let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
-        // Created or not, what GitHub now has is the answer.
-        match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(_), Ok(Some(pr))) => answer(pr, false, false),
-            (Err(_), Ok(Some(pr))) => answer(pr, false, true),
-            (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
-            (Err(error), _) => Err(error),
+        if let Some(github_repo) = github_repo { args.extend(["--repo", github_repo]); }
+        verify_publish()?;
+        let reported = match self.gh(&repo, &args, NETWORK_TIMEOUT) {
+            Ok(url) => url,
+            Err(error) => return match self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT, github_repo).map(open) {
+                Ok(Some(pr)) => answer(pr, true, true),
+                _ => Err(error),
+            },
+        };
+        let url = crate::pr_associations::identity(reported.trim())
+            .map_err(|_| RpcError::new("outcome_unknown", "GitHub did not return a valid URL for the new pull request."))?;
+        if !known_url(&url) { return Err(RpcError::new("conflict", "GitHub returned a pull request outside the origin repository.")); }
+        let evidence = session.zip(checkout.as_ref()).filter(|_| verify_checkout().is_ok()).map(|(session, checkout)| PendingPrCreation {
+            session: session.into(), checkout: checkout.clone(), branch: branch.clone(), base, head: local, url: url.clone(),
+        });
+        if let Some(evidence) = &evidence {
+            pending_pr_creations(|entries| {
+                entries.retain(|entry| entry.session != evidence.session || entry.url != evidence.url);
+                entries.push(evidence.clone());
+                ((), true)
+            })?;
         }
+        let pr = read_created(&url)?;
+        if let Some(evidence) = &evidence {
+            Self::finish_pr_creation(evidence, &pr, verify_checkout)?;
+        }
+        answer(pr, false, false)
+    }
+
+    fn pr_creation_repository(&self, origin: &str) -> Result<String, RpcError> {
+        #[cfg(test)]
+        if let Some(fixture) = self.github_origin_fixture.as_ref().filter(|_| Path::new(origin).is_absolute()) {
+            return Ok(fixture.clone());
+        }
+        github_repository_from_origin(origin).ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))
+    }
+
+    fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {
+        if let Some(origin) = origin {
+            let effective = self.git(repo, &["ls-remote", "--get-url", "--", origin])?;
+            if effective.trim() != origin {
+                return Err(RpcError::new("conflict", "Git rewrote the verified origin URL. Check the repository's remote configuration."));
+            }
+        }
+        if self.remote_head_at(repo, origin.unwrap_or("origin"), branch, NETWORK_TIMEOUT)?.as_deref() != Some(head) {
+            return Err(RpcError::new("unpushed", format!("push {branch} first: the remote does not have its latest commit")));
+        }
+        Ok(())
+    }
+
+    fn finish_pr_creation(evidence: &PendingPrCreation, pr: &crate::github::PullRequest, verify_checkout: impl Fn() -> Result<(), RpcError>) -> Result<(), RpcError> {
+        let PendingPrCreation { session, checkout, url, branch, base, head } = evidence;
+        let matches = pr.head == *branch && pr.base == *base && pr.head_sha == *head;
+        if matches {
+            if verify_checkout().is_err() { return Ok(()); }
+            crate::pr_associations::record_local(session, &checkout.path, url, branch)
+                .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
+        }
+        if matches || matches!(pr.state.as_str(), "CLOSED" | "MERGED") {
+            pending_pr_creations(|entries| {
+                let count = entries.len();
+                entries.retain(|entry| &entry.session != session || &entry.url != url);
+                ((), entries.len() != count)
+            })?;
+        }
+        if !matches {
+            return Err(RpcError::new("conflict", format!("GitHub opened {url} with a different head, base, or commit.")));
+        }
+        Ok(())
     }
 
     fn pr_number(params: &Value) -> Result<String, RpcError> {
@@ -1606,17 +1976,47 @@ impl WorkspaceGit {
             .ok_or_else(|| RpcError::invalid("number is required"))
     }
 
-    fn pr_view(&self, repo: &Repo, number: &str) -> Result<crate::github::PullRequest, RpcError> {
-        let out = self.gh(repo, &["pr", "view", number, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+    fn pr_url(params: &Value, number: &str) -> Result<Option<String>, RpcError> {
+        if params.get("url").is_none() { return Ok(None); }
+        let target = crate::github::conversation::Target::new(required_str(params, "url")?)
+            .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
+        if target.number != number {
+            return Err(RpcError::invalid("Pull request number does not match its URL."));
+        }
+        Ok(Some(target.url))
+    }
+
+    fn verify_pr_url(pr: &crate::github::PullRequest, url: &str) -> Result<(), RpcError> {
+        if !crate::pr_associations::identity(&pr.url).is_ok_and(|found| found == url) {
+            return Err(RpcError::not_found("This checkout no longer resolves the requested pull request."));
+        }
+        Ok(())
+    }
+
+    fn pr_mutation_ref(&self, repo: &Repo, params: &Value) -> Result<String, RpcError> {
+        let number = Self::pr_number(params)?;
+        let Some(url) = Self::pr_url(params, &number)? else { return Ok(number) };
+        // Check scope through the checkout, then use the full URL so even a
+        // change to gh's default repository cannot redirect the action.
+        Self::verify_pr_url(&self.pr_view(repo, &number)?, &url)?;
+        Ok(url)
+    }
+
+    fn pr_view(&self, repo: &Repo, reference: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let out = self.gh(repo, &["pr", "view", reference, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
-        Ok(crate::github::parse_pr(&value))
+        let pr = crate::github::parse_pr(&value);
+        if reference.starts_with("https://") {
+            Self::verify_pr_url(&pr, reference)?;
+        }
+        Ok(pr)
     }
 
     fn pr_ready(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let number = Self::pr_number(params)?;
-        let result = self.gh(&repo, &["pr", "ready", &number], NETWORK_TIMEOUT);
-        let pr = self.pr_view(&repo, &number);
+        let reference = self.pr_mutation_ref(&repo, params)?;
+        let result = self.gh(&repo, &["pr", "ready", &reference], NETWORK_TIMEOUT);
+        let pr = self.pr_view(&repo, &reference);
         match (result, pr) {
             (_, Ok(pr)) if !pr.is_draft => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
@@ -1627,13 +2027,13 @@ impl WorkspaceGit {
 
     fn pr_merge(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let number = Self::pr_number(params)?;
+        let reference = self.pr_mutation_ref(&repo, params)?;
         let flag = match params.get("method").and_then(Value::as_str).unwrap_or("merge") {
             "merge" => "--merge",
             "squash" => "--squash",
             "rebase" => "--rebase",
             "queue" => {
-                let pr = self.pr_view(&repo, &number)?;
+                let pr = self.pr_view(&repo, &reference)?;
                 let (host, query) = crate::github::queue_query(&pr.url).map_err(RpcError::internal)?;
                 let out = self.gh(&repo, &["api", "graphql", "--hostname", &host, "-f", &query], NETWORK_TIMEOUT)?;
                 let queue = crate::github::parse_queue_response(&out).map_err(RpcError::internal)?;
@@ -1648,13 +2048,13 @@ impl WorkspaceGit {
             Some(Value::String(head)) if valid_object_id(head) => Some(head.as_str()),
             Some(_) => return Err(RpcError::invalid("head is a commit id")),
         };
-        let mut args = vec!["pr", "merge", number.as_str(), flag];
+        let mut args = vec!["pr", "merge", reference.as_str(), flag];
         if let Some(head) = head {
             args.extend(["--match-head-commit", head]);
         }
         let result = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.
-        match (result, self.pr_view(&repo, &number)) {
+        match (result, self.pr_view(&repo, &reference)) {
             (_, Ok(pr)) if pr.state == "MERGED" => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),

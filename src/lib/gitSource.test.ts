@@ -25,7 +25,30 @@ it("sends the selected branch and the machine session together when creating a P
   await expect(source.createPr({ ...request, sessionId: "machine:m1:p2:s1" })).rejects.toThrow("different workspace");
   expect(mutate).not.toHaveBeenCalled();
   await expect(source.createPr({ ...request, sessionId: "machine:m1:p1:s1" })).resolves.toBeNull();
-  expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic" });
+  expect(mutate).toHaveBeenCalledWith("git.prCreateForSession", { ...request, sessionId: "s1", repo: "topic" });
+});
+
+it.each([undefined, "a".repeat(40)])("requires the verified session PR method on older machines (push head %s)", async (head) => {
+  const mutate = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.prCreateForSession"));
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+  const request = { title: "Topic", body: "", base: "main", draft: false, branch: "topic", sessionId: "machine:m1:p1:s1" };
+  const create = head === undefined ? source.createPr(request) : source.createPrWithPush!(request, head);
+  await expect(create).rejects.toThrow("Update the machine runtime");
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateForSession", {
+    ...request, sessionId: "s1", repo: "topic", ...(head === undefined ? {} : { pushHead: head }),
+  });
+});
+
+it("offers explicit linking when a failed machine Create finds an unassociated PR", async () => {
+  const mutate = vi.fn().mockResolvedValue({
+    pr: { number: 17 }, created: false, existing: true, reconciled: true, sessionAssociated: false,
+  });
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+  await expect(source.createPr({
+    title: "Topic", body: "", base: "main", draft: false, sessionId: "machine:m1:p1:s1",
+  })).resolves.toBe("Pull request #17 is already open. Use Link existing branch PR to add it to this session.");
 });
 
 it("refuses to fall back to an unguarded commit on an older machine", async () => {

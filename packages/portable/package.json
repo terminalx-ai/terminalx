@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./manualStatus": "./src/manualStatus.ts",
+    "./organizationDeletion": "./src/organizationDeletion.ts",
     "./agentMarks": "./src/agentMarks.ts",
     "./agentSettings": "./src/agentSettings.ts",
     "./botFace": "./src/botFace.ts",
@@ -24,7 +25,8 @@
     "./workspaceFiles": "./src/workspaceFiles.ts",
     "./workspaceGit": "./src/workspaceGit.ts",
     "./workspaceMirror": "./src/workspaceMirror.ts",
-    "./sessionStatus": "./src/sessionStatus.ts"
+    "./sessionStatus": "./src/sessionStatus.ts",
+    "./supportReports": "./src/supportReports.ts"
   },
   "dependencies": {
     "linkify-it": "5.0.2"

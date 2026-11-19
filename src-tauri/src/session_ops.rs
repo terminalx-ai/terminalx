@@ -987,6 +987,7 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
     let _request = crate::github_process::scope();
     let path = checkout_root(project, path);
     let path = path.as_path();
+    require_resolved_pr_creation(path)?;
     let mut disposition = crate::workspaces::disposition(project, path);
     if fetch && !disposition.is_main {
         disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));
@@ -996,6 +997,13 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
     disposition.session_ids = sessions.iter().map(|session| session.id.clone()).collect();
     disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
     Ok(disposition)
+}
+
+fn require_resolved_pr_creation(path: &Path) -> Result<()> {
+    if let Some(url) = crate::remote::git::pending_pr_creation_in(path).map_err(|error| error.message)? {
+        return Err(format!("Verify the pull request at {url} before removing this workspace."));
+    }
+    Ok(())
 }
 
 // A missing descendant may have belonged to a pruned nested checkout. No
@@ -1032,7 +1040,7 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
     let cwd = Path::new(&session.cwd);
     let project = Path::new(&session.project_path);
     if !cwd.exists() && !session.worktree_removed {
-        if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| cwd.starts_with(root)) {
+        if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| identity_path(cwd).starts_with(identity_path(root))) {
             return std::fs::canonicalize(&root).unwrap_or(root);
         }
         // Older entries did not record the root. Their worktree name is the
@@ -1099,7 +1107,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
         if cwd.exists() {
             let top = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
                 .map(|top| identity_path(Path::new(top.trim())));
-            let recorded = session.checkout_root().filter(|root| cwd.starts_with(root)).map(|root| identity_path(Path::new(root)));
+            let recorded = session.checkout_root().map(|root| identity_path(Path::new(root))).filter(|root| normalized.starts_with(root));
             // A failed removal can leave the exact recorded checkout behind
             // after Git has removed its .git file. A retry of that exact path
             // remains possible when the project is still a readable repo.
@@ -1117,7 +1125,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
         }
         let records = git::list_worktrees(Path::new(&session.project_path))
             .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?;
-        if session.checkout_root().is_some_and(|root| cwd.starts_with(root)) {
+        if session.checkout_root().is_some_and(|root| normalized.starts_with(identity_path(Path::new(root)))) {
             continue;
         }
         let root = session_checkout_root(session);
@@ -1280,6 +1288,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
         return Err("A project's own checkout cannot be removed.".into());
     }
     let _lease = crate::archive_script::RemovalLease::acquire(&target).map_err(err)?;
+    require_resolved_pr_creation(&target)?;
     let affected = sessions_in_workspace(&target)?;
     if let Some(expected) = request.expected_sessions {
         let now: std::collections::BTreeSet<&str> = affected.iter().map(|session| session.id.as_str()).collect();
@@ -1324,6 +1333,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if let Some(guard) = request.guard {
         guard()?;
     }
+    require_resolved_pr_creation(&target)?;
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
     // What the sessions' tools let go of would run on from a deleted directory.
     let strays = if on_disk { crate::stray_processes::stop_in(&target) } else { Vec::new() };

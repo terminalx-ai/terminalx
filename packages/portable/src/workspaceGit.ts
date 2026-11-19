@@ -184,11 +184,21 @@ export interface RemotePushResult {
   reconciled: boolean;
 }
 
+export interface RemotePrCreateInput {
+  title: string;
+  body: string;
+  base: string | null;
+  draft: boolean;
+  branch?: string;
+  sessionId?: string;
+  associateExisting?: boolean;
+}
+
 export interface RemotePrCreateResult {
   repo: string;
   pr: RemotePullRequest;
   created: boolean;
-  /** An open pull request for the branch already existed; it is linked, not duplicated. */
+  /** An open pull request for the branch already existed. */
   existing: boolean;
   reconciled?: boolean;
   /** The machine saved this pull request to the named session. */
@@ -319,8 +329,8 @@ export class RemoteGit {
 
   /** With `number`, refresh one retained PR independently of its old branch.
    * Older runtimes use `branch`; callers still verify the returned identity. */
-  prs(branch?: string, number?: number): Promise<{ branch: string; prs: RemotePullRequest[] }> {
-    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}) });
+  prs(branch?: string, number?: number, url?: string): Promise<{ branch: string; prs: RemotePullRequest[] }> {
+    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}), ...(url ? { url } : {}) });
   }
 
   prConversation(url: string): PrConversationAccess {
@@ -331,8 +341,16 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
+  prAssociations(sessionId: string): Promise<{ pendingCreation?: boolean; branchPrLinks?: boolean; associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
+  }
+
+  linkBranchPr(sessionId: string, url: string, branch: string): Promise<{ sessionAssociated: boolean }> {
+    return this.write("git.prLinkBranch", { sessionId, url, branch });
+  }
+
+  unlinkPr(sessionId: string, url: string): Promise<unknown> {
+    return this.write("git.prUnlink", { sessionId, url });
   }
 
   prLanded(): Promise<{ safe: boolean; head: string | null; branch: string | null }> {
@@ -373,21 +391,26 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: RemotePrCreateInput): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }
 
-  readyPr(number: number): Promise<unknown> {
-    return this.write("git.prReady", { number });
+  createSessionPr(input: Omit<RemotePrCreateInput, "associateExisting"> & { sessionId: string }, pushHead?: string): Promise<RemotePrCreateResult> {
+    const { base, ...rest } = input;
+    return this.write("git.prCreateForSession", { ...rest, ...(base ? { base } : {}), ...(pushHead === undefined ? {} : { pushHead }) });
+  }
+
+  readyPr(number: number, url?: string): Promise<unknown> {
+    return this.write("git.prReady", { number, ...(url ? { url } : {}) });
   }
 
   /**
    * `head` pins the merge to the commit the person saw: GitHub refuses it
    * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
    */
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
-    return this.write("git.prMerge", head ? { number, method, head } : { number, method });
+  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string, url?: string): Promise<unknown> {
+    return this.write("git.prMerge", { number, method, ...(head ? { head } : {}), ...(url ? { url } : {}) });
   }
 }
 

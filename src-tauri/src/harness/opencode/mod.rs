@@ -172,14 +172,22 @@ impl OpenCode {
     /// startup stash as well, so neither a late opening reply nor restart can
     /// revive it. The owner verifies this is still the same child.
     pub fn withdraw_prompt(&mut self, tag: &str) -> Vec<Action> {
+        self.withdraw_http(tag, false)
+    }
+
+    pub(crate) fn withdraw_http(&mut self, tag: &str, unconfirmed: bool) -> Vec<Action> {
         if let Some(request) = tag.strip_prefix("permission:") {
             self.answers.remove(request);
             return Vec::new();
         }
         if !matches!(tag, "session_get" | "session_new" | "prompt") { return Vec::new(); }
+        // A provider event can confirm delivery before the HTTP reply is lost.
+        if unconfirmed && tag == "prompt" && (!self.turn_open || self.acknowledged) {
+            return Vec::new();
+        }
         self.generation += 1; // old opening/prompt callbacks cannot settle its successor
         if self.stashed.take().is_some() { self.turn_open = true; }
-        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed: false })).into_iter().collect::<Vec<_>>();
+        let mut actions = self.prompt_seq.take().map(|prompt_seq| Action::Emit(Payload::PromptWithdrawn { prompt_seq, unconfirmed })).into_iter().collect::<Vec<_>>();
         actions.extend(self.end_turn(TurnStatus::Aborted, None, false));
         actions
     }
@@ -660,6 +668,24 @@ impl NativeHttp {
     }
 }
 
+struct HttpLimits {
+    budget: std::time::Duration,
+    connect_retry: std::time::Duration,
+    parse: fn(&[u8]) -> Option<PhysicalOutcome>,
+}
+
+fn bounded_http(
+    method: &str, url: &str, body: Option<&Value>, budget: std::time::Duration,
+    current: impl FnMut() -> bool,
+    gate: impl FnMut(&mut dyn FnMut() -> std::io::Result<usize>) -> WriteAdmission,
+) -> PhysicalOutcome {
+    bounded_http_with_limits(method, url, body, HttpLimits {
+        budget,
+        connect_retry: std::time::Duration::ZERO,
+        parse: parse_bounded_response,
+    }, current, gate)
+}
+
 /// Only an owner exact-callback admission may consume this result. No synthetic
 /// status=0 line is manufactured: legacy session_get fallback would replay an
 /// uncertain operation. Expose no automatic engine/settle_answer entry point.
@@ -675,8 +701,8 @@ pub(crate) struct NativeHttpReply {
 /// bytes and wait outside admission. Every write is a single nonblocking call;
 /// WouldBlock/Interrupted/Deferred release admission before the next attempt.
 /// A dropped/partial response has an unknown outcome, even for session-open.
-fn bounded_http(
-    method: &str, url: &str, body: Option<&Value>, budget: std::time::Duration,
+fn bounded_http_with_limits(
+    method: &str, url: &str, body: Option<&Value>, limits: HttpLimits,
     mut current: impl FnMut() -> bool,
     mut gate: impl FnMut(&mut dyn FnMut() -> std::io::Result<usize>) -> WriteAdmission,
 ) -> PhysicalOutcome {
@@ -694,26 +720,23 @@ fn bounded_http(
     const CHUNK: usize = 4096;
     if payload.len() > MAX { return PhysicalOutcome::Refused; }
     let bytes = format!("{method} /{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).into_bytes();
-    let deadline = Instant::now() + budget;
+    let started = Instant::now();
+    let deadline = started + limits.budget;
     let pause = || std::thread::sleep(Duration::from_millis(5));
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    // Nonblocking connect: no network wait, even the connect, owns policy guards.
-    let socket = match socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, Some(socket2::Protocol::TCP)) {
-        Ok(socket) => socket, Err(_) => return PhysicalOutcome::Refused,
+    // Connect and retry outside admission. A new OpenCode process can take
+    // time to listen, but failed connects do not write any request bytes.
+    let mut stream = loop {
+        if !current() || Instant::now() >= deadline { return PhysicalOutcome::Refused; }
+        match std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)) {
+            Ok(stream) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused && started.elapsed() < limits.connect_retry => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => return PhysicalOutcome::Refused,
+        }
     };
-    if socket.set_nonblocking(true).is_err() { return PhysicalOutcome::Refused; }
-    if let Err(error) = socket.connect(&address.into()) {
-        if !matches!(error.raw_os_error(), Some(libc::EINPROGRESS) | Some(libc::EWOULDBLOCK)) {
-            return PhysicalOutcome::Refused;
-        }
-    }
-    let mut stream: std::net::TcpStream = socket.into();
-    while stream.peer_addr().is_err() {
-        if !current() || Instant::now() >= deadline || stream.take_error().ok().flatten().is_some() {
-            return PhysicalOutcome::Refused;
-        }
-        pause();
-    }
+    if stream.set_nonblocking(true).is_err() { return PhysicalOutcome::Refused; }
     let mut offset = 0;
     while offset < bytes.len() {
         if !current() || Instant::now() >= deadline { return if offset == 0 { PhysicalOutcome::Refused } else { PhysicalOutcome::Unknown }; }
@@ -751,7 +774,7 @@ fn bounded_http(
     loop {
         if !current() || Instant::now() >= deadline { return PhysicalOutcome::Unknown; }
         match stream.read(&mut buffer) {
-            Ok(0) => return parse_bounded_response(&response).unwrap_or(PhysicalOutcome::Unknown),
+            Ok(0) => return (limits.parse)(&response).unwrap_or(PhysicalOutcome::Unknown),
             Ok(n) => {
                 if response.len() + n > MAX { return PhysicalOutcome::Unknown; }
                 response.extend_from_slice(&buffer[..n]);
@@ -799,7 +822,32 @@ mod phase2_opencode_collaboration;
 /// the event pump waits for the server. It used to be the answer, and the
 /// first message of every tab failed with it (found by the live test, #427).
 pub fn perform(tag: &str, method: &str, url: &str, body: Option<Value>) -> String {
-    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).build();
+    perform_with_timeout(tag, method, url, body, std::time::Duration::from_secs(600), STARTUP_WAIT)
+}
+
+pub(crate) fn perform_mobile(
+    tag: &str, method: &str, url: &str, body: Option<&Value>,
+    current: impl FnMut() -> bool,
+    gate: impl FnMut(&mut dyn FnMut() -> std::io::Result<usize>) -> WriteAdmission,
+) -> PhysicalOutcome {
+    use std::time::Duration;
+    bounded_http_with_limits(method, url, body, HttpLimits {
+        budget: if tag.starts_with("permission:") { Duration::from_secs(5) } else { Duration::from_secs(600) },
+        connect_retry: if matches!(tag, "session_get" | "session_new") { STARTUP_WAIT } else { Duration::ZERO },
+        parse: |response| {
+            // Keep the legacy client's response framing, including chunked
+            // JSON, while all actual writes go through mobile admission.
+            let response: ureq::Response = std::str::from_utf8(response).ok()?.parse().ok()?;
+            let status = response.status();
+            let text = response.into_string().ok()?;
+            Some(PhysicalOutcome::Response { status, body: serde_json::from_str(&text).unwrap_or(Value::String(text)) })
+        },
+    }, current, gate)
+}
+
+fn perform_with_timeout(tag: &str, method: &str, url: &str, body: Option<Value>,
+    timeout: std::time::Duration, retry_for: std::time::Duration) -> String {
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let started = std::time::Instant::now();
     let (status, body) = loop {
         let req = agent.request(method, url);
@@ -817,7 +865,7 @@ pub fn perform(tag: &str, method: &str, url: &str, body: Option<Value>) -> Strin
                 let text = r.into_string().unwrap_or_default();
                 break (code as u64, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)));
             }
-            Err(ureq::Error::Transport(e)) if e.kind() == ureq::ErrorKind::ConnectionFailed && started.elapsed() < STARTUP_WAIT => {
+            Err(ureq::Error::Transport(e)) if e.kind() == ureq::ErrorKind::ConnectionFailed && started.elapsed() < retry_for => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             Err(e) => break (0, Value::String(e.to_string())),

@@ -1,3 +1,4 @@
+import { openSupportReport } from "@/components/SupportReportDialog";
 import { SettingsDescription } from "./SettingsDescription";
 import { SettingsFileRow } from "./SettingsFile";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -33,6 +34,7 @@ import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { LayeredConfiguration } from "./LayeredConfiguration";
 import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
+import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
 
 export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   const prefs = usePrefs();
@@ -229,6 +231,7 @@ export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
       <RegisteredSetting setting="general.useWorktree"
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />
+      <CopyAgentConfigsRow />
       <QuickChatSettings />
       <LocalRuntimeSettings />
       <RegisteredSetting setting="general.startupDiagnostics" control={<Button variant="outline" size="sm" onClick={openStartupDiagnostics}>Inspect startup</Button>} />
@@ -620,6 +623,8 @@ export function AboutTab() {
         )}
         {state.kind === "installing" && <span className="text-xs text-muted-foreground">Installing… {state.pct}%</span>}
       </div></RegisteredSetting>
+
+      <RegisteredSetting setting="about.supportReport" control={<Button variant="outline" size="sm" onClick={openSupportReport}>Prepare report</Button>} />
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">What's new</div>

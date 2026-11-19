@@ -235,7 +235,10 @@ for (const colorScheme of ["light", "dark"]) {
   {
     // The sidebar destination is "Overview" since PRO-384 (#1046).
     await page.getByRole("button", { name: /^Overview/ }).first().click();
+    // The overview's view is chosen in its Display menu since PRO-385 (02.15).
+    await page.getByRole("button", { name: "Display", exact: true }).click();
     await page.getByRole("button", { name: "Table", exact: true }).click();
+    await page.keyboard.press("Escape");
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     await table.locator("tbody tr[data-session]").first().waitFor();
     const headers = (await table.locator("thead th").allTextContents()).map((text) => text.trim());
@@ -302,7 +305,7 @@ for (const colorScheme of ["light", "dark"]) {
 
   // Mac mini goes offline: its section stays, dimmed, with its last known sessions.
   {
-    await page.evaluate(() => window.__PW_MACHINE__("m-mini", { state: "offline", lastSeenAt: Date.parse("2026-11-15T14:02:00"), retryInMs: 10_000 }));
+    await page.evaluate((lastSeenAt) => window.__PW_MACHINE__("m-mini", { state: "offline", lastSeenAt, retryInMs: 10_000 }), LAST_SEEN);
     await page.locator('[data-testid="machine-section"][data-machine="m-mini"][data-reachable="false"]').waitFor();
     await page.waitForTimeout(300);
     const m = await measure(page);

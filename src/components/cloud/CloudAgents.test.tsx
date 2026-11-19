@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
@@ -19,33 +19,15 @@ vi.mock("@/lib/models", async (original) => ({
   ],
   useModels: () => [],
 }));
-// The composer's own behaviour is covered by Composer.test; here it only needs to send and stop.
-vi.mock("@/components/chat/Composer", () => ({
-  Composer: (props: { draft: string; busy: boolean; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; onStop: () => void; onSetMode: (m: string) => void; disabledReason?: string | null; disabled?: boolean; settingsLockedReason?: string | null; canStop?: boolean }) => (
-    <div>
-      {props.disabledReason && <p data-testid="composer-reason">{props.disabledReason}</p>}
-      <button disabled={!!props.settingsLockedReason} title={props.settingsLockedReason ?? undefined} onClick={() => props.onSetMode("bypassPermissions")}>Bypass mode</button>
-      <textarea aria-label="Prompt" disabled={props.disabled} value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
-      <button disabled={props.disabled} onClick={() => void props.onSend(props.draft, []).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
-      {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
-    </div>
-  ),
-}));
-
-// jsdom has no canvas for the chat's idle animation.
-vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
-
-import { CloudAgentsView, connectionLabel, provisioningLabel, signInAgain, signInMessage, stoppedAndStaying } from "./CloudAgents";
+import { CloudAgentSessions, agentSessionRows, signInAgain, signInMessage } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
-import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
-import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
+import { resetCollab } from "@/lib/cloudCollab";
+import { resetPeople } from "@/lib/cloudPeople";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BypassDialog } from "@/components/session/BypassDialog";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
-import { noticesDeferred } from "@/lib/noticeDeferral";
-import { applyEvent } from "@/lib/agentEvents";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -114,8 +96,9 @@ function backend(cmd: string, args: Record<string, unknown> = {}) {
         requestId: (payload.requestId as string) ?? null,
         state: "queued",
         wake: "queued",
-        createdAt: 1,
-        updatedAt: 1,
+        // The mailbox stamps a command when it takes it: after anything already in it.
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       };
       outbox = [...outbox, entry];
       return Promise.resolve(entry);
@@ -176,11 +159,14 @@ function makeClient() {
 }
 let client: ReturnType<typeof makeClient>;
 
-function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready", wake = vi.fn(), active = true) {
+/** Where a session row sends the reader: the shared session view (#1289). */
+let openSession: ReturnType<typeof vi.fn<(sessionId: string, tabId: string | null) => void>>;
+
+function view(state: WorkspaceConnectionState, workspaceState: string | null = "ready") {
   client.connection = state;
   return (
     <TooltipProvider>
-      <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} wakeWorkspace={wake} active={active} />
+      <CloudAgentSessions scope={scope} client={client as unknown as WorkspaceRpcClient} state={state} workspaceState={workspaceState} onOpenSession={openSession} />
     </TooltipProvider>
   );
 }
@@ -193,6 +179,7 @@ beforeEach(async () => {
   liveTabs = [];
   streams = {};
   client = makeClient();
+  openSession = vi.fn<(sessionId: string, tabId: string | null) => void>();
   answers = {};
   notificationListeners.clear();
   mocks.invoke.mockReset();
@@ -238,8 +225,8 @@ async function choose(picker: string, name: string | RegExp, role: "menuitem" | 
 
 const pill = (title: string) => screen.getByTitle(title).textContent;
 
-describe("cloud agent tabs", () => {
-  it("shows a sleeping workspace's chat from cache and checkpoint without attaching, and attaches once the runtime is online", async () => {
+describe("a workspace's agent sessions (#1289)", () => {
+  it("lists a sleeping workspace's sessions from its cache without attaching, and opens one in the shared session view", async () => {
     cache["t-1"] = {
       tab: tabInfo({ title: "Refactor" }),
       events: [ev(1, { type: "user_message", text: "cached question", queued: false })],
@@ -269,35 +256,74 @@ describe("cloud agent tabs", () => {
         updatedAt: 5,
       },
     };
-    const { rerender } = render(view({ state: "suspended" }, "suspended"));
-    expect(await screen.findByText("cached question")).toBeTruthy();
-    expect(await screen.findByText("answer from the checkpoint")).toBeTruthy();
-    const order = mocks.invoke.mock.calls.map(([cmd]) => cmd);
-    expect(order.indexOf("cloud_agent_cache_load")).toBeLessThan(order.indexOf("cloud_agent_checkpoint"));
+    render(view({ state: "suspended" }, "suspended"));
+    const row = await screen.findByTestId("cloud-agent-session");
+    expect(row.textContent).toContain("Refactor");
+    expect(row.getAttribute("data-session")).toBe("s-1");
+    // Nothing is read live or attached while it sleeps; no chat of its own is drawn here.
     expect(client.subscribeSession).not.toHaveBeenCalled();
     expect(client.listAgentTabs).not.toHaveBeenCalled();
-    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Offline");
-    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
+    expect(screen.queryByText("cached question")).toBeNull();
+    fireEvent.click(row);
+    expect(openSession).toHaveBeenCalledWith("s-1", "t-1");
+  });
 
-    liveTabs = [tabInfo({ title: "Refactor", lastSeq: 3 })];
-    streams["s-1/t-1"] = [ev(3, { type: "assistant_text", text: "live answer" })];
-    rerender(view(connected()));
-    expect(await screen.findByText("live answer")).toBeTruthy();
-    expect(client.subscribeSession).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Live");
+  it("follows the runtime's tabs once connected, one row per session", async () => {
+    liveTabs = [
+      tabInfo({ sessionId: "s-1", tabId: "t-1", title: "Refactor", modified: "2026-09-29T00:00:01Z" }),
+      tabInfo({ sessionId: "s-1", tabId: "t-2", harness: "codex", status: "in_progress", modified: "2026-09-29T00:00:02Z" }),
+      tabInfo({ sessionId: "s-2", tabId: "t-3", harness: "codex", modified: "2026-09-29T00:00:03Z" }),
+    ];
+    render(view(connected()));
+    await waitFor(() => expect(screen.getAllByTestId("cloud-agent-session")).toHaveLength(2));
+    const [first, second] = screen.getAllByTestId("cloud-agent-session");
+    // The most recently changed session first.
+    expect(first!.getAttribute("data-session")).toBe("s-2");
+    expect(second!.textContent).toContain("Refactor");
+    expect(second!.textContent).toContain("2 tabs");
+    expect(second!.textContent).toContain("Working");
+    // The working tab is the one it opens on.
+    fireEvent.click(second!);
+    expect(openSession).toHaveBeenCalledWith("s-1", "t-2");
+  });
+
+  it("says an agent needs sign-in instead of showing it working (PRO-78)", async () => {
+    liveTabs = [tabInfo({ status: "in_progress", signIn: { provider: "claude", state: "not-connected", reason: null } })];
+    render(view(connected()));
+    const row = await screen.findByTestId("cloud-agent-session");
+    expect(row.textContent).toContain("Needs sign-in");
+    expect(row.textContent).not.toContain("Working");
+    expect(within(row).queryByLabelText("working")).toBeNull();
+  });
+
+  it("leaves out a tab with no session yet, and names an untitled session by its agent", () => {
+    const tab = (info: Partial<AgentTabInfo>) => ({ tabId: info.tabId ?? "t", info: tabInfo(info), unread: false }) as never;
+    const rows = agentSessionRows([tab({ sessionId: "", tabId: "t-0" }), tab({ sessionId: "s-1", tabId: "t-1", harness: "codex" })]);
+    expect(rows.map((row) => [row.sessionId, row.title])).toEqual([["s-1", "Codex"]]);
+  });
+
+  it("opens a session it just started in the shared session view", async () => {
+    client.createAgentTab.mockImplementation(async () => {
+      liveTabs = [tabInfo({ sessionId: "s-9", tabId: "t-9" })];
+      return { sessionId: "s-9", tabId: "t-9" };
+    });
+    render(view(connected()));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
+    fireEvent.submit(await screen.findByTestId("cloud-agent-new"));
+    await waitFor(() => expect(openSession).toHaveBeenCalledWith("s-9", "t-9"));
   });
 
   it("starts a new agent tab in bypass unless another mode is picked", async () => {
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     render(view(connected()));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     expect(within(form).getByTitle("Permissions").textContent).toBe("Bypass permissions");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
     expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", mode: "bypassPermissions" });
 
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     await choose("Permissions", /^Ask every time/);
     fireEvent.submit(await screen.findByTestId("cloud-agent-new"));
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(2));
@@ -308,135 +334,13 @@ describe("cloud agent tabs", () => {
     client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS);
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     render(view(connected({ capabilities: ["session/1", "keys/1", "agents/1"] })));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     // The workspace's own CLI says what its alias runs.
     await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus 4.6"));
     await choose("Model", "Opus 4.6");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
-  });
-
-  it("keeps two agent tabs' conversations and states apart", async () => {
-    liveTabs = [
-      tabInfo({ status: "in_progress" }),
-      tabInfo({ sessionId: "s-2", tabId: "t-2", harness: "codex", created: "2026-09-29T00:00:01Z" }),
-    ];
-    streams["s-1/t-1"] = [ev(1, { type: "user_message", text: "first agent's task", queued: false })];
-    streams["s-2/t-2"] = [ev(1, { type: "user_message", text: "second agent's task", queued: false }, "s-2", "t-2")];
-    render(view(connected()));
-    const tabs = await screen.findAllByTestId("cloud-agent-tab");
-    expect(tabs.map((t) => t.textContent)).toEqual([expect.stringContaining("Claude 1"), expect.stringContaining("Codex 2")]);
-    expect(await screen.findByText("first agent's task")).toBeTruthy();
-    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Working");
-    fireEvent.click(within(tabs[1]!).getByRole("tab"));
-    expect(await screen.findByText("second agent's task")).toBeTruthy();
-    expect(screen.queryByText("first agent's task")).toBeNull();
-    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Idle");
-  });
-
-  it("sends through the mailbox, and a message whose fate is unknown is only sent again when asked", async () => {
-    liveTabs = [tabInfo()];
-    outbox = [
-      { clientCommandId: "old-1", tabId: "t-1", kind: "send", text: "deploy it", state: "outcome-unknown", createdAt: 1, updatedAt: 1 },
-      { clientCommandId: "old-2", tabId: "t-1", kind: "send", text: "not delivered", state: "rejected", category: "tab-unknown", createdAt: 1, updatedAt: 1 },
-    ];
-    render(view(connected()));
-    const unknown = await screen.findByText("May not have been sent");
-    expect(screen.getByText("Not delivered (tab-unknown)")).toBeTruthy();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(enqueued).toHaveLength(0);
-
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "hello" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(enqueued).toHaveLength(1));
-    expect(enqueued[0]).toMatchObject({ organizationId: "org-1", workspaceId: "ws-1", tabId: "t-1", kind: "send", payload: { text: "hello" } });
-    expect(client.nudgeMailbox).toHaveBeenCalled();
-    expect(await screen.findByText("Queued for the workspace")).toBeTruthy();
-
-    fireEvent.click(within(unknown.closest("li")!).getByRole("button", { name: "Send again" }));
-    await waitFor(() => expect(enqueued).toHaveLength(2));
-    expect(enqueued[1]).toMatchObject({ kind: "send", payload: { text: "deploy it" } });
-  });
-
-  it("answers a permission request once, however often it is clicked", async () => {
-    liveTabs = [tabInfo({ status: "waiting" })];
-    streams["s-1/t-1"] = [
-      ev(1, { type: "user_message", text: "clean up", queued: false }),
-      ev(2, {
-        type: "permission_requested",
-        requestId: "req-9",
-        toolUseId: "tool-1",
-        toolName: "Bash",
-        input: { command: "rm -rf build" },
-        options: [
-          { id: "allow", label: "Allow", kind: "allow_once" },
-          { id: "deny", label: "Deny", kind: "deny" },
-        ],
-      }),
-    ];
-    const mounted = render(view(connected()));
-    const allow = await screen.findByRole("button", { name: /^Allow/ });
-    expect(noticesDeferred()).toBe(true);
-    mounted.rerender(view(connected(), "ready", undefined, false));
-    expect(noticesDeferred()).toBe(false);
-    mounted.rerender(view(connected()));
-    expect(noticesDeferred()).toBe(true);
-    fireEvent.click(allow);
-    fireEvent.click(allow);
-    await waitFor(() => expect(enqueued).toHaveLength(1));
-    expect(enqueued[0]).toMatchObject({ kind: "permission-decision", payload: { requestId: "req-9", optionId: "allow" } });
-    await waitFor(() => expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(true));
-    fireEvent.click(screen.getByRole("button", { name: /Deny/ }));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(enqueued).toHaveLength(1);
-    // A queued answer is still pending until the runtime confirms the decision.
-    expect(noticesDeferred()).toBe(true);
-    act(() => applyEvent(ev(3, { type: "permission_decided", requestId: "req-9", allowed: true, label: "Allowed", automatic: false })));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
-    expect(noticesDeferred()).toBe(false);
-  });
-
-  it("shows follow-ups the runtime holds until the turn ends, and steers or stops the running turn", async () => {
-    liveTabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-f", text: "then run the linter" }] })];
-    render(view(connected()));
-    const followUp = await screen.findByTestId("cloud-agent-followup");
-    expect(followUp.textContent).toContain("then run the linter");
-    expect(followUp.textContent).toContain("sends when the agent finishes");
-    // A /goal is never steered past the composer's check (PRO-380): no Steer now for it.
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal ship it" } });
-    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal" } });
-    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use pnpm instead" } });
-    fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
-    await waitFor(() => expect(enqueued[0]).toMatchObject({ kind: "steer", payload: { text: "use pnpm instead" } }));
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    await waitFor(() => expect(enqueued[1]).toMatchObject({ kind: "stop", payload: {} }));
-  });
-
-  it("says so honestly when the agent process ended mid-turn", async () => {
-    liveTabs = [tabInfo({ status: "in_progress", process: "exited" })];
-    streams["s-1/t-1"] = [ev(1, { type: "user_message", text: "long task", queued: false })];
-    render(view(connected()));
-    const notice = await screen.findByTestId("cloud-agent-exited");
-    expect(notice.textContent).toContain("Agent process ended — the saved conversation resumes on your next message");
-    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Process ended mid-turn");
-    // Not shown as still working: no stop button, a plain send.
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
-  });
-
-  it("says an agent needs sign-in instead of showing it working, and what to do (PRO-78)", async () => {
-    liveTabs = [tabInfo({ status: "in_progress", signIn: { provider: "claude", state: "not-connected", reason: null } })];
-    render(view(connected()));
-    const notice = await screen.findByTestId("cloud-agent-sign-in");
-    expect(notice.textContent).toContain("Needs sign-in: Claude Code isn't connected for this organization");
-    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Needs sign-in");
-    expect(screen.getByTestId("cloud-agent-turn").textContent).not.toContain("Working");
-    // Not a turn in progress: no spinner on the tab, no stop button.
-    expect(within(screen.getByTestId("cloud-agent-tab")).queryByLabelText("working")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
   it("words the sign-in notice for who is reading and why the login is missing", () => {
@@ -486,330 +390,6 @@ describe("cloud agent tabs", () => {
     expect(signInMessage(info("route-template-unsupported"), false)).toContain("does not apply its route's endpoint type");
     expect(signInMessage(info("route-unavailable"), false)).toContain("could not be read");
   });
-
-  it("wakes a sleeping workspace only after an interactive command, and reports the wake", async () => {
-    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
-    const wake = vi.fn();
-    render(view({ state: "suspended" }, "suspended", wake));
-    await screen.findByLabelText("Prompt");
-    expect(wake).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "continue" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
-    expect(client.nudgeMailbox).not.toHaveBeenCalled();
-    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Waking");
-  });
-
-  it("marks a finished tab read when it is opened and shows other finished tabs as unread", async () => {
-    liveTabs = [tabInfo({ status: "completed" }), tabInfo({ sessionId: "s-2", tabId: "t-2", status: "completed", created: "2026-09-29T00:00:01Z" })];
-    render(view(connected()));
-    await waitFor(() => expect(client.markAgentTabRead).toHaveBeenCalledWith("s-1", "t-1"));
-    const tabs = await screen.findAllByTestId("cloud-agent-tab");
-    await waitFor(() => expect(within(tabs[0]!).queryByTestId("cloud-agent-unread")).toBeNull());
-    expect(within(tabs[1]!).getByTestId("cloud-agent-unread")).toBeTruthy();
-  });
-
-  it("asks this device to connect once when it has no key for the workspace", async () => {
-    liveTabs = [tabInfo()];
-    render(view(connected()));
-    await screen.findByLabelText("Prompt");
-    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
-      cmd === "cloud_agent_enqueue" ? Promise.reject("cloud_agent_key_missing") : backend(cmd, args),
-    );
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText(/Connect to this workspace once/)).toBeTruthy();
-    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hi");
-    act(() => undefined);
-  });
-
-  it("says the key store could not be read, not that this device needs to connect", async () => {
-    liveTabs = [tabInfo()];
-    render(view(connected()));
-    await screen.findByLabelText("Prompt");
-    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
-      cmd === "cloud_agent_enqueue" ? Promise.reject("cloud_agent_key_store_unavailable") : backend(cmd, args),
-    );
-    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText(/could not read its key for this workspace from the system key store/)).toBeTruthy();
-    // The key exists; connecting again would not help, and the raw code is not shown.
-    expect(screen.queryByText(/Connect to this workspace once/)).toBeNull();
-    expect(screen.queryByText(/cloud_agent_key_store_unavailable/)).toBeNull();
-    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("hi");
-    act(() => undefined);
-  });
-});
-
-describe("shared cloud workspace agent tabs (PRO-30)", () => {
-  const KEY = "cloud:org-1:ws-1";
-  type You = { userId: string; role: "manager" | "driver" | "viewer" | "none"; canApprove: boolean };
-  const me = (role: You["role"], canApprove = role === "manager"): You => ({ userId: "u-me", role, canApprove });
-  const alice = (fields: Partial<{ expiresAt: number }> = {}) => ({ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000, ...fields });
-
-  /** Connect with collab/1 as `you`, with the runtime answering collab.state. */
-  function share(you: You, leases: unknown[] = [], authority: "manage" | "participate" = you.role === "manager" ? "manage" : "participate") {
-    const state = connected({ capabilities: ["session/1", "keys/1", "collab/1"], authority, you });
-    client.connection = state;
-    answers["collab.state"] = () => ({ you, participants: [], leases });
-    rememberPeople([{ userId: "u-alice", name: "Alice" }]);
-    act(() => void startCollab(KEY, client as unknown as WorkspaceRpcClient));
-    return state;
-  }
-  const notify = (event: string, params: Record<string, unknown>) => act(() => notificationListeners.forEach((listener) => listener({ event, params })));
-
-  it("disables the mode, model and effort pickers for a driver who may not approve (review M1)", async () => {
-    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
-    liveTabs = [tabInfo()];
-    render(view(share(me("driver"))));
-    const bypass = (await screen.findByRole("button", { name: "Bypass mode" })) as HTMLButtonElement;
-    await waitFor(() => expect(bypass.disabled).toBe(true));
-    expect(bypass.title).toMatch(/^Only a workspace admin or someone who can approve/);
-    cleanup();
-    resetCollab();
-    render(view(share(me("driver", true))));
-    await waitFor(() => expect((screen.getByRole("button", { name: "Bypass mode" }) as HTMLButtonElement).disabled).toBe(false));
-  });
-
-  it("keeps a viewer's controls disabled while the workspace sleeps or reconnects", async () => {
-    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
-    liveTabs = [tabInfo()];
-    const state = share(me("viewer"));
-    const { rerender } = render(view(state));
-    await waitFor(() => expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access"));
-    // The connection drops and the workspace goes to sleep: still a viewer.
-    rerender(view({ state: "suspended" }, "suspended"));
-    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
-    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
-    expect(screen.queryByTestId("cloud-agent-lease")).toBeNull();
-  });
-
-  it("uses the share list's word on access for a workspace that was asleep from the start", async () => {
-    cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
-    act(() => rememberYou(KEY, { role: "viewer", canApprove: false }));
-    render(view({ state: "suspended" }, "suspended"));
-    await waitFor(() => expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true));
-    expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access");
-  });
-
-  it("disables the composer for a viewer and says why", async () => {
-    liveTabs = [tabInfo()];
-    const state = share(me("viewer"));
-    render(view(state));
-    await waitFor(() => expect(screen.getByTestId("composer-reason").textContent).toBe("You can view this workspace; ask an admin for driver access"));
-    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
-    // A viewer never takes the wheel.
-    expect(screen.queryByRole("button", { name: "Take the wheel" })).toBeNull();
-    expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving");
-  });
-
-  it("shows who drives, blocks sending while someone else does, and lets a manager take over", async () => {
-    liveTabs = [tabInfo()];
-    const state = share(me("manager"), [alice()]);
-    answers["lease.takeOver"] = ({ tabId }) => ({ lease: { tabId, holderId: "u-me", acquiredAt: 2, expiresAt: Date.now() + 120_000 } });
-    render(view(state));
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
-    expect(screen.getByTestId("composer-reason").textContent).toContain("Alice is driving this tab. Take over to send.");
-    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Take over" }));
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
-    expect(client.call).toHaveBeenCalledWith("lease.takeOver", { tabId: "t-1" });
-    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByTestId("composer-reason")).toBeNull();
-  });
-
-  it("follows lease changes from the runtime and lets a driver take a free wheel", async () => {
-    liveTabs = [tabInfo()];
-    const state = share(me("driver"), [alice()]);
-    answers["lease.acquire"] = ({ tabId }) => ({ lease: { tabId, holderId: "u-me", acquiredAt: 3, expiresAt: Date.now() + 120_000 } });
-    render(view(state));
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("Driving: Alice"));
-    // A driver cannot take over.
-    expect(screen.queryByRole("button", { name: "Take over" })).toBeNull();
-    notify("collab.lease", { tabId: "t-1", lease: null });
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving"));
-    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "Take the wheel" }));
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
-    fireEvent.click(screen.getByRole("button", { name: "Release" }));
-    await waitFor(() => expect(client.call).toHaveBeenCalledWith("lease.release", { tabId: "t-1" }));
-    await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("No one is driving"));
-  });
-
-  it("says whose turn it was when a message was refused for the lease or for changed access, and who queued a follow-up", async () => {
-    liveTabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-f", text: "then run the tests", actorId: "u-alice" }] })];
-    outbox = [
-      { clientCommandId: "c-1", tabId: "t-1", kind: "send", text: "deploy", state: "rejected", category: "lease-held", receipt: { holderId: "u-alice" }, createdAt: 1, updatedAt: 1 },
-      { clientCommandId: "c-2", tabId: "t-1", kind: "send", text: "hi", state: "rejected", category: "access-revoked", createdAt: 1, updatedAt: 1 },
-      // PRO-88: the runtime refused a slash command this person may not send.
-      {
-        clientCommandId: "c-3",
-        tabId: "t-1",
-        kind: "send",
-        text: "/model opus",
-        state: "rejected",
-        category: "slash-command-forbidden",
-        receipt: { command: "/model", message: "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help." },
-        createdAt: 1,
-        updatedAt: 1,
-      },
-      { clientCommandId: "c-4", tabId: "t-1", kind: "send", text: "!ls", state: "rejected", category: "shell-command-forbidden", createdAt: 1, updatedAt: 1 },
-      // PRO-33: the runtime could not write its record of the command, so it left the agent alone.
-      { clientCommandId: "c-5", tabId: "t-1", kind: "send", text: "go on", state: "rejected", category: "receipt-store-failed", createdAt: 1, updatedAt: 1 },
-    ];
-    const state = share(me("driver"));
-    render(view(state));
-    expect(await screen.findByText("Alice is driving — your message was not sent")).toBeTruthy();
-    expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
-    expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
-    expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
-    expect(screen.getByText("Not sent: the workspace could not record it (its disk may be full)")).toBeTruthy();
-    expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
-  });
-
-  it("keeps notes apart from the agent: posting one never enqueues a command", async () => {
-    liveTabs = [tabInfo()];
-    const state = share(me("viewer"));
-    answers["notes.list"] = () => ({ notes: [{ id: "note_1", tabId: "t-1", authorId: "u-alice", text: "I am on the login bug", createdAt: 1_000 }], more: false });
-    answers["notes.post"] = ({ tabId, text }) => ({ note: { id: "note_2", tabId, authorId: "u-me", text, createdAt: 2_000 } });
-    render(view(state));
-    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    const panel = await screen.findByTestId("cloud-agent-notes");
-    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(1));
-    expect(within(panel).getByTestId("cloud-note").textContent).toContain("Alice");
-    const input = within(panel).getByPlaceholderText("Add a note for teammates (not sent to the agent)");
-    fireEvent.change(input, { target: { value: "taking the tests" } });
-    fireEvent.click(within(panel).getByRole("button", { name: "Post note" }));
-    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(2));
-    expect(client.mutate).toHaveBeenCalledWith("notes.post", { tabId: "t-1", text: "taking the tests" }, expect.any(String));
-    // Someone else's note arrives by notification.
-    notify("notes.posted", { note: { id: "note_3", tabId: "t-1", authorId: "u-alice", text: "thanks", createdAt: 3_000 } });
-    await waitFor(() => expect(within(panel).getAllByTestId("cloud-note")).toHaveLength(3));
-    expect(enqueued).toHaveLength(0);
-    expect(mocks.invoke.mock.calls.map(([cmd]) => cmd)).not.toContain("cloud_agent_enqueue");
-    expect(client.mutate.mock.calls.map(([method]) => method)).not.toContain("session.send");
-  });
-
-  it("lets only approvers decide permission requests", async () => {
-    const permission = ev(2, {
-      type: "permission_requested",
-      requestId: "req-9",
-      toolUseId: "tool-1",
-      toolName: "Bash",
-      input: { command: "rm -rf build" },
-      options: [
-        { id: "allow", label: "Allow", kind: "allow_once" },
-        { id: "deny", label: "Deny", kind: "deny" },
-      ],
-    });
-    liveTabs = [tabInfo({ status: "waiting" })];
-    streams["s-1/t-1"] = [ev(1, { type: "user_message", text: "clean up", queued: false }), permission];
-    const state = share(me("driver", false));
-    const { unmount } = render(view(state));
-    const allow = await screen.findByRole("button", { name: /^Allow/ });
-    expect((allow as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
-    fireEvent.click(allow);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(enqueued).toHaveLength(0);
-    unmount();
-    resetCollab();
-
-    // A viewer who may approve can decide, though not send.
-    const approver = share(me("viewer", true));
-    render(view(approver));
-    const enabled = await screen.findByRole("button", { name: /^Allow/ });
-    await waitFor(() => expect((enabled as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.queryByTestId("answer-blocked")).toBeNull();
-    fireEvent.click(enabled);
-    await waitFor(() => expect(enqueued).toHaveLength(1));
-    expect(enqueued[0]).toMatchObject({ kind: "permission-decision", payload: { requestId: "req-9", optionId: "allow" } });
-  });
-
-  it("explains an empty workspace to someone it was not shared with", async () => {
-    liveTabs = [tabInfo()];
-    const state = connected({ capabilities: ["session/1", "collab/1"], authority: "participate", you: me("none") });
-    client.connection = state;
-    act(() => void startCollab(KEY, client as unknown as WorkspaceRpcClient));
-    render(view(state));
-    expect((await screen.findByTestId("cloud-not-shared")).textContent).toContain("This workspace has not been shared with you");
-    expect(screen.queryByTestId("cloud-agent-tab")).toBeNull();
-    expect(client.call).not.toHaveBeenCalledWith("collab.state", {});
-  });
-
-  it("reports typing while composing, throttled, and viewing again once idle", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    liveTabs = [tabInfo()];
-    const state = share(me("driver"));
-    render(view(state));
-    await waitFor(() => expect(client.call).toHaveBeenCalledWith("presence.update", { tabId: "t-1", activity: "viewing" }));
-    const prompt = screen.getByLabelText("Prompt");
-    fireEvent.change(prompt, { target: { value: "a" } });
-    fireEvent.change(prompt, { target: { value: "ab" } });
-    fireEvent.change(prompt, { target: { value: "abc" } });
-    const presence = () => client.call.mock.calls.filter(([method]) => method === "presence.update").map(([, params]) => params);
-    expect(presence().filter((params) => params?.activity === "typing")).toHaveLength(1);
-    await act(async () => void (await vi.advanceTimersByTimeAsync(TYPING_IDLE_MS + 10)));
-    expect(presence().at(-1)).toEqual({ tabId: "t-1", activity: "viewing" });
-  });
-});
-
-describe("wake refused at the running limit (saas PRO-76)", () => {
-  const offline = { state: "idle" } as unknown as WorkspaceConnectionState;
-  it("says why when the organization's running limit is reached, and stays generic otherwise", () => {
-    expect(provisioningLabel("suspended", "unavailable", offline, true)).toBe("Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)");
-    expect(provisioningLabel("suspended", "unavailable", offline)).toBe("Cannot wake (commands stay queued)");
-    expect(provisioningLabel("suspended", "queued", offline, true)).toBe("Waking");
-  });
-
-  it("does not call a running workspace Starting while this window attaches to it", () => {
-    const waiting = { state: "waitingForRuntime" } as WorkspaceConnectionState;
-    expect(provisioningLabel("ready", null, waiting)).toBe("Ready");
-    expect(provisioningLabel("provisioning", null, waiting)).toBe("Starting");
-    // A stopped workspace is Starting only once someone resumes it.
-    expect(provisioningLabel("suspended", null, waiting, false, true)).toBe("Starting");
-  });
-
-  // PRO-84: both chips flipped every few seconds while the workspace was simply stopped.
-  it("reads one stable state while a stopped workspace's connection keeps retrying", () => {
-    const tries = ["opening", "waitingForRuntime", "opening", "suspended"].map((state) => ({ state }) as WorkspaceConnectionState);
-    for (const state of tries) {
-      expect(stoppedAndStaying(state, "suspended", false)).toBe(true);
-      expect(connectionLabel(state, "asleep")).toBe("Offline (workspace asleep)");
-      expect(provisioningLabel("suspended", null, state)).toBe("Asleep");
-    }
-    // Being woken: one wait, not "Checking" and "Waiting for runtime" in turn.
-    expect(stoppedAndStaying(tries[0]!, "suspended", true)).toBe(false);
-    expect(new Set(tries.slice(0, 3).map((state) => connectionLabel(state)))).toEqual(new Set(["Waiting for runtime"]));
-    expect(new Set(tries.slice(0, 3).map((state) => provisioningLabel("suspended", null, state, false, true)))).toEqual(new Set(["Starting"]));
-  });
-
-  // Review of #272: a Resume refused at the running limit left "Starting" / "Waiting for runtime" on a stopped workspace.
-  it("reads stopped again when the wake stops or is refused", async () => {
-    const at = (waking: boolean) => (
-      <TooltipProvider>
-        <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={{ state: "waitingForRuntime" } as WorkspaceConnectionState} workspaceState="suspended" waking={waking} />
-      </TooltipProvider>
-    );
-    const { rerender } = render(at(true));
-    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Starting");
-    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Waiting for runtime");
-    rerender(at(false));
-    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
-    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Offline (workspace asleep)");
-    // No Resume control here: the workspace header has the one Resume button.
-    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
-  });
-
-  it("reads an archived workspace opened to read as offline, not as waiting for its runtime", () => {
-    const tries = ["opening", "waitingForRuntime", "idle"].map((state) => ({ state }) as WorkspaceConnectionState);
-    for (const state of tries) {
-      expect(stoppedAndStaying(state, "archived", false)).toBe(true);
-      expect(provisioningLabel("archived", null, state)).toBe("Archived (unarchive it to resume)");
-    }
-    expect(connectionLabel(tries[1]!, "archived")).toBe("Offline (workspace archived)");
-  });
 });
 
 describe("a new agent tab's launch settings (#554)", () => {
@@ -823,7 +403,7 @@ describe("a new agent tab's launch settings (#554)", () => {
         <BypassDialog />
       </>,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     await waitFor(() => expect(client.listRuntimeAgents).toHaveBeenCalled());
     return form;
@@ -919,12 +499,13 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
   ];
   const machineView = (projects: Partial<import("./CloudAgents").AgentProjects>) => (
     <TooltipProvider>
-      <CloudAgentsView
+      <CloudAgentSessions
         scope={{ organizationId: "", workspaceId: "machine:m1" }}
         client={client as unknown as WorkspaceRpcClient}
         state={connected()}
         workspaceState={null}
         projects={{ projects: PROJECTS, preferred: null, request: null, onRequestTaken: vi.fn(), onCreated: vi.fn(), ...projects }}
+        onOpenSession={openSession}
       />
     </TooltipProvider>
   );
@@ -945,16 +526,16 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("s-9", "p-server"));
   });
 
-  it("+ Agent starts on the focused session's project, and with none chosen it cannot start", async () => {
+  it("+ Agent starts on the preferred project, and with none chosen it cannot start", async () => {
     client.connection = connected();
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     const { unmount } = render(machineView({ preferred: "p-terminalx" }));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     expect((await screen.findByTestId("cloud-agent-new")).getAttribute("data-project")).toBe("p-terminalx");
     unmount();
 
     render(machineView({ preferred: null }));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     expect(within(form).getByTestId("agent-project").textContent).toBe("Choose a project");
     expect((within(form).getByRole("button", { name: "Start agent" }) as HTMLButtonElement).disabled).toBe(true);
@@ -973,7 +554,7 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
     ] as never);
     const openPage = vi.fn();
     render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage } }));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     await waitFor(() => expect(client.listRuntimeAgents).toHaveBeenCalled());
     await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
@@ -990,7 +571,7 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
     client.connection = connected({ capabilities: ["session/1", "keys/1", "agents/1"] });
     client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS as never);
     render(machineView({ preferred: "p-terminalx", machine: { name: "dev-server", openPage: vi.fn() } }));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     await waitFor(() => expect(pill("Model")).toBe("Opus 4.6"));
     await choose("Agent", "Codex", "menuitem");
@@ -1000,7 +581,7 @@ describe("a machine's new agent tab is created in one of its projects (PRO-346)"
   it("a cloud workspace's form has no project picker and sends no project", async () => {
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     render(view(connected()));
-    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent session" }));
     const form = await screen.findByTestId("cloud-agent-new");
     expect(within(form).queryByTestId("agent-project")).toBeNull();
     fireEvent.submit(form);

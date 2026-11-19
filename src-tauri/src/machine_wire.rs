@@ -53,6 +53,7 @@ pub const CHANGED_EVENT: &str = "machine_host_changed";
 pub const STATUS: &str = "runtime.machineHost.status";
 pub const ADOPT_KEY: &str = "runtime.machineHost.adoptKey";
 pub const PHONE_ROUTE: &str = "runtime.machineHost.phoneRoute";
+pub const PHONE_ROUTE_BOUND: &str = "runtime.machineHost.phoneRouteBound";
 pub const REVOKE: &str = "runtime.machineHost.revoke";
 /// Remove the paired computer that paired through the account grant
 /// `grantRequestId` (PRO-349, [`RevokeGrant`]): `{ revoked, id }`, with `id`
@@ -599,6 +600,8 @@ pub struct RelayConnection {
 pub enum Forwarded {
     /// A phone on the direct listener; its bytes follow the header.
     Direct { peer: Option<String> },
+    /// The window binds the proxy to the authenticated device before output.
+    DirectBound { peer: Option<String>, forwarded_id: String },
     /// A phone through the runtime's relay registration. The window opens the
     /// data leg `/v1/host/data/<connId>` on `cell_url` with this generation.
     Relay { cell_url: String, relay_host_id: String, generation: u64, connection: RelayConnection },

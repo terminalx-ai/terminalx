@@ -19,6 +19,7 @@ import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_ROWS, Setti
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
+import { ACTIONS_SUBTITLE } from "./RepositoryActionsPage";
 import { issues } from "@/lib/api";
 import { shortPath } from "@/lib/paths";
 import type { Project } from "@/types/session";
@@ -472,6 +473,8 @@ function ProjectPageSubtitle({ project, page }: { project: Project; page: Projec
     Promise.resolve().then(() => issues.githubRepo(project.path)).then((name) => { if (live) setRepository({ path: project.path, name: name ?? null }); }, () => {});
     return () => { live = false; };
   }, [project.path, project.kind]);
+  // Actions says what it holds, not where the project is (design 11.06).
+  if (page === "actions") return <p className="mt-1 text-[13px] text-muted-foreground">{ACTIONS_SUBTITLE}</p>;
   if (page === "settingsFiles") return <p className="mt-1 text-[13px] text-muted-foreground">Where {project.name}’s values come from, highest first. Edits made in an editor show up here within a second.</p>;
   const name = repository?.path === project.path ? repository.name : null;
   return <p className="mt-1 break-words text-[13px] text-muted-foreground"><span className="font-mono text-[12px]">{shortPath(project.path)}</span>{name && <> · {name}</>}</p>;

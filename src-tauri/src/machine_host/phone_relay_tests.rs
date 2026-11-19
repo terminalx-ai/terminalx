@@ -12,6 +12,8 @@ type Socket = WebSocketStream<tokio::net::TcpStream>;
 struct Rig {
     host: Arc<MachineHost>,
     phones: Arc<phones::Phones>,
+    #[cfg(feature = "desktop")]
+    sessions: crate::session::SessionManager,
     relay: Arc<crate::remote::host::RelayHost>,
     commands: mpsc::UnboundedReceiver<Value>,
     cell: tokio::net::TcpListener,
@@ -61,7 +63,7 @@ impl Rig {
             host.state.lock().unwrap().enabled = true;
             host
         };
-        let phones = phones::Phones::new(sessions, sink.clone(), lifetime.clone(), || {}).unwrap();
+        let phones = phones::Phones::new(sessions.clone(), sink.clone(), lifetime.clone(), || {}).unwrap();
         host.phones.set(phones.clone()).ok().unwrap();
         let cell = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (relay, commands) = crate::remote::host::RelayHost::phone_test_registration(
@@ -74,6 +76,8 @@ impl Rig {
         Self {
             host,
             phones,
+            #[cfg(feature = "desktop")]
+            sessions,
             relay,
             commands,
             cell,
@@ -163,7 +167,7 @@ impl Rig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn detached_runtime_applies_account_revocations_to_direct_phones() {
-    use crate::machine_account::{self, tests::{service, session_body}, Api};
+    use crate::machine_account::{self, tests::{service_with_hook, session_body}, Api};
 
     let rig = Rig::new().await;
     let host_id = rig.key.host_id();
@@ -177,6 +181,10 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     let mut session = session_body();
     session["cloud"]["userId"] = json!("owner");
     machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    // Computer operation keeps the account copy after the last phone goes.
+    let mut settings = crate::store::settings::load();
+    settings.machines.allow_operating = true;
+    crate::store::settings::save(&settings).unwrap();
     // The poll and direct listener must work without either desktop or Relay.
     assert!(!rig.host.window_available());
     rig.relay.stop();
@@ -199,15 +207,33 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
         Phone::authenticate(socket, handshake, "token").await
     };
 
-    let (base, seen, handle) = service(vec![
-        (200, json!({"revocations": []})),
-        (200, json!({"revocations": [{
+    let revoked = json!({"revocations": [{
             "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
             "clientInstallationId": "installation", "grantRequestId": "grant",
             "bindingGeneration": 5,
-        }]})),
+    }]});
+    let (retried, retry) = tokio::sync::oneshot::channel();
+    let (later_acked, later_ack) = tokio::sync::oneshot::channel();
+    let mut retried = Some(retried);
+    let mut later_acked = Some(later_acked);
+    let mut acknowledgements = 0;
+    let mut later = revoked.clone();
+    later["revocations"][0]["revocationId"] = json!("revoke-2");
+    let (base, seen, handle) = service_with_hook(vec![
+        (200, json!({"revocations": []})),
+        (200, revoked.clone()),
+        (500, json!({})),
+        (200, revoked),
         (200, json!({})),
-    ]);
+        (200, later),
+        (200, json!({})),
+    ], move |path| {
+        if path.ends_with("/acknowledge") {
+            acknowledgements += 1;
+            if acknowledgements == 2 { retried.take().unwrap().send(()).unwrap(); }
+            if acknowledgements == 3 { later_acked.take().unwrap().send(()).unwrap(); }
+        }
+    });
     let authority = rig.phones.watch_account_revocations();
     assert!(connect().await.read().await.is_none(), "admission requires an account check");
     let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority.clone(), Arc::new(Api::new(&base))));
@@ -224,6 +250,15 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert!(phone.read().await.is_none(), "revocation closes the active phone");
     assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
     assert!(connect().await.read().await.is_none(), "the saved token cannot reconnect");
+    authority.hint();
+    tokio::time::timeout(Duration::from_secs(5), retry).await.expect("retry after the last phone was revoked").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !authority.retired_binding_is_settled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    authority.hint();
+    tokio::time::timeout(Duration::from_secs(5), later_ack).await.expect("a hint rechecks a settled binding").unwrap();
     poller.abort();
     handle.join().unwrap();
     let seen = seen.lock().unwrap();
@@ -231,6 +266,259 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert_eq!(seen[0], (format!("{root}?bindingGeneration=5"), Value::Null, Some("Bearer access-1".into())));
     assert_eq!(seen[1], seen[0]);
     assert_eq!(seen[2], (format!("{root}/revoke-1/acknowledge"), json!({"bindingGeneration": 5}), Some("Bearer access-1".into())));
+    assert_eq!(seen[3], seen[0]);
+    assert_eq!(seen[4], seen[2]);
+    assert_eq!(seen[5], seen[0]);
+    assert_eq!(seen[6].0, format!("{root}/revoke-2/acknowledge"));
+    assert!(machine_account::load(&rig.host.data_dir).unwrap().is_some(), "computer operation still needs the account copy");
+}
+
+/// Revoke the only account-paired phone through a detached poll, with an
+/// approved explicit phone paired too when `other_phone`. Whether the
+/// runtime's account copy is still there once the binding settled.
+async fn account_copy_after_last_revocation(other_phone: bool) -> bool {
+    use crate::machine_account::{self, tests::{service_with_hook, session_body}, Api};
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    save_account_mirror(&AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(),
+        display_name: "Owner".into(), host_display_name: None, binding_generation: 5,
+    }).unwrap();
+    rig.phones.tick(now_ms());
+    rig.pair("phone", "token", true, true);
+    if other_phone {
+        rig.pair("other", "other-token", false, true);
+    }
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    assert!(!rig.host.window_available() && rig.host.phone_route().is_none());
+    assert!(!crate::store::settings::load().machines.allow_operating);
+
+    let (acked, ack) = tokio::sync::oneshot::channel();
+    let mut acked = Some(acked);
+    let (base, seen, handle) = service_with_hook(vec![
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ], move |path| {
+        if path.ends_with("/acknowledge") {
+            acked.take().unwrap().send(()).unwrap();
+        }
+    });
+    let authority = rig.phones.watch_account_revocations();
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority.clone(), Arc::new(Api::new(&base))));
+    tokio::time::timeout(Duration::from_secs(5), ack).await.expect("the revocation is acknowledged").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !authority.retired_binding_is_settled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the retired binding settles after one round");
+    let saved = machine_account::load(&rig.host.data_dir).unwrap();
+    poller.abort();
+    handle.join().unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2, "one fetch and one acknowledgement");
+    assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none(), "the account phone is revoked");
+    if let Some(saved) = &saved {
+        assert_eq!((saved.access_token.as_str(), saved.refresh_token.as_str()), ("access-1", "refresh-1"), "a kept copy is unchanged");
+    }
+    saved.is_some()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_last_phone_revocation_removes_the_runtime_account_tokens() {
+    assert!(!account_copy_after_last_revocation(false).await, "no phone or computer operation needs the access and refresh tokens");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_revocation_keeps_the_account_tokens_another_phone_needs() {
+    assert!(account_copy_after_last_revocation(true).await, "an approved phone still needs the account copy");
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledging() {
+    use crate::keychain::{testing::MemorySecrets, SecretStore};
+    use crate::local_runtime::{client::{AttachmentIdentity, Build}, mobile::{self, Actor}};
+    use crate::machine_account::{self, tests::{service_with_hook, session_body}, Api};
+    use crate::phone::Owner;
+
+    // Use the real session owner's mobile registry for the window lease.
+    struct CheckBarrier {
+        first_connection: String,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    struct WindowOwner {
+        sessions: crate::session::SessionManager,
+        lifetime: Arc<crate::local_runtime::Lifetime>,
+        identity: AttachmentIdentity,
+        build: Build,
+        connection: Mutex<Option<(Actor, String)>>,
+        before_output: Mutex<Option<CheckBarrier>>,
+    }
+    impl Owner for WindowOwner {
+        fn attachment(&self) -> Result<AttachmentIdentity> { Ok(self.identity.clone()) }
+        fn build(&self) -> &Build { &self.build }
+        fn disconnect(&self) { self.lifetime.release(&self.identity.lease); }
+        fn mobile(&self, actor: &Actor, method: &str, mut params: Value) -> Result<Value> {
+            params["actor"] = serde_json::to_value(actor)?;
+            let result = mobile::execute(&self.sessions, &self.lifetime, method, params.clone())?;
+            if method == "register" {
+                *self.connection.lock().unwrap() = Some((actor.clone(), params["connection"].as_str().unwrap().into()));
+            }
+            if method == "check" {
+                let latest = self.connection.lock().unwrap().as_ref().is_some_and(|(_, id)| params["connection"] == *id);
+                let barrier = {
+                    let mut barrier = self.before_output.lock().unwrap();
+                    if latest && barrier.as_ref().is_some_and(|barrier| params["connection"] != barrier.first_connection) {
+                        barrier.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(barrier) = barrier {
+                    barrier.entered.send(()).unwrap();
+                    barrier.release.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    save_account_mirror(&AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(), display_name: "Owner".into(),
+        host_display_name: None, binding_generation: 5,
+    }).unwrap();
+    rig.pair("phone", "token", true, true);
+    rig.pair("unrelated", "other-token", false, true);
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    let entry = serde_json::from_value(json!({
+        "id": "takeover", "projectPath": "/repo", "cwd": "/repo", "title": "Review",
+        "created": "2026-01-01", "modified": "2026-01-01",
+        "tabs": [{"id": "tab", "harness": "claude", "permissionMode": "manual", "created": "2026-01-01"}],
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
+    rig.host.state.lock().unwrap().listening = Some(listener);
+    let key = &rig.key;
+    let connect = |token: &'static str| async move {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &key.public_key_b64(), "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, token).await
+    };
+
+    let (poll_started, polling) = tokio::sync::oneshot::channel();
+    let (reply_to_poll, poll_reply) = std::sync::mpsc::channel();
+    let (ack_started, acknowledging) = tokio::sync::oneshot::channel();
+    let (reply_to_ack, ack_reply) = std::sync::mpsc::channel();
+    let (fence_check, check_at_ack) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+    let (mut poll_started, mut ack_started) = (Some(poll_started), Some(ack_started));
+    let (base, seen, service) = service_with_hook(vec![
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ], move |path| {
+        if path.ends_with("/acknowledge") {
+            check_at_ack.recv_timeout(Duration::from_secs(5)).unwrap()();
+            ack_started.take().unwrap().send(()).unwrap();
+            ack_reply.recv_timeout(Duration::from_secs(5)).unwrap();
+        } else {
+            poll_started.take().unwrap().send(()).unwrap();
+            poll_reply.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    });
+    let authority = rig.phones.watch_account_revocations();
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority, Arc::new(Api::new(&base))));
+    tokio::time::timeout(Duration::from_secs(5), polling).await.unwrap().unwrap();
+
+    let owner = Arc::new(WindowOwner {
+        sessions: rig.sessions.clone(),
+        lifetime: rig.lifetime.clone(),
+        identity: AttachmentIdentity { epoch: rig.lifetime.epoch().into(), lease: rig.lifetime.hold().unwrap() },
+        build: Build { version: None, mobile: Default::default(), handover: None },
+        connection: Mutex::new(None),
+        before_output: Mutex::new(None),
+    });
+    let route_path = rig._data.path().join("takeover.sock");
+    let route = tokio::net::UnixListener::bind(&route_path).unwrap();
+    rig.host.register_phone_route(PhoneRoute {
+        attachment: rig.lifetime.attachment(&owner.identity.epoch, &owner.identity.lease).unwrap(),
+        lease: owner.identity.lease.clone(), socket: route_path,
+        device_scoped: true,
+    }).unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    secrets.set("test.revocation-takeover.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
+    let window = crate::pairing::PairingManager::with_secrets_for_test("test.revocation-takeover", secrets);
+    window.set_phone_owner_for_test(owner.clone());
+    let route_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = route.accept().await.unwrap();
+            let window = window.clone();
+            tokio::spawn(async move { let _ = window.routed_phone(stream).await; });
+        }
+    });
+    let mut healthy = connect("other-token").await;
+    healthy.authenticated().await;
+    let mut phone = connect("token").await;
+    phone.authenticated().await;
+    assert_eq!(phone.call("sessions.summaries", json!({})).await["result"]["sessions"][0]["id"], "takeover");
+    let (actor, connection) = owner.connection.lock().unwrap().clone().unwrap();
+    let permit = rig.sessions.mobile.permit(&actor, &connection, "takeover", "tab").unwrap();
+    assert!(permit.valid());
+    let approval = json!({
+        "connection": connection, "sessionId": "takeover", "tabId": "tab",
+        "requestId": "test-approval", "optionId": "allow",
+    });
+    let (checked, checking) = tokio::sync::oneshot::channel();
+    let (send_output, output) = std::sync::mpsc::channel();
+    *owner.before_output.lock().unwrap() = Some(CheckBarrier {
+        first_connection: connection, entered: checked, release: output,
+    });
+    let mut checked_before_revoke = connect("token").await;
+    tokio::time::timeout(Duration::from_secs(5), checking).await.unwrap().unwrap();
+    fence_check.send(Box::new(move || {
+        assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
+        assert!(!permit.valid(), "work queued by the window grant must lose its permit");
+        for method in ["check", "permission"] {
+            let error = owner.mobile(&actor, method, approval.clone()).unwrap_err();
+            assert!(error.to_string().contains("revoked"), "{method}: {error:#}");
+        }
+    })).ok().unwrap();
+    reply_to_poll.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), acknowledging).await.unwrap().unwrap();
+
+    send_output.send(()).unwrap();
+    assert!(checked_before_revoke.read().await.is_none(), "a pre-revocation grant check cannot authenticate afterward");
+    assert!(phone.read().await.is_none(), "an idle revoked phone closes without sending another request");
+    assert!(connect("token").await.read().await.is_none(), "a revoked credential cannot reconnect");
+    for _ in 0..2 {
+        assert!(!rig.phones.revoke("phone").unwrap(), "retry a persisted revocation");
+        assert_eq!(healthy.call("sessions.summaries", json!({})).await["ok"], true);
+    }
+    reply_to_ack.send(()).unwrap();
+    service.join().unwrap();
+    assert_eq!(seen.lock().unwrap()[1].0, format!("/v1/desktop/host-account-bindings/{host_id}/revocations/revoke-1/acknowledge"));
+    poller.abort();
+    route_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -321,6 +609,15 @@ impl Phone {
         assert_eq!(self.read().await.unwrap()["type"], "e2ee_authenticated");
     }
     async fn call(&mut self, method: &str, params: Value) -> Value {
+        self.send(method, params).await;
+        loop {
+            let reply = self.read().await.unwrap();
+            if reply["id"] == "req" {
+                return reply;
+            }
+        }
+    }
+    async fn send(&mut self, method: &str, params: Value) {
         let request = json!({"id":"req", "method":method, "params":params});
         self.socket
             .send(Message::Text(
@@ -334,12 +631,6 @@ impl Phone {
             ))
             .await
             .unwrap();
-        loop {
-            let reply = self.read().await.unwrap();
-            if reply["id"] == "req" {
-                return reply;
-            }
-        }
     }
 }
 
@@ -574,6 +865,7 @@ async fn window_takeover_fences_pre_auth_and_routes_until_its_lease_ends() {
                 .unwrap(),
             lease: lease.clone(),
             socket: path,
+            device_scoped: false,
         })
         .unwrap();
     assert!(
@@ -763,6 +1055,7 @@ async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
         attachment: rig.lifetime.attachment(rig.lifetime.epoch(), &lease).unwrap(),
         lease,
         socket: path,
+        device_scoped: false,
     }).unwrap();
     let secrets = Arc::new(crate::keychain::testing::MemorySecrets::default());
     secrets.set("test.forwarded-relay.pairing", "host-e2ee-key", rig.key.secret()).unwrap();

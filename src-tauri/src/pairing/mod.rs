@@ -189,6 +189,7 @@ struct KeepAwake {
 enum PairingConnectionContext {
     Direct {
         direct_auth_id: String,
+        forwarded_id: Option<String>,
     },
     Relay {
         relay_host_id: String,
@@ -719,6 +720,17 @@ impl PairingManager {
         attempt: u32,
         failure: Option<diagnostics::Failure>,
     ) {
+        self.record_phone_end(event, attempt, failure, None)
+    }
+
+    /// `record_relay_diagnostic`, with how a phone's session ended (#1282).
+    fn record_phone_end(
+        &self,
+        event: diagnostics::Event,
+        attempt: u32,
+        failure: Option<diagnostics::Failure>,
+        ended: Option<crate::phone::Ended>,
+    ) {
         // Only typed allowlisted data reaches either sink. A disk error must not
         // stop connection recovery or reveal the user's filesystem path.
         if let Some(failure) = failure {
@@ -731,7 +743,7 @@ impl PairingManager {
             .diagnostics
             .lock()
             .unwrap()
-            .record(event, attempt, failure)
+            .record_end(event, attempt, failure, ended)
             .is_err()
         {
             log::warn!("relay diagnostics write failed (category=local-storage)");
@@ -1084,6 +1096,7 @@ impl PairingManager {
                                 socket,
                                 PairingConnectionContext::Direct {
                                     direct_auth_id: Uuid::new_v4().simple().to_string(),
+                                    forwarded_id: None,
                                 },
                                 None,
                                 None,
@@ -1112,7 +1125,7 @@ impl PairingManager {
         generation: u64,
         keypair: HostKeypair,
         connection: ConnectionOpen,
-    ) -> Result<()> {
+    ) -> Result<crate::phone::Ended> {
         if keypair.host_id() != relay_host_id {
             return Err(anyhow!("relay connection named a different host key")
                 .context(diagnostics::Stage::PhoneAttach));
@@ -1149,7 +1162,7 @@ impl PairingManager {
         connection: PairingConnectionContext,
         expected_device_id: Option<String>,
         logged_in: Option<&AtomicBool>,
-    ) -> Result<()>
+    ) -> Result<crate::phone::Ended>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1190,7 +1203,8 @@ impl PairingManager {
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
             crate::phone::send_authenticated(&mut socket, &mut session).await?;
             mark_logged_in();
-            return self.share_socket(socket, session, session_id, link_id).await;
+            self.share_socket(socket, session, session_id, link_id).await?;
+            return Ok(crate::phone::Ended::by(crate::phone::EndReason::ShareEnded));
         }
         let device = self
             .registry
@@ -1241,16 +1255,21 @@ impl PairingManager {
                 inner.active_pairing = None;
             }
         }
-        crate::phone::send_authenticated(&mut socket, &mut session).await?;
-        mark_logged_in();
         // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
         let (_tracked, signal_rx) = self.track_connection(&device.id, transport);
-        let (outbound_tx, outbound_rx) = mpsc::channel(8);
+        let (outbound_tx, outbound_rx) = mpsc::channel(crate::phone::OUTBOUND_QUEUE);
+        let forwarded_id = match &connection {
+            PairingConnectionContext::Direct { forwarded_id, .. } => forwarded_id.clone(),
+            PairingConnectionContext::Relay { .. } => None,
+        };
         let mobile_connection = Arc::new(
-            mobile::MobileConnection::open(&self.phone, &device, outbound_tx, wire_transport)
+            mobile::MobileConnection::open(&self.phone, &device, outbound_tx, wire_transport, forwarded_id)
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
+        crate::phone::send_with_grant(&self.phone, &mobile_connection,
+            crate::phone::send_authenticated(&mut socket, &mut session)).await?;
+        mark_logged_in();
         crate::phone::serve_connection(&mut socket, &mut session, &self.phone, &mobile_connection, outbound_rx, signal_rx, |request| {
             let (connection, device, mobile_connection) = (&connection, &device, &mobile_connection);
             async move { self.rpc_response(&request, device, connection, mobile_connection).await }
@@ -1336,7 +1355,7 @@ impl PairingManager {
             .current_relay()
             .ok_or_else(|| anyhow!("relay control is not active"))?;
         let authorization = match connection {
-            PairingConnectionContext::Direct { direct_auth_id } => {
+            PairingConnectionContext::Direct { direct_auth_id, .. } => {
                 DeviceCredentialInstallAuthorization::AuthenticatedDirect {
                     direct_auth_id: direct_auth_id.clone(),
                 }
@@ -2087,11 +2106,11 @@ mod tests {
             let pairing = pairing.clone();
             async move {
                 let (outbound, inbound) = mpsc::channel(64);
-                (Arc::new(mobile::MobileConnection::open(&pairing.phone, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
+                (Arc::new(mobile::MobileConnection::open(&pairing.phone, &device, outbound, wire::Transport::Direct, None).await.unwrap()), inbound)
             }
         };
         let ((phone, _phone_inbound), (tablet, _tablet_inbound)) = (connect(driver.clone()).await, connect(viewer.clone()).await);
-        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into() };
+        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into(), forwarded_id: None };
         let ask = |device: &DeviceEntry, connection: &Arc<mobile::MobileConnection>, method: &str, params: serde_json::Value| {
             let request = json!({"id": method, "method": method, "params": params});
             let (pairing, device, connection, context) = (pairing.clone(), device.clone(), connection.clone(), context.clone());

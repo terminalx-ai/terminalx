@@ -60,7 +60,11 @@ beforeEach(() => {
   mocks.app = {
     refreshSessions: vi.fn(async () => {}),
     activeHost: { id: "mac" },
+    connectionStage: "connected",
+    retryConnection: vi.fn(),
+    connection: { note: vi.fn() },
     api: {
+      awaitConnected: vi.fn(async () => true),
       features: vi.fn(async () => ({ sessionControls: 1 })),
       onFeaturesChanged: () => () => {},
       tabControls: vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "auto", status: "idle" })),
@@ -184,6 +188,65 @@ describe("session controls on the phone", () => {
     await render();
     await click("Stop");
     expect(container.textContent).toContain("This paired device is read-only.");
+  });
+});
+
+describe("a resume that fails on the phone (#1290)", () => {
+  it("says a resume the connection dropped for in plain words, offers Reconnect, and logs its step and code", async () => {
+    await render([recovery("failed")]);
+    mocks.app.api.sendSession.mockRejectedValueOnce(new Error("Host is disconnected"));
+    await click("Continue here");
+    expect(container.textContent).toContain("Not resumed: the connection to your Mac dropped before it could be sent. Reconnect, then try again.");
+    expect(container.textContent).not.toContain("Host is disconnected");
+    expect(mocks.app.connection.note).toHaveBeenCalledWith("error", "Session resume failed", "Continue here · step connect · code dropped");
+    // Reconnect is offered once the screen shows the connection gone.
+    mocks.app.connectionStage = "reconnecting";
+    await render([recovery("failed")], 0, false);
+    await click("Reconnect");
+    expect(mocks.app.retryConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a resume the Mac has not answered in time as under way, not as an error", async () => {
+    await render([recovery("failed")]);
+    mocks.app.api.sendSession.mockRejectedValueOnce(new Error("RPC timed out: session.send"));
+    await click("Continue here");
+    expect(container.textContent).toContain("Your Mac has not answered yet, so the resume may still be under way.");
+    expect(container.textContent).not.toContain("RPC timed out");
+    expect(mocks.app.connection.note).toHaveBeenCalledWith("warning", "Session resume not confirmed", "Continue here · step send · code no-answer");
+    expect(() => button("Reconnect")).toThrow();
+  });
+
+  it("can be asked for while the phone reconnects, waits for the connection, and is sent once however often it is tapped", async () => {
+    await render([recovery("failed")]);
+    mocks.app.connectionStage = "reconnecting";
+    await render([recovery("failed")], 0, false);
+    let connect!: (up: boolean) => void;
+    mocks.app.api.awaitConnected.mockImplementationOnce(() => new Promise<boolean>((resolve) => (connect = resolve)));
+    expect(button("Continue here").disabled).toBe(false);
+    // Two taps before the controls redraw as busy.
+    await act(async () => { button("Continue here").click(); button("Continue here").click(); });
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+    await act(async () => { connect(true); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.awaitConnected).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(1);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("t", CONTINUE_PROMPT);
+  });
+
+  it("is not offered while the phone is not trying to connect", async () => {
+    await render([recovery("failed")]);
+    mocks.app.connectionStage = "idle";
+    await render([recovery("failed")], 0, false);
+    expect(button("Continue here").disabled).toBe(true);
+    expect(button("Retry safely").disabled).toBe(true);
+  });
+
+  it("says the Mac's refusal with the step it refused and the next step", async () => {
+    await render([recovery("failed")]);
+    mocks.app.api.sendSession.mockResolvedValueOnce({ sent: false, message: "The agent is not running", code: "agent_not_running" });
+    await click("Retry safely");
+    expect(container.textContent).toContain("The agent was stopped, but your Mac did not send the prompt. It said: The agent is not running. Try again, or open the session on the Mac to see more.");
+    expect(mocks.app.connection.note).toHaveBeenCalledWith("error", "Session resume failed", "Retry safely · step send · code agent_not_running");
   });
 });
 

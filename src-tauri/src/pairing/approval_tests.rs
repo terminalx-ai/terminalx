@@ -3,9 +3,8 @@
 //! the pairing, and the Mac stays awake only while a phone is connected.
 //!
 //! Phones here run the real v2 handshake over an in-memory WebSocket against
-//! `handle_e2ee_socket`; secrets live in an in-memory store. No local runtime
-//! is attached, so an authenticated connection ends right after
-//! `e2ee_authenticated`, which is as far as pairing needs.
+//! `handle_e2ee_socket`; secrets live in an in-memory store. A runtime stub
+//! accepts registration so approved phones can complete authentication.
 use super::crypto::{E2eeClientHandshake, E2eeSession};
 use base64::{engine::general_purpose, Engine as _};
 use super::*;
@@ -28,6 +27,24 @@ struct Fixture {
     _home: crate::store::TempHome,
 }
 
+#[derive(Default)]
+struct ApprovalOwner(crate::local_runtime::client::Build);
+
+impl crate::phone::Owner for ApprovalOwner {
+    fn attachment(&self) -> Result<crate::local_runtime::client::AttachmentIdentity> {
+        Ok(crate::local_runtime::client::AttachmentIdentity {
+            epoch: "test-epoch".into(),
+            lease: "test-lease".into(),
+        })
+    }
+    fn mobile(&self, _: &crate::local_runtime::mobile::Actor, method: &str, _: serde_json::Value) -> Result<serde_json::Value> {
+        assert!(matches!(method, "register" | "check" | "close"), "{method}");
+        Ok(serde_json::Value::Null)
+    }
+    fn build(&self) -> &crate::local_runtime::client::Build { &self.0 }
+    fn disconnect(&self) {}
+}
+
 fn manager(ttl_ms: i64) -> (Arc<PairingManager>, MemorySecrets, crate::store::TempHome) {
     let home = crate::store::temp_home();
     let store = MemorySecrets::default();
@@ -35,6 +52,7 @@ fn manager(ttl_ms: i64) -> (Arc<PairingManager>, MemorySecrets, crate::store::Te
     manager.secrets = PairingSecrets::with_store(Arc::new(store.clone()));
     manager.approval_ttl_ms = ttl_ms;
     manager.secrets.configure("test.terminalx.pairing-approval").unwrap();
+    manager.set_phone_owner_for_test(Arc::new(ApprovalOwner::default()));
     (Arc::new(manager), store, home)
 }
 
@@ -130,10 +148,10 @@ async fn connect(manager: &Arc<PairingManager>, host: &HostKeypair, secret: [u8;
             credential_kind: "invite".into(),
             basis_conn_id: "conn-1".into(),
         },
-        None => PairingConnectionContext::Direct { direct_auth_id: "direct-1".into() },
+        None => PairingConnectionContext::Direct { direct_auth_id: "direct-1".into(), forwarded_id: None },
     };
     let (server_manager, expected) = (manager.clone(), expected.map(str::to_string));
-    let server = tokio::spawn(async move { server_manager.handle_e2ee_socket(host_socket, context, expected, None).await });
+    let server = tokio::spawn(async move { server_manager.handle_e2ee_socket(host_socket, context, expected, None).await.map(drop) });
     let transport = if relay { "relay" } else { "direct" };
     let handshake = E2eeClientHandshake::with_secret(secret, &host.public_key_b64(), transport, relay_host_id.as_deref()).unwrap();
     let key_b64 = handshake.hello().client_public_key_b64.clone();
@@ -263,9 +281,9 @@ async fn approval_holds_both_racing_connections_then_releases_them_together() {
     let status = fixture.manager.status();
     assert!(status.active_pairing.is_none());
     assert_eq!(status.devices.iter().map(|device| device.id.as_str()).collect::<Vec<_>>(), [PENDING]);
-    // Past authentication each ends where the absent runtime stops it.
-    for phone in [direct, relay] {
-        assert!(phone.server.await.unwrap().is_err());
+    for mut phone in [direct, relay] {
+        phone.socket.close(None).await.unwrap();
+        phone.server.await.unwrap().unwrap();
     }
 }
 

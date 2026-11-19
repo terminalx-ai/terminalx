@@ -197,7 +197,7 @@ pub enum Decision {
 }
 
 pub(crate) struct DecisionSender {
-    sender: std::sync::mpsc::Sender<Decision>,
+    sender: std::sync::mpsc::Sender<QueuedDecision>,
     caller: crate::hooks::Caller,
     /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
     /// handover carries with the wait (#765).
@@ -206,8 +206,23 @@ pub(crate) struct DecisionSender {
     session_command: Option<String>,
 }
 
+struct QueuedDecision {
+    decision: Decision,
+    mobile: Option<MobileDecision>,
+}
+
+struct MobileDecision {
+    permit: crate::local_runtime::mobile::WritePermit,
+    label: String,
+    session_command: String,
+}
+
 impl DecisionSender {
     fn send(self, decision: Decision) -> std::result::Result<(), ()> {
+        self.queue(QueuedDecision { decision, mobile: None })
+    }
+
+    fn queue(self, decision: QueuedDecision) -> std::result::Result<(), ()> {
         if !self.caller.connected() { return Err(()); }
         self.sender.send(decision).map_err(|_| ())
     }
@@ -224,7 +239,7 @@ struct Waiting {
 
 /// Own the receiver so a timed-out hook stops accepting answers before it
 /// waits to reacquire the runtime lock. Only the returned decision resumes work.
-fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::Duration) -> Option<Decision> {
+fn wait_for_decision<T>(rx: std::sync::mpsc::Receiver<T>, wait: std::time::Duration) -> Option<T> {
     rx.recv_timeout(wait).ok()
 }
 
@@ -468,6 +483,44 @@ const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(12
 /// queue the CLI discarded must not go on swallowing the same words typed
 /// into the terminal.
 const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a queued prompt whose wait ran out is still known by its words
+/// (#1284). A CLI that takes it after all, behind a turn the tab saw end
+/// early or a queue it was slow to deliver, is answering that message.
+const LAPSED_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How many lapsed queued prompts are kept to tell a late take by.
+const LAPSED_ECHOES: usize = 8;
+
+/// Queued prompts whose echo was given up on (#1284), still owed one. The
+/// chat drew each as a Queued card that only the CLI's record of it clears;
+/// were that record taken for a prompt typed into the terminal, the card
+/// would wait for good beside a second bubble of the same words. Matched
+/// only once nothing still awaited does, and only by the whole of its words:
+/// the same words typed in the terminal then end the card, which is the
+/// message they repeat.
+#[derive(Default)]
+struct LapsedEchoes(std::collections::VecDeque<(Instant, ComposerEcho)>);
+
+impl LapsedEchoes {
+    fn keep(&mut self, echoes: Vec<ComposerEcho>, now: Instant) {
+        for echo in echoes {
+            self.0.push_back((now, echo));
+        }
+        while self.0.len() > LAPSED_ECHOES {
+            self.0.pop_front();
+        }
+    }
+
+    /// The lapsed prompt `payload` records, taken out: the CLI has it.
+    fn take(&mut self, payload: &Payload, now: Instant) -> Option<Echoed> {
+        let Payload::UserMessage { text, .. } = payload else { return None };
+        self.0.retain(|(lapsed_at, _)| now.saturating_duration_since(*lapsed_at) <= LAPSED_ECHO_TTL);
+        let at = self.0.iter().position(|(_, echo)| echo.matches(text))?;
+        let (_, mut echo) = self.0.remove(at).expect("the matched echo exists");
+        echo.confirm_delivery();
+        Some(echo.echoed())
+    }
+}
 
 /// How long a CLI is given to answer a `/model` or `/effort` the app typed
 /// while it was idle. It answers within a second when it is going to.
@@ -808,7 +861,7 @@ fn overtake_composer_prompts(pending: &mut std::collections::VecDeque<ComposerEc
 /// Returns the events of the reader's own queued prompts among them: typed
 /// and submitted behind a turn, and still not taken once that turn was over.
 /// Those may be sitting in the CLI's input, and the reader is owed a word.
-fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<u64> {
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<ComposerEcho> {
     if turn_open {
         for prompt in pending.iter_mut() {
             prompt.sent_at = now;
@@ -816,13 +869,15 @@ fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>
     }
     let before = pending.len();
     let mut unsent = Vec::new();
-    pending.retain(|prompt| {
-        let expired = prompt.expired(now);
-        if expired && prompt.queued && prompt.submitted && !prompt.command {
-            unsent.push(prompt.seq);
+    let mut kept = std::collections::VecDeque::with_capacity(pending.len());
+    for prompt in pending.drain(..) {
+        if !prompt.expired(now) {
+            kept.push_back(prompt);
+        } else if prompt.queued && prompt.submitted && !prompt.command {
+            unsent.push(prompt);
         }
-        !expired
-    });
+    }
+    *pending = kept;
     if pending.len() < before {
         log::warn!("{} composer prompt(s) expired without an echo", before - pending.len());
     }
@@ -888,6 +943,8 @@ pub struct CliTab {
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     echoed: std::collections::VecDeque<ComposerEcho>,
+    /// Queued prompts `echoed` gave up on, which the CLI may take yet (#1284).
+    lapsed: LapsedEchoes,
     /// Composer identities still awaiting acceptance from the provider's queue.
     held: Vec<u64>,
     /// The prompts the transcript has recorded, to tell one that took the
@@ -1034,6 +1091,17 @@ impl FirstStarts {
 }
 
 impl CliTab {
+    /// Forget composer prompts that waited too long for their echo
+    /// (`expire_composer_echoes`), keeping the queued ones among them for a
+    /// late take (#1284). The `seq`s of those, which the reader is owed a
+    /// word about.
+    fn expire_echoes(&mut self, turn_open: bool, now: Instant) -> Vec<u64> {
+        let unsent = expire_composer_echoes(&mut self.echoed, turn_open, now);
+        let seqs = unsent.iter().map(|echo| echo.seq).collect();
+        self.lapsed.keep(unsent, now);
+        seqs
+    }
+
     /// Whether this CLI went before it ever got going: within moments of the
     /// app starting it, and before it said it was up. What it printed then
     /// is why it went, unlike the last screen of a CLI the reader quit
@@ -1950,7 +2018,7 @@ impl SessionManager {
             // A prompt queued behind a turn that is over, and still not taken.
             if !rt.turn_open {
                 let unsent = match &mut rt.engine {
-                    Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, false, now),
+                    Engine::Cli(p) => p.expire_echoes(false, now),
                     _ => Vec::new(),
                 };
                 if self.queued_prompts_unsent(&mut rt, &unsent) {
@@ -3671,7 +3739,7 @@ impl SessionManager {
                 } else {
                     o.start(prompt.agent.clone(), wire_images)
                 };
-                self.apply_actions(&mut rt, actions);
+                self.apply_actions_with_mobile(&mut rt, actions, prompt.mobile.as_ref());
             }
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
@@ -3995,6 +4063,11 @@ impl SessionManager {
     }
 
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
+        self.apply_actions_with_mobile(rt, actions, None);
+    }
+
+    fn apply_actions_with_mobile(&self, rt: &mut TabRuntime, actions: Vec<Action>,
+        mobile: Option<&crate::local_runtime::mobile::WritePermit>) {
         for a in actions {
             if self.carried_opencode(rt) && matches!(&a, Action::Http { .. } | Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }) {
                 // Only the exact original ProviderAction may reach NativeHttp.
@@ -4052,6 +4125,7 @@ impl SessionManager {
                     let manager = self.clone();
                     let me = rt.me.clone();
                     let privacy = crate::data_privacy::remote_ticket();
+                    let mobile = mobile.cloned();
                     let child = rt.child.clone();
                     std::thread::spawn(move || {
                         #[cfg(test)] {
@@ -4063,18 +4137,38 @@ impl SessionManager {
                         let current = |rt: &TabRuntime| !rt.stopping
                             && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
                             && matches!(&rt.engine, Engine::OpenCode(o) if o.generation() == generation);
-                        {
+                        let withdraw = |unconfirmed| {
                             let mut rt = runtime.lock().unwrap();
                             if !current(&rt) { return; }
-                            if admitted.is_err() {
-                                let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
-                                manager.apply_actions(&mut rt, actions);
-                                return;
-                            }
+                            let Engine::OpenCode(engine) = &mut rt.engine else { return; };
+                            let actions = engine.withdraw_http(&tag, unconfirmed);
+                            manager.apply_actions(&mut rt, actions);
+                        };
+                        if admitted.is_err() || mobile.as_ref().is_some_and(|permit| !permit.valid()) {
+                            withdraw(false);
+                            return;
                         }
-                        // The original ticket and turn generation survive the whole
-                        // request, fallback opening, and subsequent physical prompt.
-                        let line = opencode::perform(&tag, &method, &url, body);
+                        if !current(&runtime.lock().unwrap()) { return; }
+                        let line = if let Some(permit) = &mobile {
+                            use opencode::{PhysicalOutcome, WriteAdmission};
+                            match opencode::perform_mobile(&tag, &method, &url, body.as_ref(),
+                                || current(&runtime.lock().unwrap()), |write| {
+                                    let Ok(_mobile) = permit.enter() else { return WriteAdmission::Refused; };
+                                    let rt = runtime.lock().unwrap();
+                                    if !current(&rt) { return WriteAdmission::Refused; }
+                                    let _ = write();
+                                    WriteAdmission::Admitted
+                                }) {
+                                PhysicalOutcome::Response { status, body } =>
+                                    serde_json::json!({"raccoon_http":{"tag":tag,"status":status,"body":body}}).to_string(),
+                                outcome => {
+                                    withdraw(outcome == PhysicalOutcome::Unknown);
+                                    return;
+                                }
+                            }
+                        } else {
+                            opencode::perform(&tag, &method, &url, body)
+                        };
                         let mut rt = runtime.lock().unwrap();
                         if !current(&rt) { return; }
                         let (actions, answer) = if let Engine::OpenCode(o) = &mut rt.engine {
@@ -4084,7 +4178,9 @@ impl SessionManager {
                         rt.last_activity = Instant::now();
                         rt.incidents.progress("agent_output");
                         manager.stall_disproved(&mut rt);
-                        manager.apply_actions(&mut rt, actions);
+                        // Session opening can schedule a fallback or the
+                        // original prompt. Neither may shed its sender.
+                        manager.apply_actions_with_mobile(&mut rt, actions, mobile.as_ref());
                         if let Some((request, allow)) = answer {
                             manager.permission_delivered(&mut rt, &request, allow);
                             let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
@@ -4850,6 +4946,16 @@ impl SessionManager {
     }
 
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, None)
+    }
+
+    pub(crate) fn respond_permission_from_phone(&self, session_id: &str, tab_id: &str, request_id: &str,
+        option_id: &str, permit: &crate::local_runtime::mobile::WritePermit) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, Some(permit))
+    }
+
+    fn respond_permission_with(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str,
+        mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
@@ -4873,7 +4979,7 @@ impl SessionManager {
             let binding = self.provider_binding(&rt).context("OpenCode approval association missing")?;
             let provider_request = request_id.strip_prefix("oc:").context("OpenCode ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             self.answer_opencode_carried(&mut rt, request_id, option_id, context)?;
             return Ok(());
@@ -4885,7 +4991,7 @@ impl SessionManager {
             // ask registry; the original ID is preserved, never guessed by tag.
             let provider_request = request_id.strip_prefix("acp:").context("ACP ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
             let envelope = a.answer_carried(request_id, option_id, context)?;
@@ -4911,10 +5017,17 @@ impl SessionManager {
                 };
                 let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision, mobile: Some(MobileDecision {
+                        permit: permit.clone(), label, session_command,
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
+                    return Ok(());
+                }
                 tx.send(decision).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
                 (allow, label)
             }
             Engine::Acp(a) => {
+                anyhow::ensure!(mobile.is_none() || a.writing.is_none(), "The agent is still receiving input. Retry the approval shortly.");
                 let allow = a.answer_choice(request_id, option_id).ok_or_else(|| anyhow!("that option has no unambiguous outcome"))?;
                 let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
                 self.apply_actions(&mut rt, actions);
@@ -4923,13 +5036,13 @@ impl SessionManager {
             Engine::OpenCode(o) => {
                 anyhow::ensure!(!o.answer_pending(request_id), "An answer to this request is still being delivered; try again when it settles");
                 let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                self.apply_actions(&mut rt, actions);
+                self.apply_actions_with_mobile(&mut rt, actions, mobile);
                 // The card remains open until the HTTP response confirms delivery.
                 return Ok(());
             }
             Engine::CodexStdio(engine) => {
                 let actions = engine.answer(request_id, option_id)?;
-                self.apply_codex_actions(&mut rt, actions)?;
+                self.apply_codex_actions_with_approval(&mut rt, actions, mobile)?;
                 // Enqueueing is not delivery. A revoked unsent reply is retryable.
                 return Ok(());
             }
@@ -4958,22 +5071,35 @@ impl SessionManager {
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
     pub fn answer_questions(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<()> {
+        self.answer_questions_with_mobile(session_id, tab_id, request_id, answers, None)
+    }
+
+    pub(crate) fn answer_questions_with_mobile(&self, session_id: &str, tab_id: &str, request_id: &str,
+        answers: HashMap<String, String>, mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let ask = rt.pending.get(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let tool_use_id = ask.tool_use_id.clone();
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision: Decision::Answers(input), mobile: Some(MobileDecision {
+                        permit: permit.clone(), label: "Answered".into(), session_command: String::new(),
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
+                    return Ok(());
+                }
                 tx.send(Decision::Answers(input)).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
             }
             _ => bail!("that agent does not ask questions this way"),
         }
-        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
+        rt.pending.remove(request_id);
+        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         drop(rt);
         self.observer.answered(session_id, tab_id);
         Ok(())
@@ -5910,6 +6036,7 @@ impl SessionManager {
             recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
+            lapsed: Default::default(),
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,
@@ -6440,7 +6567,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let unsent = match &mut rt.engine {
-            Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, turn_open, Instant::now()),
+            Engine::Cli(p) => p.expire_echoes(turn_open, Instant::now()),
             _ => Vec::new(),
         };
         self.queued_prompts_unsent(&mut rt, &unsent);
@@ -6532,6 +6659,8 @@ impl SessionManager {
                         let joined = consume_composer_echoes_within(&mut p.echoed, &payload);
                         if joined.is_empty() { consume_awaited_echo_changed(&mut p.echoed, p.awaiting_delivery, &payload).into_iter().collect() } else { joined }
                     };
+                    // A queued prompt taken after its wait ran out (#1284).
+                    let echoed = if echoed.is_empty() { p.lapsed.take(&payload, Instant::now()).into_iter().collect() } else { echoed };
                     if !echoed.is_empty() {
                         forget_taken(p);
                     }
@@ -6901,7 +7030,7 @@ impl SessionManager {
     fn await_composer_echo(&self, rt: &mut TabRuntime, echo: ComposerEcho, agent_text: &str) {
         let (queued, seq) = (echo.queued, echo.seq);
         if let Engine::Cli(p) = &mut rt.engine {
-            expire_composer_echoes(&mut p.echoed, queued, Instant::now());
+            p.expire_echoes(queued, Instant::now());
             p.echoed.push_back(echo);
             if queued {
                 forget_taken(p);
@@ -8023,7 +8152,7 @@ impl SessionManager {
             return self.run_discovery(rt_arc, frame, kind, &input, approved, Answering::Permission);
         }
 
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         {
             let mut rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
@@ -8181,7 +8310,7 @@ impl SessionManager {
     /// say it as that hook prints it, once `mine` finds the tab still has the
     /// CLI that asked. A frame handed over by the runtime this one replaced
     /// waits here too, for the card it asked for there (#765).
-    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
+    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<QueuedDecision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
         let Waiting { kind, gate, request_id, local_owner } = waiting;
         let gate = gate.as_str();
         let wait = match kind {
@@ -8196,13 +8325,57 @@ impl SessionManager {
         drop(parked);
         let mut rt = rt_arc.lock().unwrap();
         if !mine(&rt) {
+            if answer.is_some_and(|queued| queued.mobile.is_some()) { return reply_for(kind, gate, Decision::Deny); }
             return HookReply::default();
         }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
         }
         match answer {
-            Some(decision) => {
+            Some(QueuedDecision { decision, mobile: Some(mobile) }) => {
+                let Engine::Cli(cli) = &rt.engine else { return reply_for(kind, gate, Decision::Deny); };
+                let (generation, token) = (cli.generation, cli.origin.token.clone());
+                drop(rt);
+                let denied = reply_for(kind, gate, Decision::Deny);
+                let allow = !matches!(decision, Decision::Deny);
+                let reply = reply_for(kind, gate, decision);
+                let manager = self.clone();
+                let runtime = rt_arc.clone();
+                let MobileDecision { permit, label, session_command } = mobile;
+                let deliver = move |write: &mut dyn FnMut(bool) -> bool| {
+                    // Take the phone grant before the tab lock, as at admission. Keep
+                    // both until the bounded write settles so cancellation and
+                    // revocation cannot pass the last check before delivery.
+                    let grant = permit.enter().ok();
+                    let mut rt = runtime.lock().unwrap();
+                    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == generation && cli.origin.token == token)
+                        || !rt.pending.contains_key(&request_id) {
+                        drop(rt);
+                        drop(grant);
+                        write(false);
+                        return;
+                    }
+                    let delivered = write(grant.is_some()) && grant.is_some();
+                    let ask = rt.pending.remove(&request_id).expect("checked under tab lock");
+                    if delivered && !session_command.is_empty() {
+                        manager.session_commands.lock().unwrap().entry(rt.key()).or_default().insert(session_command);
+                    }
+                    manager.publish(&mut rt, Payload::PermissionDecided {
+                        request_id, tool_use_id: Some(ask.tool_use_id), allowed: delivered && allow,
+                        label: if delivered { label } else { "Cancelled".into() }, automatic: !delivered,
+                    }, None);
+                    if !delivered { return; }
+                    if rt.pending.is_empty() {
+                        manager.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+                        manager.set_status(&mut rt, TabStatus::InProgress);
+                    }
+                    let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                    drop(rt);
+                    manager.observer.answered(&session, &tab);
+                };
+                if crate::hooks::guard_mobile_reply(denied.clone(), deliver) { reply } else { denied }
+            }
+            Some(QueuedDecision { decision, mobile: None }) => {
                 if rt.pending.is_empty() {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);

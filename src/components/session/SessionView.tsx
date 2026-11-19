@@ -52,6 +52,7 @@ import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
+import { CloudHeaderActions } from "./CloudHeaderActions";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
@@ -250,6 +251,9 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
  *    instead of 40 px wide, still the bar's full height
  *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
  *    title's first characters either.
+ * 7. The port-forward chip (PRO-355) with nothing forwarded is left out of a
+ *    header up to 480 px wide (`PortForwardChip`): the Ports tab forwards a
+ *    port just the same. One that counts forwards stays.
  *
  * At that narrow width, breadcrumb padding, gaps and chip margins tighten
  * to keep the title readable beside the full-height 40px action buttons.
@@ -909,6 +913,8 @@ export function SessionView({
             {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} workspace={cloud?.removableWorkspace} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
+            {/* A cloud workspace session's Run, Git and Share, where a local session has them (#1289). */}
+            {cloud && !machine && !compact && <CloudHeaderActions cloud={cloud} runMenuReason={backend.unavailable?.runMenu ?? null} />}
             {continueTab && (
               <WithTooltip label={continueLabel}>
                 <Button variant="ghost" size="icon-sm" aria-label={continueLabel} onClick={continueTab}>

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredHost } from "../store/hosts";
+import { endPairingInstance } from "../store/pairing-instance";
 import { RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
@@ -42,7 +43,7 @@ vi.mock("./relay-client", async (importOriginal) => {
       return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, RESUME_REQUEST_WAIT_MS, scopedConnectionSnapshot, type ConnectionLogEntry } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -56,6 +57,37 @@ beforeEach(() => {
   vi.useFakeTimers(); mocks.clients = []; mocks.reachable.clear(); mocks.refused.clear(); mocks.opening.clear(); mocks.endpoints = [vpn, lan, bonjour]; mocks.hang = false; mocks.requests = []; mocks.describe = "refuse"; mocks.writes.mockReset().mockResolvedValue(undefined); connection = new HostConnection();
 });
 afterEach(() => { connection.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("derives coverage only from events of current, scoped pairings", async () => {
+  const owned: StoredHost = { ...host, hostName: "ghp_FIXTURE_HOST_LABEL", provenance: { kind: "automatic", userId: "first" } };
+  const other: StoredHost = { ...host, id: "other", provenance: { kind: "automatic", userId: "second" } };
+  const logs: ConnectionLogEntry[] = [];
+  connection.onLog((entry) => logs.push(entry));
+  mocks.reachable.add(lan);
+  const window = { from: 1000, to: 10000 };
+  vi.setSystemTime(2000);
+  connection.start(other, credential);
+  await flush();
+  vi.setSystemTime(3000);
+  connection.start(owned, credential);
+  await flush();
+
+  const first = scopedConnectionSnapshot(logs, "first", [owned, other], window);
+  expect(first.events).toEqual([
+    { at: 3000, kind: "connecting", classification: undefined },
+    { at: 3000, kind: "connected", classification: "direct" },
+  ]);
+  expect(first.retainedSince).toBe(3001);
+  expect(first.pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+  expect(scopedConnectionSnapshot(logs.slice(0, 2), "first", [owned], window)).toEqual({
+    events: [], retainedSince: undefined, pairings: [],
+  });
+  expect(scopedConnectionSnapshot(logs, "first", [], window).events).toBe("unavailable");
+  const reopenedLog = JSON.parse(JSON.stringify(logs)) as ConnectionLogEntry[];
+  expect(scopedConnectionSnapshot(reopenedLog, "first", [owned], window).events).toEqual([]);
+  endPairingInstance(owned.id);
+  expect(scopedConnectionSnapshot(logs, "first", [owned], window).events).toEqual([]);
+});
 
 describe("host path recovery", () => {
   it("connects over LAN when the paired tailnet endpoint hangs, and closes losers", async () => {
@@ -457,6 +489,41 @@ describe("a lost connection", () => {
     sockets = mocks.clients.length;
     connection.retryNow(); await flush();
     expect(mocks.clients).toHaveLength(sockets);
+  });
+
+  it("lets a resume wait for a reconnect under way, and says at once when no connection is coming (#1290)", async () => {
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    expect(await connection.awaitConnected(0)).toBe(true);
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    // Reconnecting: the wait ends as soon as the connection is back, well before its limit.
+    const waited = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    let done: boolean | null = null;
+    void waited.then((value) => (done = value));
+    await flush();
+    expect(done).toBeNull();
+    mocks.reachable.add(lan);
+    connection.retryNow(); await flush();
+    expect(await waited).toBe(true);
+    // Still reconnecting when the limit passes: false, and the caller says so instead of sending.
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    const late = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    await vi.advanceTimersByTimeAsync(RESUME_REQUEST_WAIT_MS);
+    expect(await late).toBe(false);
+    // No Mac chosen: nothing to wait for.
+    connection.stop();
+    expect(await connection.awaitConnected(RESUME_REQUEST_WAIT_MS)).toBe(false);
+  });
+
+  it("writes an entry from elsewhere in the app to the log, redacted like its own (#1290)", () => {
+    const logs: any[] = []; connection.onLog((entry) => logs.push(entry));
+    connection.note("warning", "Session resume not confirmed", `Continue here · step send · code no-answer · ${"a".repeat(40)}`);
+    expect(logs).toEqual([expect.objectContaining({ level: "warning", message: "Session resume not confirmed", detail: "Continue here · step send · code no-answer · [redacted]" })]);
   });
 
   it("does not reconnect from the background on retryNow", async () => {

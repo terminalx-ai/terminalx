@@ -107,7 +107,7 @@ try {
 
     // Changes: opening a file must leave the panel there, on its scope.
     await page.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).click();
-    const scope = page.getByLabel("Changes scope");
+    const scope = page.getByRole("button", { name: "Changes scope", exact: true });
     await page.getByText("slug.js", { exact: true }).first().click();
     const stack = page.getByTestId("review-stack").filter({ visible: true });
     await stack.waitFor();
@@ -115,7 +115,8 @@ try {
     await page.waitForTimeout(300);
     const panel = {
       changesSelected: (await page.getByRole("button", { name: /^Changes(\s*\d+)?$/ }).getAttribute("aria-pressed")) === "true",
-      scope: await scope.inputValue(),
+      // PRO-393: the scope is a button naming the scope it shows, not a select.
+      scope: (await scope.innerText()).trim(),
       noTurnError: (await page.getByText("No turn snapshots are available").count()) === 0,
     };
     // One review tab, stacking both files under one toolbar row.
@@ -237,7 +238,7 @@ try {
     await shot("composer");
 
     failed += report(mode, {
-      "opening a file keeps the panel on Changes with its scope": panel.changesSelected && panel.scope === "all" && panel.noTurnError,
+      "opening a file keeps the panel on Changes with its scope": panel.changesSelected && panel.scope === "All changes" && panel.noTurnError,
       "one Review tab stacks every file": tabTitle === 1 && reviewTabs === 1 && shape.files.join() === "src/slug.js,test/slug.test.js",
       "opening a file further down lands on it once the files above have loaded": landed.loadedAbove >= 1 && (Math.abs(landed.offset) <= 2 || (landed.atEnd && landed.offset >= 0)) && landed.scrolled > 1000,
       "file headers carry path, +/− and Viewed": shape.header?.includes("src/slug.js") && shape.header.includes("+4") && shape.header.includes("−1") && shape.viewed,

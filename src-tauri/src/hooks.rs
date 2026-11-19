@@ -862,16 +862,71 @@ fn answer_frame(stream: std::os::unix::net::UnixStream, busy: Busy, answer: impl
     CALLER.with(|caller| *caller.borrow_mut() = None);
     FRAME.with(|frame| *frame.borrow_mut() = None);
     let then = AFTER_REPLY.with(|after| after.borrow_mut().take());
-    drop(busy);
+    let mobile = MOBILE_REPLY.with(|guard| guard.borrow_mut().take());
     let mut stream = stream;
-    if let Ok(mut bytes) = serde_json::to_vec(&reply) {
-        bytes.push(b'\n');
-        let _ = stream.write_all(&bytes);
-        let _ = stream.flush();
+    if let Some(MobileReply { denied, deliver }) = mobile {
+        deliver(&mut |authorized| write_frame_reply(&mut stream, if authorized { &reply } else { &denied }, true));
+        drop(busy);
+    } else {
+        drop(busy);
+        write_frame_reply(&mut stream, &reply, false);
     }
     if let Some(then) = then {
         then();
     }
+}
+
+#[cfg(unix)]
+fn write_frame_reply(stream: &mut std::os::unix::net::UnixStream, reply: &Value, bounded: bool) -> bool {
+    let Ok(mut bytes) = serde_json::to_vec(reply) else { return false };
+    bytes.push(b'\n');
+    if !bounded {
+        return stream.write_all(&bytes).and_then(|()| stream.flush()).is_ok();
+    }
+    // Use one deadline across partial writes while revocation waits for the
+    // grant, including when a hook caller keeps draining only a few bytes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if budget.is_zero() || stream.set_write_timeout(Some(budget)).is_err() { return false; }
+        match stream.write(remaining) {
+            Ok(0) => return false,
+            Ok(written) => remaining = &remaining[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+    stream.flush().is_ok()
+}
+
+#[cfg(unix)]
+type MobileDelivery = Box<dyn FnOnce(&mut dyn FnMut(bool) -> bool)>;
+
+#[cfg(unix)]
+struct MobileReply {
+    denied: Value,
+    deliver: MobileDelivery,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static MOBILE_REPLY: std::cell::RefCell<Option<MobileReply>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Carry mobile authority to the hook transport's actual reply write.
+pub(crate) fn guard_mobile_reply(denied: HookReply,
+    deliver: impl FnOnce(&mut dyn FnMut(bool) -> bool) + 'static) -> bool {
+    #[cfg(unix)]
+    if FRAME.with(|frame| frame.borrow().is_some()) {
+        MOBILE_REPLY.with(|guard| *guard.borrow_mut() = Some(MobileReply {
+            denied: serde_json::to_value(denied).unwrap_or_default(), deliver: Box::new(deliver),
+        }));
+        return true;
+    }
+    let _ = denied;
+    deliver(&mut |_| false);
+    false
 }
 
 /// What the hook bridge holds off on while the runtime is handed over (#765).

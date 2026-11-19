@@ -3,7 +3,7 @@ import { getName } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BYPASS_MODE, FIRST_RUN_PERMISSION_MODE, PERMISSION_MODES, pickerMode } from "@terminalx/portable/agentSettings";
 import appMark from "../../../src-tauri/icons/128x128.png";
-import { BookOpen, Check, ChevronsUpDown, FolderGit2, FolderOpen, Loader2, Zap, type LucideIcon } from "@/icons";
+import { ArrowUpRight, BookOpen, Check, ChevronsUpDown, Folder, FolderGit2, FolderOpen, Keyboard, Loader2, MousePointerClick, Zap, type LucideIcon } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AgentSetupCard, ReadyBadge } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
@@ -18,8 +18,10 @@ import { cn } from "@/lib/cn";
 import { chooseMode } from "@/lib/dialogs";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
-import { START_ACTIONS, attachProject, projectStartDialogOpen, type StartAction } from "@/lib/projectStart";
-import { REPO_URL } from "@/lib/repo";
+import { START_ACTIONS, attachProject, openRecentProject, projectStartDialogOpen, recentProjects, type StartAction } from "@/lib/projectStart";
+import { repoFile } from "@/lib/repo";
+import { homeShort, useHome } from "@/lib/homePath";
+import { ago } from "@/lib/time";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
 
@@ -41,7 +43,7 @@ const BRIEF_ACTIONS: { id: StartAction["id"]; label: string }[] = [
  * three ways to a project. A folder dropped anywhere on the screen is opened
  * like "Open local project"; opening a project leads to its new-session view.
  */
-export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents") => void }) {
+export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents" | "shortcuts") => void }) {
   const store = useSessionStore();
   const account = useAccount();
   const prefs = usePrefs();
@@ -209,7 +211,7 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
                     );
                   })}
                 </div>
-                <p className="mt-3.5 text-right text-xs text-muted-foreground">Or drop a folder anywhere on this window</p>
+                <RecentProjects busy={busy !== null} onError={setError} />
               </Step>
             )}
 
@@ -224,9 +226,14 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
 
           <footer className="mt-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[12.5px] text-faint">
             <span>{identity ? `Signed in as ${identity.name || identity.email}. You can sign out in Settings › Account.` : "A TerminalX account is optional for local work."}</span>
-            <button type="button" onClick={() => void openUrl(`${REPO_URL}#readme`)} className={cn(LINK, "inline-flex items-center gap-1")}>
-              <BookOpen aria-hidden className="size-[13px]" /> Read the guide
-            </button>
+            <span className="flex flex-wrap items-center gap-x-5 gap-y-1">
+              <button type="button" onClick={() => onOpenSettings("shortcuts")} className={cn(LINK, "inline-flex items-center gap-1.5")}>
+                <Keyboard aria-hidden className="size-[13px]" /> Keyboard shortcuts
+              </button>
+              <button type="button" onClick={() => void openUrl(repoFile("README.md"))} className={cn(LINK, "inline-flex items-center gap-1.5")}>
+                <BookOpen aria-hidden className="size-[13px]" /> Read the docs <ArrowUpRight aria-hidden className="size-3" />
+              </button>
+            </span>
           </footer>
         </div>
       </div>
@@ -240,6 +247,62 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
       >
         Drop a folder to open it as a project
       </div>
+    </div>
+  );
+}
+
+/**
+ * Step 2's last line (01.04): the projects opened or worked in most lately,
+ * five at most, each opened with one click on its new-session view; with
+ * none yet, a line saying where they will show. A folder dropped anywhere
+ * opens too, as the line's other end says.
+ */
+function RecentProjects({ busy, onError }: { busy: boolean; onError: (message: string | null) => void }) {
+  const store = useSessionStore();
+  const home = useHome();
+  const [opening, setOpening] = useState<string | null>(null);
+  const recent = recentProjects(store.projects, store.sessions);
+  const open = async (path: string) => {
+    onError(null);
+    setOpening(path);
+    try {
+      await openRecentProject(path);
+    } catch (cause) {
+      onError(errorMessage(cause));
+    } finally {
+      setOpening(null);
+    }
+  };
+  return (
+    <div className="mt-3.5 text-xs" data-testid="recent-projects">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <h3 id="recent-projects-title" className="font-normal text-faint">Recent projects</h3>
+        {!recent.length && <span className="text-faint">· none yet, projects you open show here</span>}
+        <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+          <MousePointerClick aria-hidden className="size-[13px]" /> Or drop a folder anywhere on this window
+        </span>
+      </div>
+      {recent.length > 0 && (
+        <ul aria-labelledby="recent-projects-title" className="mt-1.5 grid gap-0.5">
+          {recent.map(({ project, openedAt }) => (
+            <li key={project.path}>
+              <button
+                type="button"
+                disabled={busy || opening !== null}
+                onClick={() => void open(project.path)}
+                aria-label={`Open ${project.name}`}
+                title={project.path}
+                className="flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-[12.5px] outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-60"
+              >
+                {opening === project.path ? <Loader2 aria-hidden className="size-[14px] shrink-0 animate-spin text-muted-foreground" /> : <Folder aria-hidden className="size-[14px] shrink-0 text-muted-foreground" />}
+                <span className="shrink-0 font-medium">{project.name}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-faint">{homeShort(project.path, home)}</span>
+                {openedAt > 0 && <span className="shrink-0 text-faint" data-recent-opened="">{ago(openedAt)}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

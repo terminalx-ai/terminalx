@@ -107,6 +107,7 @@ export function Chat({
   footer,
   onSendQueuedNow,
   sending = null,
+  pending,
   firstMessage,
   onSendAgain,
   onSecondOpinion,
@@ -117,6 +118,7 @@ export function Chat({
   onReset,
   onRetryInNewChat,
   onRetry,
+  unavailable,
   agent,
   onGoalCommand,
   onEditGoal,
@@ -150,6 +152,12 @@ export function Chat({
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
   /** `files`: the names of the files attached to it (PRO-290), drawn as chips that do not open yet. */
   sending?: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[]; pressedAt: number } | null;
+  /**
+   * Messages on their way to a cloud tab's agent (#1291): drawn last, as the
+   * Queued cards a local session draws, until the conversation has them.
+   * Null when there are none: the empty chat's scene shows only then.
+   */
+  pending?: ReactNode;
   /** The local Create prompt and startup progress, until the transcript owns the prompt. */
   firstMessage?: ReactNode;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
@@ -172,6 +180,11 @@ export function Chat({
    * standing leaves the tab idle, and sending wakes the agent as the composer would.
    */
   onRetry?: (seq: number) => void;
+  /**
+   * Why each turn action this session cannot take here is off (#1289): it is
+   * shown disabled, with the reason, where it would have been offered.
+   */
+  unavailable?: ChatActionsUnavailable;
   /** The agent's name, for what a message it took mid-turn says. */
   agent?: { id: string; name: string };
   /** Sends Codex's `/goal pause` or `/goal resume` from the goal card. */
@@ -473,18 +486,18 @@ export function Chat({
       {find.bar}
       {transcript.goal && <GoalBanner goal={transcript.goal} onCommand={onGoalCommand} onEdit={onEditGoal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
+      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-visible [scrollbar-gutter:stable] [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
           <SearchDisclosures value={find.disclosures}>
-          {!turns.length && !live && !sending && !firstMessage && loading && (
+          {!turns.length && !live && !sending && !pending && !firstMessage && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
               <Loader2 className="size-3 animate-spin" aria-hidden />
               Loading the conversation…
             </p>
           )}
-          {!turns.length && !live && !sending && !firstMessage && !loading && (
+          {!turns.length && !live && !sending && !pending && !firstMessage && !loading && (
             <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
               <RaccoonScene />
               <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
@@ -517,6 +530,10 @@ export function Chat({
                 // A failed last turn can go again: its prompt, sent as a new message.
                 onRetry={isLast && !t.live && !sending ? onRetry : undefined}
                 onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
+                forkUnavailable={unavailable?.fork}
+                resetUnavailable={!isLast && !live && !sending ? unavailable?.reset : undefined}
+                secondOpinionUnavailable={unavailable?.secondOpinion}
+                retryInNewChatUnavailable={isLast && !sending ? unavailable?.retryInNewChat : undefined}
                 agent={agent}
               />
             );
@@ -524,6 +541,7 @@ export function Chat({
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
           {firstMessage}
           {sending && <SendingMessage message={sending} cwd={cwd} />}
+          {pending}
           {transcript.compacting && (
             <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
           )}
@@ -549,13 +567,15 @@ export function Chat({
         </div>
       </div>
       {promptMap && (
-        <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+        // Beside the scrollbar, never over it: the rail's marks take clicks and wheels the bar must get (#1287).
+        <div className="pointer-events-none absolute top-0 left-0 right-(--scrollbar-size)" style={{ bottom: footerHeight }}>
           <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} locate={readingTurn} />
         </div>
       )}
       </div>
-      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
-      <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
+      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes.
+          It stops short of the scrollbar's gutter, so its fade never paints over the thumb at the end (#1287). */}
+      <div ref={footerRef} className="pointer-events-none absolute bottom-0 left-0 right-(--scrollbar-size) z-10 [&>*]:pointer-events-auto">
         <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
@@ -586,6 +606,14 @@ export function Chat({
 }
 
 /** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+/** Why each turn action a session cannot take here is off; absent ones are offered or simply not shown. */
+export interface ChatActionsUnavailable {
+  fork?: string;
+  reset?: string;
+  secondOpinion?: string;
+  retryInNewChat?: string;
+}
+
 export interface ResetTarget {
   turn: number;
   removed: number[];

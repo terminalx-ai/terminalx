@@ -122,13 +122,20 @@ export function RightPanel({
   dock?: ReactNode;
 }) {
   const prefs = usePrefs();
-  // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
-  const remembers = !!ports && !!sessionId;
+  // A session's panel reopens on the tab it last showed (PRO-130), after a switch to another session or a relaunch.
   // Null until a tab is picked: the first one depends on the Git source, which a cloud session learns after drawing.
-  const [picked, setTab] = useState<PanelTab | null>(() => takePanelTab() ?? (remembers ? rememberedPanelTab(sessionId!) : null));
+  // The panel stays mounted from one session to the next, so the pick is kept with the session it was made in.
+  const [choice, setChoice] = useState<{ sessionId: string | undefined; tab: PanelTab | null }>(() => ({
+    sessionId,
+    tab: takePanelTab() ?? (sessionId ? rememberedPanelTab(sessionId) : null),
+  }));
+  const picked = choice.sessionId === sessionId ? choice.tab : sessionId ? rememberedPanelTab(sessionId) : null;
+  const current = useRef(sessionId);
+  current.current = sessionId;
+  const setTab = useCallback((tab: PanelTab) => setChoice({ sessionId: current.current, tab }), []);
   useEffect(() => {
-    if (remembers && picked) rememberPanelTab(sessionId!, picked);
-  }, [remembers, sessionId, picked]);
+    if (sessionId && picked) rememberPanelTab(sessionId, picked);
+  }, [sessionId, picked]);
   // A menu elsewhere asked for a tab (the session's "Ports and previews").
   useEffect(
     () =>
@@ -136,7 +143,7 @@ export function RightPanel({
         takePanelTab();
         setTab(asked);
       }),
-    [],
+    [setTab],
   );
   const [focusPr, setFocusPr] = useState(0);
   // A pull request just linked to this session (PRO-294): scroll to it in the Branch tab.

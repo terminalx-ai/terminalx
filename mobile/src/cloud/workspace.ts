@@ -115,7 +115,7 @@ export interface CloudWorkspaceSessionOptions {
    * Called at most once in `REFUSAL_REFRESH_MS`.
    */
   onRefused?: () => void;
-  link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now">>;
+  link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now" | "log">>;
 }
 
 const isEvent = (value: unknown): value is AgentEvent => !!value && typeof value === "object" && typeof (value as AgentEvent).seq === "number" && !!(value as AgentEvent).payload;

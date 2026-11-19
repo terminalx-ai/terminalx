@@ -491,6 +491,14 @@ pub(crate) mod tests {
     /// A loopback account service answering each request with the next of
     /// `answers` (status, body), recording what it was sent.
     pub(crate) fn service(answers: Vec<(u16, Value)>) -> (String, Seen, std::thread::JoinHandle<()>) {
+        service_with_hook(answers, |_| {})
+    }
+
+    pub(crate) fn service_with_hook(
+        answers: Vec<(u16, Value)>,
+        before_reply: impl FnMut(&str) + Send + 'static,
+    ) -> (String, Seen, std::thread::JoinHandle<()>) {
+        let mut before_reply = before_reply;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -520,7 +528,8 @@ pub(crate) mod tests {
                 let path = head.split_whitespace().nth(1).unwrap().to_string();
                 let bearer = head.lines().find_map(|line| line.to_ascii_lowercase().starts_with("authorization:").then(|| line[14..].trim().to_string()));
                 let request_body = if length == 0 { Value::Null } else { serde_json::from_slice(&request[head_end..]).unwrap() };
-                record.lock().unwrap().push((path, request_body, bearer));
+                record.lock().unwrap().push((path.clone(), request_body, bearer));
+                before_reply(&path);
                 let text = body.to_string();
                 let reason = if status == 200 { "OK" } else { "Bad Request" };
                 write!(stream, "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}", text.len()).unwrap();
@@ -555,7 +564,7 @@ pub(crate) mod tests {
         let mut binding = None;
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
-        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
+        assert!(directory::sign_out(&api, data.path(), false).unwrap().is_some());
         assert!(load(data.path()).unwrap().is_none());
         save(data.path(), &session).unwrap();
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
@@ -591,10 +600,10 @@ pub(crate) mod tests {
         save(data.path(), &session).unwrap();
         let mut binding = None;
         directory::refresh(&api, &session, data.path(), &key, &mut binding).unwrap();
-        assert!(directory::sign_out(&api, data.path()).is_err());
+        assert!(directory::sign_out(&api, data.path(), false).is_err());
         assert!(load(data.path()).unwrap().is_none());
         assert!(directory::ensure_no_pending_sign_out(data.path()).is_err());
-        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
+        assert!(directory::sign_out(&api, data.path(), false).unwrap().is_some());
         directory::ensure_no_pending_sign_out(data.path()).unwrap();
         let mut new_owner = session;
         new_owner.access_token = "new-account-token".into();
@@ -603,7 +612,7 @@ pub(crate) mod tests {
         // The new owner's register can succeed remotely before its reply is
         // lost. Its logout must advance past that attempt's generation.
         assert!(directory::refresh(&api, &new_owner, data.path(), &key, &mut binding).is_err());
-        assert!(directory::sign_out(&api, data.path()).unwrap().is_some());
+        assert!(directory::sign_out(&api, data.path(), false).unwrap().is_some());
         handle.join().unwrap();
         let seen = seen.lock().unwrap();
         let generations: Vec<_> = seen.iter().map(|(_, body, _)| body["bindingGeneration"].as_u64().unwrap()).collect();
@@ -629,10 +638,10 @@ pub(crate) mod tests {
         session.expires_at = 1;
         save(data.path(), &session).unwrap();
 
-        assert!(directory::sign_out(&api, data.path()).is_err(), "temporary refresh failure");
+        assert!(directory::sign_out(&api, data.path(), false).is_err(), "temporary refresh failure");
         assert!(load(data.path()).unwrap().is_none());
-        assert!(directory::sign_out(&api, data.path()).is_err(), "temporary unbind failure");
-        let signed_out = directory::sign_out(&api, data.path()).unwrap().unwrap();
+        assert!(directory::sign_out(&api, data.path(), false).is_err(), "temporary unbind failure");
+        let signed_out = directory::sign_out(&api, data.path(), false).unwrap().unwrap().session;
         assert!(load(data.path()).unwrap().is_none());
         api.logout(&signed_out).unwrap();
         handle.join().unwrap();
@@ -644,6 +653,111 @@ pub(crate) mod tests {
         assert_eq!(seen[3].2.as_deref(), Some("Bearer fresh-access"));
         assert_eq!(seen[3], seen[4]);
         assert_eq!(seen[5], (LOGOUT_PATH.into(), json!({"refreshToken": "fresh-refresh"}), Some("Bearer fresh-access".into())));
+    }
+
+    /// A signed-in, registered machine whose session the service has ended.
+    /// `expires_at` says whether the access token still looks current here.
+    fn ended_session(base: &str, expires_at: Option<i64>) -> (Api, tempfile::TempDir) {
+        let api = Api::new(base);
+        let data = tempfile::tempdir().unwrap();
+        let mut session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut None).unwrap();
+        if let Some(expires_at) = expires_at {
+            session.expires_at = expires_at;
+            save(data.path(), &session).unwrap();
+        }
+        (api, data)
+    }
+
+    fn ended(result: Result<Option<directory::SignedOut>>) -> bool {
+        result.err().is_some_and(|error| error.is::<SessionEnded>())
+    }
+
+    #[test]
+    fn an_expired_session_ends_logout_until_it_is_forgotten_and_the_next_sign_in_knows_the_machine_stayed_bound() {
+        let refused = || (401, json!({ "error": "invalid_refresh_token" }));
+        let (base, seen, handle) = service(vec![(201, json!({})), refused(), refused(), refused(), (201, json!({}))]);
+        let (api, data) = ended_session(&base, Some(1));
+
+        assert!(ended(directory::sign_out(&api, data.path(), false)));
+        assert!(ended(directory::sign_out(&api, data.path(), false)), "a retry meets the same refusal");
+        assert!(load(data.path()).unwrap().is_none());
+        assert!(directory::ensure_no_pending_sign_out(data.path()).is_err(), "nothing was cleared without being asked");
+        assert_eq!(directory::left_bound_to(data.path()).unwrap(), None);
+
+        let signed_out = directory::sign_out(&api, data.path(), true).unwrap().unwrap();
+        assert!(signed_out.left_bound);
+        directory::ensure_no_pending_sign_out(data.path()).unwrap();
+        assert_eq!(directory::left_bound_to(data.path()).unwrap().as_deref(), Some("A Person (person@example.com)"));
+        assert!(directory::sign_out(&api, data.path(), true).unwrap().is_none());
+
+        // The next sign-in registers; an accepted registration owns the binding again.
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut None).unwrap();
+        assert_eq!(directory::left_bound_to(data.path()).unwrap(), None);
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(seen[1..4].iter().all(|request| *request == (REFRESH_PATH.into(), json!({"refreshToken": "refresh-1"}), None)));
+        assert_eq!(seen[4].1["bindingGeneration"], 1, "no unbind was attempted, so the generation did not move");
+    }
+
+    #[test]
+    fn a_revoked_session_that_looks_current_ends_logout_the_same_way() {
+        let (base, seen, handle) = service(vec![
+            (201, json!({})),
+            (401, json!({ "error": "invalid_session" })), (401, json!({ "error": "invalid_refresh_token" })),
+            (401, json!({ "error": "invalid_session" })), (401, json!({ "error": "invalid_refresh_token" })),
+            (201, json!({})),
+        ]);
+        let (api, data) = ended_session(&base, None);
+
+        assert!(ended(directory::sign_out(&api, data.path(), false)));
+        assert!(directory::ensure_no_pending_sign_out(data.path()).is_err());
+        assert!(directory::sign_out(&api, data.path(), true).unwrap().unwrap().left_bound);
+        directory::ensure_no_pending_sign_out(data.path()).unwrap();
+        assert!(directory::left_bound_to(data.path()).unwrap().is_some());
+
+        let session: Session = serde_json::from_value(session_body()).unwrap();
+        let key = crate::relay_e2ee::HostKeypair::from_secret([42; 32]);
+        save(data.path(), &session).unwrap();
+        directory::refresh(&api, &session, data.path(), &key, &mut None).unwrap();
+        assert_eq!(directory::left_bound_to(data.path()).unwrap(), None);
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        let unbind = format!("/v1/desktop/host-account-bindings/{}", key.host_id());
+        assert_eq!(seen[1].0, unbind);
+        assert_eq!(seen[2].0, REFRESH_PATH);
+        assert_eq!(seen[3], seen[1], "the retry repeats the same unbind generation");
+        assert_eq!(seen[5].1["bindingGeneration"], 3, "the registration passes the unbind that may have landed");
+    }
+
+    #[test]
+    fn a_revoked_access_token_is_renewed_and_forgetting_never_skips_a_transient_failure() {
+        let mut renewed = session_body();
+        renewed["accessToken"] = json!("fresh-access");
+        renewed["refreshToken"] = json!("fresh-refresh");
+        let (base, seen, handle) = service(vec![
+            (201, json!({})),
+            (401, json!({ "error": "invalid_session" })), (200, renewed), (503, json!({})),
+            (200, json!({})),
+        ]);
+        let (api, data) = ended_session(&base, None);
+
+        let error = directory::sign_out(&api, data.path(), true).err().unwrap();
+        assert!(!error.is::<SessionEnded>(), "a 503 is retried, not forgotten");
+        assert!(directory::ensure_no_pending_sign_out(data.path()).is_err());
+        let signed_out = directory::sign_out(&api, data.path(), true).unwrap().unwrap();
+        assert!(!signed_out.left_bound);
+        assert_eq!(signed_out.session.refresh_token, "fresh-refresh", "the renewed session was kept for the retry");
+        assert_eq!(directory::left_bound_to(data.path()).unwrap(), None);
+        handle.join().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[3].2.as_deref(), Some("Bearer fresh-access"));
+        assert_eq!(seen[4], seen[3]);
     }
 
     #[test]

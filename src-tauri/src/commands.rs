@@ -2592,6 +2592,26 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
         .map_err(err)?
 }
 
+/// MCP servers, slash commands and skills in Claude Code's and Codex's own
+/// homes, side by side (PRO-153).
+#[tauri::command]
+pub async fn agent_configs_compare() -> CmdResult<crate::agent_configs::Comparison> {
+    tauri::async_runtime::spawn_blocking(|| crate::agent_configs::compare().map_err(err)).await.map_err(err)?
+}
+
+/// What copying these items would write, before anything is.
+#[tauri::command]
+pub async fn agent_configs_preview(changes: Vec<crate::agent_configs::Change>) -> CmdResult<crate::agent_configs::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_configs::preview(&changes).map_err(err)).await.map_err(err)?
+}
+
+/// Write the previewed copies, backing each file up first. `token` is the
+/// preview's: anything else (the files changed since) is refused.
+#[tauri::command]
+pub async fn agent_configs_apply(changes: Vec<crate::agent_configs::Change>, token: String) -> CmdResult<Vec<crate::agent_configs::Written>> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_configs::apply(&changes, &token).map_err(err)).await.map_err(err)?
+}
+
 // ------------------------------------------------------------------ git
 
 /// The branch against its base, for the side panel's Branch tab.

@@ -637,6 +637,8 @@ impl SessionManager {
                 collaboration_required: echo.collaboration_required, text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
+            // Not carried over: what lapsed before the handover is not waited on.
+            lapsed: Default::default(),
             held: cli.held,
             prompts: RecordedPrompts(cli.prompts.into_iter().map(|prompt| RecordedPrompt {
                 lineage: tui::Lineage { uuid: prompt.uuid, parent: prompt.parent }, seq: prompt.seq, text: prompt.text, worked_on: prompt.worked_on,
@@ -669,7 +671,7 @@ impl SessionManager {
     /// it there as it would have been replied to (#765).
     pub(crate) fn resume_decision(&self, bridge: &crate::hooks::Bridge, wait: Wait, stream: std::os::unix::net::UnixStream) {
         let Wait { tab: rt_arc, ask, gate } = wait;
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         let local_owner = crate::local_runtime::permissions::enabled();
         let (kind, token, generation) = {
             let mut rt = rt_arc.lock().unwrap();

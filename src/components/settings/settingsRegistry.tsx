@@ -161,6 +161,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "action", location: "Signed update feed" }, layout: "content",
   }),
   defineSetting({
+    id: "about.supportReport", section: "about", title: "Support report",
+    description: "Review selected diagnostics before sending them to TerminalX Support.",
+    searchTerms: ["about", "support", "feedback", "diagnostics", "report", "help"], scope: "user",
+    storage: { kind: "action", location: "TerminalX Support" },
+  }),
+  defineSetting({
     id: "about.changelog", section: "about", title: "Changelog",
     description: "Changes in each version of TerminalX.",
     searchTerms: ["about", "changelog"], scope: "user",
@@ -605,6 +611,12 @@ export const SETTINGS_ROWS = [
     description: "Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout.",
     searchTerms: ["general", "new", "sessions", "use", "a", "worktree"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.useWorktree" },
+  }),
+  defineSetting({
+    id: "general.copyAgentConfigs", section: "general", title: "Copy agent configs",
+    description: "Compare MCP servers, slash commands and skills between Claude Code and Codex, and copy what's missing.",
+    searchTerms: ["copy", "agent", "configs", "mcp", "servers", "slash", "commands", "prompts", "skills", "claude", "codex", "compare", "sync"], scope: "user",
+    storage: { kind: "file", location: "~/.claude.json, ~/.claude/commands, ~/.claude/skills, ~/.codex/config.toml, ~/.codex/prompts, ~/.codex/skills" },
   }),
   defineSetting({
     id: "general.browser", section: "general", title: "Built-in browser",

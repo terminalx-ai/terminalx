@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import { collabGranted } from "@terminalx/portable/workspaceCollab";
@@ -31,7 +32,7 @@ import {
 } from "@/lib/cloudAgents";
 import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { deletion, isOpen, machineRunning, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
+import { deletion, isOpen, machineRunning, machineStarting, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -96,6 +97,8 @@ export const IN_PROGRESS_LABELS = [CONNECTING_LABEL, RECONNECTING_LABEL, STOPPIN
 
 /** While waking, the chip only moves forward: Resuming…, then Connecting…, then Live. */
 export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
+/** While the machine comes up (provisioned, or resumed elsewhere), likewise: Starting…, then Connecting…, then Live (#1288). */
+export const START_STEPS = [STARTING_LABEL, CONNECTING_LABEL] as const;
 
 /**
  * The connection chip: a short label, and whether it is live, on its way, or
@@ -115,6 +118,13 @@ export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
  * or "Live" for a machine on its way down. A window attaching again after
  * its workspace came back (`reattaching`) reads "Reconnecting…" until the
  * transport is really up.
+ *
+ * Both coming-up sequences only move forward: `wakeFloor` is the step this
+ * view already showed (1 once it read "Connecting…"), so a dial the relay
+ * turns away while the runtime boots never takes the chip back to
+ * "Resuming…" or "Starting…". "Reconnecting…" is only for a connection that
+ * was up and was lost (the transport's own `reconnecting`), or one attached
+ * again after its workspace came back.
  */
 export function cloudConnectionChip(
   state: WorkspaceConnectionState,
@@ -128,6 +138,10 @@ export function cloudConnectionChip(
     // Waking: never back from Connecting to Starting while the runtime retries.
     const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" || state.state === "reconnecting" ? 1 : 0);
     return { label: WAKE_STEPS[step], tone: "pending" };
+  }
+  if (options.starting && !options.reattaching && (state.state === "opening" || state.state === "waitingForRuntime" || state.state === "connecting")) {
+    const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" ? 1 : 0);
+    return { label: START_STEPS[step], tone: "pending" };
   }
   // Stopped by the list, and nothing resumes it: Stopped, whatever the transport is still doing
   // (reading connected from before the stop, or trying again until it finds out). Nothing is starting.
@@ -154,6 +168,25 @@ export function cloudConnectionChip(
       if (workspaceState === "suspended") return { label: "Stopped", tone: "offline" };
       if (workspaceState === "archived") return { label: "Archived", tone: "offline" };
       return { label: "Not connected", tone: "offline" };
+  }
+}
+
+/** The chip's label as the status line under a queued message reads it (#1291). */
+export function cloudWorkspaceStatus(chip: ConnectionChip): WorkspaceStatus {
+  switch (chip.label) {
+    case STARTING_LABEL:
+      return "starting";
+    case RESUMING_LABEL:
+      return "resuming";
+    case CONNECTING_LABEL:
+    case RECONNECTING_LABEL:
+      return "connecting";
+    case "Live":
+      return "live";
+    case "Stopped":
+      return "stopped";
+    default:
+      return null;
   }
 }
 
@@ -451,11 +484,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   // view's connection afresh. Only ever a `connect`.
   const listRunning = !!item && machineRunning(item);
   const listStopping = !!item && stopping(item);
+  const listStarting = !!item && machineStarting(item);
   const listAt = catalog.orgs[orgId]?.requestedAt ?? null;
   useEffect(() => {
     if (!parsed || !item) return;
-    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, at: listAt ?? 0 });
-  }, [orgId, workspaceId, !!item, listRunning, listAt, lease]);
+    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, starting: listStarting, at: listAt ?? 0 });
+  }, [orgId, workspaceId, !!item, listRunning, listStarting, listAt, lease]);
   // The transport says stopped while the list says running: one of them is
   // stale. Read the list again; a list asked for after the transport stopped
   // decides (the manager then attaches again, with backoff).
@@ -608,17 +642,20 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     if (asleep) quietCloudTerminals(workspaceKey);
   }, [asleep, workspaceKey]);
   // The header chip: Live only while the transport is up, never for a stopped workspace, and monotonic while this desktop wakes it.
-  const wakeFloor = useRef(0);
-  if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
   // Starting only while the list says the machine is coming up (a launch, a resume); else this window is just attaching.
+  const starting = workspaceStarting(item);
+  const wakeFloor = useRef(0);
+  if (!(managed.woke || starting) || state.state === "connected") wakeFloor.current = 0;
   const chip = cloudConnectionChip(state, workspaceState, {
     woke: managed.woke,
     wakeFloor: wakeFloor.current,
-    starting: workspaceStarting(item),
+    starting,
     stopping: listStopping,
     reattaching: managed.reattaching,
   });
-  if (managed.woke && chip.label === WAKE_STEPS[1]) wakeFloor.current = 1;
+  if ((managed.woke || starting) && chip.label === CONNECTING_LABEL) wakeFloor.current = 1;
+  // #1291: the same state, for the line under a queued message.
+  const workspaceStatus = cloudWorkspaceStatus(chip);
   // Woken and back: the list still says stopped until it is read again.
   const wokeLive = managed.woke && state.state === "connected";
   useEffect(() => {
@@ -659,6 +696,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         authority,
         outbox: agents.outbox,
         followUps,
+        workspaceStatus,
         wake,
         you,
         collabClient: collabLive ? client : null,
@@ -669,7 +707,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         agentProcess,
         signIn,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
   );
 
   const ownTabs = useMemo(() => {

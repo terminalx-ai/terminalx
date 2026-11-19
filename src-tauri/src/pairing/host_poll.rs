@@ -325,31 +325,32 @@ impl PairingManager {
         {
             return;
         }
-        if let Ok(Some(device)) = self.registry.automatic_for_grant(
+        let devices = match self.registry.automatic_for_grant(
             &context.user_id,
+            generation,
             &revocation.client_installation_id,
             &revocation.grant_request_id,
         ) {
-            if let Err(error) = self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device.id})) {
-                // The failed fence disconnects the attachment before
-                // the persisted credential is retired below.
-                log::warn!("fence revoked mobile grant: {error:#}");
-            }
-        }
-        match self.registry.revoke_automatic_grant(
-            &context.user_id,
-            &revocation.client_installation_id,
-            &revocation.grant_request_id,
-        ) {
-            Ok(Some(device)) => {
-                self.account.sync_runtime_copy();
-                let _ = self.secrets.delete_device_token(&device.id);
-                self.cancel_connections(&device.id);
-                relay.revoke(device.id);
-            }
-            Ok(None) => {}
+            Ok(devices) => devices,
             Err(error) => {
+                log::warn!("read revoked mobile grant before acknowledging: {error:#}");
+                return;
+            }
+        };
+        for device in devices {
+            if let Err(error) = self.registry.revoke(&device.id) {
                 log::warn!("save revoked mobile grant before acknowledging: {error:#}");
+                return;
+            }
+            let fence = self.fence_runtime_mobile("revoke", serde_json::json!({
+                "deviceId": device.id, "persisted": true,
+            }));
+            self.account.sync_runtime_copy();
+            let _ = self.secrets.delete_device_token(&device.id);
+            self.cancel_connections(&device.id);
+            relay.revoke(device.id);
+            if let Err(error) = fence {
+                log::warn!("fence revoked mobile grant before acknowledging: {error:#}");
                 return;
             }
         }

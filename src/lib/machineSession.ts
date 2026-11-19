@@ -263,9 +263,9 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
   const gitSourceFor = useCallback(
     (repo: string | null) => generation && projectClient?.hasCapability("git/1") && repo
-      ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity })
+      ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity, sessionCheckout: repo === checkoutRepository })
       : undefined,
-    [generation, projectClient, projectKey, manage],
+    [generation, projectClient, projectKey, manage, checkoutRepository],
   );
   const checkoutGitSource = useMemo(() => gitSourceFor(checkoutRepository), [gitSourceFor, checkoutRepository]);
   const gitSource = useMemo(() => repository === checkoutRepository ? checkoutGitSource : gitSourceFor(repository), [repository, checkoutRepository, checkoutGitSource, gitSourceFor]);

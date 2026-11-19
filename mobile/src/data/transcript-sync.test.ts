@@ -15,6 +15,8 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   removeItem: async (key: string) => { storage.delete(key); },
   getAllKeys: async () => [...storage.keys()],
   multiRemove: async (keys: string[]) => { keys.forEach((key) => storage.delete(key)); },
+  multiGet: async (keys: string[]) => keys.map((key) => [key, storage.get(key) ?? null]),
+  multiSet: async (pairs: [string, string][]) => { pairs.forEach(([key, value]) => storage.set(key, value)); },
 } }));
 const event = (seq: number, text = `synthetic ${seq}`): AgentEvent => ({ id: `event-${seq}`, seq, sessionId: "session", tabId: "tab", harness: "codex", ts: "2026-01-01T00:00:00Z", payload: { type: "user_message", text } } as AgentEvent);
 const stops: (() => void)[] = [];

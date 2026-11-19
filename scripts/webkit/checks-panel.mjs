@@ -92,9 +92,9 @@ localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: true, panelWid
     pr: window.__checks.scenario === "draft" ? null : { number: pr.number, url: pr.url, headSha: pr.headSha, state: "OPEN", checks: pr.checks }, behindUpstream: false });
 })();`;
 
-/** Text under 12px inside `root`, other than the keycaps' own glyphs. */
+/** Text under 12px inside `root`, other than the keycaps' own glyphs and an avatar's initials (a 20px disc, hidden from assistive technology, app-wide). */
 const smallText = (root) => [...root.querySelectorAll("*")].filter((node) => {
-  if (!node.offsetParent || node.closest("kbd")) return false;
+  if (!node.offsetParent || node.closest("kbd") || node.matches("span.rounded-full[aria-hidden]")) return false;
   const own = [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim());
   return own && parseFloat(getComputedStyle(node).fontSize) < 12;
 }).map((node) => `${node.textContent.trim().slice(0, 40)} (${getComputedStyle(node).fontSize})`);
