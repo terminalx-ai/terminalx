@@ -60,7 +60,16 @@ pub fn status(serve: &Serve) -> Value {
 pub fn listening(serve: &Serve) -> String {
     let deadline = std::time::Instant::now() + super::agent::AGENT_WAIT;
     loop {
-        let last = status(serve);
+        // The runtime prints "ready" before it installs its machine host
+        // (src/serve.rs), so a status asked in between is refused as
+        // "unsupported": not listening yet, rather than a failure.
+        let response = serve.try_control("runtime.machineHost.status", json!({}));
+        let last = if response["ok"] == true {
+            response["result"].clone()
+        } else {
+            assert_eq!(response["error"]["code"], "unsupported", "runtime.machineHost.status failed: {response}");
+            response
+        };
         if let Some(address) = last["listening"].as_str() {
             return address.to_string();
         }
