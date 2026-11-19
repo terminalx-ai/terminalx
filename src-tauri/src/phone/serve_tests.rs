@@ -102,14 +102,21 @@ async fn served(
     let phone = WebSocketStream::from_raw_socket(phone_end, Role::Client, None).await;
     let (outbound, inbound) = mpsc::channel(OUTBOUND_QUEUE);
     let connection = Arc::new(rpc::MobileConnection::open(&host, &device(), outbound, wire::Transport::Direct, None).await.unwrap());
-    let (_signals_tx, signals) = mpsc::unbounded_channel();
+    let (signals_tx, signals) = mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
-        let _signals_tx = _signals_tx;
-        serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| async move {
-            if request["method"] == "slow" {
-                tokio::time::sleep(slow).await;
+        serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
+            let signals_tx = signals_tx.clone();
+            async move {
+                if request["method"] == "slow" {
+                    tokio::time::sleep(slow).await;
+                }
+                // As `pairing.forget` does: the connection is cancelled before its reply is sent.
+                if request["method"] == "forget" {
+                    signals_tx.send(ConnectionSignal::Cancel).unwrap();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                json!({ "id": request["id"], "ok": true, "result": {} })
             }
-            json!({ "id": request["id"], "ok": true, "result": {} })
         })
         .await
     });
@@ -200,6 +207,22 @@ async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
         "{error:#}"
     );
     drop(phone);
+}
+
+/// The forget acknowledgement reaches the phone although answering it
+/// cancelled the connection, and the request after it is not answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reply_goes_out_before_a_signal_that_came_while_it_was_answered() {
+    for _ in 0..20 {
+        let (mut phone, _sink, server, _home) = served(Duration::ZERO).await;
+        phone.request("forget", "forget").await;
+        phone.request("after", "status.get").await;
+        let reply = phone.read().await.expect("the acknowledgement");
+        assert_eq!(reply["id"], "forget");
+        assert!(phone.read().await.is_none(), "nothing after the cancellation");
+        let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::Cancelled);
+    }
 }
 
 #[test]

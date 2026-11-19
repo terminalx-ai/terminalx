@@ -391,6 +391,23 @@ where
     Ok((forget, respond(request).await))
 }
 
+/// End a connection on its host's signal: `None` when the host dropped the
+/// sender, which cancels it.
+async fn end_on_signal<S>(socket: &mut WebSocketStream<S>, session: &mut E2eeSession, connection: &rpc::MobileConnection, signal: Option<ConnectionSignal>) -> Ended
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let reason = if signal == Some(ConnectionSignal::Disconnect) {
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &disconnected_notification(), connection.wire())).await;
+        EndReason::DisconnectedOnMac
+    } else {
+        EndReason::Cancelled
+    };
+    connection.close();
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
+    Ended::by(reason)
+}
+
 /// The phone's requests and the host's replies and notifications, until the
 /// phone closes, the host signals, or the connection falls behind. `respond`
 /// answers one request at a time, in the order they came; while it runs the
@@ -418,24 +435,25 @@ where
     let mut waiting = std::collections::VecDeque::new();
     let mut answering = None;
     loop {
-        if answering.is_none() {
-            if let Some(request) = waiting.pop_front() {
-                answering = Some(Box::pin(answer(host, connection, &respond, request)));
+        if answering.is_none() && !waiting.is_empty() {
+            // A signal that came while the last request was answered ends the
+            // connection before the next one starts.
+            match signals.try_recv() {
+                Ok(signal) => return Ok(end_on_signal(socket, session, connection, Some(signal)).await),
+                Err(mpsc::error::TryRecvError::Disconnected) => return Ok(end_on_signal(socket, session, connection, None).await),
+                Err(mpsc::error::TryRecvError::Empty) => {}
             }
+            let request = waiting.pop_front().expect("not empty");
+            answering = Some(Box::pin(answer(host, connection, &respond, request)));
         }
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
             _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
-            signal = signals.recv() => {
-                let reason = if signal == Some(ConnectionSignal::Disconnect) {
-                    let _ = tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &disconnected_notification(), connection.wire())).await;
-                    EndReason::DisconnectedOnMac
-                } else {
-                    EndReason::Cancelled
-                };
-                connection.close();
-                let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
-                return Ok(Ended::by(reason));
+            // Not while a request is answered: its reply goes first, as an
+            // acknowledged `pairing.forget` must reach the phone although
+            // answering it cancels this connection.
+            signal = signals.recv(), if answering.is_none() => {
+                return Ok(end_on_signal(socket, session, connection, signal).await);
             }
             answered = async { answering.as_mut().expect("guarded").await }, if answering.is_some() => {
                 answering = None;
