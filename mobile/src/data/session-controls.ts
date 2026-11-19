@@ -90,9 +90,14 @@ function failed(action: ResumeAction, step: ResumeStep, cause: unknown, after = 
     if (isTransportError(cause)) return { done: false, failure: { action, step, code: "transport", text: `${lead}: the connection to your Mac failed. Reconnect, then try again.`, next: "reconnect", pending: false } };
     return { done: false, failure: { action, step, code: "client_error", text: `${lead}: something on this phone stopped the request. Try again.`, next: "retry", pending: false } };
   }
-  if (problem === "no-answer") {
-    // It reached the Mac and may still be running there: sending it again could resume twice.
+  if (problem === "no-answer" && (step === "send" || step === "open")) {
+    // The resume itself reached the Mac and may still be running there: sending it again could resume twice.
     return { done: false, failure: { action, step, code: problem, text: "Your Mac has not answered yet, so the resume may still be under way. It shows in the conversation when it starts; check there before trying again.", next: "wait", pending: true } };
+  }
+  if (problem === "no-answer") {
+    // A step before the resume (stop, model, prepare) got no answer: the resume itself was never asked for.
+    const what = step === "stop" ? "stopping the agent" : step === "model" ? "switching the model" : "preparing the handoff";
+    return { done: false, failure: { action, step, code: problem, text: `${lead}: your Mac didn't answer in time while ${what}, so the resume was not sent. Try again.`, next: "retry", pending: false } };
   }
   if (cause instanceof Error && ["Host is disconnected", "Relay connection unavailable"].includes(cause.message)) {
     // Never sent: the connection was not back in time.

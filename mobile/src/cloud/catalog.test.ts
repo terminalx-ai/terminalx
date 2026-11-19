@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, SUPPORTED_PROVIDERS } from "./api";
 import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle, type CloudLog } from "./catalog";
 import { keyItemName } from "./keys";
+import { resumeFailure, ResumeUnconfirmed } from "./resume";
 import { cloudSections, emptyOrganizationsLabel } from "./list";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
@@ -677,8 +678,27 @@ describe("a resume that fails or gets no answer (#1290)", () => {
     const h = harness({ log });
     await h.catalog.refresh();
     h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
-    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ reason: "timeout" });
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ reason: "timeout", listChecked: true });
     expect(log).toHaveBeenCalledWith("error", "Cloud workspace resume failed", "workspace ws-new · stage request · code timeout");
+  });
+
+  it("says a timed-out resume was not checked against the list when the list could not be read either", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    h.api.organizations.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "network"));
+    const error = await h.catalog.start("org-1", "ws-new").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ResumeUnconfirmed);
+    expect(error).toMatchObject({ code: "cloud_workspace_unavailable", reason: "timeout", listChecked: false });
+    expect(resumeFailure(error).text).toMatch(/list could not be read to check/);
+  });
+
+  it("leaves a refusal as the service's own error: nothing was asked of the list", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const refusal = new CloudApiError("cloud_workspace_forbidden", 403);
+    h.api.resume.mockRejectedValueOnce(refusal);
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toBe(refusal);
   });
 
   it("logs a refusal at once, without asking the list whether it is starting", async () => {

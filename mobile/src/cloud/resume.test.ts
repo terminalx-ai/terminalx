@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CloudApiError } from "./api";
-import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail, resumeRetryable } from "./resume";
+import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail, resumeRetryable, ResumeUnconfirmed } from "./resume";
 import { attentionDetail, connectionLine, openRefusalText } from "./words";
 
 /** Nothing the phone says about a failed resume is a bare "That did not work." or a raw code (#1290). */
@@ -11,9 +11,13 @@ const plain = (text: string) => {
 
 describe("what a failed resume request says (#1290)", () => {
   it("says a timeout, a network failure and an unreadable error answer apart, each with Try again", () => {
-    const timeout = resumeFailure(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    const timeout = resumeFailure(new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), true));
     expect(timeout).toMatchObject({ stage: "request", code: "timeout", retry: true });
-    expect(timeout.text).toMatch(/did not answer in time/);
+    expect(timeout.text).toMatch(/did not answer in time, and the list does not show the workspace starting/);
+    // The list was not read to check (that read failed, or nothing asked it): not said to be checked.
+    for (const unchecked of [new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), false), new CloudApiError("cloud_workspace_unavailable", null, "timeout")]) {
+      expect(resumeFailure(unchecked).text).toBe("The service did not answer in time, and the list could not be read to check whether the workspace is starting. If it stays stopped, try again.");
+    }
     const network = resumeFailure(new CloudApiError("cloud_workspace_unavailable", null, "network"));
     expect(network).toMatchObject({ stage: "request", code: "network", retry: true });
     expect(network.text).toMatch(/could not reach the service/);

@@ -146,6 +146,26 @@ describe("a resume on the Mac that fails (#1290)", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("says a step before the resume that got no answer as a failure, not as a resume under way", async () => {
+    const stop = api((method) => { if (method === "session.stop") throw new Error("RPC timed out: session.stop"); return ok({ status: "sent", queued: false }); });
+    const stopped = await retrySafely(stop.api, "s", "t");
+    expect(stopped).toEqual({ done: false, failure: {
+      action: "retry-safely", step: "stop", code: "no-answer", next: "retry", pending: false,
+      text: "Not resumed: your Mac didn't answer in time while stopping the agent, so the resume was not sent. Try again.",
+    } });
+    // The prompt was never asked for.
+    expect(stop.request.mock.calls.map(([method]) => method)).toEqual(["session.stop"]);
+    const model = api((method) => { if (method === "session.setModel") throw new Error("RPC timed out: session.setModel"); return ok(); });
+    expect(await retrySafely(model.api, "s", "t", "opus")).toMatchObject({ done: false, failure: { step: "model", pending: false, next: "retry", text: "The agent was stopped, but the resume was not finished: your Mac didn't answer in time while switching the model, so the resume was not sent. Try again." } });
+    expect(model.request.mock.calls.map(([method]) => method)).toEqual(["session.stop", "session.setModel"]);
+    const prepare = api(() => { throw new Error("RPC timed out: session.prepareContinuation"); });
+    expect(await continueInNewTab(prepare.api, "s", "t", { harness: "claude", model: "" }, "focused")).toMatchObject({ done: false, failure: { step: "prepare", pending: false, next: "retry", text: "Not resumed: your Mac didn't answer in time while preparing the handoff, so the resume was not sent. Try again." } });
+    expect(prepare.request.mock.calls.map(([method]) => method)).toEqual(["session.prepareContinuation"]);
+    // The resume itself unanswered is still under way, also for Retry safely's last step.
+    const send = api((method) => { if (method === "session.send") throw new Error("RPC timed out: session.send"); return ok(); });
+    expect(await retrySafely(send.api, "s", "t")).toMatchObject({ done: false, failure: { step: "send", pending: true, next: "wait" } });
+  });
+
   it("says a connection lost while the resume was on its way may or may not have arrived", async () => {
     const result = await resendLast(throwing(new RelayOuterError(4408)).api, "s", "t");
     expect(result).toMatchObject({ done: false, failure: { action: "resend", step: "send", code: "dropped", next: "reconnect", pending: false } });

@@ -1,6 +1,6 @@
 import { CloudApiError, SUPPORTED_PROVIDERS, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
 import { CloudPeople } from "./people";
-import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail } from "./resume";
+import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail, ResumeUnconfirmed } from "./resume";
 import { keyItemName, type SecretStorage } from "./keys";
 import type { CloudLinkOptions } from "./link";
 import type { BlobStorage } from "./transcripts";
@@ -308,7 +308,8 @@ export class CloudCatalog {
     } catch (error) {
       if (this.closed) throw error;
       // No answer, or one that says something already runs: the list says whether it is starting (#1290).
-      if (mayBeUnderWay(error) && await this.fresh(orgId).catch(() => false) && listedAsStarting(this.item(orgId, workspaceId))) {
+      const checked = mayBeUnderWay(error) ? await this.fresh(orgId).catch(() => false) : null;
+      if (checked && listedAsStarting(this.item(orgId, workspaceId))) {
         this.options.log?.("warning", "Cloud workspace resume not confirmed, but under way", resumeLogDetail(resumeFailure(error), workspaceId));
         const operation = this.item(orgId, workspaceId)?.latestOperation;
         if (operation?.action === "resume" && operation.state !== "succeeded") this.resumes.set(sessionKey(orgId, workspaceId), operation.id);
@@ -319,6 +320,8 @@ export class CloudCatalog {
       this.options.log?.("error", "Cloud workspace resume failed", resumeLogDetail(resumeFailure(error), workspaceId));
       // What the workspace is doing now is shown, whatever asking said.
       void this.refresh();
+      // Said with whether the list was read to check (#1290): a timeout is not said to be checked when it was not.
+      if (checked !== null && error instanceof CloudApiError) throw new ResumeUnconfirmed(error, checked);
       throw error;
     }
     if (this.closed) return "started";

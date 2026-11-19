@@ -6,6 +6,7 @@ import CloudScreen from "../app/(tabs)/cloud";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
 import CloudSharesScreen from "../app/cloud/shares";
 import { CloudApiError } from "./cloud/api";
+import { ResumeUnconfirmed } from "./cloud/resume";
 
 const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
@@ -480,7 +481,8 @@ describe("a cloud workspace screen", () => {
   it("says each way a resume fails in plain words, with Try again where asking again can help (#1290)", async () => {
     const failures: [unknown, string, boolean][] = [
       [new CloudApiError("cloud_workspace_unavailable", null, "network"), "This phone could not reach the service. Check its connection, then try again.", true],
-      [new CloudApiError("cloud_workspace_unavailable", null, "timeout"), "The service did not answer in time, and the list does not show the workspace starting. Try again.", true],
+      [new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), true), "The service did not answer in time, and the list does not show the workspace starting. Try again.", true],
+      [new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), false), "The service did not answer in time, and the list could not be read to check whether the workspace is starting. If it stays stopped, try again.", true],
       [new CloudApiError("cloud_workspace_unavailable", 502, "unreadable"), "The service had a problem and did not start the workspace. Try again in a moment.", true],
       [new CloudApiError("cloud_workspace_invalid_response", 200), "The service answered in a way this version of the app cannot read. The workspace may be starting anyway; update the app to follow it here.", false],
       [new CloudApiError("cloud_brand_new_code", 409), "The service would not start this workspace. Try again; if it keeps failing, open it on the desktop to see why.", true],

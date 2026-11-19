@@ -41,6 +41,18 @@ const RESUME_TEXT: Record<string, { text: string; retry: boolean }> = {
   cloud_workspace_policy_denied: { text: "Your organization's compute policy does not allow starting this workspace. An owner or admin can check its limits on the desktop.", retry: false },
 };
 
+/**
+ * A resume that may have been under way (no answer, the service failed, or it
+ * said another action runs), with whether the list was read again to check:
+ * `listChecked` false when that read failed too, so nothing is said about it.
+ */
+export class ResumeUnconfirmed extends CloudApiError {
+  constructor(from: CloudApiError, readonly listChecked: boolean) {
+    super(from.code, from.status, from.reason);
+    this.name = "ResumeUnconfirmed";
+  }
+}
+
 /** Why asking to resume failed, from what `CloudCatalog.start` threw. */
 export function resumeFailure(error: unknown): ResumeFailure {
   if (!(error instanceof CloudApiError)) {
@@ -52,7 +64,11 @@ export function resumeFailure(error: unknown): ResumeFailure {
     return { stage: "answer", code, status, text: "The service answered in a way this version of the app cannot read. The workspace may be starting anyway; update the app to follow it here.", retry: false };
   }
   if (reason === "timeout") {
-    return { stage: "request", code: "timeout", status, text: "The service did not answer in time, and the list does not show the workspace starting. Try again.", retry: true };
+    // Only said to be checked when the list was read again after the timeout (`CloudCatalog.start`).
+    const checked = error instanceof ResumeUnconfirmed && error.listChecked;
+    return { stage: "request", code: "timeout", status, text: checked
+      ? "The service did not answer in time, and the list does not show the workspace starting. Try again."
+      : "The service did not answer in time, and the list could not be read to check whether the workspace is starting. If it stays stopped, try again.", retry: true };
   }
   if (reason === "network") {
     return { stage: "request", code: "network", status, text: "This phone could not reach the service. Check its connection, then try again.", retry: true };
