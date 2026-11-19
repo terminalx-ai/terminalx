@@ -614,6 +614,102 @@ it.each([true, false])("shows a linked machine PR without offering a desktop unl
   expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_unlink")).toBe(false);
 });
 
+it("links a legacy PR by an explicitly entered URL and ignores a pre-upgrade withdrawn cache entry", async () => {
+  const workspaceKey = "machine:mini:project";
+  const sessionId = `${workspaceKey}:author`;
+  const legacy = { ...followup, head: "feature", isDraft: true, url: `https://github.enterprise.test/acme/widgets/pull/${followup.number}` };
+  const withdrawn = { ...legacy, number: 99, title: "Withdrawn PR", url: "https://github.enterprise.test/acme/widgets/pull/99" };
+  const runtimeRow = (pr: PullRequest) => ({ url: pr.url, number: pr.number, head: pr.head, repo: "feature-tree" });
+  mocks.invoke.mockImplementation(async (command: string) => {
+    if (command === "pr_associations") return [legacy, withdrawn].map((pr) => ({
+      ...runtimeRow(pr), scope: { kind: "cloud", workspace: workspaceKey, repo: "feature-tree" },
+    }));
+    throw Error(command);
+  });
+  let saved = false;
+  let pr = legacy;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(legacy.head, 3);
+    if (method === "git.prAssociations") return {
+      associations: saved ? [{ ...runtimeRow(legacy), linked: true }] : [],
+      branchPrLinks: true,
+    };
+    if (method === "git.prs") return { prs: [pr, withdrawn] };
+    if (method === "git.prConversation") return { ...pr, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async (method: string) => {
+    if (method === "git.prLinkBranch") { saved = true; return { sessionAssociated: true }; }
+    if (method === "git.prReady") { pr = { ...pr, isDraft: false }; return {}; }
+    if (method === "git.prUnlink") { saved = false; return {}; }
+    throw Error(method);
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "feature-tree"), canWrite: true, author: async () => null, sessionCheckout: true });
+  const panel = <PrPanel source={source} sessionId={sessionId} branch={legacy.head} active busy={false} inline />;
+  const view = render(panel);
+  fireEvent.click(await screen.findByRole("button", { name: "Link existing branch PR" }));
+  const input = screen.getByRole<HTMLInputElement>("textbox", { name: "Pull request URL" });
+  expect(input.value).toBe("");
+  expect(screen.queryByText(withdrawn.title)).toBeNull();
+  expect(screen.queryByRole("button", { name: "Mark ready" })).toBeNull();
+  expect(mutate).not.toHaveBeenCalled();
+  fireEvent.change(input, { target: { value: legacy.url } });
+  fireEvent.click(screen.getByRole("button", { name: "Link pull request" }));
+  expect(await screen.findByRole("button", { name: "Mark ready" })).toBeTruthy();
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prLinkBranch", {
+    sessionId: "author", repo: "feature-tree", url: legacy.url, branch: legacy.head,
+  });
+  view.unmount();
+  render(panel);
+  fireEvent.click(await screen.findByRole("button", { name: "Mark ready" }));
+  await waitFor(() => expect(mutate).toHaveBeenLastCalledWith("git.prReady", {
+    repo: "feature-tree", number: legacy.number, url: legacy.url,
+  }));
+  const unlink = await screen.findByRole("button", { name: `Unlink #${legacy.number}` });
+  await waitFor(() => expect((unlink as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(unlink);
+  expect(await screen.findByRole("button", { name: "Link existing branch PR" })).toBeTruthy();
+  expect(mutate).toHaveBeenLastCalledWith("git.prUnlink", {
+    sessionId: "author", repo: "feature-tree", url: legacy.url,
+  });
+  expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_associations")).toBe(false);
+});
+
+it("links an existing machine branch PR while retained history is unavailable", async () => {
+  const workspaceKey = "machine:mini:project";
+  const branchPr = { ...followup, head: "feature", url: `https://github.com/acme/widgets/pull/${followup.number}` };
+  const history = { number: 97, url: "https://github.com/acme/old/pull/97", head: "previous", repo: null, linked: false };
+  let linked = false;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(branchPr.head, 3);
+    if (method === "git.prs") return { prs: [branchPr] };
+    if (method === "git.prAssociations") return {
+      associations: linked ? [history, { ...branchPr, repo: "app", linked: true }] : [history],
+      branchPrLinks: true,
+    };
+    if (method === "git.prConversation") return { ...branchPr, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async () => {
+    linked = true;
+    return { sessionAssociated: true };
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null, sessionCheckout: true });
+  render(<PrPanel source={source} sessionId={`${workspaceKey}:author`} branch={branchPr.head} active busy={false} inline />);
+
+  expect(await screen.findByText("Could not refresh this pull request.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Unlink #97" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Link existing branch PR" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Pull request URL" }), { target: { value: branchPr.url } });
+  fireEvent.click(screen.getByRole("button", { name: "Link pull request" }));
+
+  expect(await screen.findByText(branchPr.title)).toBeTruthy();
+  expect(screen.getByText("Could not refresh this pull request.")).toBeTruthy();
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prLinkBranch", {
+    sessionId: "author", repo: "app", url: branchPr.url, branch: branchPr.head,
+  });
+});
+
 it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-created %s merge", async () => {
   const sessionId = "cloud:org:workspace:author";
   let saved: unknown[] = [];

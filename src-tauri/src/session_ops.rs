@@ -1040,7 +1040,7 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
     let cwd = Path::new(&session.cwd);
     let project = Path::new(&session.project_path);
     if !cwd.exists() && !session.worktree_removed {
-        if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| cwd.starts_with(root)) {
+        if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| identity_path(cwd).starts_with(identity_path(root))) {
             return std::fs::canonicalize(&root).unwrap_or(root);
         }
         // Older entries did not record the root. Their worktree name is the
@@ -1107,7 +1107,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
         if cwd.exists() {
             let top = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
                 .map(|top| identity_path(Path::new(top.trim())));
-            let recorded = session.checkout_root().filter(|root| cwd.starts_with(root)).map(|root| identity_path(Path::new(root)));
+            let recorded = session.checkout_root().map(|root| identity_path(Path::new(root))).filter(|root| normalized.starts_with(root));
             // A failed removal can leave the exact recorded checkout behind
             // after Git has removed its .git file. A retry of that exact path
             // remains possible when the project is still a readable repo.
@@ -1125,7 +1125,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
         }
         let records = git::list_worktrees(Path::new(&session.project_path))
             .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?;
-        if session.checkout_root().is_some_and(|root| cwd.starts_with(root)) {
+        if session.checkout_root().is_some_and(|root| normalized.starts_with(identity_path(Path::new(root)))) {
             continue;
         }
         let root = session_checkout_root(session);
