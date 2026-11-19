@@ -22,8 +22,7 @@ import { AccountRadioItems } from "./SessionAgentControls";
 
 /**
  * Agent, model, effort and permissions behind one quiet button: `Opus 5.5
- * High · Ask every time`. The menu holds the agent and the efforts inline, the
- * models and permissions one level in. The mode is always on the button, so
+ * High · Ask every time`. The menu holds agent, model, effort and permissions in submenus. The mode is always on the button, so
  * what the agent may do unasked is never a menu away (PRO-162); Bypass is
  * marked as a warning and Plan in the composer's plan colour.
  *
@@ -86,19 +85,20 @@ export function AgentMenu({ selection, disabled = false, split = false, onSetup 
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[15rem]">
-        <DropdownMenuLabel>Agent</DropdownMenuLabel>
-        {harnesses.map((h) => {
-          const state = readiness?.[h.id]?.state;
-          const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
-          const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
-          // Only a definite answer offers setup: "checking…" stays off until the check says.
-          const setup = unavailable && !!onSetup && (state === "missing" || state === "signed_out");
-          return <DropdownMenuItem key={h.id} disabled={unavailable && !setup} onSelect={() => setup ? onSetup(h.id) : selectHarness(h.id)}>
-            <AgentMark id={h.id} decorative brand />
-            <span>{h.name}</span>
-            {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
-          </DropdownMenuItem>
-        })}
+        <ChoiceRow label="Agent" value={harness?.name ?? "Choose an agent"} testId="agent-menu-agent" className="min-w-[14rem]">
+          {harnesses.map((h) => {
+            const state = readiness?.[h.id]?.state;
+            const unavailable = here && (!h.available || (readiness !== undefined && (!state || state === "missing" || state === "signed_out")));
+            const hint = !h.available || state === "missing" ? "not installed" : state === "signed_out" ? "sign in required" : "checking…";
+            // Only a definite answer offers setup: "checking…" stays off until the check says.
+            const setup = unavailable && !!onSetup && (state === "missing" || state === "signed_out");
+            return <DropdownMenuItem key={h.id} disabled={unavailable && !setup} onSelect={() => setup ? onSetup(h.id) : selectHarness(h.id)}>
+              <AgentMark id={h.id} decorative brand />
+              <span>{h.name}</span>
+              {h.id === harness?.id ? <span className="ml-auto pl-3 text-[11px] text-faint">current</span> : unavailable ? <span className="ml-auto pl-3 text-[11px] text-faint">{hint}</span> : null}
+            </DropdownMenuItem>
+          })}
+        </ChoiceRow>
 
         {/* Only an agent with more than one account offers the choice (#980). */}
         {harness && accounts && account && (
@@ -147,9 +147,7 @@ export function AgentMenu({ selection, disabled = false, split = false, onSetup 
         )}
 
         {harness && model && model.efforts.length > 0 && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Effort</DropdownMenuLabel>
+          <ChoiceRow label="Effort" value={effortText ?? "Default"} testId="agent-menu-effort" className="min-w-[12rem]">
             <DropdownMenuRadioGroup value={effort ?? ""} onValueChange={selectEffort}>
               {allowDefaultEffort && <DropdownMenuRadioItem value="">Default</DropdownMenuRadioItem>}
               {model.efforts.map((e) => (
@@ -158,7 +156,7 @@ export function AgentMenu({ selection, disabled = false, split = false, onSetup 
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>
-          </>
+          </ChoiceRow>
         )}
 
         {!split && (
@@ -198,5 +196,18 @@ export function AgentMenu({ selection, disabled = false, split = false, onSetup 
       </DropdownMenu>
     )}
     </>
+  );
+}
+
+/** The Agent and Effort rows: what is chosen, and its choices in a submenu beside the row. */
+function ChoiceRow({ label, value, testId, className, children }: { label: string; value: string; testId: string; className?: string; children: React.ReactNode }) {
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger data-testid={testId}>
+        <span className="flex-1">{label}</span>
+        <span className="ml-auto max-w-[10rem] truncate pl-3 text-[12px] text-faint">{value}</span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className={className}>{children}</DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }
