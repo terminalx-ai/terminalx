@@ -42,6 +42,11 @@ pub fn identity(raw: &str) -> Result<String> {
 }
 
 type Associations = BTreeMap<String, BTreeMap<String, Association>>;
+type Withdrawals = BTreeMap<String, BTreeSet<String>>;
+
+fn withdrawals_path(path: &Path) -> std::path::PathBuf {
+    path.with_file_name("session-pr-withdrawals.json")
+}
 
 fn transaction<T>(path: &Path, change: impl FnOnce() -> Result<T>) -> Result<T> {
     // The desktop and local runtime share this cache. Protect the registry and
@@ -89,6 +94,28 @@ fn merge(all: &mut Associations, session: &str, additions: Vec<Association>) -> 
 pub fn record_local(session: &str, cwd: &Path, url: &str, head: &str) -> Result<()> {
     update(&registry()?, session, vec![local_association(cwd, url, head)?])?;
     Ok(())
+}
+
+/// Older desktops use Create to attach a PR they find already open. Preserve
+/// that convenience as a removable link and respect any recorded withdrawal.
+pub fn reconcile_existing(session: &str, cwd: &Path, url: &str, head: &str) -> Result<bool> {
+    let mut entry = local_association(cwd, url, head)?;
+    entry.linked = true;
+    let path = registry()?;
+    transaction(&path, || {
+        let mut all: Associations = crate::store::read_json(&path)?.unwrap_or_default();
+        if all.get(session).is_some_and(|rows| rows.contains_key(&entry.url)) {
+            return Ok(true);
+        }
+        let withdrawals: Withdrawals = crate::store::read_json(&withdrawals_path(&path))?.unwrap_or_default();
+        if withdrawals.get(session).is_some_and(|urls| urls.contains(&entry.url)) {
+            return Ok(false);
+        }
+        if merge(&mut all, session, vec![entry])? {
+            crate::store::write_json(&path, &all)?;
+        }
+        Ok(true)
+    })
 }
 
 fn local_association(cwd: &Path, url: &str, head: &str) -> Result<Association> {
@@ -378,6 +405,13 @@ fn unlink_in(path: &Path, session: &str, url: &str) -> Result<Vec<Association>> 
             None => {}
             Some(entry) if !entry.linked => bail!("This session opened #{}; only a linked pull request can be unlinked", entry.number),
             Some(_) => {
+                // The registry lock also guards reconciliation. Persist the
+                // withdrawal first so a crash cannot leave an unmarked removal.
+                let withdrawals = withdrawals_path(path);
+                let mut withdrawn: Withdrawals = crate::store::read_json(&withdrawals)?.unwrap_or_default();
+                if withdrawn.entry(session.into()).or_default().insert(url.clone()) {
+                    crate::store::write_json(&withdrawals, &withdrawn)?;
+                }
                 entries.remove(&url);
                 if entries.is_empty() { all.remove(session); }
                 crate::store::write_json(path, &all)?;

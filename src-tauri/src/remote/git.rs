@@ -1469,7 +1469,7 @@ impl WorkspaceGit {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        let mut response = self.locate_pr_associations(associations);
+        let mut response = self.locate_pr_associations(&session, associations);
         if self.project {
             response["branchPrLinks"] = json!(true);
         }
@@ -1480,6 +1480,20 @@ impl WorkspaceGit {
         cwd == root || (cwd.starts_with(root)
             && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
                 .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_deref() == Some(root))
+    }
+
+    /// A prior branch may have contained the directory the link saved.
+    /// Walk back only through missing paths and verify the surviving directory.
+    fn existing_link_directory(cwd: &Path) -> Option<(PathBuf, bool)> {
+        for ancestor in cwd.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(path) if path.is_dir() => return Some((path, ancestor != cwd)),
+                Ok(_) => {}
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
+                Err(_) => return None,
+            }
+        }
+        None
     }
 
     fn pr_link_branch(&self, params: &Value) -> Result<Value, RpcError> {
@@ -1526,7 +1540,7 @@ impl WorkspaceGit {
         Ok(json!({}))
     }
 
-    fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {
+    fn locate_pr_associations(&self, session: &crate::store::index::SessionEntry, associations: Vec<crate::pr_associations::Association>) -> Value {
         let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
             self.project_repositories().into_iter().filter_map(|name| {
                 let root = self.dir(&name).canonicalize().ok()?;
@@ -1548,10 +1562,19 @@ impl WorkspaceGit {
                 // A machine link is verified in its saved checkout, which can
                 // have its own gh routing even when another shares its origin.
                 crate::pr_associations::Scope::Local { cwd } if self.project && association.linked => {
-                    Path::new(cwd).canonicalize().ok().and_then(|path| {
+                    Self::existing_link_directory(Path::new(cwd)).and_then(|(path, missing)| {
                         let (name, root) = linked_checkouts.iter()
                             .filter(|(_, root)| path.starts_with(root))
                             .max_by_key(|(_, root)| root.components().count())?;
+                        // Never climb out of a removed worktree and use the
+                        // project checkout's GitHub configuration.
+                        if missing && (session.worktree_removed || match session.checkout_root() {
+                                Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
+                                None => name == "." && (session.worktree_name.is_some() || cwd != &session.cwd),
+                            })
+                        {
+                            return None;
+                        }
                         (self.verified_machine_repo(name) && Self::checkout_contains(root, &path)).then_some(name)
                     })
                 }
@@ -1658,6 +1681,11 @@ impl WorkspaceGit {
                     let url = crate::pr_associations::identity(&pr.url).map_err(RpcError::internal)?;
                     crate::pr_associations::for_session(&session.id, vec![]).map_err(RpcError::internal)?
                         .iter().any(|row| row.url == url)
+                } else if existing || reconciled {
+                    // An open PR discovered after a failed create is also
+                    // ambiguous. Preserve withdrawals and keep new links removable.
+                    crate::pr_associations::reconcile_existing(&session.id, &repo.dir, &pr.url, &pr.head)
+                        .map_err(RpcError::internal)?
                 } else {
                     crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
                         .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;

@@ -800,6 +800,7 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
         assert_eq!(f.call("git.prLinkBranch", link(url)).unwrap()["sessionAssociated"], true);
     }
     git(&checkout, &["checkout", "-qb", "next"]);
+    std::fs::remove_dir(legacy_cwd).unwrap();
     let rows = read();
     assert_eq!(rows["branchPrLinks"], true);
     assert_eq!(rows["associations"], json!([
@@ -840,11 +841,25 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
     assert_eq!(existing["sessionAssociated"], false);
     assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
 
+    let existing = f.call("git.prCreate", legacy_create.clone()).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let new_link = "https://github.com/acme/widgets/pull/5";
+    save_pr(5, new_link, "OPEN", false);
     let existing = f.call("git.prCreate", legacy_create).unwrap();
     assert_eq!(existing["existing"], true);
     assert_eq!(existing["sessionAssociated"], true);
     assert_eq!(read()["associations"].as_array().unwrap().len(), 2);
-    assert_eq!(read()["associations"][0]["url"], public_url);
+    assert_eq!(read()["associations"][0]["url"], new_link);
+    assert_eq!(read()["associations"][0]["linked"], true);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": new_link})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    git(&checkout, &["checkout", "feature"]);
+    assert_eq!(f.call("git.prLinkBranch", link(public_url)).unwrap()["sessionAssociated"], true);
+    git(&root, &["worktree", "remove", "feature-tree"]);
+    assert!(read()["associations"][0]["repo"].is_null());
     assert!(!f.gh_calls().contains(r#"["pr", "create","#));
 }
 
