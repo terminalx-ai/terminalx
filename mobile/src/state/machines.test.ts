@@ -1,6 +1,6 @@
 import type { ConnectionState } from "./connection-view";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, HEADLESS_PHONE_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
 import type { AccountHost } from "../pairing/account-client";
 import type { StoredHost } from "../store/hosts";
 import { ago, isGenericName, kindName, machineList, OFFLINE_REASON, UNREACHABLE_REASON, type MachineInput } from "./machines";
@@ -87,6 +87,15 @@ describe("machine states", () => {
       ["Studio MacBook", "laptop", "Last connected 1 day ago"],
       ["Office iMac", "desktop", "Last connected 1 day ago"],
     ]);
+  });
+
+  it("shows a discovered headless Mac as a server before and after QR pairing", () => {
+    const server = account(21, { displayName: "Build Mac", capabilities: [HEADLESS_PHONE_PAIRING_CAPABILITY] });
+    const available = machineList(input({ accountHosts: [server] })).available;
+    expect(available).toMatchObject([{ id: server.hostId, icon: "server", terminalPairing: true, pairBlocked: null }]);
+    const list = machineList(input({ hosts: [stored(server.hostId, { publicKeyB64: server.hostPublicKeyB64 })], accountHosts: [server] }));
+    expect(list.available).toEqual([]);
+    expect(list.paired).toMatchObject([{ id: server.hostId, icon: "server", account: server }]);
   });
 
   it("uses names typed on this phone, keeps hidden machines apart, and tells twins apart", () => {

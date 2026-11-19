@@ -16,6 +16,18 @@ it("reports unsupported header totals on an older runtime without falling back t
   expect(call.mock.calls).toEqual([["git.branchDiffSize", { repo: "topic", base: "release/2.x" }]]);
 });
 
+it("sends the selected branch and the machine session together when creating a PR", async () => {
+  const mutate = vi.fn().mockResolvedValue({ sessionAssociated: true });
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+  const request = { title: "Topic", body: "", base: "release/2.x", draft: false, branch: "topic" };
+
+  await expect(source.createPr({ ...request, sessionId: "machine:m1:p2:s1" })).rejects.toThrow("different workspace");
+  expect(mutate).not.toHaveBeenCalled();
+  await expect(source.createPr({ ...request, sessionId: "machine:m1:p1:s1" })).resolves.toBeNull();
+  expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic" });
+});
+
 describe("the runtime session a session key names in a workspace", () => {
   it("reads a machine session in its own project (PRO-347)", () => {
     expect(runtimeSessionIn("machine:m1:p1", "machine:m1:p1:s1")).toBe("s1");

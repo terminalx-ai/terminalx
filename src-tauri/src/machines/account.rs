@@ -367,6 +367,14 @@ impl AccountPairing {
         let paired: HashSet<String> = self.machines.store().and_then(|store| store.list()).map_err(|error| format!("{error:#}"))?.into_iter().map(|machine| machine.machine_id).collect();
         let machines = hosts
             .iter()
+            // The desktop account picker requests workspace grants; a
+            // standalone server pairs computers from its terminal.
+            .filter(|host| {
+                advertises_operating(host)
+                    || !host.capabilities.iter().any(|capability| {
+                        capability == crate::machine_account::directory::PHONE_PAIRING_CAPABILITY
+                    })
+            })
             .filter_map(|host| match account_machine(host, &this_mac, &paired) {
                 Ok(machine) => Some(machine),
                 Err(error) => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ChevronDown, GitBranch, Loader2 } from "@/icons";
+import { ChevronDown, GitBranch, Loader2, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -10,11 +10,13 @@ import { isMac } from "@/lib/shortcuts";
 import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { BRANCH_ACTIONS, BRANCH_STATES, type BranchAction } from "@/lib/branchStep";
 import { currentMergeMethod, noteMerge, type MergeMethod } from "@/lib/mergeMethods";
+import { openWorkspaceDelete } from "@/lib/dialogs";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { SessionBackend } from "@/lib/sessionBackend";
 import { agentPrompt, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, machineBranchBase, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
 import type { SessionEntry } from "@/types/session";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 
 /** How often the machine's `git.status` is read while the window shows; file changes on the machine read it sooner. */
 export const MACHINE_STATUS_EVERY_MS = 15_000;
@@ -226,7 +228,7 @@ interface Pending { action: BranchAction; expected: MachineBranchSnapshot; sourc
  * actions run on the machine through its `git/1` with the machine's Git
  * sign-in. Commits carry this computer's Git identity, as in Changes.
  */
-export function MachineBranchButton({ branch }: { branch: MachineBranch }) {
+export function MachineBranchButton({ branch, workspace }: { branch: MachineBranch; workspace?: RemovableWorkspace }) {
   const { session, backend, gitSource: source, machineName, tabId } = branch.input;
   const { snapshot, error: readError, refreshing, refresh, working, agent: agentRun, agentDone } = branch;
   const [running, setRunning] = useState<string | null>(null);
@@ -371,7 +373,9 @@ export function MachineBranchButton({ branch }: { branch: MachineBranch }) {
   useShortcut("git.merge", shortcuts.merge);
 
   const failure = error ?? readError;
-  if ((!snapshot || snapshot.state === "merged") && !failure && !running && !pending) return null;
+  const hasGitFeedback = !!(failure || running || pending);
+  const showGitStep = !!snapshot && (snapshot.state !== "merged" || hasGitFeedback);
+  if (!showGitStep && !workspace && !hasGitFeedback) return null;
   const where = `Runs on ${machineName} with its Git sign-in.`;
   const tooltip = snapshot
     ? `${state?.detail}. Base: ${snapshot.base}. ${where}${snapshot.state === "behind" ? (snapshot.pullNeedsAgent ? (snapshot.behindUpstream ? " The agent preserves uncommitted work while pulling." : " The agent merges the latest base into this branch.") : " Pull fast-forwards from the upstream branch.") : ""}${canWrite ? "" : " You may only read this machine's Git."}`
@@ -379,24 +383,29 @@ export function MachineBranchButton({ branch }: { branch: MachineBranch }) {
   const needsMessage = pending?.action === "commitPush" || pending?.action === "createPr";
   return (
     <div className="flex min-w-0 items-center gap-2" data-testid="machine-branch-button">
-      {snapshot && <div className="flex shrink-0 items-center">
-        <WithTooltip label={tooltip} shortcut={state?.action ? BRANCH_ACTIONS[state.action].shortcut : undefined}>
+      {(showGitStep || workspace) && <div className="flex shrink-0 items-center">
+        {showGitStep && <WithTooltip label={tooltip} shortcut={state?.action ? BRANCH_ACTIONS[state.action].shortcut : undefined}>
           <Button variant="outline" size="sm" className="max-w-44 rounded-r-none border-r-0" aria-label={running ?? (state?.label || "Git actions")} disabled={!state?.action || !enabled(state.action) || !!pending} onClick={() => state?.action && void prepare(state.action)}>
             {running || refreshing || working ? <Loader2 className="size-3.5 animate-spin" /> : <GitBranch className="size-3.5" />}
             <span className="truncate @max-[520px]/session-header:hidden">{running ?? (state?.label || "Git actions")}</span>
           </Button>
-        </WithTooltip>
+        </WithTooltip>}
         <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="rounded-l-none px-1.5" aria-label="Git actions"><ChevronDown className="size-3" /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className={showGitStep ? "rounded-l-none px-1.5" : undefined} aria-label="Git actions">{!showGitStep && <GitBranch className="size-3.5" />}<ChevronDown className="size-3" /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {(Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
+            {showGitStep && (Object.entries(BRANCH_ACTIONS) as [BranchAction, typeof BRANCH_ACTIONS[BranchAction]][]).map(([action, definition]) => (
               <DropdownMenuItem key={action} disabled={!enabled(action) || !!pending} onSelect={() => void prepare(action)}>
                 {action === "resolveConflicts" && snapshot.state === "diverged" ? BRANCH_STATES.diverged.label : definition.label}{definition.shortcut && <span className="ml-auto pl-4 text-xs text-muted-foreground">{keycaps(definition.shortcut).join("")}</span>}
               </DropdownMenuItem>
             ))}
-            <DropdownMenuSeparator />
-            {snapshot.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(errorText(source, reason)))}>Open pull request</DropdownMenuItem>}
-            <DropdownMenuItem disabled={refreshing} onSelect={() => void refresh(true)}>Refresh Git status</DropdownMenuItem>
+            {showGitStep && <DropdownMenuSeparator />}
+            {snapshot?.pr && <DropdownMenuItem onSelect={() => void openUrl(snapshot.pr!.url).catch((reason) => setError(errorText(source, reason)))}>Open pull request</DropdownMenuItem>}
+            {source && <DropdownMenuItem disabled={refreshing} onSelect={() => void refresh(true)}>Refresh Git status</DropdownMenuItem>}
+            {workspace && (
+              <DropdownMenuItem destructive onSelect={() => openWorkspaceDelete(workspace.projectPath, workspace.path, workspace.name, workspace.host)}>
+                <Trash2 /> Delete workspace…
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>}

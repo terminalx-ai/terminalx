@@ -225,6 +225,29 @@ async fn a_sessions_worktree_is_read_and_removed_by_its_session_and_the_main_dir
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workspace_rpc_refuses_removal_when_the_repository_requires_an_archive_script() {
+    let f = fixture();
+    let manager = peer(&f.rpc, Authority::Manage, &["workspace/1"]).await;
+    let session = session(&f, "done", Some("done-one"));
+    let checked = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": session.id, "fetch": true })).await.unwrap();
+    assert_eq!(checked["disposition"]["landed"]["safe"], true, "{checked}");
+
+    let project = crate::store::projects::add(f.root.to_str().unwrap()).unwrap();
+    let scripts = crate::store::projects::RepositoryScripts { archive: "exit 0".into(), ..Default::default() };
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(scripts), ..Default::default() }).unwrap();
+
+    for (method, params) in [
+        ("workspace.disposition", json!({ "sessionId": session.id })),
+        ("workspace.remove", json!({ "clientRequestId": "request-0001", "sessionId": session.id, "expectedSessions": [session.id] })),
+    ] {
+        let response = f.rpc.handle(&manager, &json!({ "id": "archive-script", "method": method, "params": params })).await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(response["error"]["message"].as_str().unwrap().contains("archive script"), "{response}");
+    }
+    assert!(Path::new(&session.cwd).exists() && crate::store::index::get(&session.id).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_removal_tells_its_caller_how_far_it_is_and_nobody_else() {
     let f = fixture();
     let (manager, mut heard) = Peer::new("device-a".into(), Authority::Manage);

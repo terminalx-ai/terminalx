@@ -1148,9 +1148,8 @@ because the "On your account" tab of Add a machine (screen 21.03) needs it.
   `machines_account_request { hostId }`, `machines_account_cancel`,
   `machines_account_finish { grantRequestId, paired }`; shapes in
   `src/types/machines.ts`.
-- **A headless server** has no host binding, so it is not listed on the
-  account; it pairs from its terminal (PRO-353). Relay registration does not
-  create that binding.
+- **A headless server** pairs computers from its terminal (PRO-353). Its
+  account listing advertises terminal QR pairing for phones (PRO-359).
 - **Remove** (`machines_remove { machineId }`) stops the machine's connection
   and deletes its record, its device token and its relay credential. Nothing on
   the machine changes: its sessions keep running, and it lists this computer
@@ -1419,9 +1418,9 @@ Retaining registration cancellation through window forwarding remains open in
 [#1239](https://github.com/terminalx-ai/terminalx/issues/1239) (the #1236 review).
 
 **Capability.** The window's host binding advertises `machine-operating.v1`
-only while the switch is on (PRO-349, `PairingManager::host_capabilities`). A
-headless machine has no host binding yet: it is reachable by its paired
-computers, and is not listed in the account directory.
+only while the switch is on (PRO-349, `PairingManager::host_capabilities`).
+A standalone runtime advertises `headless-phone-pairing.v1` for the account
+directory (PRO-359).
 
 **Not yet.** A pairing code still carries no `relay`, so a computer pairs with
 a machine over a direct route first and gets its relay credential from
@@ -1994,8 +1993,10 @@ direct port now answers phones too, with nothing new on the phone's wire.
   records and the same RPC. The RPC moved from the desktop-only `pairing` module
   into the shared `phone` module, so both builds compile it. When a window
   registers a phone route, the runtime closes the phones it serves; they
-  reconnect and reach the window. With the switch off, the window owns the port
-  and serves phones as before (decision 9 holds).
+  reconnect and reach the window. An approved phone keeps the Mac reachable
+  when its window closes, even with computer operation off. A first pairing
+  can finish on the window's routes before the runtime takes over. The window
+  hands over its host key and, if signed in, saves the session for Relay.
 - **Writes.** A phone served by the runtime writes through the runtime's own
   owner operations (`local_runtime::mobile::execute`) under a lease the runtime
   holds for its phones (`Lifetime::hold`), as a window holds one for its own. It
@@ -2008,7 +2009,12 @@ direct port now answers phones too, with nothing new on the phone's wire.
   next request. Each tick, the runtime also closes such phones and ends their
   grants, and it fences by the account mirror's binding generation, as the
   window does. It reads that generation once a tick, not on every message, and
-  judges no phone while `account.json` cannot be read.
+  judges no phone while `account.json` cannot be read. With the window detached,
+  the runtime checks account-pairing revocations directly with the account
+  service, including when Relay is unavailable. It removes affected devices
+  and ends their grants before acknowledging revocation. Account-paired phones
+  need a recent successful check. Explicit pairings can still use the LAN when
+  the account service is unavailable.
 - **Notices stay in their process.** The runtime's phone host publishes its
   `mobile_notification` events on a sink that keeps them in the runtime
   (`phone/sink.rs`). Every runtime event also streams to the window, so the
@@ -2032,9 +2038,11 @@ direct port now answers phones too, with nothing new on the phone's wire.
   registration changes during the request or the relay refuses or fails to
   answer. Endpoint requests can also ask for install status or, on a resume
   connection, resume confirmation (`machine_host/phones.rs`).
-- **`terminalx-serve pair --phone`** prints the `terminalx://pair` link the
-  window's Settings → Devices makes for "LAN only" (offer v2, direct endpoints,
-  no relay; the strict offer schema is unchanged). It prints the link as a
+- **`terminalx-serve pair --phone`** prints a version-2 `terminalx://pair`
+  link. With a live Relay registration it includes a one-time invite, and
+  the phone installs a resume credential after approval. With a direct
+  listener it includes nearby endpoints, even if Relay could not issue an
+  invite. It prints the link as a
   half-block QR and as text, then asks "Allow? [y/N]" with the fingerprint the
   phone shows. If hosting is off it asks to turn it on first, since phones use
   the same listener. While a TerminalX window is open (`Status.phones.windowOpen`)
@@ -2048,11 +2056,16 @@ direct port now answers phones too, with nothing new on the phone's wire.
   an older runtime sees none.
 - **`terminalx-serve devices`** lists paired phones after the computers, and
   `devices revoke <id>` removes either.
-- **Discovery.** Relay registration alone does not make a headless machine
-  discoverable on a phone through the account: the headless runtime does not
-  create a host binding or run the window's host-binding poll. A phone can list
-  the machine after pairing from its terminal. The account list shows Linux and
-  SSH machines as servers when they are listed.
+- **Discovery.** A standalone runtime with hosting enabled and a signed-in
+  account creates its directory entry once the relay registers its host key.
+  It sends a live heartbeat every 30 seconds while that registration is
+  active. The Machines screen uses `headless-phone-pairing.v1` to show a
+  server icon and open the QR scanner from that row. Scan the server's
+  `terminalx-serve pair --phone` QR over Relay or on a network that can reach
+  the server, then compare the fingerprint and allow the phone in the terminal.
+  After pairing, the phone lists the server once under its paired machines.
+  Signing out refreshes an expiring account session before removing the
+  listing and stops heartbeats.
 
 ## Session feature parity
 
@@ -2239,8 +2252,12 @@ none of the rest.
   machine runs the checks a local removal runs (uncommitted work, unpushed
   commits, the pull request, the second confirmation's digest). Nothing on
   this computer is read or removed; the machine's path is only shown.
-- **Where it is offered.** As for a cloud session: once the PR merged, the
-  chat's Delete workspace opens the standard removal dialog with this host.
+  Repositories with an archive script require removal from the machine's
+  own workspace dialog. The remote removal refuses before stopping sessions.
+- **Where it is offered.** The machine session's Git actions menu opens the
+  standard removal dialog through the machine host. The chat and the merged
+  PR's What next section also offer Delete workspace once the machine verifies
+  the worktree is clean and its PR has merged.
   The sessions that went with the worktree leave the sidebar at once
   (`forgetMachineSessions`); a lost answer counts as removed only when the
   machine no longer lists the session.

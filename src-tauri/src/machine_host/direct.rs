@@ -106,6 +106,7 @@ async fn connection(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: toki
     let mut stream = crate::data_privacy::NetworkIo::new(stream);
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await.context("no request")??;
     if request_path(&head)? == MACHINE_PATH {
+        anyhow::ensure!(host.enabled(), "computer operation is off");
         serve_computer(host, rpc, Prefixed::new(head, stream), ComputerRoute::of_peer(peer.ip())).await
     } else {
         forward_phone(&host, head, stream, peer).await

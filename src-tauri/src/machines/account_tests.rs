@@ -269,6 +269,7 @@ fn the_directory_maps_online_offline_not_available_this_mac_and_paired() {
         host(&offline, "Build box", BOTH, "unverifiable", Some("2026-11-15T08:30:00.000Z")),
         host(&off, "Studio", &[PAIRING_CAPABILITY], "live", None),
         host(&mine, "This Mac", BOTH, "live", None),
+        host(&host_key(5), "Phone-paired server", &[crate::machine_account::directory::PHONE_PAIRING_CAPABILITY], "live", None),
     ]});
     let account = FakeAccount::start(move |recorded| match recorded.path.as_str() {
         path if path.starts_with("/v1/account/client-installations/") => trusted(),
@@ -298,6 +299,7 @@ fn the_directory_maps_online_offline_not_available_this_mac_and_paired() {
     let machine = |id: &str| directory["machines"].as_array().unwrap().iter().find(|machine| machine["machineId"] == id).unwrap().clone();
     assert_eq!(directory["signedIn"], true);
     assert_eq!(directory["installation"], "ready");
+    assert_eq!(directory["machines"].as_array().unwrap().len(), 4);
     assert_eq!(
         machine(&online.id),
         json!({

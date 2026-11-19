@@ -20,7 +20,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
 use common::agent::{count, wait_until, AgentWorld, Serve, AGENT_WAIT};
 use common::machine::{free_port, listening, status};
 use futures_util::{SinkExt, StreamExt};
@@ -36,7 +36,18 @@ const COMPUTER_LABEL: &str = "Test MacBook";
 fn runtime(world: &AgentWorld, port: u16) -> Serve {
     let mut command = world.command();
     command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string());
-    Serve::start(command, &world.data)
+    let serve = Serve::start(command, &world.data);
+    // The control socket's ready line precedes machine-host installation.
+    // Wait for the host on initial launch and after a restart.
+    wait_until("the installed machine host", || {
+        let reply = serve.try_control("runtime.machineHost.status", json!({}));
+        if reply["error"]["code"] == "unsupported" {
+            return None;
+        }
+        assert_eq!(reply["ok"], true, "machine host status failed: {reply}");
+        Some(())
+    });
+    serve
 }
 
 /// `terminalx-serve <args>` as a person on the server runs it: the same
@@ -142,8 +153,8 @@ impl Drop for Terminal {
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// The operating computer, connected and authenticated.
-struct Operating {
+/// A direct client, connected and authenticated.
+struct DirectClient {
     socket: Socket,
     session: E2eeSession,
     next: u64,
@@ -151,8 +162,12 @@ struct Operating {
 
 /// Connect as the operating computer with `token`, and wait for the machine
 /// to let it in (`Ok`) or refuse it (`Err` with the close code).
-async fn operate(port: u16, host_public_key_b64: &str, token: &str) -> Result<Operating, Option<u16>> {
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/machine/1")).await.unwrap();
+async fn operate(port: u16, host_public_key_b64: &str, token: &str) -> Result<DirectClient, Option<u16>> {
+    connect(port, "/machine/1", host_public_key_b64, token, Some(COMPUTER_LABEL)).await
+}
+
+async fn connect(port: u16, path: &str, host_public_key_b64: &str, token: &str, label: Option<&str>) -> Result<DirectClient, Option<u16>> {
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}")).await.unwrap();
     let handshake = E2eeClientHandshake::with_secret(COMPUTER_KEY, host_public_key_b64, "direct", None).unwrap();
     socket.send(Message::Text(serde_json::to_string(handshake.hello()).unwrap().into())).await.unwrap();
     let ready = match socket.next().await.unwrap().unwrap() {
@@ -161,7 +176,11 @@ async fn operate(port: u16, host_public_key_b64: &str, token: &str) -> Result<Op
     };
     let mut session = handshake.accept_ready(&ready).unwrap();
     let transcript = session.transcript_hash_b64.clone();
-    let auth = json!({ "type": "e2ee_auth", "v": 2, "transcriptHashB64": transcript, "deviceToken": token, "label": COMPUTER_LABEL, "platform": "macos" });
+    let mut auth = json!({ "type": "e2ee_auth", "v": 2, "transcriptHashB64": transcript, "deviceToken": token });
+    if let Some(label) = label {
+        auth["label"] = json!(label);
+        auth["platform"] = json!("macos");
+    }
     let sealed = session.seal(auth.to_string().as_bytes(), PayloadKind::Text).unwrap();
     socket.send(Message::Text(STANDARD.encode(sealed).into())).await.unwrap();
     // A person has two minutes to answer.
@@ -172,7 +191,7 @@ async fn operate(port: u16, host_public_key_b64: &str, token: &str) -> Result<Op
                 match reply["type"].as_str() {
                     Some("e2ee_authenticated") => {
                         assert_eq!(reply["transcriptHashB64"], transcript.as_str());
-                        return Ok(Operating { socket, session, next: 1 });
+                        return Ok(DirectClient { socket, session, next: 1 });
                     }
                     Some("pairing_refused") => continue,
                     _ => panic!("unexpected reply {reply}"),
@@ -185,7 +204,7 @@ async fn operate(port: u16, host_public_key_b64: &str, token: &str) -> Result<Op
     }
 }
 
-impl Operating {
+impl DirectClient {
     async fn call(&mut self, method: &str, params: Value) -> Value {
         let id = format!("r{}", self.next);
         self.next += 1;
@@ -229,12 +248,64 @@ fn hosting(data: &Path) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn phone_pairs_from_terminal_and_answers_an_agent_approval_without_a_window() {
+    let world = AgentWorld::new();
+    let port = free_port();
+    let serve = runtime(&world, port);
+    let mut pair = Terminal::start(cli(&world, &["pair", "--phone"]));
+    pair.wait_for("Let other computers operate this server? [y/N]");
+    pair.type_line("y");
+    let screen = pair.wait_for("Waiting for the phone");
+    assert!(screen.contains('▀'), "shows a terminal QR");
+    let link = screen.split_whitespace().find(|word| word.starts_with("terminalx://pair?")).unwrap();
+    let code = link.trim_start_matches("terminalx://pair?code=").split('&').next().unwrap();
+    let offer: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(code).unwrap()).unwrap();
+    assert_eq!(offer["v"], 2);
+    assert_eq!(offer["scope"], "mobile");
+    let key = offer["publicKeyB64"].as_str().unwrap().to_string();
+    let token = offer["deviceToken"].as_str().unwrap().to_string();
+    let pairing = tokio::spawn({
+        let (key, token) = (key.clone(), token.clone());
+        async move { connect(port, "/", &key, &token, None).await }
+    });
+    let screen = pair.wait_for("Allow? [y/N]");
+    assert!(screen.contains("Check it shows the fingerprint"));
+    pair.type_line("y");
+    let mut phone = pairing.await.unwrap().unwrap();
+    assert_eq!(pair.exit_code(), 0);
+    assert_eq!(phone.call("host.describe", json!({})).await["result"]["hasWindow"], false);
+    assert_eq!(phone.call("machine.describe", json!({})).await["ok"], false);
+
+    let created = serve.control("sessions.create", json!({
+        "project": world.project, "agent": "claude", "prompt": "ask:echo paired-phone",
+        "mode": "manual", "useWorktree": false, "onMain": true,
+    }));
+    let tab = &created["tabId"];
+    assert_eq!(serve.control("wait", json!({"target": tab, "timeoutSeconds": 10}))["reason"], "permission");
+    let pending = serve.control("permissions.list", json!({}));
+    let answer = phone.call("permission.respond", json!({
+        "sessionId": created["sessionId"], "tabId": tab,
+        "requestId": pending["permissions"][0]["requestId"], "optionId": "allow",
+    })).await;
+    assert_eq!(answer["ok"], true, "{answer}");
+    serve.wait_events(tab.as_str().unwrap(), "the phone's approval", |events| count(events, "turn_completed") == 1);
+
+    let summaries = phone.call("sessions.summaries", json!({})).await;
+    assert_eq!(summaries["ok"], true, "{summaries}");
+    assert!(summaries["result"]["sessions"].as_array().unwrap().iter().any(|session| session["id"] == created["sessionId"]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_person_pairs_a_computer_from_the_servers_terminal_and_revokes_it() {
     let world = AgentWorld::new();
     let port = free_port();
     let serve = runtime(&world, port);
     std::fs::write(world.data.join("settings.json"), json!({ "keepMe": { "unknown": 1 } }).to_string()).unwrap();
-    assert_eq!(status(&serve)["enabled"], false, "off until a person turns it on");
+    let initial = wait_until("the installed machine host", || {
+        let reply = serve.try_control("runtime.machineHost.status", json!({}));
+        (reply["ok"] == true).then(|| reply["result"].clone())
+    });
+    assert_eq!(initial["enabled"], false, "off until a person turns it on");
 
     // Without a terminal, `pair` refuses before it changes anything.
     let piped = cli(&world, &["pair"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();

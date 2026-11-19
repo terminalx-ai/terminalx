@@ -25,7 +25,7 @@ import { useTheme } from "@mobile/ui/theme";
  * edge (the rename sheet rides above the keyboard), closed by a tap outside;
  * Forget asks in a dialog in the middle of the screen.
  */
-export function useDeviceMenu(options: { onRemoved?(): void; onPairAgain?(): void; onConnect?(machine: PairedMachine): void } = {}) {
+export function useDeviceMenu(options: { onRemoved?(): void; onPairAgain?(): void; onScanServer?(): void; onConnect?(machine: PairedMachine): void } = {}) {
   const machines = useMachines();
   const [id, setId] = useState<string | null>(null);
   const all: Machine[] = [...machines.paired, ...machines.available, ...machines.hidden];
@@ -112,7 +112,7 @@ function DeviceMenu({ machine, options, onClose }: { machine: Machine; options: 
             <Text style={[styles.detail, styles.sheetDetail, { color: palette.muted }]}>{machine.state}</Text>
             <View style={[styles.list, { borderColor: palette.border }]}>
               <MenuItem icon={<Pencil size={18} color={palette.ink} />} label="Rename" first disabled={busy} onPress={() => setMode("rename")} />
-              {machine.kind === "paired" ? <PairedItems machine={machine} busy={busy} options={options} act={act} onForget={() => setMode("forget")} onClose={onClose} /> : <AvailableItems machine={machine} busy={busy} act={act} />}
+              {machine.kind === "paired" ? <PairedItems machine={machine} busy={busy} options={options} act={act} onForget={() => setMode("forget")} onClose={onClose} /> : <AvailableItems machine={machine} busy={busy} act={act} onScan={options.onScanServer && (() => { onClose(); options.onScanServer?.(); })} />}
             </View>
           </> : <>
             <Text accessibilityRole="header" style={[styles.title, styles.renameTitle, { color: palette.ink }]}>Rename machine</Text>
@@ -176,12 +176,14 @@ function PairedItems({ machine, busy, options, act, onForget, onClose }: { machi
   </>;
 }
 
-function AvailableItems({ machine, busy, act }: { machine: AvailableMachine; busy: boolean; act(work: () => Promise<unknown>): Promise<void> }) {
+function AvailableItems({ machine, busy, act, onScan }: { machine: AvailableMachine; busy: boolean; act(work: () => Promise<unknown>): Promise<void>; onScan?: () => void }) {
   const app = useApp();
   const { palette } = useTheme();
   const blocked = machine.pairBlocked;
   return <>
-    <MenuItem icon={<QrCode size={18} color={palette.ink} />} label="Pair" detail={blocked ?? undefined} disabled={busy || blocked !== null} onPress={() => void act(() => app.pairAvailable(machine.host))} />
+    {machine.terminalPairing
+      ? <MenuItem icon={<QrCode size={18} color={palette.ink} />} label="Scan pairing QR" disabled={busy || !onScan} onPress={() => onScan?.()} />
+      : <MenuItem icon={<QrCode size={18} color={palette.ink} />} label="Pair" detail={blocked ?? undefined} disabled={busy || blocked !== null} onPress={() => void act(() => app.pairAvailable(machine.host))} />}
     {machine.hidden
       ? <MenuItem icon={<Eye size={18} color={palette.ink} />} label="Show on this phone" disabled={busy} onPress={() => void act(() => app.hideAccountMachine(machine.id, false))} />
       : <MenuItem icon={<EyeOff size={18} color={palette.ink} />} label="Hide on this phone" detail="It stays on your account." disabled={busy} onPress={() => void act(() => app.hideAccountMachine(machine.id, true))} />}

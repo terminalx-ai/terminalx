@@ -1,10 +1,12 @@
-import { act, cleanup, fireEvent, render as renderView, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderView, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { PullRequest } from "@/lib/api";
+import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
 import type { GitSource, SourceStatus } from "@/lib/gitSource";
 import type { SessionBackend } from "@/lib/sessionBackend";
 import type { FileSource } from "@/lib/workspaceFiles";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -50,7 +52,7 @@ function makeSource(): GitSource {
 
 const fileSource = { watch: (listener: (paths: string[] | null) => void) => { watchers.push(listener); return () => {}; } } as unknown as FileSource;
 
-function Harness({ tabs, source, baseRef }: { tabs: TabEntry[]; source: GitSource; baseRef: string | null }) {
+function Harness({ tabs, source, baseRef = null, workspace }: { tabs: TabEntry[]; source?: GitSource; baseRef?: string | null; workspace?: RemovableWorkspace }) {
   const session = { id: "machine:m1:p1:s1", cwd: "/work/app", projectPath: "", title: "Add read markers to the catalog feed", tabs } as unknown as SessionEntry;
   const branch = useMachineBranch({
     session, machineName: "Mac mini", backend: { send } as unknown as SessionBackend, gitSource: source, fileSource,
@@ -60,7 +62,7 @@ function Harness({ tabs, source, baseRef }: { tabs: TabEntry[]; source: GitSourc
     <span data-testid="current-branch">{branch.currentBranch}</span>
     <span data-testid="pr-count">{branch.prCount}</span>
     <MachineDiffSize branch={branch} />
-    <MachineBranchButton branch={branch} />
+    <MachineBranchButton branch={branch} workspace={workspace} />
   </div>;
 }
 
@@ -82,9 +84,25 @@ beforeEach(() => {
   send = vi.fn(async () => ({ accepted: true }));
   try { localStorage.clear(); } catch { /* none */ }
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); closeWorkspaceRemove(); vi.useRealTimers(); });
 
 describe("machine session header Git step (PRO-404, 21.08)", () => {
+  it("opens checked removal for the machine worktree even without a Git status", async () => {
+    const workspace = {
+      projectPath: "machine:m1:p1", path: "/work/app/feature", name: "feature",
+      host: { key: "machine:m1|s1", disposition: vi.fn(), remove: vi.fn(), turnRunning: () => false },
+    };
+    const { result } = renderHook(useDialogs);
+    const view = renderView(<TooltipProvider><Harness tabs={idle} workspace={workspace} /></TooltipProvider>);
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Git actions" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete workspace…" }));
+    expect(result.current.workspaceRemove).toEqual({ ...workspace, mode: "delete" });
+    expect(workspace.host.remove).not.toHaveBeenCalled();
+
+    view.rerender(<TooltipProvider><Harness tabs={idle} /></TooltipProvider>);
+    expect(screen.queryByRole("button", { name: "Git actions" })).toBeNull();
+  });
+
   it("compares against the selected base and opens a PR for an already pushed branch", async () => {
     status = { ...status, upstream: "origin/feature", ahead: 0 };
     render(idle, "origin/release/2.x");

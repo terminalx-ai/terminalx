@@ -1156,9 +1156,16 @@ async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
     assert_eq!(listed["session"]["tabs"][0]["usage"]["models"][0]["costUsd"], json!(0.42), "{listed}");
     assert!(listed["session"]["tabs"][0].get("accountLabel").is_none(), "one account: no label: {listed}");
 
+    let log = crate::store::log_path(&session_id, &tab_id).unwrap();
+    let prompt = json!({
+        "id": "request", "seq": 1, "ts": index::now(), "sessionId": session_id, "tabId": tab_id,
+        "harness": "claude", "payload": { "type": "user_message", "text": "Review usage", "images": [], "queued": false },
+    });
+    crate::store::append_line(&log, &prompt.to_string()).unwrap();
     let context = call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": tab_id })).await.unwrap();
     assert_eq!(context["tabId"], json!(tab_id), "{context}");
     assert_eq!(context["provider"], "claude", "{context}");
+    assert_eq!(context["lastPrompt"], "Review usage", "{context}");
     assert_eq!(context["cwd"], json!(path), "the machine's own folder: {context}");
     assert_eq!(code(call(&m.rpc, &peer, "session.prepareContinuation", json!({ "sessionId": session_id, "tabId": "tab-nope" })).await), "not_found");
     assert_eq!(code(call(&m.rpc, &peer, "session.usage", json!({ "sessionId": "session-nope" })).await), "not_found");

@@ -69,7 +69,7 @@ function session(id: string, cwd: string, worktreeName: string | null): RuntimeS
 
 function machine(name: string, sessions: RuntimeSession[]) {
   const runtime = new FakeAgentRuntime();
-  runtime.capabilities = ["workspace/1"];
+  runtime.capabilities = ["workspace/1", "git/1"];
   const client = new WorkspaceRpcClient(runtime);
   return { name, sessions, runtime, client };
 }
@@ -103,7 +103,6 @@ afterEach(() => {
 
 it("keeps header Git on the session checkout when Changes selects another repository", async () => {
   const { mini } = machines();
-  mini.runtime.capabilities.push("git/1");
   const remote = "https://github.com/owner/repo";
   vi.spyOn(workspaceGit, "listRepositories").mockResolvedValue([
     { repo: ".", remote, branch: "main", head: null, defaultBranch: "main" },
@@ -121,6 +120,42 @@ it("keeps header Git on the session checkout when Changes selects another reposi
 
   rerender("machine:mini:project:second");
   expect(result.current?.machine?.branchGit).toBeUndefined();
+});
+
+it("keeps the machine's session checkout available for Fix errors when the panel switches repositories", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }, { repo: firstPath }] });
+    if (method === "git.status") return Promise.resolve({ branch: "first" });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result } = renderHook(() => useMachineSession(firstKey));
+  await waitFor(() => expect(result.current?.repository).toBe(firstPath));
+  act(() => result.current?.selectRepository("."));
+  expect(result.current?.repository).toBe(".");
+  await result.current!.machine!.checkoutGitSource!.workStatus();
+  expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
+});
+
+it("withholds Fix errors when a session's worktree is missing, even if the panel falls back to the project", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }], truncated: true });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
+  await waitFor(() => expect(result.current?.repository).toBe("."));
+  expect(result.current?.gitSource).toBeDefined();
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:second");
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:base");
+  expect(result.current?.machine?.checkoutGitSource).toBe(result.current?.gitSource);
+  expect(request.mock.calls.some(([method]) => method === "git.status")).toBe(false);
 });
 
 describe("useMachineSession removable workspace", () => {

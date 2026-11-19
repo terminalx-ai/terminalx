@@ -88,20 +88,25 @@ describe("WorkspaceRemoveDialog", () => {
     expect(removeButton().disabled).toBe(false);
   });
 
-  it("reads and removes a cloud worktree on the host that owns it, with the same check and the sessions named (#411)", async () => {
+  it.each([
+    { projectKey: "cloud:org-1:ws-1", bulkCleanupAvailable: true },
+    { projectKey: "machine:mini:project", bulkCleanupAvailable: false },
+  ])("reads and removes worktrees on $projectKey and offers bulk cleanup only when it reaches the host", async ({ projectKey, bulkCleanupAvailable }) => {
     const host = {
-      key: "cloud:org-1:ws-1|s1",
-      keepConversationsUnavailable: "Use Clean up worktrees to keep cloud conversations.",
+      key: `${projectKey}|s1`,
+      keepConversationsUnavailable: "This action cannot keep conversations.",
+      bulkCleanupAvailable,
       disposition: vi.fn(async () => workspace(dirty)),
       remove: vi.fn(async () => ({ keptBranch: null, rescuedBranch: null })),
       turnRunning: () => false,
     };
     mocks.ask.mockResolvedValue(true);
     render(<WorkspaceRemoveDialog />);
-    act(() => openWorkspaceDelete("cloud:org-1:ws-1", "/home/user/app/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox", host));
+    act(() => openWorkspaceDelete(projectKey, "/home/user/app/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox", host));
     await screen.findByText("Removing it now needs a second confirmation.");
     expect(host.disposition).toHaveBeenCalledWith({ fetch: true });
     expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
+    expect(!!screen.queryByRole("button", { name: "Clean up worktrees…" })).toBe(bulkCleanupAvailable);
 
     expect(removeButton().disabled).toBe(true);
     fireEvent.click(screen.getByLabelText("Permanently delete conversations too"));

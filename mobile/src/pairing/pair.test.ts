@@ -22,14 +22,19 @@ const state = vi.hoisted(() => ({
   /** What the Mac answers device.describe with: an older Mac refuses it. */
   describe: "refuse" as "refuse" | "accept" | "fail",
   described: [] as unknown[],
+  transports: [] as string[],
   /** An unreachable path fails only after the others have answered. */
   slowFailure: false,
+  onJournalWrite: null as (() => void) | null,
 }));
 vi.mock("expo-crypto", () => ({ getRandomBytesAsync: async (length: number) => new Uint8Array(randomBytes(length)) }));
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 1,
   getItemAsync: async (key: string) => state.secrets.get(key) ?? null,
-  setItemAsync: async (key: string, value: string) => { state.secrets.set(key, value); },
+  setItemAsync: async (key: string, value: string) => {
+    state.secrets.set(key, value);
+    if (key.includes("pairing-journal")) state.onJournalWrite?.();
+  },
   deleteItemAsync: async (key: string) => { state.secrets.delete(key); },
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
@@ -46,6 +51,7 @@ vi.mock("../transport/relay-client", () => ({
   RelayClient: class {
     constructor(private options: { transport?: string; credentialKind?: string; awaitApproval?: { onWaiting?: () => void } }) {}
     async connect() {
+      state.transports.push(this.options.transport ?? "relay");
       if (!(this.options.transport === "direct" ? state.direct : state.relay)) {
         if (state.slowFailure) for (let i = 0; i < 50; i++) await Promise.resolve();
         throw new Error("network unavailable");
@@ -94,6 +100,8 @@ beforeEach(() => {
   state.storage.clear(); state.secrets.clear(); state.installed = null; state.calls = [];
   state.direct = false; state.relay = false; state.failSave = false; state.provisionError = null;
   state.approval = "immediate"; state.describe = "refuse"; state.described = []; state.slowFailure = false;
+  state.transports = [];
+  state.onJournalWrite = null;
   state.status = { protocolVersion: 2, product: "TerminalX", deviceScope: "driver" };
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...endpoint, leaseExpiresAt: Date.now() + 60_000 }))));
 });
@@ -121,6 +129,35 @@ it("pairs a direct-only offer without provisioning a relay credential", async ()
   expect(await readHosts()).toEqual([host]);
   expect((await readHostCredential(host.id))?.current).toBeUndefined();
   expect(state.calls).toEqual(["status.get"]);
+});
+
+it("pairs a relay-only terminal QR and saves a resume credential without a LAN attempt", async () => {
+  state.relay = true;
+  const code = btoa(JSON.stringify({ ...freshOffer(), endpoint: "ws://127.0.0.1:0" }));
+  const offer = parsePairingCode(`terminalx://pair?code=${encodeURIComponent(code)}`)!;
+  const host = await pair(offer);
+  expect(state.transports).toEqual(["relay"]);
+  expect(state.installed?.authorizationMode).toBe("relay-basis");
+  expect(await readHostCredential(host.id)).toMatchObject({ deviceToken: offer.deviceToken, current: { version: 1 } });
+});
+
+it("allows a fresh scan when a Relay-only code expires while storing its journal", async () => {
+  const payload = { ...freshOffer(), endpoint: "ws://127.0.0.1:0" };
+  const offer = parsePairingCode(btoa(JSON.stringify(payload)))!;
+  const clock = vi.spyOn(Date, "now");
+  state.onJournalWrite = () => clock.mockReturnValue(payload.relay.inviteExpiresAt);
+  try {
+    await expect(pair(offer)).rejects.toThrow("[pairing:parsing/expired-offer]");
+    expect(state.transports).toEqual([]);
+    expect(await readPairingJournal()).toBeNull();
+  } finally {
+    clock.mockRestore();
+    state.onJournalWrite = null;
+  }
+  state.relay = true;
+  const fresh = parsePairingCode(btoa(JSON.stringify({ ...freshOffer(), endpoint: payload.endpoint })))!;
+  const host = await pair(fresh);
+  expect(await readHostCredential(host.id)).toMatchObject({ current: { version: 1 } });
 });
 
 it("recovers a committed install after saving the host failed", async () => {

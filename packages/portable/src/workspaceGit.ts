@@ -191,6 +191,8 @@ export interface RemotePrCreateResult {
   /** An open pull request for the branch already existed; it is linked, not duplicated. */
   existing: boolean;
   reconciled?: boolean;
+  /** The machine saved this pull request to the named session. */
+  sessionAssociated?: boolean;
 }
 
 export interface RepositoryFacts {
@@ -325,7 +327,7 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
+  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
   }
 
@@ -362,7 +364,7 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }

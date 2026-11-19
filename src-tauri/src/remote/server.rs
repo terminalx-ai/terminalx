@@ -4210,7 +4210,11 @@ impl WorkspaceRpc {
     fn workspace_disposition(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let fetch = params.get("fetch").and_then(Value::as_bool).unwrap_or(false);
-        let disposition = crate::session_ops::workspace_disposition(Path::new(&session.project_path), Path::new(&session.cwd), fetch).map_err(RpcError::internal)?;
+        let project = Path::new(&session.project_path);
+        let disposition = crate::session_ops::workspace_disposition(project, Path::new(&session.cwd), fetch).map_err(RpcError::internal)?;
+        if disposition.exists && !disposition.is_main {
+            crate::archive_script::require_no_script(project).map_err(RpcError::internal)?;
+        }
         Ok(json!({ "disposition": disposition }))
     }
 

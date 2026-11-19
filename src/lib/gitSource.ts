@@ -194,6 +194,7 @@ export function runtimeSessionIn(workspaceKey: string, sessionKey: string): stri
 export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null> }): GitSource {
   let servesBranchDiffSize = true;
   const { remote } = input;
+  const fromMachine = !!parseMachineKey(input.workspaceKey);
   const statusOf = async (): Promise<SourceStatus> => {
     const status = await remote.status();
     return {
@@ -266,12 +267,25 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         if (!(error instanceof WorkspaceRpcError) || error.code !== "method_not_found") throw error;
         // Older git/1 runtimes can list branch PRs but cannot prove session
         // ownership. Show those transiently, never persist them as associations.
-        return { associations: await gh.associations(sessionId), discoveryOnly: true };
+        return { associations: fromMachine ? [] : await gh.associations(sessionId), discoveryOnly: true };
       }
-      return { associations: await gh.associations(sessionId, response.associations.map((entry) => ({
+      const runtimeRows = response.associations.map((entry) => ({
         url: entry.url, number: entry.number, head: entry.head,
-        scope: { kind: "cloud", workspace: input.workspaceKey, repo: entry.repo ?? "" },
-      }))) };
+        // Older machines omit provenance. Their entries can only be acted
+        // on when discovered on the current branch.
+        linked: entry.linked ?? (fromMachine ? true : undefined),
+        scope: { kind: "cloud" as const, workspace: input.workspaceKey, repo: entry.repo ?? "" },
+      }));
+      // A live machine reply is authoritative, including when a link has
+      // been removed. Desktop associations cannot establish machine ownership.
+      if (fromMachine) return { associations: runtimeRows };
+      const cached = await gh.associations(sessionId, runtimeRows);
+      // The cache may predate the linked bit.
+      const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
+      return { associations: cached.map((entry) => {
+        const flag = linked.get(entry.url);
+        return flag === undefined ? entry : { ...entry, linked: flag };
+      }) };
     },
     prScope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo },
     prAccess: (association) => {
@@ -295,8 +309,11 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       return new RemoteGit(remote.client, association.scope.repo).prConversation(pr.url);
     },
     createPr: async ({ title, body, base, draft, sessionId, branch }) => {
-      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}) });
-      if (sessionId) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);
+      const runtimeId = fromMachine && sessionId ? runtimeSessionIn(input.workspaceKey, sessionId) : null;
+      if (fromMachine && sessionId && !runtimeId) throw new Error("This session belongs to a different workspace.");
+      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId } : {}) });
+      if (runtimeId && !result.sessionAssociated) return `Pull request #${result.pr.number} is open on GitHub. Update the machine runtime and choose Create pull request again to save it to this session.`;
+      if (sessionId && !fromMachine) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);
       if (result.existing) return `Pull request #${result.pr.number} for this branch already exists; it is linked below, not duplicated.`;
       return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;
     },
