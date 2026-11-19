@@ -49,10 +49,14 @@ export function defaultDirection(item: AgentConfigItem): AgentConfigDirection | 
   return null;
 }
 
-/** Every item that can be copied, ticked, each its default way. */
+/**
+ * What is ticked on open: items one side lacks, each copied toward it. A
+ * "Different" item replaces the other side's version, so the reader ticks it.
+ */
 export function initialSelection(items: AgentConfigItem[]): Map<string, AgentConfigDirection> {
   const out = new Map<string, AgentConfigDirection>();
   for (const item of items) {
+    if (item.status === "different") continue;
     const direction = defaultDirection(item);
     if (direction) out.set(key(item), direction);
   }
@@ -322,7 +326,8 @@ export function AgentConfigsDialog({ onClose }: { onClose: () => void }) {
               </ul>
             )}
           </div>
-          {applyError && <p role="alert" className="mt-2 break-words text-xs text-destructive">Nothing was written: {applyError}</p>}
+          {/* The backend says what was written, if anything, before it stopped. */}
+          {applyError && <p role="alert" className="mt-2 break-words text-xs text-destructive">{applyError}</p>}
           {written && !applyError && (
             <p role="status" className="mt-2 break-words text-xs text-muted-foreground">
               Wrote {written.length} {written.length === 1 ? "file" : "files"}.

@@ -127,7 +127,7 @@ fn claude_servers_convert_to_codex_shapes() {
 fn codex_servers_convert_to_claude_shapes() {
     let claude = |toml_text: &str| {
         let server = parse_codex_server(&toml::from_str::<toml::Value>(toml_text).unwrap());
-        (claude_entry(&server.transport.unwrap(), 0), server.stays)
+        (claude_entry(&server.transport.unwrap(), 0, &[]), server.stays)
     };
     let (entry, stays) = claude("command = \"npx\"\nargs = [\"-y\", \"@upstash/context7-mcp\"]\nstartup_timeout_sec = 20\nenv_vars = [\"CONTEXT7_KEY\"]\n");
     assert_eq!(entry, "{\n  \"type\": \"stdio\",\n  \"command\": \"npx\",\n  \"args\": [\n    \"-y\",\n    \"@upstash/context7-mcp\"\n  ],\n  \"env\": {\n    \"CONTEXT7_KEY\": \"${CONTEXT7_KEY}\"\n  }\n}");
@@ -221,7 +221,7 @@ fn apply_refuses_files_that_changed_since_the_preview() {
     let preview = preview_in(&rig.homes, &changes).unwrap();
     fs::write(rig.homes.codex_toml(), "model = \"other\"\n").unwrap();
     let error = apply_in(&rig.homes, &changes, &preview.token).unwrap_err();
-    assert!(error.to_string().contains("changed since the preview"), "{error}");
+    assert_eq!(error.to_string(), "Nothing was written: these files changed since the preview. Look over the new preview and apply again.");
     assert_eq!(fs::read_to_string(rig.homes.codex_toml()).unwrap(), "model = \"other\"\n");
 }
 
@@ -324,4 +324,103 @@ fn frontmatter_splits_into_keys_with_their_lines() {
     assert_eq!(body, "body\n");
     assert_eq!(frontmatter_value("---\ndescription: >\n  folded\n  text\n---\n", "description").as_deref(), Some("folded text"));
     assert!(split_frontmatter("no frontmatter").is_none());
+}
+
+#[test]
+fn a_replaced_codex_server_keeps_its_own_settings_and_says_so() {
+    let rig = rig();
+    let toml_path = rig.homes.codex_toml();
+    let text = fs::read_to_string(&toml_path).unwrap().replace(
+        "bearer_token_env_var = \"SENTRY_TOKEN\"\n",
+        "bearer_token_env_var = \"SENTRY_TOKEN\"\nenabled = false\nstartup_timeout_sec = 30\n",
+    );
+    fs::write(&toml_path, text).unwrap();
+    let changes = [change(Kind::Mcp, "sentry", Direction::ToCodex)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    let notes: Vec<_> = preview.notes.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(notes, vec!["keeps Codex's own `enabled`, `startup_timeout_sec`", "stays turned off in Codex"]);
+    assert!(preview.files[0].text.contains("enabled = false\nstartup_timeout_sec = 30\n"), "{}", preview.files[0].text);
+    apply_in(&rig.homes, &changes, &preview.token).unwrap();
+    let parsed: toml::Table = toml::from_str(&fs::read_to_string(&toml_path).unwrap()).unwrap();
+    let sentry = &parsed["mcp_servers"]["sentry"];
+    assert_eq!(sentry["url"].as_str(), Some("https://mcp.sentry.dev/mcp"));
+    assert_eq!(sentry["enabled"].as_bool(), Some(false));
+    assert_eq!(sentry["startup_timeout_sec"].as_integer(), Some(30));
+}
+
+#[test]
+fn a_replaced_claude_server_keeps_its_own_settings() {
+    let rig = rig();
+    let text = fs::read_to_string(&rig.homes.claude_json).unwrap().replace(
+        "      \"url\": \"https://mcp.sentry.dev/mcp\",\n",
+        "      \"url\": \"https://mcp.sentry.dev/mcp\",\n      \"oauth\": { \"clientId\": \"abc\" },\n",
+    );
+    fs::write(&rig.homes.claude_json, text).unwrap();
+    let changes = [change(Kind::Mcp, "sentry", Direction::ToClaude)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    assert!(preview.notes.iter().any(|n| n.text == "keeps Claude Code's own `oauth`"), "{:?}", preview.notes);
+    apply_in(&rig.homes, &changes, &preview.token).unwrap();
+    let after: Value = serde_json::from_str(&fs::read_to_string(&rig.homes.claude_json).unwrap()).unwrap();
+    let sentry = &after["mcpServers"]["sentry"];
+    assert_eq!(sentry["url"], "https://sentry.internal.example.com/mcp");
+    assert_eq!(sentry["headers"]["Authorization"], "Bearer ${SENTRY_TOKEN}");
+    assert_eq!(sentry["oauth"]["clientId"], "abc");
+}
+
+#[test]
+fn a_name_codex_cannot_key_is_refused_even_straight_to_preview() {
+    let rig = rig();
+    let text = fs::read_to_string(&rig.homes.claude_json).unwrap().replacen("\"mcpServers\": {\n", "\"mcpServers\": {\n    \"my.server\": { \"command\": \"x\" },\n", 1);
+    fs::write(&rig.homes.claude_json, text).unwrap();
+    assert!(item(&compare_in(&rig.homes).unwrap(), Kind::Mcp, "my.server").to_codex_blocked.is_some());
+    let error = preview_in(&rig.homes, &[change(Kind::Mcp, "my.server", Direction::ToCodex)]).unwrap_err();
+    assert!(error.to_string().contains("Codex server names use only letters"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_skill_linking_out_of_its_folder_is_not_copied() {
+    let rig = rig();
+    let secret = rig.homes.home.join("secret-key");
+    fs::write(&secret, "private").unwrap();
+    std::os::unix::fs::symlink(&secret, rig.homes.claude_dir.join("skills/release-notes/key")).unwrap();
+    let c = compare_in(&rig.homes).unwrap();
+    assert_eq!(item(&c, Kind::Skill, "release-notes").to_codex_blocked.as_deref(), Some("can't be copied: key links outside the skill folder"));
+    assert!(preview_in(&rig.homes, &[change(Kind::Skill, "release-notes", Direction::ToCodex)]).is_err());
+    // A link that stays inside the folder is fine.
+    fs::remove_file(rig.homes.claude_dir.join("skills/release-notes/key")).unwrap();
+    std::os::unix::fs::symlink("SKILL.md", rig.homes.claude_dir.join("skills/release-notes/README.md")).unwrap();
+    assert_eq!(item(&compare_in(&rig.homes).unwrap(), Kind::Skill, "release-notes").to_codex_blocked, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_config_file_stays_a_link() {
+    let rig = rig();
+    let dotfiles = rig.homes.home.join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    fs::rename(rig.homes.codex_toml(), dotfiles.join("config.toml")).unwrap();
+    std::os::unix::fs::symlink(dotfiles.join("config.toml"), rig.homes.codex_toml()).unwrap();
+    let before = fs::read_to_string(dotfiles.join("config.toml")).unwrap();
+    apply_now(&rig.homes, &[change(Kind::Mcp, "linear", Direction::ToCodex)]);
+    assert!(fs::symlink_metadata(rig.homes.codex_toml()).unwrap().file_type().is_symlink());
+    assert!(fs::read_to_string(dotfiles.join("config.toml")).unwrap().contains("[mcp_servers.linear]"));
+    let backup = rig.homes.codex_dir.join(format!("config.toml.bak-{}", today()));
+    assert!(fs::symlink_metadata(&backup).unwrap().is_file());
+    assert_eq!(fs::read_to_string(backup).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_write_that_fails_part_way_names_what_was_already_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig();
+    let changes = [change(Kind::Skill, "release-notes", Direction::ToCodex), change(Kind::Mcp, "linear", Direction::ToCodex)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    // The skill lands in ~/.codex/skills; config.toml's backup beside it in ~/.codex cannot.
+    fs::set_permissions(&rig.homes.codex_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let error = apply_in(&rig.homes, &changes, &preview.token).unwrap_err().to_string();
+    fs::set_permissions(&rig.homes.codex_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(error.starts_with("Wrote ~/.codex/skills/release-notes, then stopped: back up ~/.codex/config.toml"), "{error}");
+    assert!(error.ends_with("Nothing after that was written."), "{error}");
 }

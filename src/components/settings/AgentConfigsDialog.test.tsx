@@ -71,7 +71,8 @@ describe("copy agent configs", () => {
     expect(defaultDirection(context7)).toBe("toClaude");
     expect(defaultDirection(github)).toBeNull();
     expect(defaultDirection({ ...sentry, toCodexBlocked: "no" })).toBe("toClaude");
-    expect([...initialSelection(comparison.items).keys()]).toEqual(["mcp:linear", "mcp:playwright", "mcp:sentry", "mcp:context7", "command:review", "skill:release-notes"]);
+    // A difference is never ticked for the reader: copying it replaces the other side's version.
+    expect([...initialSelection(comparison.items).keys()]).toEqual(["mcp:linear", "mcp:playwright", "mcp:context7", "command:review", "skill:release-notes"]);
   });
 
   it("lists the tabs with their counts and marks each row as the design does", async () => {
@@ -89,7 +90,8 @@ describe("copy agent configs", () => {
     expect(within(row("mcp", "github")).getByRole("checkbox")).toHaveProperty("disabled", true);
     expect(within(row("mcp", "events")).getByText("Codex has no SSE transport; it takes stdio and streamable HTTP servers")).toBeTruthy();
     expect(within(row("mcp", "events")).getByRole("checkbox")).toHaveProperty("disabled", true);
-    expect(applyButton().textContent).toContain("Apply 6 changes");
+    expect(within(row("mcp", "sentry")).getByRole("checkbox")).toHaveProperty("ariaChecked", "false");
+    expect(applyButton().textContent).toContain("Apply 5 changes");
     expect(screen.getByText("Agents pick up the change in new tabs.")).toBeTruthy();
   });
 
@@ -99,9 +101,12 @@ describe("copy agent configs", () => {
     expect(within(box).getByText("# ~/.codex/config.toml (backed up to config.toml.bak-2026-11-19)")).toBeTruthy();
     expect(within(box).getByText("[mcp_servers.linear]")).toBeTruthy();
     expect(within(box).getByText("+3 servers, 1 command, 1 skill")).toBeTruthy();
-    expect(within(box).getByText("1 server replaced")).toBeTruthy();
+    expect(within(box).queryByText(/replaced/)).toBeNull();
     expect(within(box).getByText(/startup_timeout_sec/)).toBeTruthy();
 
+    fireEvent.click(within(row("mcp", "sentry")).getByRole("checkbox"));
+    await waitFor(() => expect(lastChanges().find((c) => c.name === "sentry")?.direction).toBe("toCodex"));
+    expect(await within(box).findByText("1 server replaced")).toBeTruthy();
     fireEvent.click(within(row("mcp", "linear")).getByRole("checkbox"));
     await waitFor(() => expect(lastChanges().map((c) => c.name)).not.toContain("linear"));
     expect(applyButton().textContent).toContain("Apply 5 changes");
@@ -129,11 +134,11 @@ describe("copy agent configs", () => {
     await waitFor(() => expect(mock.compare).toHaveBeenCalledTimes(2));
   });
 
-  it("says nothing was written when the files changed since the preview", async () => {
-    mock.apply.mockRejectedValue(new Error("These files changed since the preview. Look over the new preview and apply again."));
+  it("shows what the backend says was written, or not, when applying stops", async () => {
+    mock.apply.mockRejectedValue(new Error("Wrote ~/.codex/skills/release-notes, then stopped: back up ~/.codex/config.toml: Permission denied. Nothing after that was written."));
     await open();
     fireEvent.click(applyButton());
-    expect((await screen.findByRole("alert")).textContent).toBe("Nothing was written: These files changed since the preview. Look over the new preview and apply again.");
+    expect((await screen.findByRole("alert")).textContent).toBe("Wrote ~/.codex/skills/release-notes, then stopped: back up ~/.codex/config.toml: Permission denied. Nothing after that was written.");
   });
 
   it("disables Apply when the preview cannot be made", async () => {
