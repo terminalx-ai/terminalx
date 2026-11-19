@@ -344,7 +344,11 @@ impl CloudRemote {
                     ClientEvent::State(state) => {
                         if let Some(code) = close_code(&state) {
                             // A machine has no identity: its close is recorded without an Organization and never exported.
-                            closes.record(identity.as_ref().map(|identity| identity.organization_id.as_str()), workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
+                            closes.record_for(
+                                identity.as_ref().map(|identity| (identity.user_id.as_str(), identity.profile_id.as_str())),
+                                identity.as_ref().map(|identity| identity.organization_id.as_str()),
+                                workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis(),
+                            );
                         }
                         // A participant gets the key only while the workspace
                         // is shared with them (saas contract §21.5).

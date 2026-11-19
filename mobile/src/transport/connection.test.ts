@@ -42,7 +42,7 @@ vi.mock("./relay-client", async (importOriginal) => {
       return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, scopedConnectionEvents, type ConnectionLogEntry } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -56,6 +56,23 @@ beforeEach(() => {
   vi.useFakeTimers(); mocks.clients = []; mocks.reachable.clear(); mocks.refused.clear(); mocks.opening.clear(); mocks.endpoints = [vpn, lan, bonjour]; mocks.hang = false; mocks.requests = []; mocks.describe = "refuse"; mocks.writes.mockReset().mockResolvedValue(undefined); connection = new HostConnection();
 });
 afterEach(() => { connection.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("projects only in-memory connection events belonging to a currently paired account", async () => {
+  const owned: StoredHost = { ...host, hostName: "ghp_FIXTURE_HOST_LABEL", provenance: { kind: "automatic", userId: "first" } };
+  const logs: ConnectionLogEntry[] = [];
+  connection.onLog((entry) => logs.push(entry));
+  mocks.reachable.add(lan);
+  connection.start(owned, credential);
+  await flush();
+  expect(scopedConnectionEvents(logs, "first", [owned])).toEqual([
+    { at: expect.any(Number), kind: "connecting", classification: undefined },
+    { at: expect.any(Number), kind: "connected", classification: "direct" },
+  ]);
+  expect(scopedConnectionEvents(logs, "second", [owned])).toBe("unavailable");
+  expect(scopedConnectionEvents(logs, "first", [])).toBe("unavailable");
+  const reopenedLog = JSON.parse(JSON.stringify(logs)) as ConnectionLogEntry[];
+  expect(scopedConnectionEvents(reopenedLog, "first", [owned])).toEqual([]);
+});
 
 describe("host path recovery", () => {
   it("connects over LAN when the paired tailnet endpoint hangs, and closes losers", async () => {

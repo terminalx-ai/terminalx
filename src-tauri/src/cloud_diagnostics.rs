@@ -258,13 +258,18 @@ pub struct ConnectionClose {
     pub at: i64,
 }
 
+struct RecordedClose {
+    close: ConnectionClose,
+    owner: Option<(String, String)>,
+}
+
 /// The last [`CLOSE_LOG_CAPACITY`] typed relay closes, newest last. Memory
 /// only: it is gone when the app quits and leaves only in an export. A 4101
 /// is either the relay's close or the client's own check of the runtime
 /// generation in `rpc.hello`; both mean the attachment was stale.
 #[derive(Default)]
 pub struct ConnectionCloseLog {
-    entries: Mutex<VecDeque<ConnectionClose>>,
+    entries: Mutex<VecDeque<RecordedClose>>,
 }
 
 impl ConnectionCloseLog {
@@ -273,20 +278,38 @@ impl ConnectionCloseLog {
     }
 
     /// Codes outside 4100-4104 are not recorded.
+    #[cfg(test)]
     pub fn record(&self, organization_id: Option<&str>, workspace_id: Option<&str>, code: u16, at: i64) {
+        self.record_for(None, organization_id, workspace_id, code, at);
+    }
+
+    pub fn record_for(&self, owner: Option<(&str, &str)>, organization_id: Option<&str>, workspace_id: Option<&str>, code: u16, at: i64) {
         let Some(name) = close_reason_name(code) else { return };
         let mut entries = self.entries.lock().unwrap();
         while entries.len() >= CLOSE_LOG_CAPACITY {
             entries.pop_front();
         }
-        entries.push_back(ConnectionClose { organization_id: organization_id.map(str::to_string), workspace_id: workspace_id.map(str::to_string), code, name, at });
+        entries.push_back(RecordedClose {
+            close: ConnectionClose { organization_id: organization_id.map(str::to_string), workspace_id: workspace_id.map(str::to_string), code, name, at },
+            owner: owner.map(|(user, profile)| (user.to_owned(), profile.to_owned())),
+        });
     }
 
     /// The closes met in `organization_id`, oldest first. There is no way to
     /// read the whole log: an entry of another Organization, or with none
     /// recorded, is never shown or exported.
     pub fn snapshot_for(&self, organization_id: &str) -> Vec<ConnectionClose> {
-        self.entries.lock().unwrap().iter().filter(|close| close.organization_id.as_deref() == Some(organization_id)).cloned().collect()
+        self.entries.lock().unwrap().iter().map(|entry| &entry.close).filter(|close| close.organization_id.as_deref() == Some(organization_id)).cloned().collect()
+    }
+
+    pub(crate) fn support_events(&self, scope: &crate::account::CloudScope, from: i64, to: i64) -> Vec<(i64, &'static str)> {
+        self.entries.lock().unwrap().iter().filter_map(|entry| {
+            let (user, profile) = entry.owner.as_ref()?;
+            let close = &entry.close;
+            let organization = close.organization_id.as_deref()?;
+            (user == &scope.user_id && profile == &scope.profile_id && scope.allows(organization)
+                && (from..=to).contains(&close.at)).then_some((close.at, close.name))
+        }).collect()
     }
 
     #[cfg(test)]
@@ -701,6 +724,25 @@ mod tests {
     }
 
     #[test]
+    fn support_close_log_requires_current_account_profile_membership_and_window() {
+        let log = ConnectionCloseLog::default();
+        log.record_for(Some(("mine", "my-profile")), Some("org_1"), Some("hidden-workspace"), 4101, 100);
+        log.record_for(Some(("someone-else", "my-profile")), Some("org_1"), None, 4100, 101);
+        log.record_for(Some(("mine", "another-profile")), Some("org_1"), None, 4100, 101);
+        log.record_for(Some(("mine", "my-profile")), Some("org_2"), None, 4100, 101);
+        log.record_for(Some(("mine", "my-profile")), Some("org_1"), None, 4100, 200);
+        log.record(None, None, 4100, 101);
+        let scope = crate::account::CloudScope {
+            user_id: "mine".into(),
+            profile_id: "my-profile".into(),
+            active_org_id: "org_1".into(),
+            multi_org: true,
+            members: ["org_1".to_string()].into_iter().collect(),
+        };
+        assert_eq!(log.support_events(&scope, 100, 150), vec![(100, "stale_generation")]);
+    }
+
+    #[test]
     fn close_log_keeps_only_typed_reasons_and_is_bounded() {
         let log = ConnectionCloseLog::default();
         log.record(Some("org_1"), Some("cw_1"), 1006, 1);
@@ -797,7 +839,7 @@ mod tests {
         assert!(serde_json::to_value(log.snapshot_for("org_b")).unwrap().to_string().find("org_b").is_none());
 
         // The builder checks again: handed every entry, it keeps org A's.
-        let everything: Vec<ConnectionClose> = log.entries.lock().unwrap().iter().cloned().collect();
+        let everything: Vec<ConnectionClose> = log.entries.lock().unwrap().iter().map(|entry| entry.close.clone()).collect();
         assert_eq!(everything.len(), 7);
         let mut answer = fixture();
         answer["organizationId"] = json!("org_a");

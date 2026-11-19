@@ -6,12 +6,17 @@ import SettingsScreen from "../app/(tabs)/settings";
 import PrivacyScreen from "../app/privacy";
 import ConnectionLogScreen from "../app/connection-log";
 import AccountScreen from "../app/account";
+import SupportReportScreen from "../app/support-report";
 import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
+const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn() }));
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
+vi.mock("@mobile/support/api", () => ({ supportApi: support }));
+vi.mock("expo-clipboard", () => ({ setStringAsync: support.copy }));
+vi.mock("@mobile/transport/connection", () => ({ scopedConnectionEvents: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
@@ -21,6 +26,7 @@ vi.mock("react-native", () => {
   const View = ({ children, testID, style }: { children?: ReactNode; testID?: string; style?: unknown }) => <div data-testid={testID} data-bg={flat(style).backgroundColor as string | undefined}>{children}</div>;
   return {
     View, Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>, ScrollView: View,
+    TextInput: ({ accessibilityLabel, value, onChangeText }: any) => <input aria-label={accessibilityLabel} value={value} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     Platform: { OS: "ios" }, Alert: { alert: mocks.alert }, useColorScheme: () => "dark",
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1, absoluteFill: {} },
     Pressable: ({ children, onPress, accessibilityLabel, accessibilityState }: any) => <button aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
@@ -28,7 +34,7 @@ vi.mock("react-native", () => {
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
-  Button: ({ label, onPress }: any) => <button onClick={onPress}>{label}</button>,
+  Button: ({ label, onPress, disabled }: any) => <button onClick={onPress} disabled={disabled}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children }: any) => <div>{children}</div>,
   SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
@@ -42,6 +48,10 @@ const show = (screen: ReactNode) => act(async () => { root.render(screen); });
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.push.mockReset();
+  support.preview.mockReset();
+  support.submit.mockReset();
+  support.copy.mockReset();
+  support.events.mockReset();
   mocks.back.mockReset();
   mocks.setName.mockReset();
   mocks.alert.mockReset();
@@ -163,4 +173,44 @@ it("offers Sign in in place of the account row when signed out", async () => {
   expect(container.textContent).toContain("Not signed in");
   [...container.querySelectorAll("button")].find((b) => b.textContent === "Sign in")!.click();
   expect(mocks.app.signIn).toHaveBeenCalledTimes(1);
+});
+
+const supportReceipt = "c1e725d7-9bcb-49f6-abf1-5fdf0f1d3464";
+
+const tap = (label: string) => act(async () => {
+  [...container.querySelectorAll("button")].find((button) => button.textContent === label)!.click();
+});
+
+it("opens support reports from Settings and cancels before sending", async () => {
+  await show(<SettingsScreen />);
+  await tap("Send a support report");
+  expect(mocks.push).toHaveBeenCalledWith("/support-report");
+
+  await show(<SupportReportScreen />);
+  expect(support.preview).not.toHaveBeenCalled();
+  await tap("Cancel");
+  expect(mocks.back).toHaveBeenCalled();
+  expect(support.submit).not.toHaveBeenCalled();
+});
+
+it("previews scoped mobile events and retries the reviewed submission before confirming delivery", async () => {
+  const now = Date.now();
+  mocks.app.session.user.userId = "my-account";
+  support.events.mockReturnValue([{ at: now - 500, kind: "connected", classification: "relay", detail: "ghp_CANARY" }]);
+  support.preview.mockResolvedValue({
+    key: supportReceipt, from: now - 1000, to: now, server: { status: "omitted", events: [], capturedAt: now, truncated: false },
+  });
+  support.submit.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ reference: supportReceipt });
+  await show(<SupportReportScreen />);
+  await act(async () => container.querySelector<HTMLInputElement>('[aria-label="This phone’s connection events"]')!.click());
+  expect(support.events).not.toHaveBeenCalled();
+  await tap("Prepare preview");
+  expect(container.textContent).toContain("Phone: Included");
+  expect(support.events).toHaveBeenCalledWith(mocks.app.logs, "my-account", mocks.app.hosts);
+  await tap("Send to TerminalX Support");
+  expect(container.textContent).not.toContain("Report delivered");
+  await tap("Retry same report");
+  expect(container.textContent).toContain(supportReceipt);
+  expect(support.submit.mock.calls[0]).toEqual(support.submit.mock.calls[1]);
+  expect(JSON.stringify(support.submit.mock.calls)).not.toContain("ghp_CANARY");
 });

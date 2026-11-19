@@ -1,11 +1,12 @@
 import { directEndpoints } from "./direct-endpoints";
 import { z } from "zod";
+import type { ReportEvent } from "@terminalx/portable/supportReports";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
 import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
-import { closeDetail } from "./connection-errors";
+import { closeDetail, connectionProblem } from "./connection-errors";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -18,7 +19,28 @@ import type { PhoneNetwork } from "./network";
  * the person reconnects from the phone.
  */
 export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable" | "disconnected-on-mac";
+export const supportConnectionStages = ["connecting", "connected", "disconnected-on-mac", "attempt-failed", "connection-lost"] as const;
+export const supportConnectionClassifications = ["direct", "relay", "pairing-invalid", "mac-offline", "dropped", "reconnecting", "network", "too-large", "no-answer", "unknown"] as const;
+type ReportFields = {
+  kind: typeof supportConnectionStages[number];
+  classification?: typeof supportConnectionClassifications[number];
+};
+
 export interface ConnectionLogEntry { id: string; at: number; level: "info" | "success" | "warning" | "error"; message: string; detail?: string }
+
+// Typed annotations on existing connection-log entries. Ownership and report
+// fields never enter the persisted display log or outlive its in-memory entry.
+const reportFields = new WeakMap<ConnectionLogEntry, ReportFields & { owner: string; hostId: string }>();
+
+export function scopedConnectionEvents(logs: readonly ConnectionLogEntry[], owner: string, hosts: readonly StoredHost[]): ReportEvent[] | "unavailable" {
+  const permitted = new Set(hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === owner).map((host) => host.id));
+  if (!permitted.size) return "unavailable";
+  return logs.flatMap((entry) => {
+    const fields = reportFields.get(entry);
+    if (!fields || fields.owner !== owner || !permitted.has(fields.hostId)) return [];
+    return [{ at: entry.at, kind: fields.kind, classification: fields.classification }];
+  });
+}
 
 const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
 
@@ -346,7 +368,7 @@ export class HostConnection {
           this.log("info", "Connection attempt cancelled", this.cancelReason);
           return;
         }
-        this.log("warning", "Connection attempt failed", safeError(error));
+        this.log("warning", "Connection attempt failed", safeError(error), { kind: "attempt-failed", classification: connectionProblem(error) ?? "unknown" });
         attempt++;
       } finally {
         if (this.attempting === generation) this.attempting = null;
@@ -408,7 +430,7 @@ export class HostConnection {
     this.log("info", "Trying connection paths", [
       ...directEndpoints(storedHost).map(redactEndpoint),
       ...(resumable.length ? [redactEndpoint(storedHost.relay!.cellUrl)] : []),
-    ].join(" · "));
+    ].join(" · "), { kind: "connecting" });
     const attempts: Promise<ConnectionCandidate>[] = directEndpoints(storedHost).map(openDirect);
     for (const resume of resumable) {
       attempts.push((async (): Promise<ConnectionCandidate> => {
@@ -462,12 +484,12 @@ export class HostConnection {
         wasConnected = true;
         connectedAt = Date.now();
         this.emitStage("connected", 0);
-        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
+        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`, { kind: "connected", classification: winner.path });
       } else if (state === "disconnected" && wasConnected) {
         clearInterval(this.refreshTimer);
         this.client = null;
         if (this.heldByMac) {
-          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`);
+          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`, { kind: "disconnected-on-mac" });
           this.emitStage("disconnected-on-mac", 0);
           return;
         }
@@ -482,7 +504,7 @@ export class HostConnection {
         const delay = this.flaps ? FLAP_DELAYS_MS[Math.min(this.flaps, FLAP_DELAYS_MS.length) - 1]! : 0;
         // The close code and reason are what tell a relay rejection from the phone's own network (#670).
         const lost = `${hostDisplayName(host)} · ${winner.path} · ${cause ? safeError(cause) : "no cause"}`;
-        this.log("warning", "Connection lost", delay ? `${lost} · reconnecting in ${delay / 1_000} s` : lost);
+        this.log("warning", "Connection lost", delay ? `${lost} · reconnecting in ${delay / 1_000} s` : lost, { kind: "connection-lost", classification: connectionProblem(cause) ?? "unknown" });
         void this.connectLoop(generation, delay);
       }
     });
@@ -576,8 +598,12 @@ export class HostConnection {
     for (const listener of this.stageListeners) listener(stage, attempt);
   }
 
-  private log(level: ConnectionLogEntry["level"], message: string, detail?: string): void {
+  private log(level: ConnectionLogEntry["level"], message: string, detail?: string, report?: ReportFields): void {
     const entry = { id: `${Date.now()}-${Math.random()}`, at: Date.now(), level, message, ...(detail ? { detail } : {}) };
+    const host = this.active?.host;
+    if (report && host?.provenance.kind === "automatic") {
+      reportFields.set(entry, { ...report, owner: host.provenance.userId, hostId: host.id });
+    }
     for (const listener of this.logListeners) listener(entry);
   }
 }
