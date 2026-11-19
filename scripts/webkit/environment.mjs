@@ -101,7 +101,15 @@ try {
           return invoke(command, args);
         };
         const answers = window.__PW_STUB__.answers;
-        answers.cloud_providers = { providers: [{ id: "local-docker", displayName: "Local Docker", availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: null }, capabilities: {} }] };
+        // The provider is named by the descriptor the server's registry publishes (PRO-415): the app names no provider.
+        answers.cloud_providers = { providers: [{ id: "local-docker", displayName: "Local Docker", availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: null }, capabilities: {},
+          descriptor: {
+            id: "local-docker", label: "Local Docker", icon: "container", order: 90, description: "Containers on a machine you run. Good for trying cloud workspaces out.", billing: "Your own hardware", billedByProvider: false, listed: true,
+            credentialFields: [{ name: "credential", kind: "text", label: "Connection marker", helpUrl: null }],
+            offering: { locations: "required", sources: "none", machineClasses: "catalog", pricingSource: "provider-rate", suspendedBilling: "none" },
+            capabilities: { pauseResumeWithMemory: false, stopStart: true, snapshots: false, exec: false, computeRunsUntilStopped: false },
+            allowedIdleSuspendMinutes: [5, 15, 60, 0], allowedRetentionDays: [30],
+          } }] };
         answers.organization_environment_status = { ...status, contextRevision: "s:1" };
         answers.organization_environment_recipes = { ...recipes, contextRevision: "s:1" };
         answers.organization_compute_policy = { policy: { version: 1, maxWorkspaces: 5, maxRunningWorkspaces: 3 }, canEdit: true, counts: { workspaces: 2, running: 1 }, workspaceCeiling: 10, runningWorkspaceCeiling: 10 };
@@ -121,7 +129,7 @@ try {
     const template = page.getByRole("form", { name: "Environment template" });
     await template.waitFor();
     await page.getByRole("region", { name: "Environment recipes" }).waitFor();
-    const rows = await page.getByRole("list", { name: "Environment versions" }).evaluate((list) => [...list.children].map((row) => ({ height: row.getBoundingClientRect().height, text: row.textContent })));
+    const rows = await page.getByRole("list", { name: "Environment versions" }).evaluate((list) => [...list.children].map((row) => ({ height: row.getBoundingClientRect().height, line: row.firstElementChild.getBoundingClientRect().height, text: row.textContent })));
     const unbuilt = await page.getByRole("region", { name: "Unbuilt changes" }).textContent();
     // The page before anything is opened, as the design draws it.
     await page.getByTestId("organization-cloud-compute").screenshot({ path: `/tmp/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
@@ -166,7 +174,9 @@ try {
     const calls = await page.evaluate(() => window.__ENVIRONMENT_CALLS__);
     failed += report(`environment section at ${width}px${colorScheme ? ` (${colorScheme})` : ""}`, {
       "no text on the Environment tab is smaller than 12px": layout.small.length === 0,
-      "versions are 44px rows named Environment vN": rows.length === 3 && rows.every((row) => row.height >= 43 && row.height <= 45) && /^Environment v4/.test(rows[0].text),
+      "versions are 44px rows named Environment vN": rows.length === 3 && rows.every((row) => row.line >= 43 && row.line <= 45) && rows.slice(1).every((row) => row.height >= 43 && row.height <= 45) && /^Environment v4/.test(rows[0].text),
+      // #1093: the retry is under the failed row from the start, not only once its log is open.
+      "a failed version offers Build again… on a line under its row, with its log closed": /View logBuild again…$/.test(rows[0].text) && rows[0].height > rows[0].line + 20 && rows[0].height <= rows[0].line + 45 && rows.slice(1).every((row) => !/Build again/.test(row.text)),
       "the active version has an ACTIVE badge and older built ones offer Activate": /Active/.test(rows[1].text) && /Activate/.test(rows[2].text),
       "a failed version says where it failed, without the error code": /Failed in install script/.test(rows[0].text) && !/cloud_environment_install_failed/.test(layout.text),
       "times are relative ages or short dates, not locale timestamps": !/\d+\/\d+\/\d{4}/.test(layout.text),

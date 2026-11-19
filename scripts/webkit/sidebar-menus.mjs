@@ -70,7 +70,8 @@ try {
       await menu.waitFor();
     };
     const close = async () => {
-      await page.keyboard.press("Escape");
+      // One Escape closes the menu and its submenu. A second would reach the
+      // permission card, where Escape denies (PRO-382) and leaves Allow off.
       await page.keyboard.press("Escape");
       await page.getByRole("menu").first().waitFor({ state: "hidden" });
     };
