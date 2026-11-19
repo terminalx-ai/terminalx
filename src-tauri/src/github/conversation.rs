@@ -121,6 +121,10 @@ impl Target {
         }
         Ok(Self { host: parts[0].into(), owner: parts[1].into(), name: parts[2].into(), number: parts[4].into(), url })
     }
+
+    pub(crate) fn repository_url(&self) -> String {
+        format!("https://{}/{}/{}", self.host, self.owner, self.name)
+    }
 }
 
 fn string(v: &Value, key: &str) -> String { v[key].as_str().unwrap_or_default().into() }

@@ -79,7 +79,7 @@ describe("session PR transport", () => {
     expect(rows.map((row) => row.identity)).toEqual([b.url, a.url]);
     expect(call).toHaveBeenCalledWith("git.prs", expect.objectContaining({ repo: "old-repo", branch: "initial", number: 1 }));
     await source.prAccess!(saved).ready();
-    expect(mutate).toHaveBeenCalledWith("git.prReady", expect.objectContaining({ repo: "old-repo", number: 1 }));
+    expect(mutate).toHaveBeenCalledWith("git.prReady", { repo: "old-repo", url: a.url });
   });
 
   it("persists local PR creation with explicit session identity", async () => {
@@ -230,9 +230,9 @@ it("records Branch panel PR creation on the machine under its native session ID"
   await access.ready();
   await access.merge("squash");
   await reopened.conversation!(pr, association).read();
-  expect(call).toHaveBeenCalledWith("git.prs", { repo, number, branch: head });
-  expect(mutate).toHaveBeenCalledWith("git.prReady", { repo, number });
-  expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo, number, method: "squash" });
+  expect(call).toHaveBeenCalledWith("git.prs", { repo, number, branch: head, url });
+  expect(mutate).toHaveBeenCalledWith("git.prReady", { repo, url });
+  expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo, url, method: "squash" });
   expect(call).toHaveBeenCalledWith("git.prConversation", { repo, url });
   expect(invoke).not.toHaveBeenCalled();
 });

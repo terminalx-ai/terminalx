@@ -319,13 +319,15 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       const repository = new RemoteGit(remote.client, association.scope.repo);
       return {
         read: async () => {
-          const { prs } = await repository.prs(association.head, association.number);
+          const { prs } = await repository.prs(association.head, association.number, association.url);
           const pr = prs.find((pr) => pr.url.toLowerCase().replace(/\/$/, "") === association.url.toLowerCase().replace(/\/$/, ""));
           if (!pr) throw new Error(`GitHub did not return associated PR #${association.number}.`);
           return pr;
         },
-        ready: () => repository.readyPr(association.number).then(() => undefined),
-        merge: (method) => repository.mergePr(association.number, method).then(() => undefined),
+        // Omit the number so an older runtime cannot silently use its default
+        // repository for a URL-bound mutation.
+        ready: () => repository.readyPr(association.url).then(() => undefined),
+        merge: (method) => repository.mergePr(association.url, method).then(() => undefined),
       };
     },
     conversation: (pr, association) => {

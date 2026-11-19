@@ -529,7 +529,7 @@ fn display_remote(url: &str) -> String {
 }
 
 /// Compare Git transport URLs with the repository in a canonical HTTPS PR URL.
-fn origin_repository(origin: &str) -> Option<String> {
+fn origin_repository(origin: &str, ssh_host: impl FnOnce(&str) -> Option<String>) -> Option<String> {
     let url = if origin.contains("://") {
         url::Url::parse(origin).ok()?
     } else {
@@ -550,11 +550,19 @@ fn origin_repository(origin: &str) -> Option<String> {
         return None;
     }
     let host = url.host()?;
-    let authority = match url.port().filter(|_| matches!(url.scheme(), "http" | "https")) {
-        Some(port) if port != 443 => format!("{host}:{port}"),
+    let authority = match (url.scheme(), url.port()) {
+        ("ssh" | "git+ssh" | "ssh+git", _) => {
+            // Use the same alias expansion as GitHub CLI, including for scp syntax.
+            ssh_host(&format!("ssh://{host}")).unwrap_or_else(|| host.to_string())
+        }
+        ("http" | "https", Some(port)) if port != 443 => format!("{host}:{port}"),
         _ => host.to_string(),
     };
     Some(format!("https://{authority}/{repo}").to_ascii_lowercase())
+}
+
+fn checkout_origin(dir: &Path) -> Option<String> {
+    origin_repository(&crate::git::remote_url(dir)?, crate::github::hostname_from_remote)
 }
 
 /// A branch name as `git check-ref-format --branch` accepts it (so `fix#1`,
@@ -1507,13 +1515,16 @@ impl WorkspaceGit {
         }
         let names = if self.project { self.project_repositories() } else { self.repositories().0 };
         let mut identities = std::collections::HashMap::new();
+        let mut ssh_hosts = std::collections::HashMap::new();
         let mut matches = |name: &str, repository: &str| {
             identities.entry(name.to_owned()).or_insert_with(|| {
                 if !self.verified_machine_repo(name) {
                     return None;
                 }
                 let origin = crate::git::remote_url(&self.dir(name))?;
-                origin_repository(&origin)
+                origin_repository(&origin, |remote| {
+                    ssh_hosts.entry(remote.to_owned()).or_insert_with(|| crate::github::hostname_from_remote(remote)).clone()
+                })
             }).as_deref() == Some(repository)
         };
         json!({ "associations": associations.into_iter().map(|association| {
@@ -1547,16 +1558,8 @@ impl WorkspaceGit {
             Some(action)
         } else { None };
         let repo = self.repo(params)?;
-        let target = Target::new(required_str(params, "url")?).map_err(RpcError::internal)?;
-        // Resolve through this repository's gh routing before allowing a supplied
-        // URL to address anything. A participant cannot use workspace credentials
-        // to read an unrelated private repository.
-        let info = self.gh(&repo, &["repo", "view", "--json", "url"], NETWORK_TIMEOUT)?;
-        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
-        let expected = format!("https://{}/{}/{}", target.host, target.owner, target.name);
-        if info["url"].as_str().map(|url| url.trim_end_matches('/').to_lowercase()).as_deref() != Some(&expected) {
-            return Err(RpcError::invalid("The pull request belongs to another repository."));
-        }
+        let target = Target::new(required_str(params, "url")?).map_err(|error| RpcError::invalid(error.to_string()))?;
+        self.require_pr_repository(&repo, &target.repository_url())?;
         let run = |args: &[&str]| self.gh(&repo, args, NETWORK_TIMEOUT).map_err(|error| anyhow::anyhow!("{}", error.message));
         match method {
             "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
@@ -1577,8 +1580,8 @@ impl WorkspaceGit {
 
     fn prs(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        if params.get("number").is_some() {
-            let mut pr = self.pr_view(&repo, &Self::pr_number(params)?)?;
+        if params.get("number").is_some() || params.get("url").is_some() {
+            let mut pr = self.pr_view(&repo, &self.pr_selector(&repo, params)?)?;
             self.panel_pr(&repo, &mut pr);
             return Ok(json!({ "repo": repo.name, "branch": pr.head, "prs": [pr] }));
         }
@@ -1656,17 +1659,52 @@ impl WorkspaceGit {
             .ok_or_else(|| RpcError::invalid("number is required"))
     }
 
-    fn pr_view(&self, repo: &Repo, number: &str) -> Result<crate::github::PullRequest, RpcError> {
-        let out = self.gh(repo, &["pr", "view", number, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+    fn require_pr_repository(&self, repo: &Repo, expected: &str) -> Result<(), RpcError> {
+        // A machine can address its own origin explicitly even when gh defaults
+        // to another remote. Other URLs must match the workspace's gh repository.
+        if self.project && checkout_origin(&repo.dir).as_deref() == Some(expected) {
+            return Ok(());
+        }
+        let info = self.gh(repo, &["repo", "view", "--json", "url"], NETWORK_TIMEOUT)?;
+        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
+        if info["url"].as_str().map(|url| url.trim_end_matches('/').to_ascii_lowercase()).as_deref() != Some(expected) {
+            return Err(RpcError::invalid("The pull request belongs to another repository."));
+        }
+        Ok(())
+    }
+
+    fn pr_selector(&self, repo: &Repo, params: &Value) -> Result<String, RpcError> {
+        if params.get("url").is_none() {
+            return Self::pr_number(params);
+        }
+        let target = crate::github::conversation::Target::new(required_str(params, "url")?).map_err(|error| RpcError::invalid(error.to_string()))?;
+        // gh's PR URL parser drops ports and strips a leading www. Reject
+        // selectors it would send to a different host.
+        if target.host.contains(':') || target.host.starts_with("www.") {
+            return Err(RpcError::invalid("GitHub CLI cannot target this pull request hostname exactly."));
+        }
+        if params.get("number").is_some() && Self::pr_number(params)? != target.number {
+            return Err(RpcError::invalid("Pull request number does not match its URL."));
+        }
+        self.require_pr_repository(repo, &target.repository_url())?;
+        Ok(target.url)
+    }
+
+    fn pr_view(&self, repo: &Repo, selector: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let out = self.gh(repo, &["pr", "view", selector, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
-        Ok(crate::github::parse_pr(&value))
+        let pr = crate::github::parse_pr(&value);
+        if selector.starts_with("https://") && crate::pr_associations::identity(&pr.url).ok().as_deref() != Some(selector) {
+            return Err(RpcError::invalid("GitHub returned a different pull request."));
+        }
+        Ok(pr)
     }
 
     fn pr_ready(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let number = Self::pr_number(params)?;
-        let result = self.gh(&repo, &["pr", "ready", &number], NETWORK_TIMEOUT);
-        let pr = self.pr_view(&repo, &number);
+        let selector = self.pr_selector(&repo, params)?;
+        let result = self.gh(&repo, &["pr", "ready", &selector], NETWORK_TIMEOUT);
+        let pr = self.pr_view(&repo, &selector);
         match (result, pr) {
             (_, Ok(pr)) if !pr.is_draft => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
@@ -1677,13 +1715,13 @@ impl WorkspaceGit {
 
     fn pr_merge(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let number = Self::pr_number(params)?;
+        let selector = self.pr_selector(&repo, params)?;
         let flag = match params.get("method").and_then(Value::as_str).unwrap_or("merge") {
             "merge" => "--merge",
             "squash" => "--squash",
             "rebase" => "--rebase",
             "queue" => {
-                let pr = self.pr_view(&repo, &number)?;
+                let pr = self.pr_view(&repo, &selector)?;
                 let (host, query) = crate::github::queue_query(&pr.url).map_err(RpcError::internal)?;
                 let out = self.gh(&repo, &["api", "graphql", "--hostname", &host, "-f", &query], NETWORK_TIMEOUT)?;
                 let queue = crate::github::parse_queue_response(&out).map_err(RpcError::internal)?;
@@ -1698,13 +1736,13 @@ impl WorkspaceGit {
             Some(Value::String(head)) if valid_object_id(head) => Some(head.as_str()),
             Some(_) => return Err(RpcError::invalid("head is a commit id")),
         };
-        let mut args = vec!["pr", "merge", number.as_str(), flag];
+        let mut args = vec!["pr", "merge", selector.as_str(), flag];
         if let Some(head) = head {
             args.extend(["--match-head-commit", head]);
         }
         let result = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.
-        match (result, self.pr_view(&repo, &number)) {
+        match (result, self.pr_view(&repo, &selector)) {
             (_, Ok(pr)) if pr.state == "MERGED" => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),

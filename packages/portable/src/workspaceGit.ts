@@ -317,10 +317,10 @@ export class RemoteGit {
     return this.read("git.branches");
   }
 
-  /** With `number`, refresh one retained PR independently of its old branch.
-   * Older runtimes use `branch`; callers still verify the returned identity. */
-  prs(branch?: string, number?: number): Promise<{ branch: string; prs: RemotePullRequest[] }> {
-    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}) });
+  /** Refresh a retained PR by URL where supported, with a number and branch for older runtimes.
+   * Callers still verify the returned identity. */
+  prs(branch?: string, number?: number, url?: string): Promise<{ branch: string; prs: RemotePullRequest[] }> {
+    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}), ...(url ? { url } : {}) });
   }
 
   prConversation(url: string): PrConversationAccess {
@@ -378,16 +378,17 @@ export class RemoteGit {
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }
 
-  readyPr(number: number): Promise<unknown> {
-    return this.write("git.prReady", { number });
+  readyPr(pr: number | string): Promise<unknown> {
+    return this.write("git.prReady", typeof pr === "string" ? { url: pr } : { number: pr });
   }
 
   /**
    * `head` pins the merge to the commit the person saw: GitHub refuses it
    * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
    */
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
-    return this.write("git.prMerge", head ? { number, method, head } : { number, method });
+  mergePr(pr: number | string, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
+    const target = typeof pr === "string" ? { url: pr } : { number: pr };
+    return this.write("git.prMerge", head ? { ...target, method, head } : { ...target, method });
   }
 }
 

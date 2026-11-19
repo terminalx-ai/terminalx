@@ -7,9 +7,9 @@ repository; this answers the calls they make, from JSON files in
 
   gh pr list --head <branch> --state all|open --json <fields> --limit <n>
   gh pr create --title <t> --body <b> --base <base> --head <branch> [--draft]
-  gh pr view <number> --json <fields>
-  gh pr ready <number>
-  gh pr merge <number> --merge|--squash|--rebase [--match-head-commit <sha>]
+  gh pr view <number|url> --json <fields>
+  gh pr ready <number|url>
+  gh pr merge <number|url> --merge|--squash|--rebase [--match-head-commit <sha>]
 
 Faults, by file in the state directory:
   auth-expired       every call fails as GitHub does for a revoked token
@@ -162,6 +162,9 @@ def main(args):
     target = rest[0].rstrip("/").split("/")[-1] if rest else ""
     number = int(target) if target.isdigit() else None
     pr = next((pr for pr in prs if pr["number"] == number), None)
+    if pr is not None and rest and rest[0].startswith("https://"):
+        if rest[0].rstrip("/").lower() != pr["url"].rstrip("/").lower():
+            pr = None
     if pr is None:
         fail("GraphQL: Could not resolve to a PullRequest with the number of %s." % (rest[0] if rest else ""))
     if command == "view":
