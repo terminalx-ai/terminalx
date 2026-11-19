@@ -33,8 +33,9 @@ async function reachable(locator, why) {
   });
   assert.ok(measured.fits && measured.hit, `${why}: ${JSON.stringify(measured)}`);
 }
-// The window is never narrower than 760px (tauri.conf.json), so at 390 and 320 the
-// open sidebar (268px) leaves the main view 122px and 52px: narrower than any single
+// The minimum window is 760px and zoom is capped at 2, so 380 CSS px is the narrowest real width.
+const WIDTHS = [1360, 390, 380];
+// At 390 and 380 the open sidebar (268px) leaves the main view about 120px: narrower than any single
 // control, in the authored layout as much as today's. The narrow passes therefore
 // measure the main view with the sidebar hidden, as a narrow window is used, and
 // show it again for every step that reads or drives the sidebar.
@@ -132,7 +133,7 @@ async function reassign(page) {
 }
 
 try {
-  for (const width of [1360, 390, 320]) {
+  for (const width of WIDTHS) {
     const page = await fresh(width);
     try {
       await chooseView(page, "Mine", ["Local task", "Owned task"]);
@@ -252,7 +253,7 @@ try {
     } finally { await page.close(); }
   }
 
-  for (const width of [1360, 390, 320]) {
+  for (const width of WIDTHS) {
     const page = await fresh(width);
     try {
       await sidebarShown(page, true);

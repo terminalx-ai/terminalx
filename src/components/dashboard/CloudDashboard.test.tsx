@@ -425,3 +425,35 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);
   expectNoWake();
 });
+
+it("shows a cloud row's Active time from its workspace's lastActivityAt only, and a local row's from its own messages", async () => {
+  const reported = Date.parse("2026-09-29T08:15:00.000Z");
+  // ws-1 reports its last activity; ws-2 reports none. Both sessions saw a message at 10:30.
+  await poll(ORG, [item("ws-1", ORG, { lastActivityAt: reported }), item("ws-2", ORG)]);
+  const invoke = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, ...rest: unknown[]) => command === "list_sessions"
+    ? [session("local-1", "Local work", "idle", { projectPath: "/repo", cwd: "/repo" })]
+    : invoke(command, ...rest));
+  try {
+    await act(async () => { await sessions.refreshSessions(); });
+    render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+    await settle();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Display" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("button", { name: "Table" }));
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    const active = screen.getAllByRole("columnheader").findIndex((header) => header.textContent === "Active");
+    const cell = async (name: RegExp) => within(await screen.findByRole("row", { name })).getAllByRole("cell")[active];
+    // The workspace's time, not the session's last message or change.
+    expect((await cell(/Fix login redirect/)).querySelector("time")?.dateTime).toBe("2026-09-29T08:15:00.000Z");
+    // None reported: unknown, with no time borrowed from the session or the workspace's update.
+    const unknown = await cell(/Add tests/);
+    expect(unknown.querySelector("time")).toBeNull();
+    expect(unknown.textContent).toBe("—");
+    // A local row keeps its own last message.
+    expect((await cell(/Local work/)).querySelector("time")?.dateTime).toBe("2026-09-30T10:30:00.000Z");
+  } finally {
+    mocks.invoke.mockImplementation(invoke);
+    await act(async () => { await sessions.refreshSessions(); });
+  }
+});
