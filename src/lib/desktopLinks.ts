@@ -75,7 +75,17 @@ const HIDDEN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F
 
 /** A prompt a `new` link may carry: some text, and nothing in it the dialog would not show. */
 export function isShownPrompt(prompt: string): boolean {
-  return !!prompt.trim() && !HIDDEN.test(prompt);
+  return !!prompt.trim() && !HIDDEN.test(prompt) && !padsOutOfView(prompt);
+}
+
+/** Blank space that would push words below what the dialog shows at first, as the native side refuses it. */
+function padsOutOfView(prompt: string): boolean {
+  let blankRun = 0;
+  for (const line of prompt.split(/\r\n|\r|\n/)) {
+    blankRun = line.trim() ? 0 : blankRun + 1;
+    if (blankRun > 2) return true;
+  }
+  return /[ \t]{40}/.test(prompt);
 }
 const isOptionalString = (value: unknown): value is string | null => value === null || typeof value === "string";
 

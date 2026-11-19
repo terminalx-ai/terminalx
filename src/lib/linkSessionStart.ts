@@ -8,8 +8,10 @@
  * for the one last worked in; it never adds a folder. A session started
  * from a link starts the way a new one from the New Session form would, on
  * the agent, model and permission mode last chosen there, except that it is
- * never started in Bypass: what an outside link asks for runs with the
- * agent asking first.
+ * never started in Bypass and never set to merge by itself: what an outside
+ * link asks for runs with the agent asking first, and its pull request
+ * waits for a person. Create acts only on the request on screen, and only
+ * once what it says has been up for `LINK_ARMING_MS`.
  */
 import { useSyncExternalStore } from "react";
 import { BYPASS_MODE, FIRST_RUN_PERMISSION_MODE, pickerMode } from "@terminalx/portable/agentSettings";
@@ -44,7 +46,12 @@ export interface LinkSessionRequest {
   busy: boolean;
   /** Why starting failed; the dialog stays open to say so. */
   error: string | null;
+  /** Create waits until this time (epoch ms): what the dialog says has been on screen long enough to be read. */
+  armedAt: number;
 }
+
+/** How long Create waits after the dialog's content appears or changes. */
+export const LINK_ARMING_MS = 800;
 
 let request: LinkSessionRequest | null = null;
 let nextId = 1;
@@ -112,13 +119,14 @@ export async function askToStartFromLink(link: NewSessionLink): Promise<void> {
     blocked: noAgent && getSessionStore().harnesses.length ? "Install and sign in to an agent before starting a session." : null,
     busy: false,
     error: null,
+    armedAt: Date.now() + LINK_ARMING_MS,
   });
   const branch = readBranch
-    ? api.workStatus(project.path).then((status) => patch(id, { branch: status.defaultBranch ?? null }), () => undefined)
+    ? api.workStatus(project.path).then((status) => patch(id, { branch: status.defaultBranch ?? null, armedAt: Date.now() + LINK_ARMING_MS }), () => undefined)
     : Promise.resolve();
   const issue = link.linear
     ? issues.details(project.path, "linear", link.linear).then(
-      (found) => patch(id, { issue: found }),
+      (found) => patch(id, { issue: found, armedAt: Date.now() + LINK_ARMING_MS }),
       (cause) => patch(id, { blocked: `${link.linear} could not be read: ${errorMessage(cause)}` }),
     )
     : Promise.resolve();
@@ -141,9 +149,10 @@ export function linkPermissionMode(lastMode: string): string {
  * Session form would start it, then opened. A failure leaves the dialog up
  * with what went wrong.
  */
-export async function startLinkSession(): Promise<void> {
+export async function startLinkSession(shownId: number): Promise<void> {
   const asked = request;
-  if (!asked || asked.busy || asked.reading || asked.blocked) return;
+  // Only the request the person saw: a link that arrived since put another in its place.
+  if (!asked || asked.id !== shownId || asked.busy || asked.reading || asked.blocked || Date.now() < asked.armedAt) return;
   const { id, link, project, isGit, issue } = asked;
   if (link.linear && !issue) return;
   patch(id, { busy: true, error: null });
@@ -175,9 +184,11 @@ export async function startLinkSession(): Promise<void> {
     const tab = session.tabs[0];
     // From an issue the prompt is the issue itself, with the link's words after it, as `sessions create --issue` does.
     const first = issue ? [await issuePromptWithComments(project.path, issue), prompt].filter(Boolean).join("\n\n") : prompt;
-    // The project's launch switches, as a new session from the form or the Issues page starts with them.
+    // The project's launch switches, as a new session from the form or the Issues page starts with them,
+    // except Merge when green: what an outside link starts never merges unless someone turns that on in the session.
     const settings = pipelineSettings(project);
-    const launched = settings.enabled && isGit ? await preparePipelineLaunch(session.id, tab.id, first, pipelineLaunchDefaults(settings, !!issue)).catch((cause) => {
+    const launch = { ...pipelineLaunchDefaults(settings, !!issue), autoMerge: false };
+    const launched = settings.enabled && isGit ? await preparePipelineLaunch(session.id, tab.id, first, launch).catch((cause) => {
       console.error("the link's session pipeline did not start", cause);
       return first;
     }) : first;

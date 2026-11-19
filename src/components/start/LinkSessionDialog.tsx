@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -13,9 +13,21 @@ import { cancelLinkSession, startLinkSession, useLinkSessionRequest } from "@/li
  */
 export function LinkSessionDialog() {
   const request = useLinkSessionRequest();
-  const create = useRef<HTMLButtonElement | null>(null);
+  const cancel = useRef<HTMLButtonElement | null>(null);
+  // Create waits until what the dialog says has been up a moment, and again after it changes.
+  const armedAt = request?.armedAt ?? 0;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const wait = armedAt - Date.now();
+    setNow(Date.now());
+    if (wait <= 0) return;
+    const timer = window.setTimeout(() => setNow(Date.now()), wait);
+    return () => window.clearTimeout(timer);
+  }, [armedAt]);
   if (!request) return null;
-  const { link, project, isGit, branch, issue, reading, blocked, busy, error } = request;
+  const { id, link, project, isGit, branch, issue, reading, blocked, busy, error } = request;
+  const arming = now < armedAt;
+  const lines = link.prompt ? link.prompt.split(/\r\n|\r|\n/).length : 0;
   const branchText = !isGit ? "No Git: runs in the project folder" : branch ? `from ${branch}` : reading ? "Reading the default branch…" : "from the default branch";
   return (
     <Dialog open onOpenChange={(open) => { if (!open) cancelLinkSession(); }}>
@@ -24,7 +36,8 @@ export function LinkSessionDialog() {
         showClose={false}
         width="max-w-[26rem]"
         className="p-0"
-        onOpenAutoFocus={(event) => { event.preventDefault(); create.current?.focus(); }}
+        // Opened by another app, it starts on Cancel: a keypress meant for that app never starts a session.
+        onOpenAutoFocus={(event) => { event.preventDefault(); cancel.current?.focus(); }}
       >
         <div className="px-4 pt-4">
           <DialogTitle className="text-sm font-semibold">Start a session from a link?</DialogTitle>
@@ -44,16 +57,17 @@ export function LinkSessionDialog() {
             )}
             {link.prompt && (
               <>
-                <dt className="text-faint">Prompt</dt>
+                <dt className="text-faint">Prompt{lines > 1 && <span className="block text-[11px]" data-link-prompt-lines="">{lines} lines</span>}</dt>
                 <dd className="max-h-32 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]" data-link-prompt="">{link.prompt}</dd>
               </>
             )}
           </dl>
+          {isGit && <p className="mt-2 text-xs text-muted-foreground">Merge when green stays off for a session started from a link.</p>}
           {(blocked || error) && <p role="alert" className="mt-2 text-xs leading-[18px] text-destructive [overflow-wrap:anywhere]">{error ?? blocked}</p>}
         </div>
         <div className="mt-1 flex justify-end gap-2 px-4 py-3">
-          <Button variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={cancelLinkSession}>Cancel</Button>
-          <Button ref={create} variant="accent" size="sm" disabled={busy || reading || !!blocked} aria-busy={busy || undefined} onClick={() => void startLinkSession()}>
+          <Button ref={cancel} variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={cancelLinkSession}>Cancel</Button>
+          <Button variant="accent" size="sm" disabled={busy || reading || arming || !!blocked} aria-busy={busy || undefined} onClick={() => void startLinkSession(id)}>
             {busy && <Loader2 aria-hidden className="animate-spin" />}
             Create session
           </Button>

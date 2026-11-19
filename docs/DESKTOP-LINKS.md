@@ -23,13 +23,18 @@ terminalx://new?project=%2FUsers%2Fme%2Fcode%2Fweb&branch=main&prompt=Fix+the+fl
 ## What a `new` link may do
 
 - Nothing is created until the person presses **Create session** in the dialog,
-  which shows the project, the branch, the issue and the whole prompt.
+  which shows the project, the branch, the issue and the whole prompt. The
+  dialog opens on Cancel, and Create works only once what it shows has been up
+  for a moment; a link arriving meanwhile replaces it and starts that wait again.
 - `project` must be the path of a project already open in TerminalX. A link
   never adds a folder. Without `project`, the project last worked in is used.
 - Without `branch`, the session starts from the project's default branch.
 - The session starts on the agent, model and permission mode last chosen in New
   Session, except Bypass: a session from a link always starts with the agent
-  asking first.
+  asking first, and never with Merge when green on.
+- A prompt with control characters, invisible characters (zero-width, bidi,
+  Unicode tags), more than two blank lines in a row, or a run of 40 spaces is
+  refused, so nothing in it can hide from the dialog.
 - At least `prompt` or `linear` is required. A name given twice, or any other
   name, makes the link invalid.
 

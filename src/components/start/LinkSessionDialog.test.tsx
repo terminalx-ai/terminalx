@@ -41,7 +41,7 @@ vi.mock("@/lib/issuePipeline", () => ({
 vi.mock("@/lib/issueSession", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/issueSession")>()), issuePromptWithComments: app.issuePrompt }));
 
 const { LinkSessionDialog } = await import("./LinkSessionDialog");
-const { askToStartFromLink, getLinkSessionRequest, linkPermissionMode, resetLinkSession } = await import("@/lib/linkSessionStart");
+const { LINK_ARMING_MS, askToStartFromLink, getLinkSessionRequest, linkPermissionMode, resetLinkSession, startLinkSession } = await import("@/lib/linkSessionStart");
 const { getErrorToasts, dismissError } = await import("@/lib/errorToasts");
 
 const web = { kind: "git", path: "/code/web", name: "web" } as Project;
@@ -51,6 +51,12 @@ const link = (patch: Partial<{ project: string | null; branch: string | null; pr
   kind: "new" as const, project: "/code/web", branch: "main", prompt: "Fix the flaky archive test in scripts.test.ts", linear: null, ...patch,
 });
 const dialog = () => screen.getByRole("dialog", { name: "Start a session from a link?" });
+const createButton = () => within(dialog()).getByRole("button", { name: "Create session" }) as HTMLButtonElement;
+/** Press Create once it is armed: what the dialog says has been up long enough to read. */
+const pressCreate = async () => {
+  await waitFor(() => expect(createButton().disabled).toBe(false), { timeout: LINK_ARMING_MS + 2000 });
+  fireEvent.click(createButton());
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -92,7 +98,7 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
   it("creates the session from the branch on Create, never in Bypass, opens it and sends the prompt", async () => {
     render(<LinkSessionDialog />);
     await act(() => askToStartFromLink(link({ branch: "release/1.2" })));
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Create session" }));
+    await pressCreate();
     await waitFor(() => expect(app.send).toHaveBeenCalled());
     expect(app.createSession).toHaveBeenCalledExactlyOnceWith({
       projectPath: "/code/web",
@@ -122,7 +128,7 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     await act(() => askToStartFromLink(link({ project: null, branch: null })));
     expect(app.workStatus).toHaveBeenCalledWith("/code/web");
     expect(within(dialog()).getByLabelText("The session the link asks for").textContent).toContain("Branchfrom trunk");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Create session" }));
+    await pressCreate();
     await waitFor(() => expect(app.createSession).toHaveBeenCalled());
     // The default branch is the backend's to choose: nothing is named.
     expect(app.createSession.mock.calls[0][0].baseRef).toBeNull();
@@ -132,7 +138,7 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     render(<LinkSessionDialog />);
     await act(() => askToStartFromLink(link({ project: "/code/notes/", branch: "main" })));
     expect(within(dialog()).getByLabelText("The session the link asks for").textContent).toContain("No Git");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Create session" }));
+    await pressCreate();
     await waitFor(() => expect(app.createSession).toHaveBeenCalled());
     expect(app.createSession.mock.calls[0][0]).toMatchObject({ projectPath: "/code/notes", useWorktree: false, onMain: true, baseRef: null, worktreeName: null });
   });
@@ -141,7 +147,7 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     app.createSession.mockRejectedValue(new Error("No branch named release/9 in web."));
     render(<LinkSessionDialog />);
     await act(() => askToStartFromLink(link({ branch: "release/9" })));
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Create session" }));
+    await pressCreate();
     expect((await within(dialog()).findByRole("alert")).textContent).toBe("No branch named release/9 in web.");
     expect(app.send).not.toHaveBeenCalled();
   });
@@ -176,14 +182,15 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     await act(async () => { answer(issue); await asked; });
     expect(app.details).toHaveBeenCalledWith("/code/web", "linear", "PRO-142");
     expect(within(dialog()).getByLabelText("The session the link asks for").textContent).toContain("IssuePRO-142 Invite email shows the wrong org name");
-    fireEvent.click(within(dialog()).getByRole("button", { name: "Create session" }));
+    await pressCreate();
     await waitFor(() => expect(app.send).toHaveBeenCalled());
     expect(app.createSession.mock.calls[0][0]).toMatchObject({
       title: "PRO-142 Invite email shows the wrong org name",
       worktreeName: "pro-142-invite-email-shows-the-wrong-org",
       issue: { provider: "linear", id: "uuid-142", identifier: "PRO-142", title: "Invite email shows the wrong org name", url: "https://linear.app/x/issue/PRO-142" },
     });
-    expect(app.launch).toHaveBeenCalledWith("new-1", "tab-1", "Work on Linear issue PRO-142: Invite email shows the wrong org name", { autoMerge: true, resolveConflicts: true });
+    // Never set to merge by itself from a link; conflicts are still resolved as the project says for issues.
+    expect(app.launch).toHaveBeenCalledWith("new-1", "tab-1", "Work on Linear issue PRO-142: Invite email shows the wrong org name", { autoMerge: false, resolveConflicts: true });
   });
 
   it("starts nothing from a Linear issue that can't be read, and says why", async () => {
@@ -192,5 +199,34 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     await act(() => askToStartFromLink(link({ prompt: null, linear: "PRO-142" })));
     expect(within(dialog()).getByRole("alert").textContent).toBe("PRO-142 could not be read: Linear is not connected.");
     expect((within(dialog()).getByRole("button", { name: "Create session" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("starts on Cancel, and Create waits until the dialog has been up a moment", async () => {
+    render(<LinkSessionDialog />);
+    await act(() => askToStartFromLink(link()));
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("Cancel"));
+    expect(createButton().disabled).toBe(true);
+    // Pressed too soon (or straight from another app's keypress), nothing starts.
+    await act(() => startLinkSession(getLinkSessionRequest()!.id));
+    expect(app.createSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(createButton().disabled).toBe(false), { timeout: LINK_ARMING_MS + 2000 });
+    expect(within(dialog()).getByText("Merge when green stays off for a session started from a link.")).toBeTruthy();
+  });
+
+  it("starts only the request that was on screen: a link that took its place is asked about anew", async () => {
+    render(<LinkSessionDialog />);
+    await act(() => askToStartFromLink(link({ prompt: "first" })));
+    const shown = getLinkSessionRequest()!.id;
+    await act(() => askToStartFromLink(link({ prompt: "second" })));
+    await new Promise((resolve) => setTimeout(resolve, LINK_ARMING_MS + 50));
+    await act(() => startLinkSession(shown));
+    expect(app.createSession).not.toHaveBeenCalled();
+    expect(within(dialog()).getByLabelText("The session the link asks for").textContent).toContain("Promptsecond");
+  });
+
+  it("says how many lines a prompt has", async () => {
+    render(<LinkSessionDialog />);
+    await act(() => askToStartFromLink(link({ prompt: "one\ntwo\n\nthree" })));
+    expect(within(dialog()).getByText("4 lines")).toBeTruthy();
   });
 });

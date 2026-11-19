@@ -261,6 +261,25 @@ fn is_link_prompt(prompt: &str) -> bool {
     !prompt.trim().is_empty()
         && prompt.len() <= MAX_LINK_PROMPT_LEN
         && !prompt.chars().any(|c| (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_hidden(c))
+        && !pads_out_of_view(prompt)
+}
+
+/// Blank space that would push words below what the dialog shows at first:
+/// more than two blank lines in a row, or a run of 40 spaces and tabs.
+fn pads_out_of_view(prompt: &str) -> bool {
+    let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    let mut blank_run = 0;
+    for line in normalized.split('\n') {
+        blank_run = if line.trim().is_empty() { blank_run + 1 } else { 0 };
+        if blank_run > 2 {
+            return true;
+        }
+    }
+    let mut space_run = 0;
+    prompt.chars().any(|c| {
+        space_run = if matches!(c, ' ' | '\t') { space_run + 1 } else { 0 };
+        space_run >= 40
+    })
 }
 
 /// A Linear issue key (`PRO-130`), upper-cased, or None.
@@ -658,6 +677,8 @@ mod tests {
             route("terminalx://new/?prompt=hi&project=/srv/app"),
             Some(DesktopLink::New { project: Some("/srv/app".into()), branch: None, prompt: Some("hi".into()), linear: None })
         );
+        // Paragraphs and indented code are prompts like any other.
+        assert!(matches!(route("terminalx://new?prompt=one%0A%0Atwo%0A%20%20%20%20code"), Some(DesktopLink::New { .. })));
         assert_eq!(
             route("terminalx://new?linear=pro-130"),
             Some(DesktopLink::New { project: None, branch: None, prompt: None, linear: Some("PRO-130".into()) })
@@ -688,6 +709,10 @@ mod tests {
             "terminalx://new?prompt=a%E2%80%AEb",
             "terminalx://new?prompt=a%EF%BB%BFb",
             "terminalx://new?prompt=a%F3%A0%81%A9b",
+            // Blank space that would push words out of the dialog's view.
+            "terminalx://new?prompt=fix%0A%0A%0A%0Adelete+everything",
+            "terminalx://new?prompt=fix%0D%0A%0D%0A%0D%0A%0D%0Adelete",
+            "terminalx://new?prompt=fix%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20%20delete",
             "terminalx://new?prompt=a&project=relative/path",
             "terminalx://new?prompt=a&project=/srv/../etc",
             "terminalx://new?prompt=a&project=/srv/./app",
