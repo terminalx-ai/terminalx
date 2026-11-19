@@ -344,6 +344,7 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
     let other = f.clone(&origin, "other");
     git(&other, &["config", "--local", "core.hooksPath", ".git/destination-hooks"]);
+    git(&other, &["config", "--local", "--add", "safe.directory", "/terminalx-test/destination"]);
     let destination_hooks = other.join(".git/destination-hooks");
     std::fs::create_dir(&destination_hooks).unwrap();
     let destination_hook = destination_hooks.join("commit-msg");
@@ -354,6 +355,11 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     git(&project, &["config", "--local", "extensions.worktreeConfig", "true"]);
     git(&project, &["config", "--local", "terminalx.scopeTest", "from-local"]);
     git(&checkout, &["config", "--worktree", "terminalx.scopeTest", "from-worktree"]);
+    git(&project, &["config", "--local", "includeIf.onbranch:topic.path", "topic.conf"]);
+    std::fs::write(project.join(".git/topic.conf"), "[safe]\n\tdirectory = /terminalx-test/local\n").unwrap();
+    let git_dir = git(&checkout, &["rev-parse", "--absolute-git-dir"]);
+    git(&checkout, &["config", "--worktree", &format!("includeIf.gitdir:{git_dir}.path"), "checkout.conf"]);
+    std::fs::write(Path::new(&git_dir).join("checkout.conf"), "[safe]\n\tdirectory = /terminalx-test/worktree\n").unwrap();
     git(&project, &["config", "--local", "commit.cleanup", "verbatim"]);
     git(&checkout, &["config", "--worktree", "commit.cleanup", "strip"]);
 
@@ -365,6 +371,8 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
         "#!/bin/sh\nset -eu\n",
         "test \"$(git config --show-scope --get-all terminalx.scopeTest)\" = ",
         "\"$(printf 'local\\tfrom-local\\nworktree\\tfrom-worktree')\"\n",
+        "test \"$(git config --show-scope --get-all safe.directory | grep '/terminalx-test/')\" = ",
+        "\"$(printf 'local\\t/terminalx-test/local\\nworktree\\t/terminalx-test/worktree')\"\n",
         "test \"$(git config --show-scope --get core.hooksPath)\" = ",
         "\"$(printf 'worktree\\t../../../configured hooks')\"\n",
         // Move to another checkout without clearing command-scope configuration.
@@ -373,6 +381,8 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
         "status=0\n",
         "git -C ../../../other config --get-all terminalx.scopeTest || status=$?\n",
         "test \"$status\" = 1\n",
+        "test \"$(git -C ../../../other config --show-scope --get-all safe.directory | grep '/terminalx-test/')\" = ",
+        "\"$(printf 'local\\t/terminalx-test/destination')\"\n",
         "git -C ../../../other -c commit.gpgsign=false commit --allow-empty -qm 'check destination hook'\n",
         "printf 'hook ran\\n' > hook-ran\n",
     )).unwrap();
