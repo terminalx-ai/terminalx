@@ -3506,7 +3506,10 @@ pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> C
     // Each asks its own CLI; neither waits on the other.
     let claude = tauri::async_runtime::spawn_blocking(move || crate::harness::claude::models::get(refresh));
     let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh));
-    Ok(crate::models::offered(claude.await.map_err(err)?, codex.await.map_err(err)?))
+    let (claude, codex) = (claude.await.map_err(err)?, codex.await.map_err(err)?);
+    // Reads settings and OpenCode's files (whose key file is retried while
+    // OpenCode rewrites it), so off the async workers too.
+    tauri::async_runtime::spawn_blocking(move || crate::models::offered(claude, codex)).await.map_err(err)
 }
 
 #[tauri::command]

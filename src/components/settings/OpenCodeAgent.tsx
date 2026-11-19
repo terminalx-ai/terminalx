@@ -161,6 +161,9 @@ export function OpenCodeAgent({ harness, readiness, checking, recheck }: {
     {overview?.configProblem && <p role="alert" className="mt-3 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-[12px] text-warning">
       <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{overview.configProblem}
     </p>}
+    {overview?.authProblem && <p role="alert" data-testid="opencode-auth-problem" className="mt-3 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-[12px] text-warning">
+      <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />{overview.authProblem}
+    </p>}
 
     <RegisteredSetting setting="agents.opencodeProviders"><div>
     <SectionHead title="Providers" description="Where OpenCode gets its models. Keys are saved where opencode auth login saves them."
@@ -371,7 +374,9 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
   replacing?: OpenCodeConnected;
 }) {
   const [key, setKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState(replacing?.baseUrl ?? (provider.local ? provider.api ?? "" : ""));
+  // The address in OpenCode's config, kept while disconnected: a reconnect starts from it.
+  const saved = replacing?.baseUrl ?? provider.baseUrl ?? null;
+  const [baseUrl, setBaseUrl] = useState(saved ?? (provider.local ? provider.api ?? "" : ""));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const keyPage = KEY_PAGES[provider.id];
@@ -381,7 +386,8 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
     setBusy(true);
     setError(null);
     try {
-      const result = await opencode.connect(provider.id, key, baseUrl.trim() === (replacing?.baseUrl ?? "") && replacing ? undefined : baseUrl.trim());
+      // Unchanged means "leave it": the key is checked at, and kept on, the saved address. "" clears it.
+      const result = await opencode.connect(provider.id, key, baseUrl.trim() === (saved ?? "") ? undefined : baseUrl.trim());
       take(result.overview);
       onConnected(provider.id, result.check.result === "notChecked" ? result.check.reason : null);
     } catch (e) {
