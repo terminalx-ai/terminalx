@@ -53,6 +53,7 @@ fn try_branch_read_slot(slots: &tokio::sync::Semaphore, pending: bool) -> Option
 const SLOW_METHODS: &[&str] = &[
     "environment.report",
     "git.push",
+    "git.pushHead",
     "git.pull",
     "git.fetch",
     "git.commit",

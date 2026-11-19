@@ -369,7 +369,8 @@ export class RemoteGit {
   }
 
   push(branch?: string, head?: string): Promise<RemotePushResult> {
-    return this.write("git.push", { ...(branch ? { branch } : {}), ...(head ? { head } : {}) });
+    if (head !== undefined) return this.write("git.pushHead", { branch, head });
+    return this.write("git.push", branch ? { branch } : {});
   }
 
   createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {

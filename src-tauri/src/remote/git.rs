@@ -503,6 +503,8 @@ impl WorkspaceGit {
             "git.commitForPush" => self.commit(params, true),
             "git.fetch" => self.fetch(params),
             "git.push" => self.push(params),
+            "git.pushHead" if params.get("head").is_some() && params.get("branch").and_then(Value::as_str).is_some_and(valid_ref_name) => self.push(params),
+            "git.pushHead" => Err(RpcError::invalid("branch and head are required")),
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
@@ -1037,8 +1039,8 @@ impl WorkspaceGit {
         }))
     }
 
-    /// Prepare with Git's ordinary commit machinery and hooks in a private,
-    /// detached Git directory. Only the named ref can receive the new commit,
+    /// Prepare with Git's ordinary commit machinery and hooks against a private
+    /// copy of the branch refs. Only the confirmed real ref can receive the commit,
     /// via a compare-and-swap against the head the caller confirmed.
     fn commit_to_branch(&self, repo: &Repo, branch: &str, head: &str, message: &str, name: &str, email: &str) -> Result<Value, RpcError> {
         let reference = format!("refs/heads/{branch}");
@@ -1056,6 +1058,7 @@ impl WorkspaceGit {
         let git_dir = path(&["rev-parse", "--absolute-git-dir"])?;
         let common = path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
         let mut lock_path = index.as_os_str().to_owned();
         lock_path.push(".lock");
         std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|error| {
@@ -1079,8 +1082,7 @@ impl WorkspaceGit {
         let staged = scratch.path().join("index");
         if index.exists() {
             std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
-            // Read a split index against the real Git directory before moving
-            // to the detached context, where its shared index is absent.
+            // Expand the split index while Git can still find its shared part.
             let mut command = git_command(&repo.dir);
             command.env("GIT_INDEX_FILE", &staged).args(["update-index", "--no-split-index"]);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
@@ -1088,26 +1090,47 @@ impl WorkspaceGit {
                 return Err(failure_error("prepare commit index", &result.text(), Failure::Other));
             }
         }
-        std::fs::write(scratch.path().join("HEAD"), format!("{head}\n")).map_err(RpcError::internal)?;
-        for metadata in ["config.worktree", "info/sparse-checkout"] {
-            let source = git_dir.join(metadata);
-            if source.is_file() {
-                let dest = scratch.path().join(metadata);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent).map_err(RpcError::internal)?;
-                }
-                std::fs::copy(source, dest).map_err(RpcError::internal)?;
-            }
+        let object_format = self.git(repo, &["rev-parse", "--show-object-format"])?;
+        let object_format = match object_format.trim() {
+            "sha1" => "sha1",
+            "sha256" => "sha256",
+            _ => return Err(RpcError::internal("Unsupported Git object format")),
+        };
+        let refs = self.git(repo, &["for-each-ref", "--sort=refname", "--format=%(objectname) %(refname)"])?;
+        std::fs::write(scratch.path().join("packed-refs"), refs).map_err(RpcError::internal)?;
+        let private_ref = scratch.path().join(&reference);
+        std::fs::create_dir_all(private_ref.parent().expect("a branch ref has a parent")).map_err(RpcError::internal)?;
+        std::fs::write(private_ref, format!("{head}\n")).map_err(RpcError::internal)?;
+        std::fs::write(scratch.path().join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
+        let config = format!("[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n");
+        std::fs::write(scratch.path().join("config"), config).map_err(RpcError::internal)?;
+        let sparse_config = git_dir.join("info/sparse-checkout");
+        if sparse_config.is_file() {
+            std::fs::create_dir_all(scratch.path().join("info")).map_err(RpcError::internal)?;
+            std::fs::copy(sparse_config, scratch.path().join("info/sparse-checkout")).map_err(RpcError::internal)?;
         }
+
+        // Include config from its original location so relative includes still
+        // resolve there. HEAD names the same branch for onbranch and hooks.
+        let common_config = format!("include.path={}", common.join("config").display());
+        let worktree_config = git_dir.join("config.worktree");
+        let include_worktree = self.git(repo, &["config", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true") && worktree_config.is_file();
+        let hooks = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+        let hooks_config = format!("core.hooksPath={}", hooks.display());
 
         let run = |args: &[&str]| {
             let mut command = git_command(&repo.dir);
-            command.env("GIT_DIR", scratch.path()).env("GIT_COMMON_DIR", &common)
-                .env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
+            command.env("GIT_DIR", scratch.path()).env_remove("GIT_COMMON_DIR")
+                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
                 .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
                 .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
-                .args(["-c", "core.splitIndex=false", "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")])
-                .args(args);
+                .args(["-c", &common_config]);
+            if include_worktree {
+                command.args(["-c", &format!("include.path={}", worktree_config.display())]);
+            }
+            command.args(["-c", &hooks_config, "-c", "core.bare=false", "-c", "core.splitIndex=false",
+                "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
                 return Err(failure_error("prepare branch commit", &result.text(), Failure::Other));
@@ -1119,8 +1142,11 @@ impl WorkspaceGit {
             return Err(RpcError::invalid("nothing to commit"));
         }
         run(&["commit", "--quiet", "-m", message])?;
-        let output = run(&["rev-parse", "HEAD"])?;
+        let output = run(&["rev-parse", "--verify", &reference])?;
         let commit = output.trim();
+        if commit == head || run(&["rev-parse", &format!("{commit}^1")])?.trim() != head {
+            return Err(RpcError::new("conflict", "The prepared commit no longer matches the confirmed branch and head."));
+        }
         check_checkout()?;
         std::fs::copy(&staged, &lock).map_err(RpcError::internal)?;
         self.git(repo, &["update-ref", "--no-deref", "-m", "commit: TerminalX", &reference, commit, head])?;

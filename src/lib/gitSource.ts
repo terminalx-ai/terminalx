@@ -269,7 +269,12 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       return committed.commit;
     },
     push: async (branch, head) => {
-      const result = await remote.push(branch, head);
+      const result = await remote.push(branch, head).catch((error: unknown) => {
+        if (head !== undefined && error instanceof WorkspaceRpcError && error.code === "method_not_found") {
+          throw new Error("Update the machine runtime to push a confirmed commit.");
+        }
+        throw error;
+      });
       if (head && result.head !== head) throw new Error("The pushed commit does not match the expected head. Refresh the branch before continuing.");
       if (!result.pushed) return `GitHub already has ${result.branch} at ${result.head.slice(0, 7)}; nothing was pushed again.`;
       return result.reconciled ? `Pushed ${result.branch} (confirmed with GitHub after the connection faltered).` : null;

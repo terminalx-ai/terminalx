@@ -252,6 +252,7 @@ pub const METHODS: &[Method] = &[
     method("git.unstage", "git/1", Manage, true),
     method("git.fetch", "git/1", Manage, true),
     method("git.push", "git/1", Manage, true),
+    method("git.pushHead", "git/1", Manage, true),
     method("git.pull", "git/1", Manage, true),
     method("git.prCreate", "git/1", Manage, true),
     method("git.prReady", "git/1", Manage, true),

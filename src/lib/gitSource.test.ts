@@ -40,6 +40,14 @@ it("refuses to fall back to an unguarded commit on an older machine", async () =
   }]]);
 });
 
+it("refuses to fall back to a live-branch push on an older machine", async () => {
+  const mutate = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.pushHead"));
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+  await expect(source.push("topic", "abc")).rejects.toThrow("Update the machine runtime");
+  expect(mutate.mock.calls).toEqual([["git.pushHead", { repo: "topic", branch: "topic", head: "abc" }]]);
+});
+
 describe("the runtime session a session key names in a workspace", () => {
   it("reads a machine session in its own project (PRO-347)", () => {
     expect(runtimeSessionIn("machine:m1:p1", "machine:m1:p1:s1")).toBe("s1");

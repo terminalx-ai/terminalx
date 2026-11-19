@@ -806,6 +806,7 @@ the pull request that adds it.
 | `git.unstage` | `git/1` | Needs a project | |
 | `git.fetch` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.push` | `git/1` | Needs a project | With the machine's git sign-in |
+| `git.pushHead` | `git/1` | Needs a project | Pushes the confirmed commit with the machine's git sign-in |
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |

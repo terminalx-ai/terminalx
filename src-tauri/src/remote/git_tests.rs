@@ -209,9 +209,36 @@ fn commit_and_push_refuse_a_changed_checkout_or_head() {
     assert_eq!(commit["branch"], "main");
     assert_ne!(commit["commit"], head);
     let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
-    assert_eq!(f.code("git.push", push(json!(head))), "conflict");
-    assert_eq!(f.call("git.push", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
+    assert_eq!(f.code("git.pushHead", push(json!(head))), "conflict");
+    assert_eq!(f.code("git.pushHead", json!({ "repo": "app", "branch": "main" })), "invalid_params");
+    assert_eq!(f.call("git.pushHead", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
     assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]), commit["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_hooks_see_the_named_branch_and_branch_specific_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["config", "includeIf.onbranch:main.path", "branch.conf"]);
+    std::fs::write(checkout.join(".git/branch.conf"), "[user]\n\tsigningKey = branch-specific\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git branch --show-current)\" = main\n",
+        "test \"$(git config --get user.signingKey)\" = branch-specific\n",
+        "test \"$(git rev-parse refs/remotes/origin/main)\" = \"$(git rev-parse HEAD)\"\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    let result = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(result["branch"], "main");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
     assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
 }
 

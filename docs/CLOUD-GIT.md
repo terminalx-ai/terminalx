@@ -47,9 +47,10 @@ runtime.
 | `git.checkout` | manage | Switch, or `create` (optionally `from` a ref). |
 | `git.stage` / `git.unstage` | manage | Paths are repository-relative; `GIT_LITERAL_PATHSPECS` makes `:(top)`-style magic plain names. |
 | `git.commit` | manage | `message`, `author` (required); everything by default, `paths`, or `staged: true` for the index only. Nothing to commit is `invalid_params`. |
-| `git.commitForPush` | manage | Commits the worktree using `message` and `author` when `expectedBranch` and `expectedHead` match. Prepares the commit with Git hooks in a detached context and atomically updates only the named branch. |
+| `git.commitForPush` | manage | Commits the worktree using `message` and `author` when `expectedBranch` and `expectedHead` match. Prepares the commit with the named branch and Git hooks in a private ref store and atomically updates only the confirmed branch. |
 | `git.fetch` / `git.pull` | manage | `fetch --prune origin`; `pull --ff-only` (divergence is `conflict`). |
 | `git.push` | manage | `branch` (default current) to `origin`, never forced. See below. |
+| `git.pushHead` | manage | Pushes exactly the confirmed `head` to the named `branch` on `origin`. Refuses if that branch's local head has changed. |
 | `git.prCreate` | manage | `title`, `body`, `base` (default: the default branch), `draft`. See below. |
 | `git.prReady` / `git.prMerge` | manage | Answered by what GitHub reports afterwards (a merge that went through before an error is a success). `git.prMerge` takes an optional `head` (a commit id): GitHub refuses the merge (`conflict`) once the pull request's head is another commit (PRO-404). |
 | `lifecycle.dispositionFacts` | participate | saas contract 10.2; see below. |
