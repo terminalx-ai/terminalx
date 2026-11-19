@@ -56,7 +56,7 @@ export function RepositoriesTab({ projectPath, page = "general" }: { projectPath
   return <>
     {general && <RepositorySettingsPage key={project.path} project={project} />}
     {page === "scripts" && <RepositoryScriptsTab projectPath={project.path} />}
-    {page === "actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
+    {page === "actions" && <RegisteredSetting setting="repositories.actions" instance={project.path}><div><RepositoryActionsPage key={project.path} header={false} projectPath={project.path} /></div></RegisteredSetting>}
     {page === "environment" && <RegisteredSetting setting="repositories.environment" instance={project.path}><div><RepositoryEnvironmentSettings key={project.path} projectPath={project.path} /></div></RegisteredSetting>}
     {page === "settingsFiles" && <ProjectSettingsFiles key={project.path} projectPath={project.path} />}
     <div hidden={!general}>

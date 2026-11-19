@@ -258,7 +258,7 @@ it("records Branch panel PR creation on the machine under its native session ID"
   const sessionId = `${workspaceKey}:author`;
   const create = { title: pr.title, body: "", base: "main", draft: false, sessionId };
   await source(repo).createPr(create);
-  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreate", { ...create, repo, sessionId: "author", associateExisting: false });
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateForSession", { ...create, repo, sessionId: "author" });
 
   const reopened = source(".");
   const { associations: [association] } = await reopened.prAssociations!(sessionId);

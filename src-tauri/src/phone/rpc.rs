@@ -561,6 +561,7 @@ impl MobileRuntime {
 
 pub(crate) struct MobileConnection {
     id: String,
+    device: DeviceEntry,
     owner: Arc<dyn super::Owner>,
     actor: crate::local_runtime::mobile::Actor,
     runtime: Arc<MobileRuntime>,
@@ -579,12 +580,12 @@ pub(crate) struct MobileConnection {
 
 impl MobileConnection {
     /// `new`, with the runtime's `register` round trip off the async workers.
-    pub(crate) async fn open(manager: &Arc<PhoneHost>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+    pub(crate) async fn open(manager: &Arc<PhoneHost>, device: &DeviceEntry, outbound: mpsc::Sender<Value>, transport: Transport, forwarded_id: Option<String>) -> Result<Self> {
         let (manager, device) = (manager.clone(), device.clone());
-        off_runtime_within(move || Self::new(&manager, &device, manager.mobile.clone(), outbound, transport)).await
+        off_runtime_within(move || Self::new(&manager, &device, manager.mobile.clone(), outbound, transport, forwarded_id)).await
     }
 
-    fn new(manager: &PhoneHost, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport) -> Result<Self> {
+    fn new(manager: &PhoneHost, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>, transport: Transport, forwarded_id: Option<String>) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
         let owner = manager.owner().context("The local runtime is unavailable.")?;
         let attachment = owner.attachment()?;
@@ -593,12 +594,12 @@ impl MobileConnection {
             generation: manager.generation(),
             user_id: account_mirror()?.map(|mirror| mirror.user_id),
         };
-        owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id}))?;
+        owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id,"forwardedId":forwarded_id}))?;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notification_filter = ConnectionFilter::default();
         runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone());
         Ok(Self {
-            id, owner, actor, overflowed, notification_filter,
+            id, device: device.clone(), owner, actor, overflowed, notification_filter,
             runtime,
             outbound,
             wire: Wire::new(transport),
@@ -642,6 +643,15 @@ impl MobileConnection {
         self.check_current(manager)?;
         let connection = self.clone();
         off_runtime_within(move || connection.call("check", json!({})).map(drop)).await
+    }
+
+    pub(crate) async fn output_permit(self: &Arc<Self>, manager: &PhoneHost) -> Result<std::fs::File> {
+        self.check_current(manager)?;
+        let connection = self.clone();
+        off_runtime_within(move || {
+            connection.call("check", json!({}))?;
+            super::registry::DeviceRegistry.output_permit(&connection.device)
+        }).await
     }
 
     fn check_current(&self, manager: &PhoneHost) -> Result<()> {

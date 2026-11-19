@@ -1025,7 +1025,7 @@ export function NewSessionView({
             </div>
 
             {!remote && (
-              <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-hairline px-4 py-1.5 text-[11.5px] text-faint" data-testid="new-session-footer">
+              <div className="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-hairline px-4 py-1.5 text-xs text-faint" data-testid="new-session-footer">
                 {signedIn.map((item) => (
                   <span key={item.id} className="flex items-center gap-1 whitespace-nowrap" data-testid="agent-signed-in"><Check className="size-3 text-add" aria-hidden />{item.name} signed in</span>
                 ))}

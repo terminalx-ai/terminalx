@@ -349,22 +349,35 @@ async fn refuse<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenit
 }
 
 /// Pass a phone to the window, from the first byte it sent.
-async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, mut stream: S, peer: SocketAddr) -> Result<()> {
+async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S, peer: SocketAddr) -> Result<()> {
     #[cfg(unix)]
     {
         // No window takes phones: the runtime serves the phone itself (PRO-359).
-        let Some(route) = host.phone_route() else {
+        let Some((route, device_scoped)) = host.direct_phone_route() else {
             return serve_phone(host, head, stream).await;
         };
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut forwarded = host.phones.get().context("phone authority is unavailable")?.forwarded_output(id.clone(), !device_scoped);
+        let output = &mut forwarded.authority;
+        let generation = *output.borrow_and_update();
         let mut window = tokio::net::UnixStream::connect(&route).await.context("reach the window's phone route")?;
-        window.write_all(&encode_header(&Forwarded::Direct { peer: Some(peer.to_string()) })?).await?;
+        let peer = Some(peer.to_string());
+        let header = if device_scoped { Forwarded::DirectBound { peer, forwarded_id: id } } else { Forwarded::Direct { peer } };
+        window.write_all(&encode_header(&header)?).await?;
         window.write_all(&head).await?;
         // Closed when the host gives up the port, so the window can take it
         // back: the phone reconnects to the window's own listener.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
         let Some(tracked) = host.track_phone(cancel_tx) else { bail!("the machine host is off") };
+        let (mut phone_read, mut phone_write) = tokio::io::split(stream);
+        let (mut window_read, mut window_write) = window.into_split();
+        let output_authority = output.clone();
+        // A WebSocket is done when either peer closes. In particular, an
+        // idle revoked phone need not close its own half of the TCP socket.
         let result = tokio::select! {
-            copied = tokio::io::copy_bidirectional(&mut stream, &mut window) => copied.map(drop).map_err(anyhow::Error::from),
+            copied = tokio::io::copy(&mut phone_read, &mut window_write) => copied.map(drop).map_err(anyhow::Error::from),
+            copied = copy_window_output(&mut window_read, &mut phone_write, &output_authority, generation) => copied,
+            _ = output.changed() => Ok(()),
             _ = cancel.recv() => Ok(()),
         };
         host.untrack_phone(tracked);
@@ -372,8 +385,33 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
     }
     #[cfg(not(unix))]
     {
-        let _ = (host, head, &mut stream, peer);
+        let _ = (host, head, stream, peer);
         bail!("phone routes need Unix sockets")
+    }
+}
+
+/// Every physical write of opaque window output is ordered with revocation.
+/// The watch read guard is held during a single nonblocking write poll.
+#[cfg(unix)]
+async fn copy_window_output<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    window: &mut R, phone: &mut W, authority: &watch::Receiver<u64>, generation: u64,
+) -> Result<()> {
+    let mut buffer = [0; 8192];
+    loop {
+        let count = window.read(&mut buffer).await?;
+        if count == 0 { return Ok(()); }
+        let mut remaining = &buffer[..count];
+        while !remaining.is_empty() {
+            let written = std::future::poll_fn(|cx| {
+                let current = authority.borrow();
+                if *current != generation {
+                    return Poll::Ready(Err(std::io::Error::other("forwarded phone output was revoked")));
+                }
+                Pin::new(&mut *phone).poll_write(cx, remaining)
+            }).await?;
+            anyhow::ensure!(written != 0, "the forwarded phone socket stopped accepting output");
+            remaining = &remaining[written..];
+        }
     }
 }
 
@@ -395,6 +433,31 @@ async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revocation_drops_window_bytes_buffered_behind_tcp_backpressure() {
+        let mobile = Arc::new(crate::local_runtime::mobile::Registry::default());
+        let forwarded = mobile.forwarded_output("legacy-route".into(), true);
+        let authority = &forwarded.authority;
+        let generation = *authority.borrow();
+        let (mut window, mut proxy_input) = tokio::io::duplex(64);
+        let (mut proxy_output, mut phone) = tokio::io::duplex(1);
+        proxy_output.write_all(b"x").await.unwrap();
+        window.write_all(b"buffered session reply").await.unwrap();
+        let mut copy = std::pin::pin!(copy_window_output(&mut proxy_input, &mut proxy_output, authority, generation));
+        assert!(futures_util::poll!(&mut copy).is_pending());
+
+        mobile.retire_device("revoked-phone");
+        assert_eq!(phone.read_u8().await.unwrap(), b'x');
+        assert!(copy.await.unwrap_err().to_string().contains("revoked"));
+
+        let reconnected = mobile.forwarded_output("legacy-reconnected".into(), true);
+        let session_invitation = mobile.forwarded_output("unbound-session-invitation".into(), false);
+        mobile.retire_device("revoked-phone");
+        assert!(!reconnected.authority.has_changed().unwrap());
+        assert!(!session_invitation.authority.has_changed().unwrap());
+    }
 
     #[test]
     fn the_path_decides_who_serves_a_connection() {

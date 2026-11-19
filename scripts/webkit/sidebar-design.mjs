@@ -175,8 +175,9 @@ try {
         "status headers lead with their chevron": facts.statusChevronFirst && facts.statusCount >= 3,
         "a status header's + shows on hover": statusAdd,
       }),
-      "destinations are Overview, New session, Search, Automations and Issues": JSON.stringify(names) === JSON.stringify(["Overview", "New session", "Search", "Automations", "Issues"]),
-      "Overview, New session and Search carry their shortcuts": chips.slice(0, 3).every(Boolean) && chips.slice(3).every((chip) => chip === null),
+      // Home leads the destinations with its own shortcut since #1103 (fe780f37).
+      "destinations are Home, Overview, New session, Search, Automations and Issues": JSON.stringify(names) === JSON.stringify(["Home", "Overview", "New session", "Search", "Automations", "Issues"]),
+      "Home, Overview, New session and Search carry their shortcuts": chips.length === 6 && chips.slice(0, 4).every(Boolean) && chips.slice(4).every((chip) => chip === null),
       "the selected destination is inset and rounded": selected.left >= 8 && selected.right >= 8 && px(selected.radius) > 0,
       "list headings are uppercase and letter-spaced": facts.headingsUpper,
       "row meta is at least 12px": facts.metaSizes.length > 0 && facts.metaSizes.every((size) => size >= 12),

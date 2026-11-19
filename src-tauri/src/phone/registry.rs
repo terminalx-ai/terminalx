@@ -20,6 +20,7 @@ use crate::relay_e2ee::token_hash;
 
 const FILE: &str = "devices.json";
 const LOCK: &str = "devices.lock";
+const ADMISSION: &str = "devices-admission.lock";
 /// How long a change waits for the other process's.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
@@ -49,7 +50,7 @@ fn rewrite<T>(change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Resu
 }
 
 fn rewrite_in<T>(root: &Path, change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Result<T> {
-    crate::store::transaction::run(&root.join(LOCK), LOCK_WAIT, || {
+    crate::store::transaction::run_with_readers(&root.join(LOCK), &root.join(ADMISSION), LOCK_WAIT, || {
         let mut file = read_in(root)?;
         let (result, changed) = change(&mut file)?;
         if changed {
@@ -60,8 +61,33 @@ fn rewrite_in<T>(root: &Path, change: impl FnOnce(&mut DeviceFile) -> Result<(T,
 }
 
 impl DeviceRegistry {
+    pub(crate) fn check_credential(&self, device: &DeviceEntry) -> Result<()> {
+        anyhow::ensure!(self.list()?.iter().any(|entry| entry.id == device.id && entry.token == device.token),
+            "The paired-device credential was revoked.");
+        Ok(())
+    }
+
+    /// A revocation takes the exclusive side of this same lock before
+    /// replacing the credential. Hold the read side through the socket flush.
+    pub(crate) fn output_permit(&self, device: &DeviceEntry) -> Result<std::fs::File> {
+        let root = root()?;
+        let permit = crate::store::transaction::read_lock(&root.join(LOCK), &root.join(ADMISSION), LOCK_WAIT)?;
+        self.check_credential(device)?;
+        Ok(permit)
+    }
+
     pub fn list(&self) -> Result<Vec<DeviceEntry>> {
         list_in(&root()?)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn automatic_binding_devices(&self, account: &AccountMirror) -> Result<Vec<DeviceEntry>> {
+        // An unacknowledged revocation can outlive the last active phone.
+        Ok(read_in(&root()?)?.devices.into_iter().filter(|device| {
+            device.provenance == DeviceProvenance::Automatic
+                && device.bound_user_id.as_deref() == Some(account.user_id.as_str())
+                && device.binding_generation == account.binding_generation
+        }).collect())
     }
 
     pub fn add(&self, mut entry: DeviceEntry) -> Result<()> {
@@ -179,20 +205,16 @@ impl DeviceRegistry {
         })
     }
 
-    pub fn automatic_for_grant(&self, user_id: &str, installation_id: &str, request_id: &str) -> Result<Option<DeviceEntry>> {
-        Ok(self.list()?.into_iter().find(|device| {
+    /// Include retired records so a retry can finish fencing in-memory grants
+    /// after another poller has already removed the credential.
+    pub fn automatic_for_grant(&self, user_id: &str, generation: u64, installation_id: &str, request_id: &str) -> Result<Vec<DeviceEntry>> {
+        Ok(read_in(&root()?)?.devices.into_iter().filter(|device| {
             device.provenance == DeviceProvenance::Automatic
                 && device.bound_user_id.as_deref() == Some(user_id)
+                && device.binding_generation == generation
                 && device.installation_id.as_deref() == Some(installation_id)
                 && device.created_request_id.as_deref() == Some(request_id)
-        }))
-    }
-
-    pub fn revoke_automatic_grant(&self, user_id: &str, installation_id: &str, request_id: &str) -> Result<Option<DeviceEntry>> {
-        match self.automatic_for_grant(user_id, installation_id, request_id)? {
-            Some(device) => self.revoke(&device.id),
-            None => Ok(None),
-        }
+        }).collect())
     }
 }
 

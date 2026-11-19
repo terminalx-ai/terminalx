@@ -188,6 +188,23 @@ where
     send_encrypted_text(socket, session, &reply.to_string()).await
 }
 
+/// Bound a slow client's write so revocation can drain output already admitted.
+pub(crate) async fn send_with_grant(
+    host: &Arc<PhoneHost>,
+    connection: &Arc<rpc::MobileConnection>,
+    send: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    let _permit = connection.output_permit(host).await?;
+    tokio::time::timeout(WRITE_TIMEOUT, send).await?
+}
+
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn send_pong<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, bytes: tokio_tungstenite::tungstenite::Bytes) -> Result<()> {
+    tokio::time::timeout(WRITE_TIMEOUT, socket.send(Message::Pong(bytes))).await??;
+    Ok(())
+}
+
 pub(crate) fn pairing_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(64 * 1024)
@@ -273,15 +290,18 @@ where
 {
     let mut reassembly = wire::Reassembly::default();
     let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(1));
+    grant_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
+            _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
             signal = signals.recv() => {
                 if signal == Some(ConnectionSignal::Disconnect) {
-                    let _ = send_message(socket, session, &disconnected_notification(), connection.wire()).await;
+                    let _ = tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &disconnected_notification(), connection.wire())).await;
                 }
                 connection.close();
-                let _ = socket.close(None).await;
+                let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
                 return Ok(());
             }
             outgoing = outbound.recv() => {
@@ -289,8 +309,7 @@ where
                     connection.close();
                     return Ok(());
                 };
-                connection.check_off_runtime(host).await?;
-                send_message(socket, session, &outgoing, connection.wire()).await?;
+                send_with_grant(host, connection, send_message(socket, session, &outgoing, connection.wire())).await?;
             }
             incoming = socket.next() => {
                 let Some(incoming) = incoming else {
@@ -318,7 +337,7 @@ where
                         return Ok(());
                     }
                     Message::Ping(bytes) => {
-                        socket.send(Message::Pong(bytes)).await?;
+                        send_pong(socket, bytes).await?;
                         continue;
                     }
                     Message::Pong(_) | Message::Frame(_) => continue,
@@ -331,10 +350,30 @@ where
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
                 // its acknowledgement contains no session data.
-                if !(forget && response["ok"] == true) { connection.check_off_runtime(host).await?; }
-                send_message(socket, session, &response, connection.wire()).await?;
+                let send = send_message(socket, session, &response, connection.wire());
+                if forget && response["ok"] == true {
+                    tokio::time::timeout(WRITE_TIMEOUT, send).await??;
+                } else {
+                    send_with_grant(host, connection, send).await?;
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    #[tokio::test]
+    async fn a_stalled_pong_write_ends_at_its_deadline() {
+        let (mut transport, _phone) = tokio::io::duplex(1);
+        transport.write_all(b"x").await.unwrap();
+        let mut socket = WebSocketStream::from_raw_socket(transport, Role::Server, None).await;
+        let error = send_pong(&mut socket, b"ping".to_vec().into()).await.unwrap_err();
+        assert!(error.is::<tokio::time::error::Elapsed>());
     }
 }
 

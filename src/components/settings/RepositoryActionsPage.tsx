@@ -23,9 +23,14 @@ export function useRepository(projectPath: string) {
  * has returned some, and saving them replaces the local list. Keep the function stable (module
  * level or memoised): a new one each render reads the file again.
  */
-export function RepositoryActionsPage({ projectPath, readRepositoryFile }: {
+/** What the Actions page holds, under its title (design 11.06). */
+export const ACTIONS_SUBTITLE = "Commands for this project's Run menu.";
+
+export function RepositoryActionsPage({ projectPath, readRepositoryFile, header = true }: {
   projectPath: string;
   readRepositoryFile?: (projectPath: string) => Promise<RepositoryAction[] | null>;
+  /** False where the surrounding page already shows this title and line (Settings: one title a page). */
+  header?: boolean;
 }) {
   const project = useRepository(projectPath);
   const path = project?.path;
@@ -50,10 +55,10 @@ export function RepositoryActionsPage({ projectPath, readRepositoryFile }: {
   };
   // Design 11.06: the page title and what it holds, then the Run actions card. Action prompts are not built yet.
   return <div className="flex flex-col gap-6">
-    <header className="min-w-0">
+    {header && <header className="min-w-0">
       <h3 className="text-xl font-semibold tracking-tight">Actions</h3>
-      <p className="mt-1 text-[13px] text-muted-foreground">Commands for this project's Run menu.</p>
-    </header>
+      <p className="mt-1 text-[13px] text-muted-foreground">{ACTIONS_SUBTITLE}</p>
+    </header>}
     <RepositoryActionsSettings
       key={project.path}
       actions={project.actions ?? NO_ACTIONS}

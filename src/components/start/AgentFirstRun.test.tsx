@@ -12,7 +12,7 @@ import type { AgentReadiness } from "@/lib/agentReadiness";
 const { invoke, listen, store, sessions, setup, pty } = vi.hoisted(() => ({
   invoke: vi.fn(),
   listen: vi.fn(),
-  store: { harnesses: [] as HarnessInfo[] },
+  store: { harnesses: [] as HarnessInfo[], projects: [], sessions: [] },
   sessions: { addProject: vi.fn(), startSessionIn: vi.fn(), refreshHarnesses: vi.fn() },
   setup: { start: vi.fn() },
   pty: { kill: vi.fn(async () => {}), resize: vi.fn(async () => {}) },

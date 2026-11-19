@@ -17,13 +17,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { announceProjectAdded, requestProjectSettings } from "@/lib/projectAdded";
 
-// The native side of setting links (PRO-127): the link `settings_link_take` hands out once, and the ping
-// a link arriving while the app runs sends. Every other command fails as it does outside the app.
+// The native side of setting links (PRO-127), through the one link router (PRO-130): the links
+// `desktop_link_take` hands out once, and the ping a link arriving while the app runs sends. Every other
+// command fails as it does outside the app.
 const native = vi.hoisted(() => ({ pending: [] as unknown[], listeners: new Map<string, Set<() => void>>() }));
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
   invoke: vi.fn(async (command: string) => {
-    if (command === "settings_link_take") return native.pending.shift() ?? null;
+    if (command === "desktop_link_take") return native.pending.splice(0).map((link) => ({ kind: "settings", ...(link as object) }));
     throw new Error(`${command} is not available in this test`);
   }),
 }));
@@ -36,7 +37,9 @@ vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
     return () => set.delete(handler);
   }),
 }));
-const pingSettingsLink = () => { for (const handler of native.listeners.get("settings_link_requested") ?? []) handler(); };
+const pingSettingsLink = () => { for (const handler of native.listeners.get("desktop_link_requested") ?? []) handler(); };
+// Where the app was left is the last-view tests' (lastView.test.ts); this shell starts where each test puts it.
+vi.mock("@/lib/lastView", () => ({ bootLastView: vi.fn(), savedPanelTab: () => null, savePanelTab: vi.fn(), resetLastView: vi.fn() }));
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
@@ -648,7 +651,7 @@ describe("setting links (PRO-127)", () => {
     sessionStore.view = "issues";
     render(<AppShell />);
     expect(screen.getByTestId("issues")).toBeTruthy();
-    await waitFor(() => expect(native.listeners.get("settings_link_requested")?.size).toBe(1));
+    await waitFor(() => expect(native.listeners.get("desktop_link_requested")?.size).toBe(1));
 
     native.pending = [{ id: "general.promptMap", enable: false }];
     act(() => pingSettingsLink());

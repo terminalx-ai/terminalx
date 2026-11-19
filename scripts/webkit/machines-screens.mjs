@@ -262,7 +262,22 @@ const measure = (page) =>
     const texts = [...document.querySelectorAll("body *")].filter(
       (element) => shown(element) && !element.closest(".xterm, [data-terminal], script, style") && [...element.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()),
     );
-    const small = texts.filter((element) => parseFloat(getComputedStyle(element).fontSize) < 12).map((element) => `${element.tagName.toLowerCase()}: ${element.textContent.trim().slice(0, 30)} (${getComputedStyle(element).fontSize})`);
+    // The 12 px floor does not cover the small labels the designs use on purpose (PRO-384, PRO-385, PRO-346,
+    // PRO-349), none under 10 px: keycaps; uppercase section, column and menu headings; a sidebar row's age and
+    // PR tag; a machine's state badge and the header's chips; a changed file's status letter; the status bar.
+    // A label only a screen reader gets is not drawn at all. Everything else is 12 px or larger.
+    const DESIGNED_SMALL = [
+      "kbd",
+      '[data-testid="new-session-create"] span.border',
+      '[data-testid="machine-session-row"] span.tabular-nums',
+      '[data-testid="paired-machine"] span.rounded.h-5',
+      '[data-testid="session-branch"]',
+      '[data-testid="session-location"]',
+      "[data-status]",
+      "[data-status-bar]",
+    ].join(", ");
+    const designedSmall = (element) => parseFloat(getComputedStyle(element).fontSize) >= 10 && (getComputedStyle(element).textTransform === "uppercase" || !!element.closest(DESIGNED_SMALL));
+    const small = texts.filter((element) => parseFloat(getComputedStyle(element).fontSize) < 12 && !element.closest(".sr-only") && !designedSmall(element)).map((element) => `${element.tagName.toLowerCase()}: ${element.textContent.trim().slice(0, 30)} (${getComputedStyle(element).fontSize})`);
     const list = document.querySelector('[data-testid="conversation-list"]');
     return {
       text: document.body.innerText,
@@ -272,7 +287,7 @@ const measure = (page) =>
     };
   });
 
-/** The checks every screen has: its machines are named, nothing scrolls sideways, no text under 12 px. */
+/** The checks every screen has: its machines are named, nothing scrolls sideways, no text under 12 px but the designed small labels (`measure`). */
 const common = (m, names) => ({
   ...Object.fromEntries(names.map((name) => [`${name} appears`, (name instanceof RegExp ? name : new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).test(m.text)])),
   "nothing scrolls sideways": !m.page && !m.sidebar,
@@ -319,8 +334,10 @@ try {
 
       // 21.01: the sidebar's sections and the overview with every machine.
       await page.getByRole("button", { name: /^(Overview|Dashboard)/ }).first().click();
-      const table = page.getByRole("button", { name: "Table", exact: true });
-      if (await table.count()) await table.click();
+      // The overview's view is chosen in its Display menu since PRO-385 (02.15).
+      await page.getByRole("button", { name: "Display", exact: true }).click();
+      await page.getByRole("button", { name: "Table", exact: true }).click();
+      await page.keyboard.press("Escape");
       await page.locator("tbody tr[data-session]").nth(6).waitFor();
       await page.waitForTimeout(300);
       await take(page, "21.01-sidebar-overview", "21.01.png");
@@ -328,7 +345,7 @@ try {
       failed += report(`21.01 sidebar and overview (${mode})`, common(m, [/this mac/i, "Mac mini", "dev-server", "tx-review-lab", "terminalx-server", "PR #212", "PR #790"]), { small: m.small });
 
       // 21.08: the Mac mini session, its changes and a terminal on the machine.
-      await page.locator(`[data-testid="machine-session-row"][title="${TITLE}"]`).click();
+      await page.locator(`[data-testid="machine-session-row"][title="read-markers · ${TITLE}"]`).click();
       const strip = page.locator('main [data-testid="machine-tab-strip"]');
       await strip.waitFor();
       await page.locator("main [data-chat-scroller]").getByText("The feed now carries a readAt marker").waitFor();
@@ -404,7 +421,8 @@ try {
       const settings = page.getByRole("main", { name: "Settings", exact: true });
       await settings.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Machines", exact: true }).click();
       await settings.getByTestId("machines-settings").waitFor();
-      await page.locator('[data-testid="machine-needs-update"]').waitFor();
+      // The card says its state itself since the designed page (PRO-349, #1029): ci-box's reads Needs update.
+      await settings.locator('[data-testid="paired-machine"][data-machine="m-ci"][data-state="needsUpdate"]').getByText("Needs update", { exact: true }).waitFor();
       await settings.getByTestId("machines-settings").getByText("Offline").first().waitFor();
       await page.waitForTimeout(300);
       await take(page, "21.02-settings-machines", "21.02.png");

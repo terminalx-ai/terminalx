@@ -1973,6 +1973,14 @@ fn privacy_review3_revoked_approval_codex_stays_answerable() {
 }
 
 #[test]
+fn a_revoked_phone_cannot_deliver_a_queued_codex_approval() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+        .env(CASE, "native3-approval-phone").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn privacy_native3_codex_followup_delivery() {
     native3_delivery_cases("followup");
 }
@@ -2092,15 +2100,24 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         let request = rt.lock().unwrap().pending.keys().next().unwrap().clone();
         let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
         *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(8)).unwrap(); }));
-        // Same remote admission used by relay permission RPC; the physical
-        // writer is a different thread and must retain this original ticket.
-        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
-          manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap(); }
+        let phone = case.ends_with("-phone").then(|| crate::local_runtime::mobile::ApprovalPhone::register(manager));
+        if let Some(phone) = &phone {
+            phone.answer(manager, "stdio-owner", "tab", &request, "allow");
+        } else {
+            let ticket = crate::data_privacy::Ticket::default();
+            let _scope = ticket.scope().unwrap();
+            manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap();
+        }
         arrived.recv_timeout(WAIT).unwrap();
         assert!(rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(manager.respond_permission("stdio-owner", "tab", &request, "deny").unwrap_err().to_string().contains("still being delivered"));
         assert!(!events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
-        policy(true); if case.ends_with("cycle") { policy(false); }
+        if let Some(phone) = phone {
+            phone.revoke(manager);
+        } else {
+            policy(true);
+            if case.ends_with("cycle") { policy(false); }
+        }
         release.send(()).unwrap();
         // A writer fence proves the rejected answer was processed, without
         // inventing a provider response or sleeping to guess queue progress.
@@ -2372,7 +2389,7 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
 #[test]
 fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_only_original_launch() {
     use crate::remote::collab::v2::{Snapshot, Permit, Action};
-    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "valid", "explicit-valid", "implicit-valid", "v1"] {
+    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "mobile", "valid", "explicit-valid", "implicit-valid", "v1"] {
         let _home = store::temp_home();
         let root = store::root().unwrap();
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
@@ -2405,7 +2422,9 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
         if change != "v1" { policy.install_v2(snapshot("1", if change == "explicit-valid" { "explicit" } else if change == "implicit-valid" { "implicit" } else { "everyone" })).unwrap(); }
         let (peer, _notifications) = crate::remote::server::Peer::for_user("partial".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
         let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Drive).for_peer(&peer);
-        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None, privacy: None };
+        let phone = (change == "mobile").then(|| crate::local_runtime::mobile::ApprovalPhone::register(&manager));
+        let mobile = phone.as_ref().map(|phone| phone.permit(&manager, "stdio-owner", "tab"));
+        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile, shared: None, privacy: None };
         let attached_peer = peer.clone();
         let (writer, runtime, work) = (manager.clone(), rt_arc.clone(), root.clone());
         let observed = Arc::new(std::sync::atomic::AtomicBool::new(false)); let saw_wait = observed.clone();
@@ -2434,6 +2453,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
                     "source" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
                     "generation" => { let _guard = policy.enter_admission(); policy.runtime_policy.set_generation(2); }
                     "attachment" => rpc.disconnect(&attached_peer),
+                    "mobile" => phone.unwrap().revoke(&writer),
                     "pending" => { index::update_tab("stdio-owner", "tab", |tab| { tab.requested_permission_mode = Some("bypassPermissions".into()); Ok(()) }).unwrap(); }
                     "mode" => { if let Engine::CodexStdio(engine) = &mut runtime.lock().unwrap().engine { engine.actual_stance = None; } }
                     "stop" => writer.stop("stdio-owner", "tab").unwrap(),
@@ -2465,7 +2485,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
             });
             completed.recv_timeout(WAIT).expect("policy/Stop/replacement blocked behind partial frame admission");
             updater.join().unwrap();
-            if matches!(change, "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
+            if matches!(change, "mobile" | "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
         })));
         WRITTEN.with(|written| written.set(0));
         let result = manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None);

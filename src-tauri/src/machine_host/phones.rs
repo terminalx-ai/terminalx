@@ -260,6 +260,10 @@ impl Phones {
         }
     }
 
+    pub(super) fn forwarded_output(&self, id: String, legacy: bool) -> crate::local_runtime::mobile::ForwardedOutput {
+        self.sessions.mobile.forwarded_output(id, legacy)
+    }
+
     #[cfg(test)]
     pub(super) fn restart_for_test(&self, sink: Arc<dyn EventSink>) -> Arc<Self> {
         self.stop();
@@ -693,7 +697,7 @@ impl Phones {
     pub(crate) fn revoke(&self, device_id: &str) -> Result<bool> {
         self.queue_revocation(device_id)?;
         let revoked = self.registry.revoke(device_id)?.is_some();
-        self.end_grants(device_id);
+        self.sessions.mobile.retire_device(device_id);
         self.close(device_id, ConnectionSignal::Cancel);
         self.revoke_relay(device_id);
         Ok(revoked)
@@ -868,7 +872,7 @@ impl Phones {
         let (_tracked, signals) = tokio::task::spawn_blocking(move || admitting.admit(&admitting_device, &admitting_key, epoch)).await??;
         let result = async {
             let (outbound, inbound) = mpsc::channel(8);
-            let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport()).await?;
+            let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport(), None).await?;
             if device.provenance == DeviceProvenance::Automatic {
                 if let Some(revocations) = self.revocations.get().cloned() {
                     let device = device.clone();
@@ -876,8 +880,8 @@ impl Phones {
                 }
             }
             let connection = Arc::new(connection);
-            connection.check_off_runtime(&self.host).await?;
-            phone::send_authenticated(&mut socket, &mut session).await?;
+            phone::send_with_grant(&self.host, &connection,
+                phone::send_authenticated(&mut socket, &mut session)).await?;
             log::info!("machine host: phone {} connected through {}", device.id, context.transport_name());
             phone::serve_connection(&mut socket, &mut session, &self.host, &connection, inbound, signals, |request| {
                 let (phones, device, connection, context, revoke_relay_on_close) = (self.clone(), &device, &connection, &context, &_tracked.revoke_relay_on_close);

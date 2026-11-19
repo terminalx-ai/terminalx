@@ -43,8 +43,13 @@ try {
       const paths = await page.getByRole("button", { name: /^(Root path|Worktree folder): / }).count();
       const navEntries = await projectNav.getByRole("button").allTextContents();
       await page.getByText(".env.local", { exact: true }).waitFor();
-      // No Save button (PRO-387): a valid edit saves itself once its preview is in.
-      await page.getByRole("textbox", { name: "Files to copy" }).fill(".env*\nconfig/local/**");
+      // No Save button (PRO-387): a valid edit is saved on leaving the field; its preview alone saves nothing.
+      const editor = page.getByRole("textbox", { name: "Files to copy" });
+      await editor.fill(".env*\nconfig/local/**");
+      await page.getByText(/^config\/local\/(long-folder-name-){8}\/app\.json$/).waitFor();
+      const savesBeforeLeaving = await page.evaluate(() => window.__SAVES__.length);
+      const noSaveButton = (await page.getByRole("main", { name: "Settings", exact: true }).getByRole("button", { name: /^Save/ }).count()) === 0;
+      await editor.blur();
       await page.waitForFunction(() => window.__SAVES__.length === 1);
       await page.getByText(".env.local", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `files-${mode}.png`) });
@@ -72,7 +77,8 @@ try {
       failed += report(`${width}px ${mode}`, {
         "both paths are folder paths with a menu": paths === 2,
         "Files to copy and Preview URLs have no nav entries": JSON.stringify(navEntries) === JSON.stringify(["General", "Scripts", "Actions", "Environment", "Settings files"]),
-        "editor saves both patterns": JSON.stringify(measured.saves) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }]),
+        "a previewed edit is not saved while the field has focus, and there is no Save button": savesBeforeLeaving === 0 && noSaveButton,
+        "leaving the field saves both patterns": JSON.stringify(measured.saves) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }]),
         "repository file overrides the editor": measured.readOnly && measured.value === "config/local/**",
         "controls and long paths fit": measured.editorVisible && !measured.overflow && measured.outside.length === 0,
         "Files to copy sits on General with its cleanup controls": measured.cleanupShown,

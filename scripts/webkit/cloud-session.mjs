@@ -179,11 +179,12 @@ for (const role of ["manager", "viewer"]) {
     chatShown: await page.locator("[data-chat-scroller]").isVisible(),
   });
   const atFirst = await selection();
-  // "Activate latest shell tab" (session.latestShell), then "Switch to tab 1" (session.tab1).
+  // "Activate latest shell tab" (session.latestShell), then "Switch to tab 1" (session.tab1),
+  // which is Shift+Cmd+1 since Overview took Cmd+1 (94f8e9d0).
   await page.keyboard.press("Meta+J");
   await page.waitForTimeout(200);
   const onTerminal = await selection();
-  await page.keyboard.press("Meta+1");
+  await page.keyboard.press("Meta+Shift+1");
   await page.waitForTimeout(200);
   const onAgent = await selection();
   failed += report(

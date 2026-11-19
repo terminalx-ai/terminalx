@@ -77,6 +77,7 @@ const SLOW_METHODS: &[&str] = &[
     "git.prAssociations",
     "git.prLanded",
     "git.prCreate",
+    "git.prCreateForSession",
     "git.prLinkBranch",
     "git.prUnlink",
     "git.prReady",

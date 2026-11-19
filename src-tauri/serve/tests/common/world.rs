@@ -126,6 +126,11 @@ impl ThisMac {
         let port = free_port();
         let mut command = world.machine_command();
         command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string());
+        // Nothing attaches to this runtime, and one with nothing attached
+        // stops itself after its idle grace: 60 seconds by default, which the
+        // scenario now outlasts, so `assert_untouched` found its control
+        // socket gone. It is asked at the end, however long that takes.
+        command.args(["--idle-grace-seconds", "3600"]);
         let serve = Serve::start(command, &world.data);
         let head = git(&world.project, &["rev-parse", "HEAD"]);
         let projects_json = std::fs::read(world.data.join("projects.json")).unwrap();

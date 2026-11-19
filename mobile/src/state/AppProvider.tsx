@@ -17,7 +17,7 @@ import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/p
 import { readHostCredential, readHosts, removeHost, setHostKind, setHostNames, type StoredHost } from "../store/hosts";
 import { readAccountMachinePrefs, setAccountMachineHidden, setAccountMachineName, takeAccountMachinePrefs, type AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
-import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
+import { CONNECTION_LOG_CAPACITY, HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 import { isTransportError } from "../transport/connection-errors";
 import { phoneNetwork } from "../transport/network";
 import { useWaited } from "./connection-view";
@@ -307,7 +307,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         // Finished in the background: a connection failure here is retried at the next open, not reported.
         .catch((cause: unknown) => { if (!startup.signal.aborted && !isTransportError(cause)) setError(readableError(cause)); });
       if (rawLogs) {
-        try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
+        try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-CONNECTION_LOG_CAPACITY)); } catch { /* Ignore a corrupt redacted log. */ }
       }
       const initialUrl = await Linking.getInitialURL();
       if (startup.signal.aborted) return;
@@ -350,7 +350,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     const log = connection.onLog((entry) => {
       setLogs((existing) => {
-        const next = [...existing, entry].slice(-200);
+        const next = [...existing, entry].slice(-CONNECTION_LOG_CAPACITY);
         void AsyncStorage.setItem(LOG_KEY, JSON.stringify(next));
         return next;
       });

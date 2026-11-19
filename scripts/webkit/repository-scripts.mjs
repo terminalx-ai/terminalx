@@ -176,7 +176,7 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `03-scripts-saved-on-this-computer-${mode}.png`), fullPage: true });
 
     // 11.06: the Actions page, its card of rows and the Edit action dialog (11.07).
-    await page.getByRole("navigation", { name: "Project settings", exact: true }).getByRole("button", { name: "Actions", exact: true }).click();
+    await page.getByRole("group", { name: "terminalx-server settings", exact: true }).getByRole("button", { name: "Actions", exact: true }).click();
     const list = page.getByRole("list", { name: "Saved actions" });
     await list.waitFor();
     await page.waitForTimeout(250);

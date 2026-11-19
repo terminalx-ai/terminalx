@@ -94,6 +94,28 @@ struct State {
     revoked: HashSet<(String,String)>,
     revisions: HashMap<String,Arc<Mutex<u64>>>,
     drivers: HashMap<String, Arc<Driver>>,
+    forwarded: HashMap<String, ForwardedPhone>,
+    legacy_retired: HashSet<String>,
+}
+
+struct ForwardedPhone {
+    legacy: bool,
+    device: Option<String>,
+    output: tokio::sync::watch::Sender<u64>,
+}
+
+#[cfg(unix)]
+pub(crate) struct ForwardedOutput {
+    registry: Arc<Registry>,
+    id: String,
+    pub(crate) authority: tokio::sync::watch::Receiver<u64>,
+}
+
+#[cfg(unix)]
+impl Drop for ForwardedOutput {
+    fn drop(&mut self) {
+        self.registry.0.lock().unwrap().forwarded.remove(&self.id);
+    }
 }
 
 /// The fifth field is each pane's input gate: see [`Registry::desktop_input`].
@@ -448,7 +470,13 @@ impl Registry {
         }
     }
 
+    #[cfg(test)]
     pub fn register(&self, lifetime: &Lifetime, actor: Actor, connection: &str, device_id: &str) -> Result<()> {
+        self.register_connection(lifetime, actor, connection, device_id, None)
+    }
+
+    fn register_connection(&self, lifetime: &Lifetime, actor: Actor, connection: &str, device_id: &str,
+        forwarded: Option<&str>) -> Result<()> {
         if connection.is_empty() || connection.len() > 128 || device_id.is_empty() || device_id.len() > 128 {
             bail!("Invalid paired-device connection.");
         }
@@ -489,10 +517,20 @@ impl Registry {
         }
         let mut state = self.0.lock().unwrap();
         if state.revoked.contains(&(actor.lease.clone(),device_id.into())) { bail!("This device was revoked from the attachment."); }
+        // A durable revocation snapshots this same registry after updating
+        // devices.json. Either it sees this grant or admission sees the removal.
+        anyhow::ensure!(crate::phone::registry::DeviceRegistry.list()?.iter().any(|current| {
+            current.id == device_id && current.token == device.token
+        }), "The device is no longer paired.");
         // A different attachment can register concurrently, so check again at
         // insertion. Same-lease mutations are serialized by _attached.
         if state.connections.contains_key(connection) { bail!("The paired-device connection cannot be rebound."); }
         if state.connections.len() >= 128 { bail!("Too many paired-device connections."); }
+        if let Some(id) = forwarded {
+            let route = state.forwarded.get_mut(id).filter(|route| !route.legacy && route.device.is_none())
+                .context("The forwarded phone connection ended or was already bound.")?;
+            route.device = Some(device_id.into());
+        }
         state.owners.insert(actor.lease.clone(),Owner { actor:actor.clone(),attachment:attachment.clone(),revoked:false });
         state.connections.insert(connection.into(),Arc::new(Grant { actor,privacy:Default::default(),attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
         Ok(())
@@ -588,6 +626,32 @@ impl Registry {
         Ok(())
     }
 
+    /// Retire a device whose persisted credential was already revoked.
+    /// Both the runtime and window leases can hold grants during takeover.
+    pub(crate) fn retire_device(&self, device: &str) {
+        let grants = {
+            let mut state = self.0.lock().unwrap();
+            // Older windows have no per-device proxy binding. Drain their
+            // opaque output on the first retirement, including on an ACK retry
+            // after a credential was already persisted as revoked.
+            let retire_legacy = state.legacy_retired.insert(device.into());
+            for route in state.forwarded.values().filter(|route|
+                route.device.as_deref() == Some(device) || (route.legacy && retire_legacy)) {
+                route.output.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+            state.connections.values()
+                .filter(|grant| grant.device.id == device).cloned().collect::<Vec<_>>()
+        };
+        for grant in grants { grant.revoke(); }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn forwarded_output(self: &Arc<Self>, id: String, legacy: bool) -> ForwardedOutput {
+        let (output, authority) = tokio::sync::watch::channel(0);
+        self.0.lock().unwrap().forwarded.insert(id.clone(), ForwardedPhone { legacy, device: None, output });
+        ForwardedOutput { registry: self.clone(), id, authority }
+    }
+
     pub fn clear(&self, actor: &Actor) -> Result<()> {
         let attachment = self.owner_attachment(actor)?;
         let _attached = attachment.enter()?;
@@ -605,6 +669,63 @@ impl Registry {
 
 pub fn actor(params: &Value) -> Result<Actor> {
     serde_json::from_value(params["actor"].clone()).context("Invalid paired-device owner identity.")
+}
+
+#[cfg(test)]
+pub(crate) struct ApprovalPhone {
+    lifetime: Arc<Lifetime>,
+    actor: Actor,
+}
+
+#[cfg(test)]
+impl ApprovalPhone {
+    pub(crate) fn register(manager: &crate::session::SessionManager) -> Self {
+        use serde_json::json;
+        let root = crate::store::root().unwrap();
+        crate::store::write_json(&root.join("devices.json"), &json!({"devices":[{
+            "id":"approval-phone","label":"Phone","platform":"test","token":"fixture-hash",
+            "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":crate::store::index::now()
+        }]})).unwrap();
+        let lifetime = Lifetime::new(std::time::Duration::from_secs(60));
+        let actor = Actor {
+            epoch: lifetime.epoch().into(), lease: lifetime.hold().unwrap(), generation: 0, user_id: None,
+        };
+        execute(manager, &lifetime, "register", json!({
+            "actor": actor, "connection": "approval-connection", "deviceId": "approval-phone",
+        })).unwrap();
+        Self { lifetime, actor }
+    }
+
+    pub(crate) fn answer(&self, manager: &crate::session::SessionManager, session: &str, tab: &str,
+        request: &str, option: &str) {
+        execute(manager, &self.lifetime, "permission", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "requestId": request, "optionId": option,
+        })).unwrap();
+    }
+
+    pub(crate) fn answer_question(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, request: &str) {
+        execute(manager, &self.lifetime, "questions", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "requestId": request, "answers": {"Which branch?": "main"},
+        })).unwrap();
+    }
+
+    pub(crate) fn send(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, text: &str) {
+        execute(manager, &self.lifetime, "send", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "text": text, "prompt": text,
+        })).unwrap();
+    }
+
+    pub(crate) fn permit(&self, manager: &crate::session::SessionManager, session: &str, tab: &str) -> WritePermit {
+        manager.mobile.permit(&self.actor, "approval-connection", session, tab).unwrap()
+    }
+
+    pub(crate) fn revoke(&self, manager: &crate::session::SessionManager) {
+        crate::phone::registry::DeviceRegistry.revoke("approval-phone").unwrap();
+        manager.mobile.retire_device("approval-phone");
+    }
 }
 
 
@@ -658,9 +779,22 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             manager.mobile.drain(manager);
             return Ok(serde_json::json!({"pending":manager.mobile.has_pending()}));
         }
-        "register" => { manager.mobile.register(lifetime, actor, string("connection")?, string("deviceId")?)?; return Ok(Value::Null); }
+        "register" => {
+            manager.mobile.register_connection(lifetime, actor, string("connection")?, string("deviceId")?, params["forwardedId"].as_str())?;
+            return Ok(Value::Null);
+        }
         "clear" => { manager.mobile.fence_owner(lifetime, &actor)?; manager.mobile.clear(&actor)?; return Ok(Value::Null); }
-        "revoke" => { manager.mobile.fence_owner(lifetime, &actor)?; manager.mobile.revoke_device(&actor, string("deviceId")?)?; return Ok(Value::Null); }
+        "revoke" => {
+            let device = string("deviceId")?;
+            manager.mobile.fence_owner(lifetime, &actor)?;
+            manager.mobile.revoke_device(&actor, device)?;
+            if params["persisted"] == true {
+                anyhow::ensure!(!crate::phone::registry::DeviceRegistry.list()?.iter().any(|entry| entry.id == device),
+                    "The paired-device credential is still active.");
+                manager.mobile.retire_device(device);
+            }
+            return Ok(Value::Null);
+        }
         "close" => { manager.mobile.close(&actor, string("connection")?)?; return Ok(Value::Null); }
         _ => {}
     }
@@ -735,6 +869,18 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     if let Some(result) = controls(manager, &actor, &grant, method, &params) {
         return result;
     }
+    if matches!(method, "permission" | "questions") {
+        let (session, tab) = (string("sessionId")?, string("tabId")?);
+        let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
+        let _admitted = permit.enter()?;
+        if method == "questions" {
+            let answers = serde_json::from_value(params["answers"].clone()).context("answers must map each question to its answer")?;
+            manager.answer_questions_with_mobile(session, tab, string("requestId")?, answers, Some(&permit))?;
+        } else {
+            manager.respond_permission_from_phone(session, tab, string("requestId")?, string("optionId")?, &permit)?;
+        }
+        return Ok(serde_json::json!({"status":"answered"}));
+    }
     let _admitted = grant.enter()?;
     match method {
         "check" => Ok(Value::Null),
@@ -765,25 +911,12 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         }
         "unobserve" => Ok(serde_json::json!({"removed":grant.observations.unsubscribe(string("subscriptionId")?)})),
         "output" => grant.observations.poll(),
-        "reconcile" | "permission" | "questions" | "terminalRead" => {
+        "reconcile" | "terminalRead" => {
             let session = string("sessionId")?;
             let tab = string("tabId")?;
             let entry = crate::store::index::get(session)?;
             if entry.tab(tab).is_none() { bail!("The tab does not belong to this session."); }
             match method {
-                "permission" => {
-                    grant.driver()?;
-                    manager.respond_permission(session, tab, string("requestId")?, string("optionId")?)?;
-                    Ok(serde_json::json!({"status":"answered"}))
-                }
-                // The desktop's own answer (`answer_questions`): the same
-                // format, the same refusal once the question is closed.
-                "questions" => {
-                    grant.driver()?;
-                    let answers = serde_json::from_value(params["answers"].clone()).context("answers must map each question to its answer")?;
-                    manager.answer_questions(session, tab, string("requestId")?, answers)?;
-                    Ok(serde_json::json!({"status":"answered"}))
-                }
                 "reconcile" => {
                     manager.load_events(session, tab)?;
                     Ok(Value::Null)

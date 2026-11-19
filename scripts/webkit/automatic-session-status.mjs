@@ -101,7 +101,8 @@ try {
       // PRO-385: the one status the row shows is in the Status column; the board's bucket ("Done") is not.
       const cells = await tr.locator("td").allInnerTexts();
       assert.equal(cells.filter((text) => text.trim() === "Done").length, 0, `table: ${row.title} shows no "Done" (${JSON.stringify(cells)})`);
-      assert.equal(await tr.locator("td").nth(5).locator("[data-session-status]").count(), 1, `table: ${row.title} status sits in the Status column`);
+      // No machine is paired in this fixture, so there is no Where column (PRO-346): Status is the fifth.
+      assert.equal(await tr.locator("td").nth(4).locator("[data-session-status]").count(), 1, `table: ${row.title} status sits in the Status column`);
     }
     if (width === 1440) {
       // PRO-385 (02.01, 02.05): every default column in view, uppercase tracked headers, 13px cells, 44px rows.
@@ -121,7 +122,7 @@ try {
           fontSize: getComputedStyle(cell).fontSize,
         };
       });
-      assert.deepEqual(layout.headers, ["SESSION", "PROJECT", "WHERE", "BRANCH", "CHANGES", "STATUS", "AGENT", "OWNER", "ACTIVE"], "table: the designed columns, in order");
+      assert.deepEqual(layout.headers, ["SESSION", "PROJECT", "BRANCH", "CHANGES", "STATUS", "AGENT", "OWNER", "ACTIVE"], "table: the designed columns, in order (Where joins only with a machine paired, PRO-346)");
       assert.equal(layout.transform, "uppercase", "table: headers are uppercase");
       assert.ok(layout.tracking > 0, "table: headers are tracked");
       assert.ok(layout.scrollWidth <= layout.clientWidth && layout.lastRight <= layout.scrollerRight + 0.5 && layout.docWidth <= width, `table: every column fits at 1440 without horizontal scroll ${JSON.stringify(layout)}`);
@@ -148,7 +149,8 @@ try {
       await page.keyboard.press("Escape");
       await page.getByRole("button", { name: "Display", exact: true }).click();
       const menu = page.getByRole("menu");
-      for (const name of ["Project", "Where", "Branch", "Line changes", "Status", "Agent", "Owner", "Last active"]) assert.equal(await menu.getByRole("menuitemcheckbox", { name, exact: true }).getAttribute("aria-checked"), "true", `display: ${name} shown`);
+      for (const name of ["Project", "Branch", "Line changes", "Status", "Agent", "Owner", "Last active"]) assert.equal(await menu.getByRole("menuitemcheckbox", { name, exact: true }).getAttribute("aria-checked"), "true", `display: ${name} shown`);
+      assert.equal(await menu.getByRole("menuitemcheckbox", { name: "Where", exact: true }).count(), 0, "display: no Where without a paired machine (PRO-346)");
       for (const name of ["Pull request", "Created", "Compact rows"]) assert.equal(await menu.getByRole("menuitemcheckbox", { name, exact: true }).getAttribute("aria-checked"), "false", `display: ${name} off`);
       await settled();
       if (screenshots) await page.screenshot({ path: join(screenshots, `display-1440-${colorScheme}.png`) });

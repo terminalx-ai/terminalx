@@ -231,21 +231,45 @@ undisturbed: prefix the command with
 
 ## Cut a version
 
-1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
-   `src-tauri/Cargo.toml` (keep all three equal), then refresh the lock entry
-   with `cargo update -p raccoon` in `src-tauri`. The About tab reads
-   `tauri.conf.json`; `terminalx --version`, the pairing handshake and the
-   agent client hellos read `CARGO_PKG_VERSION` from `Cargo.toml`.
-2. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
-3. Commit on `main` and run the release pipeline (next section). It tags
-   `v<version>` itself, after every check has passed.
+A release is built from its own branch, `release/<version>`, cut from `main`.
+PRs keep merging to `main` while a release runs (about an hour, longer under
+load); none of them reach the branch, and none of them can stop the release.
+
+1. Cut the branch. `cut` fetches, creates `release/<version>` from the current
+   `origin/main` and checks it out in its own worktree,
+   `.raccoon/worktrees/release-<version>` (`--worktree` puts it elsewhere), so
+   the main checkout stays free:
+
+   ```sh
+   python3 -I scripts/release/release.py cut 1.2.3
+   ```
+
+2. In that worktree, bump `version` in `package.json`,
+   `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` (keep all three
+   equal), then refresh the lock entry with `cargo update -p raccoon` in
+   `src-tauri`. The About tab reads `tauri.conf.json`; `terminalx --version`,
+   the pairing handshake and the agent client hellos read `CARGO_PKG_VERSION`
+   from `Cargo.toml`.
+3. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
+4. Commit "Prepare TerminalX <version> release" on the branch and run the
+   release pipeline (next section) from the worktree. It tags `v<version>`
+   itself, after every check has passed.
+
+A fix the release needs (for example for a red `main`) goes on the branch in
+its own commit before the release commit; it reaches `main` with the rest of
+the branch. Push it to `main` as well when `main` is red for everyone else.
+
+Releasing straight from `main` still works the old way: `prepare` on `main`
+requires it to contain `origin/main`, and `publish` pushes `main` itself, so a
+merge during the run makes the push fail.
 
 ## The release pipeline
 
 `scripts/release/release.py` builds, notarizes, verifies, scans and publishes
-a release. Run it from the repository root on `main`, on the version and
-changelog commit. Its working directory is the git-ignored
-`.raccoon/release-<version>/`, and the Cargo target directory is
+a release, then merges it back into `main`. Run it from the root of the
+release worktree, on `release/<version>`, on the version and changelog commit.
+Its working directory is the git-ignored `.raccoon/release-<version>/` of that
+worktree, and the Cargo target directory is
 `~/Library/Caches/terminalx-release-<version>` (`TERMINALX_RELEASE_TARGET_DIR`
 moves it):
 
@@ -253,8 +277,11 @@ moves it):
 python3 -I scripts/release/release.py prepare
 $EDITOR .raccoon/release-<version>/notes.md      # the GitHub release notes
 python3 -I scripts/release/release.py publish --dry-run   # after the steps below
-python3 -I scripts/release/release.py all        # check through verify-live
+python3 -I scripts/release/release.py all        # check through merge-back
 ```
+
+The notes name the base main commit the branch was cut from:
+`release-context.json`'s `baseMainCommit`.
 
 `all` runs the steps in this order and stops at the first failure. Each step
 can also be run by name. Each one writes a record, and a later step refuses to
@@ -262,15 +289,16 @@ run on a record that is missing, failed, or for another commit:
 
 | Step | What it does | Record |
 | --- | --- | --- |
-| `prepare` | Requires a clean `main` that contains `origin/main`, equal versions in the three files and a `## <version>` changelog section; pins the source commit | `release-context.json` |
+| `prepare` | Requires a clean `release/<version>` cut from `main` (or a clean `main` that contains `origin/main`), equal versions in the three files and a `## <version>` changelog section; records the branch, the commit it was cut from (`baseMainCommit`) and the source commit. Every later step refuses another branch or a head that moved | `release-context.json` |
 | `check` | The project's checks on that commit: TypeScript, frontend and mobile tests, these scripts' tests, icons, the frontend build, WebKit layout, Swift, Clippy, desktop Rust tests and the runtime (serve) tests | `release-checks.json`, `<check>.log` |
 | `build` | `pnpm tauri build --bundles app,dmg` with the Developer ID identity, the updater key and the App Store Connect key. Tauri notarizes and staples the app before it packages the DMG and the updater archive. A rejected notarization fails the build | `build-metadata.json`, `build.log` |
 | `notarize` | Requires the app to be stapled and rated `Notarized Developer ID`, submits the DMG with `notarytool --wait`, staples it and checks it with `stapler validate` and `spctl`; records the stapled DMG's SHA-256 | `notarization.json`, `notarization-dmg-log.json` |
 | `verify` | Extracts the updater archive and mounts the DMG: Developer ID signatures on the app, helper, runtime, launcher and DMG; stapled tickets on the DMG, on the app inside it and on the app inside the updater archive; version, bundle ID, icons, entitlements, runtime self-test, updater signature; and the same files in the DMG as in the archive | `artifact-verification.json` |
 | `assemble` | Collects the six assets (below) and checks them | `assets/` |
 | `scan` | The secret scan (below) | `secret-scan.json` |
-| `publish` | Checks every record again, then tags, pushes `main` and the tag atomically, uploads a draft release, downloads it back and compares it byte for byte, and only then marks it Latest | `upload-verification.json`, `release-result.json` |
+| `publish` | Checks every record again, then tags, pushes the branch and the tag atomically (a release branch and its tag are new refs, so merges to `main` cannot refuse them), uploads a draft release, downloads it back and compares it byte for byte, and only then marks it Latest | `upload-verification.json`, `release-result.json` |
 | `verify-live` | Downloads what users and installed apps now get: the update feed, its archive and signature, and the stable DMG link. Each must match the published file, and the downloaded DMG must still be stapled and rated `Notarized Developer ID` | `live-verification.json` |
+| `merge-back` | Merges the tagged commit into the current `origin/main` with `--no-ff`, in a scratch worktree, and pushes the merge commit; never rebases the tag. A conflict that is only the new changelog section is resolved (entries `main` gained since the cut stay under Unreleased). Any other conflict, or a `main` that moves under three merges in a row, opens a "Release TerminalX <version>" pull request instead, to merge with a merge commit. Nothing to do for a release built from `main` | `merge-back.json` |
 
 Nothing is pushed or uploaded unless the checks, the build, notarization and
 stapling of the app and the DMG, artifact verification and the secret scan
@@ -279,6 +307,11 @@ whose SHA-256 the notarize step recorded. `publish --dry-run` runs all of
 those gates and prints the tag, push and `gh release` commands without running
 them; `--dry-run` applies to no other step, since building and notarizing
 submit to Apple.
+
+After `merge-back`, remove the release worktree and delete the local branch
+(`git worktree remove .raccoon/worktrees/release-<version>`, `git branch -D
+release/<version>`); the branch stays on origin with its tag. Copy anything
+you want to keep from its `.raccoon/release-<version>/` first.
 
 If `publish` stops after it pushed (a failed upload, a download that did not
 match), fix the cause and run `publish` again. The push is then a no-op, and

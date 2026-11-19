@@ -35,6 +35,8 @@ RELEVANT = (
     "src-tauri/serve/",
     "src-tauri/Cargo.lock",
     "scripts/machine-e2e/",
+    # machine-compat is selected by this list too (ci.yml, macos-rust-changes).
+    "scripts/machine-compat/",
     "scripts/remote-runtime/",
     "src/components/machines/",
     "src/lib/machine",

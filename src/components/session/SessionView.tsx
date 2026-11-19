@@ -250,6 +250,9 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
  *    instead of 40 px wide, still the bar's full height
  *    (`HEADER_TIGHT_BUTTONS`), so the full-height buttons do not take the
  *    title's first characters either.
+ * 7. The port-forward chip (PRO-355) with nothing forwarded is left out of a
+ *    header up to 480 px wide (`PortForwardChip`): the Ports tab forwards a
+ *    port just the same. One that counts forwards stays.
  *
  * At that narrow width, breadcrumb padding, gaps and chip margins tighten
  * to keep the title readable beside the full-height 40px action buttons.

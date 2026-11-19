@@ -80,11 +80,13 @@ struct ReleaseMethod {
 impl Release {
     /// What its runtime offers a paired computer on the direct listener: a
     /// machine's namespaces (`protocol::served(true)` at its tag), less what
-    /// a machine withholds and less [`AGENT_COMMANDS`] (see [`offered_directly`]).
+    /// a machine withholds, and before [`AGENT_COMMANDS_SERVED_DIRECTLY`]
+    /// less [`AGENT_COMMANDS`].
     fn offered_to_a_computer(&self) -> BTreeSet<String> {
+        let agent_commands = version_triple(&self.version) >= AGENT_COMMANDS_SERVED_DIRECTLY;
         self.capabilities
             .iter()
-            .filter(|capability| !self.withheld.contains(capability) && capability.as_str() != AGENT_COMMANDS)
+            .filter(|capability| !self.withheld.contains(capability) && (agent_commands || capability.as_str() != AGENT_COMMANDS))
             .chain(&self.machine)
             .cloned()
             .collect()
@@ -171,13 +173,17 @@ fn manifest() -> Option<Manifest> {
     Some(manifest)
 }
 
+/// The first release whose machine serves [`AGENT_COMMANDS`] to a computer
+/// that reaches it only directly (PRO-358): with no relay link it opens its
+/// agent tabs itself when it builds the direct listener's RPC
+/// (`machine_host.rs`, `Parts::agents`). An earlier release built that RPC
+/// without agent tabs, kept no command receipts and did not offer them.
+const AGENT_COMMANDS_SERVED_DIRECTLY: (u64, u64, u64) = (0, 2, 35);
+
 /// What this build's runtime offers a paired computer on the direct
-/// listener. A runtime with no relay link builds that listener's RPC without
-/// agent tabs (`machine_host.rs`, `MachineHost::rpc`), so it keeps no agent
-/// command receipts and does not offer [`AGENT_COMMANDS`]
-/// (`WorkspaceRpc::offered`); every release with machines does the same.
+/// listener: every namespace a machine serves, agent commands among them.
 fn offered_directly() -> BTreeSet<String> {
-    protocol::served(true).into_iter().filter(|capability| *capability != AGENT_COMMANDS).map(str::to_string).collect()
+    protocol::served(true).into_iter().map(str::to_string).collect()
 }
 
 fn set(names: impl IntoIterator<Item = impl ToString>) -> BTreeSet<String> {
@@ -421,8 +427,8 @@ async fn each_previous_releases_want_is_served_by_this_builds_runtime() {
         assert_eq!(hello["ok"], true, "{tag}: {hello}");
         let granted = set(hello["result"]["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str));
         let expected: BTreeSet<String> =
-            want.iter().filter(|namespace| !WITHHELD.contains(&namespace.as_str()) && namespace.as_str() != AGENT_COMMANDS).cloned().collect();
-        assert_eq!(granted, expected, "{tag}: granted everything it wants but what a machine withholds and, with no relay, agent commands");
+            want.iter().filter(|namespace| !WITHHELD.contains(&namespace.as_str())).cloned().collect();
+        assert_eq!(granted, expected, "{tag}: granted everything it wants but what a machine withholds");
         assert_eq!(granted, want.intersection(&offered).cloned().collect::<BTreeSet<_>>(), "{tag}");
         if want.contains(MACHINE) {
             assert!(granted.contains(MACHINE), "{tag}: a machine-era desktop is granted {MACHINE}");
