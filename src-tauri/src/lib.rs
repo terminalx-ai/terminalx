@@ -8,6 +8,7 @@
 #[cfg(feature = "desktop")]
 mod account;
 mod agent_accounts;
+mod agent_configs;
 mod agent_data;
 mod agent_keys;
 #[cfg(feature = "desktop")]
@@ -891,6 +892,9 @@ pub fn run() {
             commands::agent_setup_running,
             commands::list_skills,
             commands::skill_detail,
+            commands::agent_configs_compare,
+            commands::agent_configs_preview,
+            commands::agent_configs_apply,
             commands::work_status,
             commands::branch_overview,
             commands::project_forge,
