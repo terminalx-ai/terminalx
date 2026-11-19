@@ -96,8 +96,9 @@ function backend(cmd: string, args: Record<string, unknown> = {}) {
         requestId: (payload.requestId as string) ?? null,
         state: "queued",
         wake: "queued",
-        createdAt: 1,
-        updatedAt: 1,
+        // The mailbox stamps a command when it takes it: after anything already in it.
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       };
       outbox = [...outbox, entry];
       return Promise.resolve(entry);

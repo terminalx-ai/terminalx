@@ -107,6 +107,7 @@ export function Chat({
   footer,
   onSendQueuedNow,
   sending = null,
+  pending,
   firstMessage,
   onSendAgain,
   onSecondOpinion,
@@ -151,6 +152,12 @@ export function Chat({
   /** A message sent from the composer that the runtime has not recorded yet: drawn last, as sending (#727). */
   /** `files`: the names of the files attached to it (PRO-290), drawn as chips that do not open yet. */
   sending?: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[]; pressedAt: number } | null;
+  /**
+   * Messages on their way to a cloud tab's agent (#1291): drawn last, as the
+   * Queued cards a local session draws, until the conversation has them.
+   * Null when there are none: the empty chat's scene shows only then.
+   */
+  pending?: ReactNode;
   /** The local Create prompt and startup progress, until the transcript owns the prompt. */
   firstMessage?: ReactNode;
   /** Send a message the agent dropped unanswered again, as a new message, where the backend can (local, #722). */
@@ -483,14 +490,14 @@ export function Chat({
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
           <SearchDisclosures value={find.disclosures}>
-          {!turns.length && !live && !sending && !firstMessage && loading && (
+          {!turns.length && !live && !sending && !pending && !firstMessage && loading && (
             // Loading is a label alone; the scene is for a conversation that really is empty.
             <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
               <Loader2 className="size-3 animate-spin" aria-hidden />
               Loading the conversation…
             </p>
           )}
-          {!turns.length && !live && !sending && !firstMessage && !loading && (
+          {!turns.length && !live && !sending && !pending && !firstMessage && !loading && (
             <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
               <RaccoonScene />
               <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
@@ -534,6 +541,7 @@ export function Chat({
           <div data-spacer aria-hidden style={{ height: turnTops[turns.length] - turnTops[end] }} />
           {firstMessage}
           {sending && <SendingMessage message={sending} cwd={cwd} />}
+          {pending}
           {transcript.compacting && (
             <div className="mb-3 -mx-1.5 px-1.5 text-[13px] text-shimmer">{COMPACTING_LINE}</div>
           )}
