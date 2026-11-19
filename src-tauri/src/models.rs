@@ -143,9 +143,26 @@ pub fn catalog() -> Vec<Model> {
 pub fn offered(claude: Vec<Model>, codex: Vec<Model>) -> Vec<Model> {
     let mut out = if claude.is_empty() { claude_fallback() } else { claude };
     out.extend(codex);
-    out.extend(catalog().into_iter().filter(|m| m.harness != "claude"));
-    out.retain(|m| crate::harness::visible(&m.harness));
+    out.extend(catalog().into_iter().filter(|m| m.harness != "claude" && m.harness != "opencode"));
+    let experimental = crate::store::settings::load().experimental;
+    if crate::harness::visible_with("opencode", &experimental) {
+        out.extend(opencode(crate::harness::opencode::manage::picker_models()));
+    }
+    out.retain(|m| crate::harness::visible_with(&m.harness, &experimental));
     out
+}
+
+/// OpenCode's picker (PRO-157): only the models added in Settings → Agents,
+/// the first of them the default. With none added there is one entry, which
+/// leaves the choice to OpenCode, as a tab with no model always has.
+fn opencode(added: Vec<crate::harness::opencode::manage::PickerModel>) -> Vec<Model> {
+    if added.is_empty() {
+        return vec![m("opencode", "", "Default", &[], None, true)];
+    }
+    added.into_iter().enumerate().map(|(index, model)| Model {
+        description: Some(model.provider_name),
+        ..m("opencode", &model.id, &model.name, &[], None, index == 0)
+    }).collect()
 }
 
 /// [`offered`], asking each agent in turn: for a phone's picker, which the
@@ -185,6 +202,21 @@ mod tests {
         assert_eq!(claude_label("claude-haiku-4-5-20251001").as_deref(), Some("Haiku 4.5"));
         assert_eq!(claude_label("opus"), None);
         assert_eq!(claude_label("gpt-5.6-sol"), None);
+    }
+
+    #[test]
+    fn opencode_offers_the_models_added_in_settings() {
+        use crate::harness::opencode::manage::PickerModel;
+        let none = opencode(Vec::new());
+        assert_eq!(none.iter().map(|m| (m.id.as_str(), m.is_default)).collect::<Vec<_>>(), vec![("", true)]);
+        let added = opencode(vec![
+            PickerModel { id: "openrouter/deepseek/deepseek-v4".into(), provider: "openrouter".into(), provider_name: "OpenRouter".into(), model: "deepseek/deepseek-v4".into(), name: "DeepSeek V4".into() },
+            PickerModel { id: "anthropic/claude-opus-4-5".into(), provider: "anthropic".into(), provider_name: "Anthropic".into(), model: "claude-opus-4-5".into(), name: "Claude Opus 4.5".into() },
+        ]);
+        assert_eq!(added.iter().map(|m| (m.id.as_str(), m.label.as_str(), m.is_default)).collect::<Vec<_>>(),
+            vec![("openrouter/deepseek/deepseek-v4", "DeepSeek V4", true), ("anthropic/claude-opus-4-5", "Claude Opus 4.5", false)]);
+        assert_eq!(added[1].description.as_deref(), Some("Anthropic"));
+        assert!(added.iter().all(|m| m.harness == "opencode"));
     }
 
     #[test]

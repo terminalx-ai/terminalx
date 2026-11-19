@@ -6,6 +6,7 @@ import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSea
 
 const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on, localVmTasks: false });
 const localVmTasks = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: on });
+const openCode = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, opencode: on });
 
 beforeEach(() => orchestratorRuns(false));
 afterEach(() => orchestratorRuns(false));
@@ -155,10 +156,12 @@ describe("settings row search", () => {
 
   it("offers every row behind a switch only while that switch is on, and every other row always", () => {
     const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
-    expect(behind.map((row) => row.id)).toEqual(["repositories.orchestrator"]);
+    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator"]);
     expect(behind.every((row) => !settingOffered(row))).toBe(true);
     orchestratorRuns(true);
-    expect(behind.every((row) => settingOffered(row))).toBe(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["repositories.orchestrator"]);
+    openCode(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["agents.opencodeProviders"]);
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
     expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);

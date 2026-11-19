@@ -22,6 +22,8 @@
 //! So a turn ends once (`idle`), and only what belongs to it is drawn
 //! (`belongs`).
 
+pub mod manage;
+
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
