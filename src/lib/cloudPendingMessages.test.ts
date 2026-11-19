@@ -107,6 +107,11 @@ describe("review of #1291", () => {
     expect(step(tracks, [failed, refused, delivered], [], [said(1, "deploy it")]).map((m) => m.id)).toEqual(["c-2"]);
     // A cancelled resend does not count.
     expect(step(new Map(), [failed, { ...again, state: "cancelled" }], [], []).map((m) => m.id)).toEqual(["c-1"]);
+    // Nor does one that was not delivered either: the same refused words sent twice are two refusals, each with its reason.
+    const refusedAgain = { ...again, state: "rejected" as const, category: "slash-command-forbidden" };
+    expect(step(new Map(), [failed, refusedAgain], [], []).map((m) => [m.id, m.phase])).toEqual([["c-1", "failed"], ["c-3", "failed"]]);
+    // A third try on its way takes both over.
+    expect(step(new Map(), [failed, refusedAgain, entry("c-4", { text: "deploy it", createdAt: 3 })], [], []).map((m) => m.id)).toEqual(["c-4"]);
   });
 
   it("takes only a message of images with no words for a message of images alone", () => {
