@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceProvenance, DeviceScope};
 use super::send_ids::{Reply, SendIds, SendKey, ID_REUSED, STILL_SENDING};
 use crate::local_runtime::mobile::Repeat;
+use super::sync_cache::{SyncCache, Verified};
 use super::wire::{megabytes, ReplyLimits, Transport, Wire};
 use super::PhoneHost;
 use crate::events::{AgentEvent, Payload};
@@ -585,6 +586,10 @@ pub(crate) struct MobileConnection {
     overflowed: Arc<std::sync::atomic::AtomicBool>,
     invalidations: Arc<super::Invalidations>,
     closed: std::sync::atomic::AtomicBool,
+    /// The transcript checkpoints this connection's `session.sync` replies ended at (#1283).
+    sync_cache: SyncCache,
+    /// Counts this connection's `sync.prefetch` calls: a sender stops once it is not the latest.
+    prefetch: std::sync::atomic::AtomicU64,
     #[cfg(unix)]
     authority: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
 }
@@ -619,6 +624,8 @@ impl MobileConnection {
             terminal_subscriptions: Mutex::new(HashMap::new()),
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
+            sync_cache: SyncCache::default(),
+            prefetch: std::sync::atomic::AtomicU64::new(0),
             #[cfg(unix)]
             authority: None,
         })
@@ -813,6 +820,7 @@ pub(crate) fn dispatch(
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries(connection)?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
+        "sync.prefetch" => parse_params(params).and_then(|params| prefetch(connection, params)),
         "session.image" => parse_params(params).and_then(|params: PromptImageParams| prompt_image(&params)),
         "session.subscribe" => sink
             .as_ref()
@@ -894,7 +902,9 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `transcript`, `conditionalLists` and `promptImages` (`session.image`) are this app's own.
     // `notificationFilters`: notices carry a `kind`, and `notifications.subscribe`
     // and `notifications.missedSince` take a `filter` (#990).
-    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1 });
+    // `prefetch`: `sync.prefetch` sends the newest part of the most recently
+    // active conversations ahead of time, as `session.prefetch` (#1283).
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1 });
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
@@ -1167,11 +1177,11 @@ fn file_name(path: &str) -> String {
 // A content checkpoint, not a maximum event sequence: rewrites, reconciliation,
 // truncation and replacement logs must never silently keep stale cached events.
 const SYNC_PAGE_EVENTS: usize = 500;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SyncCursor {
-    offset: usize,
-    digest: String,
+pub(super) struct SyncCursor {
+    pub offset: usize,
+    pub digest: String,
 }
 
 #[derive(Deserialize)]
@@ -1206,72 +1216,262 @@ fn session_sync(connection: &MobileConnection, request_id: &str, params: Session
         return Ok(json!({ "deleted": true }));
     }
     let path = store::log_path(&params.session_id, &params.tab_id)?;
-    connection.call("reconcile", json!({"sessionId":params.session_id,"tabId":params.tab_id}))?;
+    // The next page of a read this connection is part way through (#1283):
+    // the first page reconciled, and a live event asks for another read anyway.
+    let continuing = params.cursor.as_ref()
+        .is_some_and(|cursor| connection.sync_cache.continuing(&params.session_id, &params.tab_id, cursor));
+    if !continuing {
+        connection.call("reconcile", json!({"sessionId":params.session_id,"tabId":params.tab_id}))?;
+    }
     // Reconciliation publishes to the log. Read canonical file order again:
     // another publisher may have appended between the first read and publish.
-    let events: Vec<AgentEvent> = store::read_lines(&path)?;
     let limits = connection.wire.reply_limits(TAIL_RESPONSE_BYTES_LIMIT);
-    sync_page(&events, params.cursor.as_ref(), &params.session_id, &params.tab_id, request_id, limits)
+    synced_page(&connection.sync_cache, &path, params.cursor.as_ref(), &params.session_id, &params.tab_id, request_id, limits)
 }
 
+/// A `session.sync` page of the log at `path`. A cursor this connection
+/// verified before is continued from the bytes appended since, without reading
+/// or hashing the log again (#1283); any other, or a log that is not the one
+/// verified plus appended lines, is checked against the whole log as before.
+fn synced_page(cache: &SyncCache, path: &Path, cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
+    if let Some(cursor) = cursor {
+        if let Some(verified) = cache.matching(session, tab, cursor) {
+            if let Some(tail) = super::sync_cache::read_after(path, &verified)? {
+                let page = forward_page(verified.hash.clone(), verified.offset, &tail.events, request_id, limits)?;
+                cache.store(session, tab, verified.advance(&page, &tail));
+                return Ok(page.value);
+            }
+        }
+    }
+    let log = super::sync_cache::read_log(path)?;
+    let page = sync_page_state(&log.events, cursor, session, tab, request_id, limits)?;
+    cache.store(session, tab, Verified::of_log(&page, &log));
+    Ok(page.value)
+}
+
+#[cfg(test)]
 fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
-    // Hash canonical records with explicit boundaries, including conversation
-    // identity and protocol generation. Stable across desktop restarts.
+    Ok(sync_page_state(events, cursor, session, tab, request_id, limits)?.value)
+}
+
+/// A sync page, and the checkpoint it ends at: its cursor's offset and the
+/// hash of every record before it, to continue from.
+pub(super) struct SyncedPage {
+    pub value: Value,
+    pub end: usize,
+    pub hash: Sha256,
+    pub has_more: bool,
+}
+
+/// A new hash over a conversation's records, bound to its identity and protocol generation.
+pub(super) fn sync_hash(session: &str, tab: &str) -> Result<Sha256> {
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&(1, session, tab))?);
-    let offset = cursor.map_or(0, |c| c.offset);
-    for event in events.iter().take(offset) {
+    Ok(hash)
+}
+
+fn hash_events<'a>(hash: &mut Sha256, events: impl IntoIterator<Item = &'a AgentEvent>) -> Result<()> {
+    for event in events {
         hash.update(serde_json::to_vec(event)?);
         hash.update(b"\n");
     }
-    let valid = cursor.is_some_and(|c| c.offset <= events.len()
-        && c.digest == format!("{:x}", hash.clone().finalize()));
-    let mut start = if valid { offset } else {
-        let mut start = events.len();
-        let mut turns = 0;
-        for event in events.iter().rev().take(SYNC_PAGE_EVENTS) {
-            start -= 1;
-            if matches!(event.payload, Payload::UserMessage { .. }) { turns += 1; }
-            if turns == 20 { break; }
-        }
-        start
-    };
-    // Count the escaped request id and worst-case sync metadata too. The
-    // largest possible offset is the log length, and false is longer than true.
+    Ok(())
+}
+
+/// The sync reply's metadata at its largest, for a log of `total` records,
+/// so a page leaves room for it. False is longer than true.
+fn sync_envelope(request_id: &str, total: usize, limits: ReplyLimits) -> Result<(usize, usize)> {
     let envelope = success_response(request_id, json!({
         "events": [], "reset": false, "hasMore": false, "hasEarlier": false,
-        "cursor": SyncCursor { offset: events.len(), digest: "0".repeat(64) },
+        "cursor": SyncCursor { offset: total, digest: "0".repeat(64) },
     }));
     let envelope = serde_json::to_vec(&envelope)?.len();
     let budget = limits.page.checked_sub(envelope).context("transcript request envelope is too large")?;
     let single = limits.single.checked_sub(envelope).context("transcript request envelope is too large")?;
-    let end = if valid {
-        start + sync_event_count(events[start..].iter().take(SYNC_PAGE_EVENTS), budget)?
-    } else {
-        // A reset is a recent contiguous suffix; forward pages are prefixes of
-        // the remaining records. Neither direction can skip an oversized event:
-        // it is sent alone, and cut down to fit if it must be.
-        start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
-        events.len()
-    };
-    if !valid {
-        hash = Sha256::new();
-        hash.update(serde_json::to_vec(&(1, session, tab))?);
-        for event in events.iter().take(start) {
-            hash.update(serde_json::to_vec(event)?);
-            hash.update(b"\n");
+    Ok((budget, single))
+}
+
+fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<SyncedPage> {
+    // Hash canonical records with explicit boundaries, including conversation
+    // identity and protocol generation. Stable across desktop restarts.
+    let mut hash = sync_hash(session, tab)?;
+    let offset = cursor.map_or(0, |c| c.offset);
+    hash_events(&mut hash, events.iter().take(offset))?;
+    let valid = cursor.is_some_and(|c| c.offset <= events.len()
+        && c.digest == format!("{:x}", hash.clone().finalize()));
+    if valid {
+        return forward_page(hash, offset, &events[offset..], request_id, limits);
+    }
+    let mut start = events.len();
+    let mut turns = 0;
+    for event in events.iter().rev().take(SYNC_PAGE_EVENTS) {
+        start -= 1;
+        if matches!(event.payload, Payload::UserMessage { .. }) { turns += 1; }
+        if turns == 20 { break; }
+    }
+    let (budget, single) = sync_envelope(request_id, events.len(), limits)?;
+    // A reset is a recent contiguous suffix. It cannot skip an oversized
+    // event: it is sent alone, and cut down to fit if it must be.
+    start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
+    let mut hash = sync_hash(session, tab)?;
+    hash_events(&mut hash, events)?;
+    let page = events[start..].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
+    Ok(SyncedPage {
+        value: json!({
+            "events": page, "reset": true,
+            "cursor": SyncCursor { offset: events.len(), digest: format!("{:x}", hash.clone().finalize()) },
+            "hasMore": false, "hasEarlier": start > 0,
+        }),
+        end: events.len(), hash, has_more: false,
+    })
+}
+
+/// The forward page after a verified checkpoint: `hash` covers the `start`
+/// records before it, and `rest` is every record after them. A page is a
+/// prefix of `rest`; it cannot skip an oversized event either.
+pub(super) fn forward_page(mut hash: Sha256, start: usize, rest: &[AgentEvent], request_id: &str, limits: ReplyLimits) -> Result<SyncedPage> {
+    let total = start + rest.len();
+    let (budget, single) = sync_envelope(request_id, total, limits)?;
+    let count = sync_event_count(rest.iter().take(SYNC_PAGE_EVENTS), budget)?;
+    hash_events(&mut hash, &rest[..count])?;
+    let page = rest[..count].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
+    let end = start + count;
+    Ok(SyncedPage {
+        value: json!({
+            "events": page, "reset": false,
+            "cursor": SyncCursor { offset: end, digest: format!("{:x}", hash.clone().finalize()) },
+            "hasMore": end < total, "hasEarlier": start > 0,
+        }),
+        end, hash, has_more: end < total,
+    })
+}
+
+/// What one `sync.prefetch` sends at most (#1283): the most recently active
+/// sessions, the most recently active tabs of each, and bytes in all. Each
+/// message is held well under a Relay frame, so a live event waits behind
+/// at most one of them.
+const PREFETCH_SESSIONS: usize = 8;
+const PREFETCH_TABS_PER_SESSION: usize = 3;
+const PREFETCH_BYTES: usize = 2 * 1024 * 1024;
+const PREFETCH_MESSAGE_BYTES: usize = 256 * 1024;
+/// The checkpoints a phone may name: it names those of the conversations it keeps.
+const PREFETCH_KNOWN: usize = 256;
+/// A prefetch message waits until the connection's queue is at least half free, and gives up after this.
+const PREFETCH_ROOM_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PrefetchParams {
+    /// False stops a prefetch under way: the phone went to the background, or the setting was turned off.
+    enabled: bool,
+    /// The checkpoints of the conversations the phone keeps: those are sent from there.
+    #[serde(default)]
+    known: Vec<KnownTranscript>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KnownTranscript {
+    session_id: String,
+    tab_id: String,
+    cursor: SyncCursor,
+}
+
+/// Starts sending, or stops, the newest part of the most recently active
+/// conversations (#1283). The phone asks only when its person turned the
+/// setting on, and stops it when it goes to the background: it spends the
+/// phone's data. Each is a `session.sync` page as the phone would have read
+/// it, from the checkpoint the phone named, or the newest part when it named
+/// none; a conversation with nothing new is not sent.
+fn prefetch(connection: &Arc<MobileConnection>, params: PrefetchParams) -> Result<Value> {
+    use std::sync::atomic::Ordering;
+    let generation = connection.prefetch.fetch_add(1, Ordering::SeqCst) + 1;
+    if !params.enabled {
+        return Ok(json!({ "enabled": false }));
+    }
+    if params.known.len() > PREFETCH_KNOWN {
+        bail!("a prefetch names at most {PREFETCH_KNOWN} conversations");
+    }
+    let known: HashMap<(String, String), SyncCursor> = params.known.into_iter()
+        .map(|known| ((known.session_id, known.tab_id), known.cursor)).collect();
+    let targets = prefetch_targets(index::load()?);
+    let weak = Arc::downgrade(connection);
+    std::thread::Builder::new().name("mobile-prefetch".into()).spawn(move || {
+        let current = |connection: &MobileConnection| !connection.closed.load(Ordering::SeqCst)
+            && connection.prefetch.load(Ordering::SeqCst) == generation;
+        let mut sent = 0;
+        for (session, tab) in targets {
+            let Some(connection) = weak.upgrade() else { return };
+            if PREFETCH_BYTES - sent < 16 * 1024 || !current(&connection) || !connection.room_for_prefetch(&current) { return; }
+            let after = known.get(&(session.clone(), tab.clone()));
+            match prefetch_message(&connection, &session, &tab, after, PREFETCH_BYTES - sent) {
+                Ok(Some(message)) => {
+                    let size = serde_json::to_vec(&message).map_or(usize::MAX, |bytes| bytes.len());
+                    if size > PREFETCH_BYTES - sent { return; }
+                    // Room was made for it; a queue that filled since is left to live events.
+                    if connection.outbound.try_send(message).is_err() { return; }
+                    sent += size;
+                }
+                Ok(None) => {}
+                Err(error) => log::debug!("prefetch of {session}/{tab} skipped: {error:#}"),
+            }
+            drop(connection);
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    })?;
+    Ok(json!({ "enabled": true, "sessions": PREFETCH_SESSIONS, "bytes": PREFETCH_BYTES }))
+}
+
+/// The conversations a prefetch sends, most recently active first: the
+/// newest tabs of the newest sessions that are not archived.
+fn prefetch_targets(sessions: Vec<SessionEntry>) -> Vec<(String, String)> {
+    let latest = |session: &SessionEntry| session.tabs.iter().map(|tab| tab.modified.as_str())
+        .chain([session.modified.as_str()]).max().unwrap_or_default().to_string();
+    let mut sessions: Vec<_> = sessions.into_iter().filter(|session| !session.archived).collect();
+    sessions.sort_by_cached_key(|session| std::cmp::Reverse(latest(session)));
+    sessions.into_iter().take(PREFETCH_SESSIONS).flat_map(|session| {
+        let mut tabs = session.tabs;
+        tabs.sort_by(|left, right| right.modified.cmp(&left.modified));
+        tabs.into_iter().take(PREFETCH_TABS_PER_SESSION).map(move |tab| (session.id.clone(), tab.id))
+    }).collect()
+}
+
+/// One conversation's `session.prefetch`, at most `budget` bytes of page;
+/// `None` when the phone's checkpoint is already the end.
+fn prefetch_message(connection: &MobileConnection, session: &str, tab: &str, after: Option<&SyncCursor>, budget: usize) -> Result<Option<Value>> {
+    let path = store::log_path(session, tab)?;
+    // The wrapper around the page, at its largest, is left out of the page's room.
+    let wrapper = serde_json::to_vec(&json!({ "method": "session.prefetch", "params": {
+        "sessionId": session, "tabId": tab, "page": null,
+        "after": SyncCursor { offset: usize::MAX, digest: "0".repeat(64) },
+    } }))?.len();
+    let limits = connection.wire.reply_limits(TAIL_RESPONSE_BYTES_LIMIT);
+    let page_room = limits.page.min(PREFETCH_MESSAGE_BYTES).min(budget);
+    let limits = ReplyLimits {
+        page: page_room.checked_sub(wrapper).context("no room left for a prefetch")?,
+        single: limits.single.min(budget).checked_sub(wrapper).context("no room left for a prefetch")?,
+    };
+    let page = synced_page(&connection.sync_cache, &path, after, session, tab, "prefetch", limits)?;
+    // Not a read under way: the phone's own next read reconciles first.
+    connection.sync_cache.settle(session, tab);
+    if page["reset"] == false && page["events"].as_array().is_some_and(Vec::is_empty) {
+        return Ok(None);
     }
-    for event in &events[start..end] {
-        hash.update(serde_json::to_vec(event)?);
-        hash.update(b"\n");
+    Ok(Some(json!({ "method": "session.prefetch", "params": { "sessionId": session, "tabId": tab, "after": after, "page": page } })))
+}
+
+impl MobileConnection {
+    /// Waits until at least half the connection's queue is free, so a
+    /// prefetch never takes the room a live event needs: a full queue drops
+    /// the connection. False when it stopped being wanted, or never freed.
+    fn room_for_prefetch(&self, current: &dyn Fn(&MobileConnection) -> bool) -> bool {
+        let started = std::time::Instant::now();
+        while self.outbound.capacity() * 2 < self.outbound.max_capacity() {
+            if !current(self) || started.elapsed() > PREFETCH_ROOM_WAIT { return false; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        true
     }
-    let page = events[start..end].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
-    Ok(json!({
-        "events": page, "reset": !valid,
-        "cursor": SyncCursor { offset: end, digest: format!("{:x}", hash.finalize()) },
-        "hasMore": end < events.len(), "hasEarlier": start > 0,
-    }))
 }
 
 /// How many of `events` fill a page. The first is always taken: one larger
@@ -2532,6 +2732,174 @@ mod tests {
         serde_json::from_value(page["cursor"].clone()).unwrap()
     }
 
+    fn write_log(path: &Path, events: &[AgentEvent]) {
+        let text: String = events.iter().map(|event| serde_json::to_string(event).unwrap() + "\n").collect();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn append_log(path: &Path, events: &[AgentEvent]) {
+        for event in events {
+            store::append_line(path, &serde_json::to_string(event).unwrap()).unwrap();
+        }
+    }
+
+    /// Reads every page from `checkpoint` to the end with the connection's checkpoints, and checks each
+    /// page is the one the whole log gives for the same cursor (#1283).
+    fn drain_cached(cache: &SyncCache, path: &Path, mut checkpoint: Option<SyncCursor>, limits: ReplyLimits) -> (Vec<u64>, SyncCursor, bool) {
+        let mut seqs = Vec::new();
+        let mut reset = false;
+        loop {
+            let expected = sync_page(&store::read_lines::<AgentEvent>(path).unwrap(), checkpoint.as_ref(), "session", "tab", "test", limits).unwrap();
+            let page = synced_page(cache, path, checkpoint.as_ref(), "session", "tab", "test", limits).unwrap();
+            assert_eq!(page, expected, "a cached page is the page the whole log gives");
+            reset |= page["reset"] == true;
+            seqs.extend(page["events"].as_array().unwrap().iter().map(|event| event["seq"].as_u64().unwrap()));
+            checkpoint = Some(cursor(&page));
+            if page["hasMore"] == false { return (seqs, checkpoint.unwrap(), reset); }
+        }
+    }
+
+    #[test]
+    fn a_verified_cursor_continues_from_the_appended_bytes_and_any_other_change_reads_the_whole_log() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let cache = SyncCache::default();
+        write_log(&path, &(1..=100).map(prompt).collect::<Vec<_>>());
+        let (seqs, checkpoint, reset) = drain_cached(&cache, &path, None, direct());
+        assert!(reset);
+        assert_eq!(seqs, (81..=100).collect::<Vec<_>>());
+
+        // Appended: read from where the checkpoint ends, across pages, and the same as a whole read.
+        append_log(&path, &(101..=1300).map(prompt).collect::<Vec<_>>());
+        let verified = cache.matching("session", "tab", &checkpoint).expect("the connection kept its checkpoint");
+        let tail = super::super::sync_cache::read_after(&path, &verified).unwrap().expect("only lines were appended");
+        assert_eq!(tail.events.len(), 1200);
+        let (seqs, checkpoint, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert!(!reset);
+        assert_eq!(seqs, (101..=1300).collect::<Vec<_>>());
+
+        // A line still being written is left to the whole read, which skips it, until it ends.
+        let partial = serde_json::to_string(&prompt(1301)).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&partial.as_bytes()[..20]).unwrap();
+        let verified = cache.matching("session", "tab", &checkpoint).unwrap();
+        assert!(super::super::sync_cache::read_after(&path, &verified).unwrap().is_none());
+        let (seqs, checkpoint, _) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert!(seqs.is_empty());
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(format!("{}\n", &partial[20..]).as_bytes()).unwrap();
+        let (seqs, checkpoint, _) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert_eq!(seqs, vec![1301]);
+
+        // Rewritten in place under the checkpoint, at the same length: the fingerprint catches it.
+        let mut changed = store::read_lines::<AgentEvent>(&path).unwrap();
+        let last = changed.len() - 1;
+        changed[last] = event(1301, Payload::UserMessage { author: None, text: "prompt 9999".into(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: None });
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().write_all(
+            changed.iter().map(|event| serde_json::to_string(event).unwrap() + "\n").collect::<String>().as_bytes()).unwrap();
+        let (_, checkpoint, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert!(reset, "a changed record is a reset, as it was before the cache");
+
+        // Replaced by a new file, and truncated: both read whole again.
+        let replacement = dir.path().join("replacement.jsonl");
+        write_log(&replacement, &(1..=50).map(prompt).collect::<Vec<_>>());
+        std::fs::rename(&replacement, &path).unwrap();
+        let (_, checkpoint, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert!(reset);
+        std::fs::write(&path, b"").unwrap();
+        let (seqs, _, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
+        assert!(reset);
+        assert!(seqs.is_empty());
+    }
+
+    /// What one `session.sync` catch-up costs the Mac, before and after #1283:
+    /// `cargo test --lib phone::rpc::tests::sync_cost -- --ignored --nocapture`.
+    /// Before, every page read and hashed the whole log; after, a cursor this
+    /// connection returned reads only the lines appended since.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn sync_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = |seq: u64| event(seq, Payload::AssistantText { block: None, text: "x".repeat(600) });
+        for size in [1_000u64, 10_000, 50_000] {
+            let path = dir.path().join(format!("log-{size}.jsonl"));
+            write_log(&path, &(1..=size).map(|seq| if seq % 10 == 0 { prompt(seq) } else { tool(seq) }).collect::<Vec<_>>());
+            let cache = SyncCache::default();
+            let mut checkpoint = cursor(&synced_page(&cache, &path, None, "session", "tab", "test", relay(true)).unwrap());
+            let rounds = 20;
+            let (mut before, mut after) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+            for n in 0..rounds {
+                append_log(&path, &[tool(size + 1 + n)]);
+                let started = std::time::Instant::now();
+                let old = sync_page(&store::read_lines::<AgentEvent>(&path).unwrap(), Some(&checkpoint), "session", "tab", "test", relay(true)).unwrap();
+                before += started.elapsed();
+                let started = std::time::Instant::now();
+                let new = synced_page(&cache, &path, Some(&checkpoint), "session", "tab", "test", relay(true)).unwrap();
+                after += started.elapsed();
+                assert_eq!(old, new);
+                checkpoint = cursor(&new);
+            }
+            let bytes = std::fs::metadata(&path).unwrap().len();
+            println!("{size:>6} events ({:>5.1} MB): one-event catch-up page {:>8.2} ms before, {:>6.3} ms after",
+                bytes as f64 / 1e6, before.as_secs_f64() * 1e3 / rounds as f64, after.as_secs_f64() * 1e3 / rounds as f64);
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_is_kept_per_conversation_and_only_for_the_cursor_last_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let cache = SyncCache::default();
+        write_log(&path, &(1..=30).map(prompt).collect::<Vec<_>>());
+        let first = cursor(&synced_page(&cache, &path, None, "session", "tab", "test", direct()).unwrap());
+        assert!(cache.matching("session", "tab", &first).is_some());
+        assert!(cache.matching("session", "other", &first).is_none());
+        append_log(&path, &[prompt(31)]);
+        let second = cursor(&synced_page(&cache, &path, Some(&first), "session", "tab", "test", direct()).unwrap());
+        assert!(cache.matching("session", "tab", &first).is_none());
+        // An older cursor is still answered, from the whole log.
+        let again = synced_page(&cache, &path, Some(&first), "session", "tab", "test", direct()).unwrap();
+        assert_eq!(cursor(&again), second);
+        assert_eq!(again["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_page_that_says_there_is_more_is_continued_without_another_reconcile_and_a_prefetch_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let cache = SyncCache::default();
+        write_log(&path, &(1..=20).map(prompt).collect::<Vec<_>>());
+        let start = cursor(&synced_page(&cache, &path, None, "session", "tab", "test", direct()).unwrap());
+        assert!(!cache.continuing("session", "tab", &start), "the last page of a read is not continued");
+        append_log(&path, &(21..=1200).map(prompt).collect::<Vec<_>>());
+        let page = synced_page(&cache, &path, Some(&start), "session", "tab", "test", direct()).unwrap();
+        assert_eq!(page["hasMore"], true);
+        assert!(cache.continuing("session", "tab", &cursor(&page)));
+        cache.settle("session", "tab");
+        assert!(!cache.continuing("session", "tab", &cursor(&page)));
+    }
+
+    #[test]
+    fn a_prefetch_goes_newest_session_first_and_its_newest_tabs_and_skips_archived_ones() {
+        let session = |id: &str, modified: &str, tabs: &[(&str, &str)], archived: bool| -> SessionEntry {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": "/p", "cwd": "/p", "title": id, "created": "x", "modified": modified, "archived": archived,
+                "tabs": tabs.iter().map(|(tab, modified)| json!({ "id": tab, "harness": "claude", "created": "x", "modified": modified })).collect::<Vec<_>>(),
+            })).unwrap()
+        };
+        let mut sessions = vec![
+            session("old", "2026-11-01", &[("old-1", "2026-11-01")], false),
+            session("busy", "2026-11-02", &[("b-1", "2026-11-03"), ("b-2", "2026-11-19"), ("b-3", "2026-11-05"), ("b-4", "2026-11-04")], false),
+            session("archived", "2026-11-18", &[("a-1", "2026-11-18")], true),
+            session("recent", "2026-11-10", &[("r-1", "2026-11-10")], false),
+        ];
+        sessions.extend((0..10).map(|n| session(&format!("filler-{n}"), "2026-10-01", &[("f", "2026-10-01")], false)));
+        let targets = prefetch_targets(sessions);
+        let ids: Vec<_> = targets.iter().map(|(session, tab)| format!("{session}/{tab}")).collect();
+        assert_eq!(&ids[..5], ["busy/b-2", "busy/b-3", "busy/b-4", "recent/r-1", "old/old-1"]);
+        assert!(!ids.iter().any(|id| id.starts_with("archived/")));
+        assert_eq!(targets.iter().map(|(session, _)| session).collect::<HashSet<_>>().len(), PREFETCH_SESSIONS);
+    }
+
     #[test]
     fn sync_cold_unchanged_and_large_gap_are_contiguous() {
         let mut events: Vec<_> = (1..=100).map(prompt).collect();
@@ -3139,20 +3507,20 @@ mod tests {
     /// serve, not what this app could serve through a runtime of its own build.
     #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
-        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
         every["closeTab"] = json!(1);
         every["layeredConfiguration"] = json!(1);
         every["questions"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
         assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration and answering questions came later");
-        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1 });
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
         assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
         // A runtime that names features is taken at its word, at the level this app knows.
         let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
-        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "terminal": 1 }));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "terminal": 1 }));
     }
 
     /// #730: an operation the runtime does not know reads as what to do about it.

@@ -5,6 +5,7 @@ import { Bell, Check, ChevronRight } from "lucide-react-native";
 import { settingsSummary } from "@mobile/notifications/model";
 import { useNotificationSettings } from "@mobile/notifications/store";
 import type { MacSettings } from "@mobile/data/host-api";
+import { usePrefetchSetting } from "@mobile/data/prefetch-setting";
 import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
 import { useHostFeatures } from "@mobile/state/host-features";
@@ -25,6 +26,7 @@ export default function SettingsScreen() {
   const { name, palette, setName } = useTheme();
   const machine = useMachines().paired.find((item) => item.active);
   const notificationSettings = useNotificationSettings();
+  const [prefetch, setPrefetch] = usePrefetchSetting();
   // The machine's own settings: undefined while asking, null from a machine that does not offer them.
   const [mac, setMac] = useState<MacSettings | null | undefined>(undefined);
   const [macError, setMacError] = useState<string | null>(null);
@@ -86,6 +88,10 @@ export default function SettingsScreen() {
         <View style={styles.themeName}><Text style={[styles.themeLabel, { color: palette.ink }]}>{theme}</Text>{selected ? <Check size={15} color={palette.accent} /> : null}</View>
       </Pressable>;
     })}</View>
+
+    <SectionTitle>Data</SectionTitle>
+    {/* #1283: this phone's own choice, since it spends this phone's data and battery. */}
+    <Card><View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Send recent sessions ahead of time</Text><Text style={[styles.detail, { color: palette.muted }]}>When the phone connects, your machine sends the latest of your most recent sessions, so they open at once. Uses more data while the app is open.</Text></View><Switch accessibilityLabel="Send recent sessions ahead of time" value={prefetch} onValueChange={setPrefetch} trackColor={{ true: palette.accent }} /></View></Card>
 
     {app.activeHost && machineName ? <><SectionTitle>{machineName}</SectionTitle>
     <Card>{mac ? <View style={styles.settingRow}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>Native Codex</Text><Text style={[styles.detail, { color: palette.muted }]}>Experimental. A more reliable chat for new Codex sessions.</Text></View><Switch accessibilityLabel="Native Codex" value={mac.nativeCodex} onValueChange={(value) => void toggleNativeCodex(value)} trackColor={{ true: palette.accent }} /></View>

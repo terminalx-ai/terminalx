@@ -65,7 +65,7 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -206,14 +206,54 @@ export class HostApi {
     try { return await task; } finally { requests.delete(key); }
   }
 
+  /**
+   * The version the last `method` list read carried, so it can be kept
+   * across launches (#1283); null when there is none.
+   */
+  listVersion(method: string, params: Record<string, unknown> = {}): string | null {
+    return this.lists.get(JSON.stringify([method, params]))?.version ?? null;
+  }
+
+  /**
+   * A list kept from an earlier launch, with the version it was read at:
+   * the first read after a launch asks for it only if it changed (#1283).
+   * A list already read on this connection is not replaced.
+   */
+  rememberList(method: string, params: Record<string, unknown>, version: string, value: Record<string, unknown>): void {
+    const key = JSON.stringify([method, params]);
+    if (!this.lists.has(key)) this.lists.set(key, { version, value: { ...value, version } });
+  }
+
   async syncTranscript(sessionId: string, tabId: string, cursor?: SyncCursor): Promise<SyncPage> {
     const result = await this.connection.request<unknown>("session.sync", { sessionId, tabId, ...(cursor ? { cursor } : {}) });
     if (!result.ok) throw new Error(result.refusal.message);
-    const page = result.value as SyncPage;
-    if (page?.deleted === true) return page;
-    if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
-    if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
-    return page;
+    return checkSyncPage(result.value, sessionId, tabId, cursor);
+  }
+
+  /**
+   * Asks the Mac to send the newest part of its most recently active
+   * conversations (#1283), from `known` where the phone keeps them; or, with
+   * `enabled` false, to stop. Only to a Mac that names `prefetch`. False when
+   * it was not asked or did not start.
+   */
+  async prefetch(enabled: boolean, known: { sessionId: string; tabId: string; cursor: SyncCursor }[] = []): Promise<boolean> {
+    if ((await this.features()).prefetch !== 1) return false;
+    const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...(enabled ? { known } : {}) });
+    return result.ok && result.value?.enabled === true;
+  }
+
+  /** Each conversation a prefetch sends, as the page `session.sync` would have read from `after` (#1283). */
+  onPrefetched(listener: (prefetched: Prefetched) => void): () => void {
+    return this.connection.onEvent((event) => {
+      if (event.method !== "session.prefetch") return;
+      const params = event.params as { sessionId?: unknown; tabId?: unknown; after?: unknown; page?: unknown } | null;
+      if (typeof params?.sessionId !== "string" || typeof params.tabId !== "string" || (params.after != null && !isSyncCursor(params.after))) return;
+      const after = params.after == null ? undefined : params.after as SyncCursor;
+      try {
+        const page = checkSyncPage(params.page, params.sessionId, params.tabId, after);
+        if (!page.deleted) listener({ sessionId: params.sessionId, tabId: params.tabId, after, page });
+      } catch { /* Not a page the phone can keep: the conversation reads for itself when it opens. */ }
+    });
   }
 
   /** What the computer calls itself (PRO-87). Null from a desktop that predates the question, or when it has no name to give. */
@@ -250,9 +290,13 @@ export class HostApi {
   }
 
   async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
-    // Load the newest turn first and page backwards. Older Macs do not bound
-    // transcript bytes, so asking for many tool-heavy turns can close the socket.
-    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 1 });
+    // Load the newest turns first and page backwards. Older Macs do not bound
+    // transcript bytes, so asking for many tool-heavy turns can close the
+    // socket: one turn at a time from those. A Mac that reassembles fragments
+    // holds each page to what the connection carries (#669), so it is asked
+    // for several turns a page (#1283).
+    const limit = await this.reassemblesFragments().catch(() => false) ? EARLIER_TURNS : 1;
+    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit });
     if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
     if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {
@@ -540,6 +584,19 @@ export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): Age
 }
 
 export type SyncPage = { deleted: true } | { deleted?: false; events: AgentEvent[]; cursor: SyncCursor; reset: boolean; hasMore: boolean; hasEarlier: boolean };
+/** A conversation a prefetch sent (#1283): the page `session.sync` would have read from `after`. */
+export interface Prefetched { sessionId: string; tabId: string; after?: SyncCursor; page: Exclude<SyncPage, { deleted: true }> }
+/** The turns one "Load earlier" asks a Mac that bounds its pages for (#1283). */
+export const EARLIER_TURNS = 10;
+
+/** A `session.sync` page for this conversation, contiguous with `cursor`; throws on anything else. */
+export function checkSyncPage(value: unknown, sessionId: string, tabId: string, cursor?: SyncCursor): SyncPage {
+  const page = value as SyncPage;
+  if (page?.deleted === true) return page;
+  if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
+  if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
+  return page;
+}
 
 export function isSessionSummary(value: unknown): value is SessionSummary {
   if (!value || typeof value !== "object") return false;
