@@ -314,6 +314,19 @@ impl Phones {
         Ok(owner)
     }
 
+    /// Run `work` while no phone pairing code is live, holding the state so
+    /// none is made meanwhile: [`Self::create_code`] adds its device to
+    /// `devices.json` under this same lock. `None` while a code is live.
+    pub(super) fn without_pairing<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        let state = self.state.lock().unwrap();
+        if state.code.is_some() {
+            return None;
+        }
+        let result = work();
+        drop(state);
+        Some(result)
+    }
+
     /// Fence in-flight admission synchronously with a route or switch change.
     pub(crate) fn invalidate(&self) {
         let _state = self.state.lock().unwrap();
@@ -871,7 +884,7 @@ impl Phones {
         let (admitting_device, admitting_key) = (device.clone(), client_key);
         let (_tracked, signals) = tokio::task::spawn_blocking(move || admitting.admit(&admitting_device, &admitting_key, epoch)).await??;
         let result = async {
-            let (outbound, inbound) = mpsc::channel(8);
+            let (outbound, inbound) = mpsc::channel(phone::OUTBOUND_QUEUE);
             let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport(), None).await?;
             if device.provenance == DeviceProvenance::Automatic {
                 if let Some(revocations) = self.revocations.get().cloned() {
@@ -883,11 +896,13 @@ impl Phones {
             phone::send_with_grant(&self.host, &connection,
                 phone::send_authenticated(&mut socket, &mut session)).await?;
             log::info!("machine host: phone {} connected through {}", device.id, context.transport_name());
-            phone::serve_connection(&mut socket, &mut session, &self.host, &connection, inbound, signals, |request| {
+            let ended = phone::serve_connection(&mut socket, &mut session, &self.host, &connection, inbound, signals, |request| {
                 let (phones, device, connection, context, revoke_relay_on_close) = (self.clone(), &device, &connection, &context, &_tracked.revoke_relay_on_close);
                 async move { phones.respond(&request, device, connection, port, context, revoke_relay_on_close).await }
             })
-            .await
+            .await?;
+            log::info!("machine host: phone {} disconnected: {:?} close_code={:?}", device.id, ended.reason, ended.close_code);
+            Ok(())
         }
         .await;
         result

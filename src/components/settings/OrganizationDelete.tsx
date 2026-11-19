@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "@/icons";
+import { organizationDeletionError, organizationDeletionText as text, organizationNameConfirmed } from "@terminalx/portable/organizationDeletion";
+import { Check, Copy, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type OrganizationSummary } from "@/lib/api";
-import { organizationDeletionError } from "@/lib/organizationDeletion";
+import { copyText } from "@/lib/clipboard";
 
 export interface OrganizationDeleteConfirmation {
   organizationId: string;
@@ -22,6 +23,7 @@ export function OrganizationDelete({ organization, contextRevision, unavailableR
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const flight = useRef(false);
   const epoch = useRef(0);
   // Read on submit as well as render: an old confirmation never authorizes a new context.
@@ -32,6 +34,7 @@ export function OrganizationDelete({ organization, contextRevision, unavailableR
     setConfirmation(null);
     setTyped("");
     setError(null);
+    setCopied(false);
     setBusy(false);
     flight.current = false;
     return () => { epoch.current += 1; };
@@ -41,7 +44,7 @@ export function OrganizationDelete({ organization, contextRevision, unavailableR
 
   const submit = async () => {
     const latest = current.current;
-    if (flight.current || !confirmation || typed !== confirmation.confirmationName || !typed ||
+    if (flight.current || !confirmation || !organizationNameConfirmed(typed, confirmation.confirmationName) ||
         latest.unavailableReason || latest.organization.role !== "owner" ||
         latest.organization.id !== confirmation.organizationId || latest.organization.name !== confirmation.confirmationName ||
         latest.contextRevision !== confirmation.contextRevision) return;
@@ -65,32 +68,42 @@ export function OrganizationDelete({ organization, contextRevision, unavailableR
     }
   };
 
+  const confirmed = !!confirmation && organizationNameConfirmed(typed, confirmation.confirmationName);
+  const copyName = (name: string) => {
+    const attempt = epoch.current;
+    copyText(name).then(() => { if (epoch.current === attempt) setCopied(true); },
+      () => { if (epoch.current === attempt) setError("Could not copy the name. Select it and copy it, or type it."); });
+  };
+
   return (
-    <section className="rounded-lg border border-destructive/30 p-3" aria-label="Delete organization">
-      <h4 className="text-sm font-medium">Delete organization</h4>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Permanently delete {organization.name}. Members will lose access. This cannot be undone.
-        Shutting down cloud workspaces alone does not delete the organization.
-      </p>
+    <section className="rounded-lg border border-destructive/30 p-3" aria-label={text.title}>
+      <h4 className="text-sm font-medium">{text.title}</h4>
+      <p className="mt-1 text-xs text-muted-foreground">{text.warning(organization.name)}</p>
       {unavailableReason ? <p className="mt-2 text-xs text-muted-foreground">{unavailableReason}</p> : (
         confirmation ? (
           <form className="mt-3 flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            <label className="text-xs">
-              Type {confirmation.confirmationName} to confirm deletion
-              <input aria-label="Organization name to delete" autoComplete="off" spellCheck={false} disabled={busy}
-                value={typed} onChange={(event) => setTyped(event.target.value)}
-                className="mt-1 block h-8 w-full rounded-md border border-hairline bg-well px-2 text-sm" />
-            </label>
-            <div className="flex gap-2">
-              <Button type="submit" variant="destructive" size="sm" disabled={busy || !typed || typed !== confirmation.confirmationName}>
-                {busy && <Loader2 className="animate-spin" />} Delete {confirmation.confirmationName} permanently
+            <p className="text-xs">{text.prompt}</p>
+            <div className="flex items-center gap-2">
+              {/* The body is not selectable (app.css); the name is, so it can be copied by hand too. */}
+              <span data-testid="organization-delete-name" className="select-text min-w-0 cursor-text break-all rounded bg-well px-1.5 py-0.5 text-xs font-medium">{confirmation.confirmationName}</span>
+              <Button type="button" size="sm" variant="outline" aria-label={text.copy} title={text.copy} disabled={busy}
+                onClick={() => copyName(confirmation.confirmationName)}>
+                {copied ? <Check /> : <Copy />} {copied ? text.copied : text.copy}
               </Button>
-              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => { setConfirmation(null); setTyped(""); }}>Cancel</Button>
+            </div>
+            <input aria-label={text.inputLabel} autoComplete="off" spellCheck={false} disabled={busy}
+              value={typed} onChange={(event) => setTyped(event.target.value)}
+              className="block h-8 w-full rounded-md border border-hairline bg-well px-2 text-sm" />
+            <div className="flex gap-2">
+              <Button type="submit" variant="destructive" size="sm" disabled={busy || !confirmed}>
+                {busy && <Loader2 className="animate-spin" />} {text.confirm(confirmation.confirmationName)}
+              </Button>
+              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => { setConfirmation(null); setTyped(""); setCopied(false); }}>{text.cancel}</Button>
             </div>
           </form>
         ) : <Button className="mt-3" variant="destructive" size="sm" disabled={!contextRevision || !organization.name}
-          onClick={() => { setError(null); setTyped(""); setConfirmation({ organizationId: organization.id, contextRevision, confirmationName: organization.name }); }}>
-          Delete organization…
+          onClick={() => { setError(null); setTyped(""); setCopied(false); setConfirmation({ organizationId: organization.id, contextRevision, confirmationName: organization.name }); }}>
+          {text.start}
         </Button>
       )}
       {error && <>

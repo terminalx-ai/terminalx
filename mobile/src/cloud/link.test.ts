@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { CloudApiError } from "./api";
 import { NOW, pairingCode, relayHostId, Runtime } from "./fake-runtime";
-import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES, STABLE_AFTER_MS } from "./link";
+import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES, STABLE_AFTER_MS, type CloudLinkOptions } from "./link";
 
 // The real link against a runtime that speaks the real handshake and frames
 // (as `relay-client.test.ts` does for a paired Mac): nothing of the encrypted
@@ -11,7 +11,7 @@ import { CloudWorkspaceLink, MAX_ATTEMPTS, MAX_WAITS, PHONE_CAPABILITIES, STABLE
 const ticket = (runtimeGeneration = 3) => ({ v: 1 as const, token: "attach-jwt", expiresAt: NOW + 60_000, runtimeGeneration, protocol: "terminalx-workspace-rpc/1" as const });
 const ready = (fields: Record<string, unknown> = {}) => ({ id: "a1", workspaceId: "ws-1", state: "ready" as const, authority: "participate" as const, expiresAt: NOW + 600_000, pairingCode: pairingCode(), attachTicket: ticket(), ...fields });
 
-function harness(listed: string | null = "ready", clock: { now?: () => number; serverNow?: () => number } = { now: () => NOW }) {
+function harness(listed: string | null = "ready", clock: { now?: () => number; serverNow?: () => number } = { now: () => NOW }, log?: CloudLinkOptions["log"]) {
   const runtimes: Runtime[] = [];
   const open = vi.fn(async (..._args: unknown[]) => ready() as never);
   let state = listed;
@@ -22,6 +22,7 @@ function harness(listed: string | null = "ready", clock: { now?: () => number; s
     workspaceState: () => state,
     appVersion: "0.1.0",
     ...(clock.now ? { now: clock.now } : {}),
+    ...(log ? { log } : {}),
     random: { bytes: (length) => new Uint8Array(length).fill(9) },
     createSocket: (url) => {
       const runtime = new Runtime();
@@ -163,12 +164,15 @@ describe("the phone's connection to a cloud workspace", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await connected(offline);
 
-    const refused = harness();
+    const log = vi.fn();
+    const refused = harness("ready", { now: () => NOW }, log);
     refused.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
     refused.link.start();
     await settle();
     expect(refused.link.state.state).toBe("stopped");
     expect(refused.link.problem).toEqual({ kind: "api", code: "cloud_workspace_not_found", unreachable: false });
+    // The refusal goes to the connection log with its stage and code, so a report can include them (#1290).
+    expect(log).toHaveBeenCalledWith("error", "Cloud workspace connect refused", "workspace ws-1 · stage open · code cloud_workspace_not_found · HTTP 404");
     await vi.advanceTimersByTimeAsync(120_000);
     expect(refused.open).toHaveBeenCalledTimes(1);
     // A list that says the same as before causes no further request, however often it is read.

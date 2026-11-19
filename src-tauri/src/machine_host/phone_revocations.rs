@@ -1,4 +1,10 @@
 //! Account revocations for phones while the desktop route is detached.
+//!
+//! The window keeps a copy of its account session in the runtime's data
+//! directory while an approved phone or computer operation needs it
+//! (`account.rs`, "The runtime's copy"), and removes it once neither does.
+//! With the window closed that never runs, so when a revocation here retires
+//! the last phone, the runtime removes the copy itself: [`release_account_copy`].
 
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -8,7 +14,7 @@ use tokio::sync::Notify;
 
 use super::{phones::Phones, MachineHost};
 use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceProvenance};
-use crate::machine_account::{Api, Session};
+use crate::machine_account::{self, Api, Session};
 use crate::phone::registry::{load_account_mirror, DeviceRegistry};
 use crate::remote::{account_link::AccountLink, host::valid_opaque_id};
 
@@ -77,8 +83,11 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
             let host_id = key.host_id();
             drop(host);
             let polling = authority.clone();
-            let checked =
-                tokio::task::spawn_blocking(move || poll(&phones, &polling, &api, &link, &host_id)).await;
+            let owner = machine.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                poll(&owner, &phones, &polling, &api, &link, &host_id)
+            })
+            .await;
             let verified = match checked {
                 Ok(Ok(verified)) => verified,
                 Ok(Err(error)) => {
@@ -109,7 +118,22 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
     }
 }
 
-fn poll(phones: &Phones, authority: &Authority, api: &Api, link: &AccountLink, host_id: &str) -> Result<Option<Verified>> {
+fn retired_binding(account: &AccountMirror, devices: &[DeviceEntry]) -> Option<RetiredBinding> {
+    devices.iter().all(|device| device.revoked_at.is_some()).then(|| RetiredBinding {
+        user_id: account.user_id.clone(),
+        generation: account.binding_generation,
+        devices: devices.iter().map(|device| device.id.clone()).collect(),
+    })
+}
+
+fn poll(
+    machine: &Weak<MachineHost>,
+    phones: &Phones,
+    authority: &Authority,
+    api: &Api,
+    link: &AccountLink,
+    host_id: &str,
+) -> Result<Option<Verified>> {
     let registry = DeviceRegistry;
     let Some(account) = load_account_mirror()? else {
         return Ok(None);
@@ -120,20 +144,69 @@ fn poll(phones: &Phones, authority: &Authority, api: &Api, link: &AccountLink, h
     }
     // On startup or after a failed acknowledgement, check retired records
     // too. Once settled, wait for a hint or a change to the devices.
-    let retired = devices.iter().all(|device| device.revoked_at.is_some()).then(|| RetiredBinding {
-        user_id: account.user_id.clone(),
-        generation: account.binding_generation,
-        devices: devices.into_iter().map(|device| device.id).collect(),
-    });
+    let retired = retired_binding(&account, &devices);
     if retired.is_some() && *authority.settled.lock().unwrap() == retired {
         return Ok(None);
     }
+    let Some(host) = machine.upgrade() else {
+        return Ok(None);
+    };
+    // Every phone of the binding is retired and nobody is signed in here
+    // (the copy went with the last one): there is nothing left to check.
+    if retired.is_some() && machine_account::load(&host.data_dir)?.is_none() {
+        return Ok(None);
+    }
     let session = link.fresh_session()?;
+    let mirror = account.clone();
     let (verified, all_acknowledged) = apply(phones, api, &session, host_id, account)?;
     if all_acknowledged {
+        // This round may have retired the last phone: settle on what is
+        // left now, so a removed copy is not asked for again.
+        let retired = retired_binding(&mirror, &registry.automatic_binding_devices(&mirror)?);
+        if retired.is_some() && release_account_copy(&host, phones, &mirror.user_id, &session)? {
+            log::info!("machine host: removed the runtime's account session after the last phone was revoked");
+        }
         *authority.settled.lock().unwrap() = retired;
     }
     Ok(Some(verified))
+}
+
+/// Remove the runtime's copy of the account session once the last phone is
+/// revoked while the window is detached, unless something here still needs
+/// it: another approved phone, computer operation, a live phone pairing
+/// code, or a window that took over. Only `user_id`'s session that was used
+/// for this round, or a later rotation of it, goes; one that another account
+/// or a new sign-in saved stays. Whether it removed it. Blocking.
+///
+/// It holds the session file's lock, so the window's own update of the copy
+/// (`account.rs`, `sync_runtime_copy`) runs entirely before or after, and the
+/// phones' state, so no pairing code is made meanwhile.
+fn release_account_copy(host: &MachineHost, phones: &Phones, user_id: &str, used: &Session) -> Result<bool> {
+    machine_account::locked(&host.data_dir, || {
+        phones
+            .without_pairing(|| {
+                let detached = !crate::data_privacy::enabled()
+                    && !host.window_available()
+                    && host.phone_route().is_none();
+                if !detached
+                    || crate::store::settings::load().machines.allow_operating
+                    || crate::phone::registry::has_paired_phone()?
+                {
+                    return Ok(false);
+                }
+                match machine_account::load(&host.data_dir)? {
+                    Some(saved)
+                        if saved.cloud.user_id == user_id
+                            && (saved.refresh_token == used.refresh_token
+                                || machine_account::rotated(&used.refresh_token, used.expires_at, &saved)) =>
+                    {
+                        machine_account::remove(&host.data_dir)
+                    }
+                    _ => Ok(false),
+                }
+            })
+            .unwrap_or(Ok(false))
+    })
 }
 
 fn apply(

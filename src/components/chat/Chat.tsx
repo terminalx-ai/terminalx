@@ -117,6 +117,7 @@ export function Chat({
   onReset,
   onRetryInNewChat,
   onRetry,
+  unavailable,
   agent,
   onGoalCommand,
   onEditGoal,
@@ -172,6 +173,11 @@ export function Chat({
    * standing leaves the tab idle, and sending wakes the agent as the composer would.
    */
   onRetry?: (seq: number) => void;
+  /**
+   * Why each turn action this session cannot take here is off (#1289): it is
+   * shown disabled, with the reason, where it would have been offered.
+   */
+  unavailable?: ChatActionsUnavailable;
   /** The agent's name, for what a message it took mid-turn says. */
   agent?: { id: string; name: string };
   /** Sends Codex's `/goal pause` or `/goal resume` from the goal card. */
@@ -473,7 +479,7 @@ export function Chat({
       {find.bar}
       {transcript.goal && <GoalBanner goal={transcript.goal} onCommand={onGoalCommand} onEdit={onEditGoal} />}
       <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-thin [overflow-anchor:none]">
+      <div ref={scroller} data-chat-scroller className="min-h-0 flex-1 overflow-y-auto overscroll-none scrollbar-visible [scrollbar-gutter:stable] [overflow-anchor:none]">
         <div ref={content} className="mx-auto w-full max-w-3xl px-6 pb-4 pt-5">
           <DisclosureMemory value={disclosures}>
           <SearchDisclosures value={find.disclosures}>
@@ -517,6 +523,10 @@ export function Chat({
                 // A failed last turn can go again: its prompt, sent as a new message.
                 onRetry={isLast && !t.live && !sending ? onRetry : undefined}
                 onRetryInNewChat={isLast && !sending ? onRetryInNewChat : undefined}
+                forkUnavailable={unavailable?.fork}
+                resetUnavailable={!isLast && !live && !sending ? unavailable?.reset : undefined}
+                secondOpinionUnavailable={unavailable?.secondOpinion}
+                retryInNewChatUnavailable={isLast && !sending ? unavailable?.retryInNewChat : undefined}
                 agent={agent}
               />
             );
@@ -549,13 +559,15 @@ export function Chat({
         </div>
       </div>
       {promptMap && (
-        <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: footerHeight }}>
+        // Beside the scrollbar, never over it: the rail's marks take clicks and wheels the bar must get (#1287).
+        <div className="pointer-events-none absolute top-0 left-0 right-(--scrollbar-size)" style={{ bottom: footerHeight }}>
           <PromptMap turns={turns} scroller={scroller} onJump={jumpTo} locate={readingTurn} />
         </div>
       )}
       </div>
-      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes. */}
-      <div ref={footerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-10 [&>*]:pointer-events-auto">
+      {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes.
+          It stops short of the scrollbar's gutter, so its fade never paints over the thumb at the end (#1287). */}
+      <div ref={footerRef} className="pointer-events-none absolute bottom-0 left-0 right-(--scrollbar-size) z-10 [&>*]:pointer-events-auto">
         <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div
@@ -586,6 +598,14 @@ export function Chat({
 }
 
 /** What a reset to the end of a turn does, in the reader's terms: its number, the later turns' numbers, the files they changed. */
+/** Why each turn action a session cannot take here is off; absent ones are offered or simply not shown. */
+export interface ChatActionsUnavailable {
+  fork?: string;
+  reset?: string;
+  secondOpinion?: string;
+  retryInNewChat?: string;
+}
+
 export interface ResetTarget {
   turn: number;
   removed: number[];

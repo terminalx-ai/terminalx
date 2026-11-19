@@ -1,16 +1,11 @@
 import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
-import { useCallback, useEffect, useState, useRef } from "react";
-import { Bot, ChevronDown, Folder, Loader2, Plus, X } from "@/icons";
-import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { Chat } from "@/components/chat/Chat";
+import { useEffect, useMemo, useState } from "react";
+import { Bot, ChevronDown, ChevronRight, Folder, Loader2, Plus } from "@/icons";
+import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { LinkedText } from "@/components/chat/LinkedText";
-import { Composer } from "@/components/chat/Composer";
-import { goalCommand } from "@/lib/goalCommand";
-import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { runningLimitReached } from "@/lib/runningLimit";
 import { useAccount } from "@/lib/account";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
@@ -18,58 +13,29 @@ import { AgentLoginsLink } from "./AgentLoginsLink";
 import { managesOrganization } from "@/lib/multiOrg";
 import { openAgentLogins } from "@/lib/settingsLinks";
 import type { AgentLoginProvider } from "@/lib/api";
-import { lastSeq, useTabLog } from "@/lib/agentEvents";
-import { hasArrived, useComposerSend } from "@/lib/composerSends";
-import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
-import { useConversationView } from "@/lib/conversationView";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
 import { machineAgentSignInReason, useRuntimeModels } from "@/lib/cloudModels";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
 import {
-  attachCloudAgentTab,
-  closeCloudAgentTab,
-  configureCloudAgentTab,
-  discardPendingConfig,
   createCloudAgentTab,
   getCloudAgents,
-  decideCloudAgent,
   DEV_SCOPE_NOTICE,
   errorText,
-  isDevScope,
-  takesLiveCommands,
   flushCloudAgentCache,
   loadCloudAgents,
-  markCloudAgentRead,
-  outboxFor,
-  refreshFromCheckpoint,
-  sendAgain,
-  sendToCloudAgent,
-  setViewing,
   startOutboxPolling,
-  steerCloudAgent,
-  stopCloudAgent,
   syncLiveTabs,
   useCloudAgents,
   watchLiveTabs,
   type CloudAgentTab,
-  type CloudAgentsSnapshot,
 } from "@/lib/cloudAgents";
-import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type WakeResult } from "@/lib/cloudAgentApi";
-import type { ImageInput } from "@/lib/api";
-import type { TabEntry } from "@/types/session";
+import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry } from "@/lib/cloudAgentApi";
 import { cn } from "@/lib/cn";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
-import { usePeople } from "@/lib/cloudPeople";
+import { effectiveYou, inputRefusalText, notShared, sharingKnown, useCollab } from "@/lib/cloudCollab";
 import { useMachinePlace } from "./workspacePlace";
-import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
-import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
-
-/** A session to bring to the front of the agent view: its tab, or (null) the session's first tab. */
-export interface AgentFocus {
-  sessionId: string;
-  tabId: string | null;
-}
+import { CloudImageError } from "@/lib/cloudComposer";
+import { NotSharedNotice } from "./CloudCollab";
 
 /**
  * The projects a new agent tab may be created in: a paired machine's
@@ -78,7 +44,7 @@ export interface AgentFocus {
  */
 export interface AgentProjects {
   projects: { projectId: string; name: string }[];
-  /** The project the form starts on when opened with + Agent: the focused session's. */
+  /** The project the form starts on when opened with + Agent. */
   preferred: string | null;
   /** Open the form on this project (the sidebar's +); spent once the form has opened. */
   request: { projectId: string; nonce: number } | null;
@@ -89,44 +55,74 @@ export interface AgentProjects {
   machine?: { name: string; openPage: () => void } | null;
 }
 
+/** One agent session of a workspace, as its tabs make it up. */
+export interface AgentSessionRow {
+  sessionId: string;
+  title: string;
+  tabs: CloudAgentTab[];
+  /** The tab that says how the session is doing: one needing a decision, else one working, else the newest. */
+  lead: CloudAgentTab;
+  unread: boolean;
+  modified: string;
+}
+
+/** Group a workspace's agent tabs into its sessions, the most recently changed first. Tabs without a session yet are left out. */
+export function agentSessionRows(tabs: CloudAgentTab[]): AgentSessionRow[] {
+  const bySession = new Map<string, CloudAgentTab[]>();
+  for (const tab of tabs) {
+    const sessionId = tab.info.sessionId;
+    if (!sessionId) continue;
+    bySession.set(sessionId, [...(bySession.get(sessionId) ?? []), tab]);
+  }
+  const rows = [...bySession.entries()].map(([sessionId, members]): AgentSessionRow => {
+    const newest = [...members].sort((a, b) => (b.info.modified ?? "").localeCompare(a.info.modified ?? ""))[0]!;
+    const lead =
+      members.find((tab) => tab.info.status === "waiting" && tab.info.process !== "exited") ??
+      members.find((tab) => tab.info.status === "in_progress" && tab.info.process !== "exited") ??
+      newest;
+    const titled = members.find((tab) => tab.info.title?.trim());
+    return {
+      sessionId,
+      title: titled?.info.title?.trim() || cloudAgentLabel(members[0]!.info.harness),
+      tabs: members,
+      lead,
+      unread: members.some((tab) => tab.unread),
+      modified: newest.info.modified ?? "",
+    };
+  });
+  return rows.sort((a, b) => b.modified.localeCompare(a.modified));
+}
+
 /**
- * The agent tabs of a cloud workspace (PRO-22). Tabs and transcripts show
- * from the local cache and checkpoints even while the workspace sleeps;
- * the live stream attaches only while the runtime is online; commands go
- * through the mailbox and are the only thing that may wake compute.
+ * The agent sessions of a cloud workspace or paired machine (PRO-22, #1289).
+ * Each opens in the same session view as a local session, with every one of
+ * its options; this list only finds them and starts new ones. Sessions show
+ * from the local cache and checkpoints even while the workspace sleeps, and
+ * the runtime's list is followed only while it is online: nothing here wakes
+ * compute.
  */
-export function CloudAgentsView({
+export function CloudAgentSessions({
   scope,
   client,
   state,
   workspaceState,
-  wakeWorkspace,
-  waking = false,
   collabKey,
-  active: shown = true,
-  focus = null,
   projects = null,
+  onOpenSession,
 }: {
   scope: CloudAgentScope;
   client: WorkspaceRpcClient;
   state: WorkspaceConnectionState;
   /** The API's workspace state (ready, suspended, provisioning, …), when known. */
   workspaceState: string | null;
-  /** Raise the connection to `wake` after an interactive command. */
-  wakeWorkspace?: () => void;
-  /** This window asked for the workspace to be woken (it was opened with a resume, or a command went out). */
-  waking?: boolean;
   /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
   collabKey?: string;
-  /** The agent view is the one on screen (presence reports its tab). */
-  active?: boolean;
-  /** Bring this session's tab to the front once it is listed; a later change of focus does it again. */
-  focus?: AgentFocus | null;
   /** A machine's projects: the new-agent form picks one. */
   projects?: AgentProjects | null;
+  /** Open a session (and, when known, one of its tabs) in the shared session view. */
+  onOpenSession: (sessionId: string, tabId: string | null) => void;
 }) {
   const snapshot = useCloudAgents(scope);
-  const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const connected = state.state === "connected";
@@ -135,7 +131,7 @@ export function CloudAgentsView({
   const key = collabKey ?? `cloud:${scope.organizationId}:${scope.workspaceId}`;
   const collab = useCollab(key);
   const you = effectiveYou(state, collab);
-  // New tabs are a manager's; a demoted admin's manage attachment is not.
+  // New sessions are a manager's; a demoted admin's manage attachment is not.
   const manage = connected && state.authority === "manage" && (!collab.available || !sharingKnown(you) || you.role === "manager");
   const hidden = notShared(state, you);
 
@@ -168,24 +164,7 @@ export function CloudAgentsView({
     projects.onRequestTaken();
   }, [requestNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const tabs = snapshot.tabs;
-  // Applied once per focus, when its tab is listed: choosing another tab afterwards is not undone by later updates.
-  const focused = useRef<string | null>(null);
-  const focusKey = focus ? `${focus.sessionId}/${focus.tabId ?? ""}` : null;
-  useEffect(() => {
-    if (!focus || focused.current === focusKey) return;
-    const tab = (focus.tabId ? tabs.find((item) => item.tabId === focus.tabId) : undefined) ?? tabs.find((item) => item.info.sessionId === focus.sessionId);
-    if (!tab) return;
-    focused.current = focusKey;
-    setSelected(tab.tabId);
-  }, [focusKey, tabs]);
-  const active = tabs.find((tab) => tab.tabId === selected) ?? tabs[0] ?? null;
-
-  // Others see which agent tab this person is on.
-  const activeTabId = active?.tabId ?? null;
-  useEffect(() => {
-    if (shown && collab.available) presenceTab(key, activeTabId);
-  }, [shown, collab.available, key, activeTabId]);
+  const rows = useMemo(() => agentSessionRows(snapshot.tabs), [snapshot.tabs]);
 
   if (hidden) {
     return (
@@ -195,45 +174,18 @@ export function CloudAgentsView({
     );
   }
 
-  const close = async (tab: CloudAgentTab) => {
-    setError(null);
-    try {
-      await closeCloudAgentTab(scope, tab.tabId, client);
-      if (selected === tab.tabId) setSelected(null);
-    } catch (e) {
-      setError(errorText(e));
-    }
-  };
-
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} />
-      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
-        {tabs.map((tab, index) => (
-          <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
-            <Button
-              size="sm"
-              role="tab"
-              aria-selected={tab.tabId === active?.tabId}
-              variant={tab.tabId === active?.tabId ? "secondary" : "ghost"}
-              onClick={() => setSelected(tab.tabId)}
-            >
-              <Bot className="size-3.5" /> {tabTitle(tab, index)}
-              {tab.info.status === "in_progress" && tab.info.process !== "exited" && !tab.info.signIn && <Loader2 className="size-3 animate-spin" aria-label="working" />}
-              {tab.unread && <span className="size-1.5 rounded-full bg-accent" data-testid="cloud-agent-unread" aria-label="unread" />}
-            </Button>
-            {manage && (
-              <Button size="icon" variant="ghost" className="size-6" aria-label={`Close ${tabTitle(tab, index)}`} onClick={() => void close(tab)}>
-                <X className="size-3" />
-              </Button>
-            )}
-          </div>
-        ))}
+      <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1">
+        <span className="text-xs text-muted-foreground">
+          {machine ? `Agent sessions on ${machine.name}` : "Agent sessions in this workspace"}
+        </span>
         {manage && (
           <Button
             size="sm"
             variant="ghost"
-            aria-label="New agent tab"
+            className="ml-auto"
+            aria-label="New agent session"
             onClick={() => {
               if (!creating) setFormProject(projects?.preferred ?? null);
               setCreating((open) => !open);
@@ -255,10 +207,12 @@ export function CloudAgentsView({
             setError(null);
             try {
               const tabId = await createCloudAgentTab(scope, client, params);
-              setSelected(tabId);
               setCreating(false);
               const sessionId = getCloudAgents(scope).tabs.find((tab) => tab.tabId === tabId)?.info.sessionId;
-              if (params.projectId && sessionId) projects?.onCreated(sessionId, params.projectId);
+              if (!sessionId) return;
+              // A machine's session is selected by its project's row; a workspace's opens by its own key.
+              if (params.projectId && projects) projects.onCreated(sessionId, params.projectId);
+              else onOpenSession(sessionId, tabId);
             } catch (e) {
               setError(errorText(e));
             }
@@ -266,133 +220,46 @@ export function CloudAgentsView({
         />
       )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
-      {active && <SignInNotice info={active.info} organizationId={scope.organizationId} />}
-      {active ? (
-        <CloudAgentPane
-          key={active.tabId}
-          active={shown}
-          scope={scope}
-          tab={active}
-          client={client}
-          connected={connected}
-          snapshot={snapshot}
-          wakeWorkspace={wakeWorkspace}
-          sleeping={!connected && (workspaceState === "suspended" || state.state === "suspended")}
-          collabKey={key}
-          you={knownYou(state, collab)}
-        />
+      {rows.length ? (
+        <ul className="flex min-h-0 flex-1 flex-col overflow-y-auto py-1" aria-label="Agent sessions">
+          {rows.map((row) => (
+            <li key={row.sessionId}>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-veil-raised focus-visible:bg-veil-raised focus-visible:outline-none"
+                onClick={() => onOpenSession(row.sessionId, row.lead.tabId)}
+                data-testid="cloud-agent-session"
+                data-session={row.sessionId}
+                title="Open in the session view"
+              >
+                <Bot className="size-3.5 shrink-0 text-faint" />
+                <span className="min-w-0 flex-1 truncate">{row.title}</span>
+                {row.tabs.length > 1 && <span className="shrink-0 text-xs text-faint">{row.tabs.length} tabs</span>}
+                <span className={cn("shrink-0 text-xs", row.lead.info.signIn || row.lead.info.status === "waiting" ? "text-warning" : "text-muted-foreground")}>{turnLabel(row.lead)}</span>
+                {row.lead.info.status === "in_progress" && row.lead.info.process !== "exited" && !row.lead.info.signIn && <Loader2 className="size-3 shrink-0 animate-spin" aria-label="working" />}
+                {row.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" data-testid="cloud-agent-unread" aria-label="unread" />}
+                <ChevronRight className="size-3.5 shrink-0 text-faint" />
+              </button>
+            </li>
+          ))}
+        </ul>
       ) : (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
           {!snapshot.loaded ? (
             <Loader2 className="size-4 animate-spin" />
           ) : manage ? (
-            machine ? `No agent tabs on ${machine.name} yet. Start one with + Agent.` : "No agent tabs in this workspace yet. Start one with + Agent."
+            machine ? `No agent sessions on ${machine.name} yet. Start one with + Agent.` : "No agent sessions in this workspace yet. Start one with + Agent."
           ) : connected ? (
-            machine ? `No agent tabs on ${machine.name}.` : "No agent tabs in this workspace."
+            machine ? `No agent sessions on ${machine.name}.` : "No agent sessions in this workspace."
           ) : machine ? (
-            `Agent tabs appear here once ${machine.name} is connected or has saved conversations.`
+            `Agent sessions appear here once ${machine.name} is connected or has saved conversations.`
           ) : (
-            "Agent tabs appear here once the workspace is connected or has saved conversations."
+            "Agent sessions appear here once the workspace is connected or has saved conversations."
           )}
         </div>
       )}
     </div>
   );
-}
-
-function tabTitle(tab: CloudAgentTab, index: number): string {
-  if (tab.info.title) return tab.info.title;
-  if (tab.placeholder) return `Saved chat ${index + 1}`;
-  const name = tab.info.harness === "codex" ? "Codex" : tab.info.harness === "claude" ? "Claude" : tab.info.harness;
-  return `${name} ${index + 1}`;
-}
-
-/** Connection, agent turn and provisioning, each on its own. */
-function StatusBar({
-  state,
-  tab,
-  snapshot,
-  workspaceState,
-  orgId,
-  waking,
-}: {
-  state: WorkspaceConnectionState;
-  tab: CloudAgentTab | null;
-  snapshot: CloudAgentsSnapshot;
-  workspaceState: string | null;
-  orgId: string;
-  waking: boolean;
-}) {
-  // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
-  const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
-  const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
-  // On a paired machine the chip follows the machine's own state: Offline, not the transport's Reconnecting.
-  const machine = useMachinePlace();
-  const connection = machine && state.state !== "connected" ? machine.label : connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false);
-  return (
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connection} testId="cloud-agent-connection" />
-      <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      {/* A paired machine is not provisioned, woken or put to sleep from here: it has no such state to show. */}
-      {!machine && (
-        <Chip
-          label="Workspace"
-          value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
-          testId="cloud-agent-provisioning"
-        />
-      )}
-    </div>
-  );
-}
-
-/** The connection is still trying to attach (each try reads "opening", then "waitingForRuntime" again). */
-function attaching(state: WorkspaceConnectionState): boolean {
-  return state.state === "opening" || state.state === "waitingForRuntime";
-}
-
-/**
- * The workspace is stopped and nothing is waking it. The connection keeps
- * trying in the background, which used to flip both chips every few seconds
- * ("Asleep"/"Starting", "Checking"/"Waiting for runtime"); a stopped
- * workspace reads one way until someone resumes it. An archived workspace
- * opened to read is stopped the same way.
- */
-export function stoppedAndStaying(state: WorkspaceConnectionState, workspaceState: string | null, waking: boolean): boolean {
-  if (waking || state.state === "connected") return false;
-  const stopped = workspaceState === "suspended" || workspaceState === "archived";
-  return state.state === "suspended" || (stopped && (attaching(state) || state.state === "idle"));
-}
-
-function Chip({ label, value, testId }: { label: string; value: string; testId: string }) {
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5" data-testid={testId}>
-      <span className="text-faint">{label}:</span> <span className="text-foreground">{value}</span>
-    </span>
-  );
-}
-
-export function connectionLabel(state: WorkspaceConnectionState, stopped: false | "asleep" | "archived" = false): string {
-  if (stopped) return stopped === "archived" ? "Offline (workspace archived)" : "Offline (workspace asleep)";
-  switch (state.state) {
-    case "connected":
-      return "Live";
-    case "connecting":
-      return "Connecting";
-    case "reconnecting":
-      return "Reconnecting";
-    // One wait, however many times the connection asks again.
-    case "opening":
-    case "waitingForRuntime":
-      return "Waiting for runtime";
-    case "suspended":
-      return "Offline (workspace asleep)";
-    case "updateRequired":
-      return "Update required";
-    case "stopped":
-      return "Disconnected";
-    default:
-      return "Not connected";
-  }
 }
 
 /**
@@ -510,37 +377,6 @@ export function turnLabel(tab: CloudAgentTab): string {
   }
 }
 
-/**
- * `runningLimitReached`: the server does not say why a wake was unavailable,
- * but when the organization's last list shows its running limit reached,
- * that is the likely reason, and stopping a workspace is the way out.
- */
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false, waking = false): string {
-  if (wake === "queued") return "Waking";
-  if (wake === "in-progress" && state.state !== "connected") return "Starting";
-  if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
-  if (wake === "unavailable") return "Cannot wake (commands stay queued)";
-  // A running workspace this window is still attaching to is Ready, not starting,
-  // and a stopped one nobody is waking stays Asleep.
-  const stopped = workspaceState === "suspended" || workspaceState === "archived";
-  if (attaching(state) && workspaceState !== "ready" && (!stopped || waking)) return "Starting";
-  if (state.state === "connected") return "Ready";
-  switch (workspaceState) {
-    case "suspended":
-      return "Asleep";
-    case "archived":
-      return "Archived (unarchive it to resume)";
-    case "provisioning":
-      return "Provisioning";
-    case "ready":
-      return "Ready";
-    case null:
-    case undefined:
-      return "Unknown";
-    default:
-      return workspaceState;
-  }
-}
 
 /** Another agent in this workspace, with the same launch settings New Session offers for the cloud. */
 function NewAgentForm({
@@ -651,283 +487,6 @@ export function commandError(e: unknown): string {
   return `Could not queue the command (${code}).`;
 }
 
-function CloudAgentPane({
-  active,
-  scope,
-  tab,
-  client,
-  connected,
-  snapshot,
-  sleeping,
-  wakeWorkspace,
-  collabKey,
-  you,
-}: {
-  active: boolean;
-  scope: CloudAgentScope;
-  tab: CloudAgentTab;
-  client: WorkspaceRpcClient;
-  connected: boolean;
-  snapshot: CloudAgentsSnapshot;
-  sleeping: boolean;
-  wakeWorkspace?: () => void;
-  collabKey: string;
-  /** Set only while connected to a runtime with `collab/1`: sharing rules apply. */
-  you: WorkspaceYou | null;
-}) {
-  const { info } = tab;
-  const collab = useCollab(collabKey);
-  const nameOf = usePeople();
-  const [notesOpen, setNotesOpen] = useState(false);
-  const lease = tab.tabId in collab.leases ? (collab.leases[tab.tabId] ?? null) : (info.lease ?? null);
-  const now = useNowUntil(lease?.expiresAt);
-  const turnRunning = (info.status === "in_progress" || info.status === "waiting") && info.process === "running";
-  const { blocked, mayStop, approveBlocked, mayConfigure } = tabGate(you, lease, now, turnRunning, nameOf);
-  // Presence, the lease bar and notes need the live runtime; `you` alone may
-  // be the last known access of a sleeping workspace.
-  const collabLive = connected && collab.available && !!you;
-  const noteCount = collab.notes[tab.tabId]?.notes.length ?? 0;
-  const log = useTabLog(info.sessionId, tab.tabId);
-  // The tab's draft, the session view's too; kept with the tab's cache across a relaunch.
-  const draft = useDraft(tab.tabId);
-  const setDraft = (text: string) => setTabDraft(tab.tabId, text);
-  const [error, setError] = useState<string | null>(null);
-  const [loadingCheckpoint, setLoadingCheckpoint] = useState(false);
-  const exited = info.process === "exited";
-  const live = (info.status === "in_progress" || info.status === "waiting") && !exited;
-  // Built on as the log grows, not again for every event (#727).
-  const conversation = useConversationView(log, undefined);
-  const transcript = conversation.transcript(live);
-  // The composer's message on its way, drawn in the chat as sending (#727). Its scope is the tab's id.
-  const pendingMessage = useComposerSend(tab.tabId).pending?.message ?? null;
-  const sending = pendingMessage && !hasArrived(conversation.events(), pendingMessage) ? pendingMessage : null;
-  const entries = outboxFor(snapshot, tab.tabId);
-  const turnOpen = transcript.turns.length > 0 && !transcript.turns[transcript.turns.length - 1]!.completed;
-  const endedMidTurn = exited && (info.status === "in_progress" || info.status === "waiting" || turnOpen);
-  const deciding = entries.some((entry) => entry.kind === "permission-decision" && !TERMINAL_OUTBOX_STATES.has(entry.state));
-  const sessionKnown = !!info.sessionId;
-
-  // Cache first (already loaded), then the checkpoint when it is newer.
-  // Once the tab streams live the checkpoint is skipped.
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingCheckpoint(true);
-    void refreshFromCheckpoint(scope, tab.tabId)
-      .catch(() => undefined)
-      .finally(() => !cancelled && setLoadingCheckpoint(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [scope.organizationId, scope.workspaceId, tab.tabId]);
-
-  // Live only while the runtime is already online: reading never wakes it.
-  useEffect(() => {
-    if (!connected || !sessionKnown) return;
-    let stop: (() => void) | null = null;
-    let cancelled = false;
-    void attachCloudAgentTab(scope, tab.tabId, client)
-      .then((unsubscribe) => (cancelled ? unsubscribe() : (stop = unsubscribe)))
-      .catch((e: unknown) => !cancelled && setError(errorText(e)));
-    return () => {
-      cancelled = true;
-      stop?.();
-    };
-  }, [connected, sessionKnown, client, scope.organizationId, scope.workspaceId, tab.tabId]);
-
-  useEffect(() => {
-    setViewing(scope, tab.tabId, true);
-    return () => setViewing(scope, tab.tabId, false);
-  }, [scope.organizationId, scope.workspaceId, tab.tabId]);
-
-  // Looking at a finished tab reads it.
-  useEffect(() => {
-    if (tab.unread || info.status === "completed") void markCloudAgentRead(scope, tab.tabId, connected ? client : null);
-  }, [tab.unread, info.status, connected, client, scope.organizationId, scope.workspaceId, tab.tabId]);
-
-  const interactive = useCallback(
-    async (run: () => Promise<unknown>) => {
-      setError(null);
-      try {
-        await run();
-        // The API already woke the workspace for this command; follow it so
-        // the live stream attaches as soon as the runtime is back.
-        if (sleeping) wakeWorkspace?.();
-      } catch (e) {
-        setError(commandError(e));
-        throw e;
-      }
-    },
-    [sleeping, wakeWorkspace],
-  );
-
-  const send = async (text: string, images: ImageInput[]) => {
-    // Images are uploaded straight to the runtime: a stopped workspace is started for them and the message stays here.
-    const imagesBlocked = images.length ? cloudImagesBlocked(connected ? client : null, sleeping) : null;
-    if (imagesBlocked) {
-      setError(imagesBlocked);
-      if (imagesBlocked === CLOUD_IMAGES_NEED_RUNNING && sleeping) wakeWorkspace?.();
-      throw new CloudImageError(imagesBlocked);
-    }
-    // Settings chosen while this person could approve are not sent once they cannot.
-    if (!mayConfigure) discardPendingConfig(scope, tab.tabId);
-    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null, images));
-  };
-
-  const steer = async () => {
-    const text = draft.trim();
-    // A /goal is checked as it is sent (PRO-380): never steered past that check.
-    if (!text || goalCommand(text) !== null) return;
-    await interactive(() => steerCloudAgent(scope, tab.tabId, text, connected ? client : null)).then(() => setDraft(""), () => undefined);
-  };
-
-  const stop = () => {
-    if (!mayStop) {
-      setError("Only the person driving this tab or an admin can stop the agent.");
-      return;
-    }
-    void interactive(() => stopCloudAgent(scope, tab.tabId, connected ? client : null)).catch(() => undefined);
-  };
-
-  const decide = (decision: { requestId: string; optionId: string } | { requestId: string; answers: Record<string, string> }) => {
-    if (approveBlocked) return;
-    void interactive(() => decideCloudAgent(scope, tab.tabId, decision, connected ? client : null)).catch(() => undefined);
-  };
-
-  const changeDraft = (text: string) => {
-    setDraft(text);
-    if (collabLive && text) presenceTyping(collabKey);
-  };
-
-  const configure = (patch: { model?: string; effort?: string | null; mode?: string }) => {
-    if (!mayConfigure) return;
-    setError(null);
-    void configureCloudAgentTab(scope, tab.tabId, patch, connected ? client : null).catch((e: unknown) => setError(errorText(e)));
-  };
-
-  const entry: TabEntry = {
-    id: tab.tabId,
-    harness: info.harness,
-    title: info.title,
-    model: info.model,
-    effort: info.effort,
-    requestedModel: info.requestedModel,
-    requestedEffort: info.requestedEffort,
-    permissionMode: info.permissionMode,
-    requestedPermissionMode: info.requestedPermissionMode,
-    status: info.status,
-    created: info.created,
-    modified: info.modified,
-  };
-
-  if (!sessionKnown) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground" data-testid="cloud-agent-pane">
-        {loadingCheckpoint ? "Loading the saved conversation…" : "This tab's saved conversation is not available on this device yet."}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex min-h-0 flex-1" data-testid="cloud-agent-pane">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {collabLive && (
-          <LeaseBar
-            collabKey={collabKey}
-            client={client}
-            tabId={tab.tabId}
-            lease={lease}
-            turnRunning={turnRunning}
-            you={you}
-            notesOpen={notesOpen}
-            onToggleNotes={() => setNotesOpen((open) => !open)}
-            noteCount={noteCount}
-            unreadNotes={collab.unreadNotes[tab.tabId] ?? 0}
-          />
-        )}
-        {isDevScope(scope) && connected && !takesLiveCommands(scope, client) && (
-          <p className="border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground" data-testid="cloud-agent-dev-notice">
-            {DEV_SCOPE_NOTICE}
-          </p>
-        )}
-        {endedMidTurn && (
-          <p className="border-b border-hairline bg-warning/10 px-3 py-1.5 text-xs" data-testid="cloud-agent-exited">
-            Agent process ended — the saved conversation resumes on your next message.
-          </p>
-        )}
-        <CloudOutbox
-          entries={entries}
-          followUps={info.followUps}
-          nameOf={nameOf}
-          onSendAgain={(e) => void interactive(() => sendAgain(scope, e, connected ? client : null)).catch(() => undefined)}
-        />
-        <div className="flex min-h-0 flex-1 flex-col">
-          <Chat
-            active={active}
-            sessionId={info.sessionId}
-            tabId={tab.tabId}
-            transcript={transcript}
-            stream={log.stream}
-            live={live}
-            progressing={live && !transcript.pendingAsks.length}
-            answering={deciding}
-            answerBlockedReason={approveBlocked}
-            askDetail={!!you}
-            onAnswerPermission={(requestId, optionId) => decide({ requestId, optionId })}
-            onAnswerQuestions={(requestId, answers) => decide({ requestId, answers })}
-            sending={sending}
-            footer={
-              <div className="flex flex-col">
-                {live && draft.trim() && goalCommand(draft) === null && (!isDevScope(scope) || takesLiveCommands(scope, connected ? client : null)) && !blocked && (
-                  <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
-                    <span>Send now queues it for when the agent pauses.</span>
-                    <Button size="xs" variant="outline" onClick={() => void steer()}>
-                      Steer now
-                    </Button>
-                  </div>
-                )}
-                <Composer
-                  tab={entry}
-                  commands={
-                    info.sessionId && !blocked
-                      ? cloudComposerCommands({ workspaceKey: collabKey, sessionId: info.sessionId, tabId: tab.tabId, harness: entry.harness, client: connected ? client : null, you })
-                      : null
-                  }
-                  files={info.sessionId && !blocked ? cloudComposerFiles({ workspaceKey: collabKey, sessionId: info.sessionId, client: connected ? client : null }) : null}
-                  remote
-                  busy={live}
-                  draft={draft}
-                  onDraftChange={changeDraft}
-                  onSend={send}
-                  sentAfter={() => lastSeq(info.sessionId, tab.tabId)}
-                  history={sentMessages(transcript, { entries, followUps: info.followUps })}
-                  onStop={stop}
-                  onSetModel={(model) => configure({ model })}
-                  onSetEffort={(effort) => configure({ effort })}
-                  onSetMode={(mode) => configure({ mode })}
-                  reportedModel={transcript.model}
-                  turns={transcript.turns}
-                  compacting={transcript.compacting}
-                  contextUsed={transcript.contextUsed}
-                  contextMax={transcript.contextMax}
-                  modelsAreLocal={false}
-                  modelClient={sleeping || !connected ? null : client}
-                  disabled={!!blocked}
-                  settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
-                  settingsNote={tab.settingsIgnored ? SETTINGS_IGNORED_REASON : tab.pendingConfig && mayConfigure ? SETTINGS_WITH_NEXT_MESSAGE : null}
-                  settingsNoteWarning={!!tab.settingsIgnored}
-                  canStop={mayStop}
-                  disabledReason={blocked ?? error}
-                />
-                {blocked && error && <p className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-destructive">{error}</p>}
-              </div>
-            }
-          />
-        </div>
-      </div>
-      {collabLive && notesOpen && <NotesPanel collabKey={collabKey} client={client} tabId={tab.tabId} onClose={() => setNotesOpen(false)} />}
-    </div>
-  );
-}
 
 const STATE_TEXT: Record<string, string> = {
   unsent: "Not sent yet — will retry",

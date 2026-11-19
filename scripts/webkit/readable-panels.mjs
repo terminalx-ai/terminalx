@@ -3,7 +3,8 @@
 // glass mode (the Mac look) whatever the platform. A tooltip over the chat,
 // the composer and a menu over the sidebar rows are opaque: with their own
 // content hidden, nothing behind them shows through, and their muted text
-// reads at 4.5:1. With macOS Reduce transparency on, as the native side
+// reads at 4.5:1. So does an agent's question card, inline and floating over
+// the transcript above the composer (#1293). With macOS Reduce transparency on, as the native side
 // reports it, glass and blur are off, and come back when it is turned off.
 // pnpm build && node scripts/webkit/readable-panels.mjs
 // Set READABLE_PANELS_SHOTS to a directory to also save screenshots.
@@ -23,6 +24,17 @@ const transcript = `window.__PW_STUB__.answers.load_tab_events = ({ tabId }) => 
   { type: "assistant_text", text: ${JSON.stringify(prose)} },
   { type: "turn_completed" },
 ]).flat().map((payload, i) => ({ id: "p-" + i, seq: i + 1, sessionId: "local-s1", tabId, harness: "claude", ts: "2026-11-12T00:00:00Z", payload }));`;
+
+// #1293: an agent's question still open at the end of that transcript, which the chat draws inline after the reply.
+const question = `${transcript}
+const loadProse = window.__PW_STUB__.answers.load_tab_events;
+window.__PW_STUB__.answers.load_tab_events = (args) => {
+  const events = loadProse(args);
+  const last = events[events.length - 1];
+  return [...events.slice(0, -1), { ...last, id: "p-ask", payload: { type: "questions_asked", requestId: "q-1", toolUseId: "", questions: [
+    { question: "Which branch should the release notes cover?", header: "Branch", multiSelect: false, freeText: false, options: [{ label: "main", description: "Everything merged since the last release" }, { label: "release/0.2.36", description: "Only the release branch's fixes" }] },
+  ] } }];
+};`;
 
 // macOS Reduce transparency as the app hears it. WebKit has no
 // prefers-reduced-transparency, so the native side (src-tauri/src/transparency.rs)
@@ -98,6 +110,45 @@ try {
     checks["no browser errors"] = errors.length === 0;
     failed += report(`glass, ${at}`, checks, { tooltip, box, menuThrough, errors });
     await page.close();
+
+    // #1293: a question card has an opaque ground. Inline it lies on the chat's own colour, and a card drawn over the
+    // transcript (above the composer, or as the transcript scrolls) has the reply's words right behind it: lift the
+    // card onto those words and nothing of them may show through it.
+    const asked = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, { width: 1100, height: 760 }, { extra: question, colorScheme });
+    asked.setDefaultTimeout(30_000);
+    const askErrors = [];
+    asked.on("pageerror", (error) => askErrors.push(error.message));
+    await asked.evaluate(() => document.documentElement.setAttribute("data-glass", ""));
+    await openConversation(asked, "Local long session");
+    const card = asked.locator("[data-ask-card]:visible").first();
+    await card.waitFor();
+    await asked.evaluate(() => document.fonts.ready);
+    const inline = await card.evaluate((node) => !!node.closest("[data-chat-scroller]"));
+    await shot(asked, "question-inline");
+    const inlineGround = await throughPanel(asked, card);
+    const lifted = await card.evaluate((node) => {
+      const prose = [...node.closest("[data-chat-scroller]").querySelectorAll("p")].filter((p) => p.textContent.startsWith("Readable over panels") && !node.contains(p));
+      const target = prose[prose.length - 1].getBoundingClientRect();
+      const box = node.getBoundingClientRect();
+      node.style.translate = `0 ${target.top - box.top}px`;
+      node.style.position = "relative";
+      node.style.zIndex = "5";
+      const moved = node.getBoundingClientRect();
+      node.style.visibility = "hidden";
+      const under = document.elementFromPoint(moved.left + moved.width / 2, moved.top + 12);
+      node.style.visibility = "";
+      return { overText: !!under?.closest("p")?.textContent.startsWith("Readable over panels") };
+    });
+    await shot(asked, "question-over-text");
+    const overGround = await throughPanel(asked, card);
+    failed += report(`question card, glass, ${at}`, {
+      "the question card is drawn inline in the transcript": inline,
+      "inline, nothing shows through the card and its muted text reads at 4.5:1": inlineGround.showsThrough === 0 && inlineGround.backdrop === "none" && inlineGround.contrast >= 4.5,
+      "lifted over the reply, the card lies on its text": lifted.overText,
+      "over the reply's text, nothing behind the card shows through, and its muted text reads at 4.5:1": overGround.showsThrough === 0 && overGround.backdrop === "none" && overGround.contrast >= 4.5,
+      "no browser errors": askErrors.length === 0,
+    }, { inlineGround, lifted, overGround, askErrors });
+    await asked.close();
 
     // Reduce transparency: glass is off from the first paint, nothing blurs,
     // and both follow the setting while the app runs.

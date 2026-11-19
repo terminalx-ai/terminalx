@@ -8,6 +8,7 @@ import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
+import { resumeFailure, resumeRetryable, type ResumeFailure } from "@mobile/cloud/resume";
 import type { CloudRole } from "@mobile/cloud/api";
 import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
@@ -155,33 +156,45 @@ function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { 
   const insets = useSafeAreaInsets();
   const nameOf = useNames(catalog);
   const [asking, setAsking] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  // One request at a time, also between a tap and the render that disables the button.
+  const inFlight = useRef(false);
+  const [failure, setFailure] = useState<ResumeFailure | null>(null);
+  // No answer came, but the list shows it starting: said as under way, not as a failure (#1290).
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const listedState = catalog.workspace(orgId, workspaceId)?.state ?? null;
   const changing = starting || asking || listedState === "resuming" || listedState === "provisioning";
   const mayStart = role === "manager";
   const needsAttention = listedState === "attention-required";
   const operation = catalog.getSnapshot().organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.latestOperation;
-  const retryResume = needsAttention && operation?.state === "failed" && operation.action === "resume" && ["cloud_workspace_runtime_bootstrap_failed", "cloud_provider_unavailable", "cloud_provider_rate_limited", "cloud_provider_state_conflict", "cloud_provider_permission_denied"].includes(operation.errorCode ?? "");
-  const start = () => Alert.alert(retryResume ? "Retry resume?" : "Start this workspace?", "It is billed to the organization while it runs.", [
+  // As the desktop offers it: any failed resume can be retried; the detail says what failed and what else may be needed.
+  const retryResume = needsAttention && resumeRetryable(operation);
+  const start = () => Alert.alert(retryResume ? "Retry resume?" : failure ? "Try starting again?" : "Start this workspace?", "It is billed to the organization while it runs.", [
     { text: "Cancel", style: "cancel" },
-    { text: retryResume ? "Retry resume" : "Start", onPress: () => {
+    { text: retryResume ? "Retry resume" : failure ? "Try again" : "Start", onPress: () => {
+      if (inFlight.current) return;
+      inFlight.current = true;
       setAsking(true);
       setFailure(null);
-      void catalog.start(orgId, workspaceId).catch((error: unknown) => {
-        const code = (error as { code?: unknown })?.code;
-        setFailure(codeText(typeof code === "string" ? code : null) ?? "That did not work.");
-      }).finally(() => setAsking(false));
+      setUnconfirmed(false);
+      void catalog.start(orgId, workspaceId).then((outcome) => setUnconfirmed(outcome === "in-progress"), (error: unknown) => setFailure(resumeFailure(error))).finally(() => {
+        inFlight.current = false;
+        setAsking(false);
+      });
     } },
   ]);
+  const detail = changing ? (unconfirmed ? "The service has not confirmed yet, but the workspace is starting. The composer appears when it is running." : "The composer appears when it is running.")
+    : needsAttention ? (retryResume ? (mayStart ? `${attentionDetail(operation?.errorCode)} Retry resume, or open it on the desktop to see more.` : `${attentionDetail(operation?.errorCode)} ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : "This workspace needs attention. Open it on the desktop to see how to recover.")
+    : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null);
+  const label = changing ? "Starting…" : retryResume ? "Retry resume" : failure?.retry ? "Try again" : "Start";
   // In the composer's place, as a card like it (22.06).
   return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
-      <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : "This workspace is stopped"}</Text>
-      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : needsAttention ? (retryResume ? (mayStart ? attentionDetail(operation?.errorCode) : `${attentionDetail(operation?.errorCode)} ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : `${attentionDetail(operation?.errorCode)} Open this workspace on the desktop to see how to recover.`) : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
+      <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : failure ? "The workspace did not start" : "This workspace is stopped"}</Text>
+      <Text style={[styles.startDetail, { color: palette.muted }]}>{detail}</Text>
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
-      {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
+      {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure.text}</Text> : null}
     </View>
-    {mayStart && (!needsAttention || retryResume) ? <Button label={changing ? "Starting…" : retryResume ? "Retry resume" : "Start"} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
+    {mayStart && (!needsAttention || retryResume) && (!failure || failure.retry || changing) ? <Button label={label} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
   </View>;
 }
 

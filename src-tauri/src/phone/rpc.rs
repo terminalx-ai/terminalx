@@ -231,6 +231,7 @@ struct MobileClient {
     sender: mpsc::Sender<Value>,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
     filter: ConnectionFilter,
+    invalidations: Arc<super::Invalidations>,
 }
 
 pub(crate) struct MobileRuntime {
@@ -308,8 +309,8 @@ impl MobileRuntime {
         Ok(())
     }
 
-    fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>, filter: ConnectionFilter) {
-        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed, filter });
+    fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>, filter: ConnectionFilter, invalidations: Arc<super::Invalidations>) {
+        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed, filter, invalidations });
     }
 
     fn unregister_client(&self, id: &str) {
@@ -343,12 +344,21 @@ impl MobileRuntime {
         });
     }
 
+    /// Every connection is told once, however many come before it reads it (#1282).
+    fn invalidate(&self, which: super::Invalidation) {
+        self.clients.lock().unwrap().retain(|_, client| {
+            if client.sender.is_closed() { return false; }
+            client.invalidations.raise(which);
+            true
+        });
+    }
+
     pub(crate) fn broadcast_sessions_changed(&self) {
-        self.broadcast(json!({ "method": "sessions.changed" }));
+        self.invalidate(super::Invalidation::Sessions);
     }
 
     pub(crate) fn broadcast_settings_changed(&self) {
-        self.broadcast(json!({ "method": "settings.changed" }));
+        self.invalidate(super::Invalidation::Settings);
     }
 
     /// The desktop attached to a runtime: what each phone may be offered
@@ -357,7 +367,7 @@ impl MobileRuntime {
     /// and closes, so its phone connects again and asks afresh; one admitted
     /// by this attachment passes it on, and its phone asks again.
     pub(crate) fn broadcast_capabilities_changed(&self) {
-        self.broadcast(json!({ "method": "sync.capabilitiesChanged" }));
+        self.invalidate(super::Invalidation::Capabilities);
     }
 
     pub(crate) fn capture_agent_event(&self, manager: &PhoneHost, payload: &str) {
@@ -574,6 +584,7 @@ pub(crate) struct MobileConnection {
     terminal_subscriptions: Mutex<HashMap<String,String>>,
     polling: std::sync::atomic::AtomicBool,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
+    invalidations: Arc<super::Invalidations>,
     closed: std::sync::atomic::AtomicBool,
     /// The transcript checkpoints this connection's `session.sync` replies ended at (#1283).
     sync_cache: SyncCache,
@@ -602,9 +613,10 @@ impl MobileConnection {
         owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id,"forwardedId":forwarded_id}))?;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notification_filter = ConnectionFilter::default();
-        runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone());
+        let invalidations = Arc::new(super::Invalidations::default());
+        runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone(), invalidations.clone());
         Ok(Self {
-            id, device: device.clone(), owner, actor, overflowed, notification_filter,
+            id, device: device.clone(), owner, actor, overflowed, notification_filter, invalidations,
             runtime,
             outbound,
             wire: Wire::new(transport),
@@ -623,9 +635,16 @@ impl MobileConnection {
         &self.wire
     }
 
+    pub(crate) fn invalidations(&self) -> &super::Invalidations {
+        &self.invalidations
+    }
+
     pub(crate) fn check_buffer(&self) -> Result<()> {
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
-            bail!("The mobile stream disconnected or fell behind. Reconnect to load retained history.");
+        if self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::Fault::FellBehind.into());
+        }
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::Fault::Closed.into());
         }
         #[cfg(unix)]
         if let Some(authority) = &self.authority {
@@ -664,7 +683,7 @@ impl MobileConnection {
     fn check_current(&self, manager: &PhoneHost) -> Result<()> {
         self.check_buffer()?;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.generation() {
-            bail!("The paired-device connection or account changed.");
+            return Err(super::Fault::Changed.into());
         }
         Ok(())
     }
@@ -701,8 +720,13 @@ impl MobileConnection {
     }
 
     fn stream(&self, request_id: &str, result: Value) {
-        if !self.closed.load(std::sync::atomic::Ordering::SeqCst)
-            && self.outbound.try_send(success_response(request_id, result)).is_err() { self.finish(); }
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) { return; }
+        if let Err(error) = self.outbound.try_send(success_response(request_id, result)) {
+            if matches!(error, mpsc::error::TrySendError::Full(_)) {
+                self.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.finish();
+        }
     }
 
     /// A live event, cut down when this connection cannot carry it whole: a
@@ -2542,14 +2566,15 @@ mod tests {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
         let runtime = Arc::new(MobileRuntime::new());
         runtime.configure(sink.clone()).unwrap();
-        let (tx, mut rx) = mpsc::channel(8);
-        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)), ConnectionFilter::default());
+        let (tx, _rx) = mpsc::channel(8);
+        let invalidations = Arc::new(crate::phone::Invalidations::default());
+        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)), ConnectionFilter::default(), invalidations.clone());
         let before = summaries_with_row_statuses(Value::Null).unwrap();
         assert!(before["sessions"][0]["manualStatus"].is_null());
         let patch = crate::session_ops::SessionPatch { manual_status: Some(index::ManualStatus::InReview), ..Default::default() };
         let updated = crate::session_ops::update_session_meta("manual", &patch).unwrap();
         sink.emit("session_updated", &updated);
-        assert_eq!(rx.try_recv().unwrap(), json!({"method":"sessions.changed"}));
+        assert_eq!(invalidations.take(), [json!({"method":"sessions.changed"})]);
         let after = summaries_with_row_statuses(Value::Null).unwrap();
         assert_eq!(after["sessions"][0]["manualStatus"], "in_review");
         // Conditional summary reads must also see the metadata change.
@@ -4049,10 +4074,10 @@ mod tests {
         let runtime = MobileRuntime::new();
         let (old_tx, mut old_rx) = mpsc::channel(16);
         let (new_tx, mut new_rx) = mpsc::channel(16);
-        runtime.register_client("old", old_tx, Default::default(), ConnectionFilter::default());
+        runtime.register_client("old", old_tx, Default::default(), ConnectionFilter::default(), Default::default());
         let chosen = ConnectionFilter::default();
         *chosen.lock().unwrap() = Some(("subscription".into(), filter(json!({ "kinds": ["question"] }))));
-        runtime.register_client("new", new_tx, Default::default(), chosen);
+        runtime.register_client("new", new_tx, Default::default(), chosen, Default::default());
         let ask = runtime.agent_notification(&event(1, asked("q", vec![question("Which?", &["A"], false)])), titled).unwrap();
         let end = runtime.agent_notification(&event(2, ended(TurnStatus::Ok, None, false)), titled).unwrap();
         runtime.publish(None, ask);
@@ -4078,7 +4103,7 @@ mod tests {
         let runtime = MobileRuntime::new();
         let slot = ConnectionFilter::default();
         let (tx, mut client) = mpsc::channel(16);
-        runtime.register_client("phone", tx, Default::default(), slot.clone());
+        runtime.register_client("phone", tx, Default::default(), slot.clone(), Default::default());
         let streamed = Arc::new(Mutex::new(Vec::new()));
         let heard = streamed.clone();
         let listener = listen_notifications(&sink, &slot, "first", Some(filter(json!({ "kinds": ["question"] }))), move |result| {
@@ -4115,7 +4140,7 @@ mod tests {
         let runtime = Arc::new(MobileRuntime::new());
         runtime.configure(sink.clone()).unwrap();
         let (tx, mut client) = mpsc::channel(16);
-        runtime.register_client("phone", tx, Default::default(), ConnectionFilter::default());
+        runtime.register_client("phone", tx, Default::default(), ConnectionFilter::default(), Default::default());
         let now = Utc::now().to_rfc3339();
         let pipeline = |state: &str, events: Value| json!({
             "id": "p1", "created": now, "modified": now, "projectPath": "/workspace", "branch": "raccoon/7", "author": { "sessionId": "session", "tabId": "tab" },

@@ -5,6 +5,7 @@ import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
 import { recordStartedSessionOn } from "../notifications/store";
+import { HostRefusal } from "./host-refusal";
 
 
 /** A computer's answer to `host.describe`. */
@@ -52,7 +53,8 @@ export interface SessionSummary {
 export interface NotePromotion { tabId: string; seq: number }
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string }; promotedTo?: NotePromotion[] }
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
-export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
+/** `code`: the Mac's refusal code, when it refused (for the connection log). */
+export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string; code?: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
 /**
  * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
@@ -81,9 +83,9 @@ export interface TabControls {
 }
 /** The agent and settings a new tab starts with. */
 export interface NewTabSettings { harness: string; model: string; effort?: string | null; permissionMode?: string | null }
-export type ControlResult = { done: true } | { done: false; message: string };
+export type ControlResult = { done: true } | { done: false; message: string; code?: string };
 /** "Continue in new session": the tab exists once `started`, whether or not the handoff was confirmed. */
-export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
+export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string; code?: string };
 
 /** A project on the Mac, named by an id that is not its path. */
 export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean; repositorySettings?: { filesToCopy: string[] } }
@@ -342,9 +344,14 @@ export class HostApi {
       ...(attachments.length ? { attachments } : {}),
       ...await this.messageId(messageId),
     });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (!result.ok) return { sent: false, message: result.refusal.message, code: result.refusal.code };
     if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
     return { sent: false, message: "The host did not send this message to the agent." };
+  }
+
+  /** Waits for the connection while the phone reconnects (`RESUME_REQUEST_WAIT_MS` unless said); true once it is up (#1290). */
+  awaitConnected(milliseconds?: number): Promise<boolean> {
+    return this.connection.awaitConnected(milliseconds);
   }
 
   private async messageId(messageId: string | undefined): Promise<{ clientMessageId?: string }> {
@@ -406,19 +413,19 @@ export class HostApi {
   /** "Resend last prompt": the prompt the agent never received, as it was sent. */
   async resendUnsent(sessionId: string, tabId: string): Promise<SendResult> {
     const result = await this.connection.request<{ queued?: unknown }>("session.resendUnsent", { sessionId, tabId });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (!result.ok) return { sent: false, message: result.refusal.message, code: result.refusal.code };
     return typeof result.value?.queued === "boolean" ? { sent: true, queued: result.value.queued } : { sent: false, message: "The host did not send the prompt again." };
   }
 
   async prepareContinuation(sessionId: string, tabId: string): Promise<ContinuationContext> {
     const result = await this.connection.request<ContinuationContext>("session.prepareContinuation", { sessionId, tabId });
-    if (!result.ok) throw new Error(result.refusal.message);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
     return result.value;
   }
 
   async continueInNewTab(sessionId: string, tabId: string, tab: NewTabSettings, prompt: string): Promise<ContinueResult> {
     const result = await this.connection.request<{ tab?: { id?: unknown }; delivered?: unknown; inInput?: unknown; error?: unknown }>("session.continue", { sessionId, tabId, tab, prompt });
-    if (!result.ok) return { started: false, message: result.refusal.message };
+    if (!result.ok) return { started: false, message: result.refusal.message, code: result.refusal.code };
     const id = result.value?.tab?.id;
     if (typeof id !== "string") return { started: false, message: "The host did not open the new conversation." };
     return { started: true, tabId: id, delivered: result.value.delivered === true, inInput: result.value.inInput === true, ...(typeof result.value.error === "string" ? { message: result.value.error } : {}) };
@@ -426,7 +433,7 @@ export class HostApi {
 
   private async control(method: string, params: Record<string, unknown>): Promise<ControlResult> {
     const result = await this.connection.request<unknown>(method, params);
-    return result.ok ? { done: true } : { done: false, message: result.refusal.message };
+    return result.ok ? { done: true } : { done: false, message: result.refusal.message, code: result.refusal.code };
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {
@@ -527,7 +534,7 @@ export class HostApi {
   async configuration(projectId?: string): Promise<import("../../../src/types/configuration").Configuration | null> {
     if ((await this.features()).layeredConfiguration !== 1) return null;
     const result = await this.connection.request<import("../../../src/types/configuration").Configuration>("configuration.resolve", { projectId: projectId ?? null });
-    if (!result.ok) throw new Error(result.refusal.message);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
     return result.value;
   }
 

@@ -141,17 +141,26 @@ function setStreamBlock(log: TabLog, old: StreamBlock | undefined, next: StreamB
   log.stream = old ? log.stream.map((s) => (s === old ? next : s)) : [...log.stream, next];
 }
 
+/**
+ * A committed event retires the preview of its block. One that arrived late
+ * (`late`) retires only its own: what streams now is after it.
+ */
+function retirePreviews(log: TabLog, p: AgentEvent["payload"], late = false) {
+  if ((p.type === "assistant_text" || p.type === "reasoning") && p.block) {
+    log.stream = log.stream.filter((s) => !sameBlock(s.ref, p.block!));
+  }
+  if (p.type === "tool_call_started") {
+    log.stream = log.stream.filter((s) => !(s.kind === "tool_use" && (s.toolId === p.callId || s.done)));
+  }
+  if (!late && (p.type === "turn_completed" || (p.type === "user_message" && !p.queued))) {
+    log.stream = [];
+  }
+}
+
 export function applyEvent(ev: AgentEvent) {
   const k = key(ev.sessionId, ev.tabId);
   const log = getLog(k);
   const p = ev.payload;
-  // The send reply and the broadcast both carry the reader's own prompt.
-  if (p.type !== "delta") {
-    const first = ev.promptRequestId ? 0 : Math.max(0, log.events.length - 8);
-    for (let i = log.events.length - 1; i >= first; i--) {
-      if (log.events[i].id === ev.id) return;
-    }
-  }
   if (p.type === "delta") {
     if (ev.subagent) return; // one preview per tab; subagent output is drawn from committed events
     const b = log.stream.find((s) => sameBlock(s.ref, p.block));
@@ -191,21 +200,34 @@ export function applyEvent(ev: AgentEvent) {
     touch(k);
     return;
   }
+  // The send reply and the broadcast both carry the reader's own prompt, and
+  // either may come second, after any number of the agent's events (#1284).
+  // An event at or before the newest one shown is a copy, or late: it is
+  // placed by seq, as a history read places it, never appended out of order.
+  // A late copy of a queued message appended after the agent took it was
+  // drawn as a second Queued card that nothing would clear, and the turn the
+  // agent answered it in lost its prompt to that copy.
+  if (log.events.length && ev.seq <= log.events[log.events.length - 1].seq) {
+    if (log.events.some((known) => known.id === ev.id)) return;
+    // As `mergeTabEvents`: a saved event replaces a transient one at its seq.
+    if (transient(ev) && log.events.some((known) => known.seq === ev.seq && !transient(known))) return;
+    const events = log.events.filter((known) => transient(ev) || !(transient(known) && known.seq === ev.seq));
+    let at = events.length;
+    while (at > 0 && events[at - 1].seq > ev.seq) at--;
+    events.splice(at, 0, ev);
+    log.events = events;
+    retirePreviews(log, p, true);
+    if (log.firstMessage && recordsFirstMessage(log.firstMessage, ev)) log.firstMessage = undefined;
+    if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");
+    touch(k, true);
+    return;
+  }
   if (p.type === "usage_update" || p.type === "model_request_started") {
     log.events.push(ev);
     touch(k);
     return;
   }
-  // A committed event retires the preview of its block.
-  if ((p.type === "assistant_text" || p.type === "reasoning") && p.block) {
-    log.stream = log.stream.filter((s) => !sameBlock(s.ref, p.block!));
-  }
-  if (p.type === "tool_call_started") {
-    log.stream = log.stream.filter((s) => !(s.kind === "tool_use" && (s.toolId === p.callId || s.done)));
-  }
-  if (p.type === "turn_completed" || (p.type === "user_message" && !p.queued)) {
-    log.stream = [];
-  }
+  retirePreviews(log, p);
   log.events.push(ev);
   if (log.firstMessage && recordsFirstMessage(log.firstMessage, ev)) log.firstMessage = undefined;
   if (p.type === "recovery" && p.kind) setTabStatus(ev.sessionId, ev.tabId, "waiting");

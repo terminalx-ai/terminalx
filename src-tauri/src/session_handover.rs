@@ -637,6 +637,8 @@ impl SessionManager {
                 collaboration_required: echo.collaboration_required, text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
+            // Not carried over: what lapsed before the handover is not waited on.
+            lapsed: Default::default(),
             held: cli.held,
             prompts: RecordedPrompts(cli.prompts.into_iter().map(|prompt| RecordedPrompt {
                 lineage: tui::Lineage { uuid: prompt.uuid, parent: prompt.parent }, seq: prompt.seq, text: prompt.text, worked_on: prompt.worked_on,

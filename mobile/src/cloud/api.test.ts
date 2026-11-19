@@ -183,6 +183,43 @@ describe("the phone's cloud API client", () => {
     expect(Math.abs(client.serverNow() - serverTime)).toBeLessThan(1_500);
   });
 
+  it("deletes an organization with its own name on the account route, and only a matching answer is success (#1292)", async () => {
+    const { client, calls } = api(() => ({ body: { organizationId: "org-1", deleted: true } }));
+    await client.deleteOrganization("org-1", "Test organization");
+    expect(calls).toEqual([expect.objectContaining({ method: "POST", url: "https://login.terminalx.ai/v1/desktop/orgs/org-1/delete", body: { confirmationName: "Test organization" } })]);
+    expect(calls[0].headers).toMatchObject({ authorization: "Bearer access-token" });
+    for (const body of [{}, { organizationId: "org-2", deleted: true }, { organizationId: "org-1", deleted: false }, { organizationId: "org-1" }]) {
+      await expect(api(() => ({ body })).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: expect.stringMatching(/^organization_delete_outcome_unknown$|^cloud_workspace_invalid_response$/) });
+    }
+  });
+
+  it("keeps a deletion refusal's code and only the known blockers", async () => {
+    const blocked = api(() => ({ status: 409, body: { error: "organization_delete_blocked", cleanupPath: "https://evil.invalid", blockers: [{ code: "github_disconnect_required" }, { code: "server detail" }] } }));
+    await expect(blocked.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_blocked", status: 409, blockers: ["github_disconnect_required"] });
+    const wrong = api(() => ({ status: 422, body: { error: "organization_confirmation_invalid" } }));
+    await expect(wrong.client.deleteOrganization("org-1", "x")).rejects.toMatchObject({ code: "organization_confirmation_invalid", blockers: [] });
+  });
+
+  it("reads any other deletion failure as an unknown outcome, as the desktop does", async () => {
+    for (const answer of [{ status: 409, body: { error: "organization_delete_unavailable" } }, { status: 409, body: { error: "account_context_changed" } }, { status: 500, body: { error: "internal" } }, { status: 401, body: { error: "unauthorized" } }]) {
+      await expect(api(() => answer).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: answer.status });
+    }
+    await expect(api(() => Promise.reject(new Error("offline"))).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: null });
+    const signedOut = api(() => ({ body: {} }), null);
+    await expect(signedOut.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "account_signed_out" });
+    expect(signedOut.calls).toEqual([]);
+  });
+
+  it("offers deletion from the phone only when the server says its route takes a phone's token", async () => {
+    const older = api(() => ({ body: { organizations: [], capabilities: { flags: {} } } }));
+    expect(older.client.deletesOrganizations()).toBe(false);
+    await older.client.organizations();
+    expect(older.client.deletesOrganizations()).toBe(false);
+    const newer = api(() => ({ body: { organizations: [], capabilities: { flags: { "organizations.delete.mobile.v1": true } } } }));
+    await newer.client.organizations();
+    expect(newer.client.deletesOrganizations()).toBe(true);
+  });
+
   it("reports an answer in an unknown shape as one code, whatever the call", async () => {
     const { client } = api(() => ({ status: 202, body: { id: "a1", state: "brand-new-state" } }));
     await expect(client.open("org-1", "ws-1", "i")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", unreachable: false });
@@ -223,5 +260,37 @@ describe("the phone's cloud API client", () => {
     expect(await flaky.client.doNotWake()).toBe(false);
     up = true;
     expect(await flaky.client.doNotWake()).toBe(true);
+  });
+});
+
+describe("why a resume got no usable answer (#1290)", () => {
+  it("tells a timeout from a network failure, and an error body that is not the service's JSON from a code", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // No answer in 30 s: aborted, and said as a timeout (the server may still have acted on it).
+      const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted")))));
+      const slow = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: fetcher as never });
+      const timedOut = slow.resume("org-1", "ws-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await timedOut).toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "timeout", unreachable: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    const offline = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => { throw new TypeError("Network request failed"); }) as never });
+    await expect(offline.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "network" });
+
+    const html = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => ({ ok: false, status: 502, text: async () => "<html>Bad gateway</html>" })) as never });
+    await expect(html.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: 502, reason: "unreadable" });
+    const coded = api(() => ({ status: 409, body: { error: "cloud_provider_state_conflict" } }));
+    const refusal = await coded.client.resume("org-1", "ws-1").catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(CloudApiError);
+    expect(refusal).toMatchObject({ code: "cloud_provider_state_conflict", status: 409, reason: null });
+  });
+
+  it("says an answer it cannot parse as such, not as an error with no code", async () => {
+    const { client } = api(() => ({ status: 202, body: { workspace: { id: "ws-1" }, operation: null } }));
+    const error = await client.resume("org-1", "ws-1").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CloudApiError);
+    expect(error).toMatchObject({ code: "cloud_workspace_invalid_response" });
   });
 });

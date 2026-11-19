@@ -720,6 +720,17 @@ impl PairingManager {
         attempt: u32,
         failure: Option<diagnostics::Failure>,
     ) {
+        self.record_phone_end(event, attempt, failure, None)
+    }
+
+    /// `record_relay_diagnostic`, with how a phone's session ended (#1282).
+    fn record_phone_end(
+        &self,
+        event: diagnostics::Event,
+        attempt: u32,
+        failure: Option<diagnostics::Failure>,
+        ended: Option<crate::phone::Ended>,
+    ) {
         // Only typed allowlisted data reaches either sink. A disk error must not
         // stop connection recovery or reveal the user's filesystem path.
         if let Some(failure) = failure {
@@ -732,7 +743,7 @@ impl PairingManager {
             .diagnostics
             .lock()
             .unwrap()
-            .record(event, attempt, failure)
+            .record_end(event, attempt, failure, ended)
             .is_err()
         {
             log::warn!("relay diagnostics write failed (category=local-storage)");
@@ -1114,7 +1125,7 @@ impl PairingManager {
         generation: u64,
         keypair: HostKeypair,
         connection: ConnectionOpen,
-    ) -> Result<()> {
+    ) -> Result<crate::phone::Ended> {
         if keypair.host_id() != relay_host_id {
             return Err(anyhow!("relay connection named a different host key")
                 .context(diagnostics::Stage::PhoneAttach));
@@ -1151,7 +1162,7 @@ impl PairingManager {
         connection: PairingConnectionContext,
         expected_device_id: Option<String>,
         logged_in: Option<&AtomicBool>,
-    ) -> Result<()>
+    ) -> Result<crate::phone::Ended>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1192,7 +1203,8 @@ impl PairingManager {
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
             crate::phone::send_authenticated(&mut socket, &mut session).await?;
             mark_logged_in();
-            return self.share_socket(socket, session, session_id, link_id).await;
+            self.share_socket(socket, session, session_id, link_id).await?;
+            return Ok(crate::phone::Ended::by(crate::phone::EndReason::ShareEnded));
         }
         let device = self
             .registry
@@ -1245,7 +1257,7 @@ impl PairingManager {
         }
         // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
         let (_tracked, signal_rx) = self.track_connection(&device.id, transport);
-        let (outbound_tx, outbound_rx) = mpsc::channel(8);
+        let (outbound_tx, outbound_rx) = mpsc::channel(crate::phone::OUTBOUND_QUEUE);
         let forwarded_id = match &connection {
             PairingConnectionContext::Direct { forwarded_id, .. } => forwarded_id.clone(),
             PairingConnectionContext::Relay { .. } => None,

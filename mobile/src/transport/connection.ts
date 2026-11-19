@@ -303,19 +303,30 @@ export class HostConnection {
     if (show && quiet.pending) this.present(...quiet.pending);
   }
 
+  /**
+   * Waits up to `milliseconds` (as long as a request made right after a
+   * return from the background does, unless said) for a usable connection while one is being
+   * made; true once there is one. Nothing waits while no Mac is chosen, or
+   * while the Mac holds this phone disconnected: no connection is coming.
+   */
+  async awaitConnected(milliseconds: number = RESUME_REQUEST_WAIT_MS): Promise<boolean> {
+    if (this.client) return true;
+    if (!this.active || this.heldByMac || milliseconds <= 0) return false;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.connectedWaiters.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      this.connectedWaiters.add(done);
+    });
+    return this.client !== null;
+  }
+
   async request<T>(method: string, params?: unknown): Promise<RpcCallResult<T>> {
     // Just back from the background and reconnecting: wait for it rather than fail what the person just did.
-    if (!this.client && this.active && Date.now() < this.resumeDeadline) {
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          this.connectedWaiters.delete(done);
-          resolve();
-        };
-        const timer = setTimeout(done, Math.max(0, this.resumeDeadline - Date.now()));
-        this.connectedWaiters.add(done);
-      });
-    }
+    if (!this.client && Date.now() < this.resumeDeadline) await this.awaitConnected(this.resumeDeadline - Date.now());
     if (!this.client) throw new Error("Host is disconnected");
     return this.client.request<T>(method, params).then((result) => {
       if (!result.ok && !this.refusedMethods.has(method)) {
@@ -328,6 +339,11 @@ export class HostConnection {
 
   reportError(message: string, detail: unknown): void {
     this.log("error", message, safeError(detail));
+  }
+
+  /** An entry from elsewhere in the app (a failed resume, #1290), into the same log; its detail is redacted like any other. */
+  note(level: ConnectionLogEntry["level"], message: string, detail?: string): void {
+    this.log(level, message, detail ? safeError(detail) : undefined);
   }
 
   onEvent(listener: (event: RelayEvent) => void): () => void {
