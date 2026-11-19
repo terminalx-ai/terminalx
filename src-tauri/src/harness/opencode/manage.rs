@@ -248,17 +248,22 @@ fn read_config(paths: &Paths) -> Config {
 fn write_json(path: &Path, value: &Value, private: bool) -> Result<(), String> {
     let parent = path.parent().ok_or("no folder to write in")?;
     std::fs::create_dir_all(parent).map_err(|error| format!("Couldn’t create {}: {error}", shown(parent)))?;
-    let temp = parent.join(format!(".{}.terminalx-{}", path.file_name().and_then(|name| name.to_str()).unwrap_or("file"), std::process::id()));
     let text = format!("{}\n", serde_json::to_string_pretty(value).map_err(|error| error.to_string())?);
-    std::fs::write(&temp, text).map_err(|error| format!("Couldn’t write {}: {error}", shown(path)))?;
+    // A key file someone left readable by others is narrowed first, as `opencode auth login`
+    // keeps it: write_atomic carries an existing file's mode over to the new one.
     #[cfg(unix)]
     if private {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| format!("Couldn’t make {} private: {error}", shown(path)))?;
+            }
+        }
     }
     #[cfg(not(unix))]
     let _ = private;
-    std::fs::rename(&temp, path).map_err(|error| { let _ = std::fs::remove_file(&temp); format!("Couldn’t write {}: {error}", shown(path)) })
+    // Created owner-only and fsynced before the rename, so keys are never readable mid-write.
+    crate::store::write_atomic(path, text.as_bytes()).map_err(|error| format!("Couldn’t write {}: {error:#}", shown(path)))
 }
 
 /// Change the config file with `edit`, unless it may not be written.
@@ -644,6 +649,12 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(paths.auth_file()).unwrap().permissions().mode() & 0o777, 0o600);
+            // A key file left readable by others is made owner-only before new keys go in.
+            std::fs::set_permissions(paths.auth_file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+            connect_in(&paths, "weird", "weird-key-0123456789", None).unwrap();
+            assert_eq!(std::fs::metadata(paths.auth_file()).unwrap().permissions().mode() & 0o777, 0o600);
+            let left: Vec<_> = std::fs::read_dir(paths.auth_file().parent().unwrap()).unwrap().flatten().map(|entry| entry.file_name()).collect();
+            assert_eq!(left, vec![std::ffi::OsString::from("auth.json")], "no temp file is left beside it");
         }
         let weird = &result.overview.connected[0];
         assert_eq!((weird.id.as_str(), weird.auth.as_str(), weird.unlisted), ("weird", "api", false));
