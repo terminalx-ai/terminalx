@@ -357,6 +357,7 @@ impl Rig {
                 recorded: false,
                 tail: tail.clone(),
                 echoed: Default::default(),
+                lapsed: Default::default(),
                 awaiting_delivery: None,
                 delivery_sent_at: None,
                 accept_by: None,

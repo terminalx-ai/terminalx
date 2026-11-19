@@ -513,8 +513,9 @@ fn a_prompt_acknowledged_in_time_is_never_flagged() {
 
 /// A follow-up sent while a turn runs is the CLI's to hold. If the turn ends
 /// and the CLI still has not taken it, it may be sitting in the CLI's input:
-/// the reader is told, and the words typed into the terminal afterwards are
-/// a message of their own rather than that one's echo.
+/// the reader is told. When the CLI does take it, however late, its record
+/// is that message (#1284): the Queued card becomes the turn's prompt, never
+/// a card left waiting beside a second bubble of the same words.
 #[test]
 fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
     for kind in BOTH {
@@ -537,9 +538,53 @@ fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
         assert_eq!(rig.told(), ["user: start", "queued: and then this", "reply: one", "end"], "{kind:?}: nothing sent again");
 
         rig.cli_takes("and then this");
+        rig.cli_replies("two");
         assert_eq!(rig.banner(), None, "{kind:?}");
-        assert_eq!(rig.told().last().unwrap(), "user: and then this", "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: and then this", "reply: one", "end", "reply: two", "end"], "{kind:?}: one message, and its reply");
+        assert_eq!(rig.taken_as_prompts(), ["and then this"], "{kind:?}: the card is the next turn's prompt");
     }
+}
+
+/// #1284, on a native Codex tab: a follow-up queued behind a turn whose wait
+/// ran out — the tab saw the turn end, and the CLI went on holding the
+/// message — and that Codex then takes and answers, one turn after another.
+/// The chat had kept the Queued card, drawn a second bubble of the same
+/// words as a prompt typed into the terminal, and lost track of the turns
+/// after it. Taken late, it is still the reader's message: the card clears
+/// into the turn that answers it, and every reply after it is drawn.
+#[test]
+fn a_queued_codex_follow_up_taken_after_its_wait_ran_out_is_one_message_and_every_reply_is_drawn() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("start", 0);
+    rig.cli_takes("start");
+    assert!(rig.compose("check the tests", 0));
+    rig.enter_written();
+    rig.cli_replies("one");
+    rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+    rig.tick();
+    rig.tick();
+    let queued = rig.queued_seq("check the tests");
+
+    rig.cli_takes("check the tests");
+    rig.cli_replies("the tests pass");
+    assert!(!rig.compose("check the tests", 0), "the CLI is idle: sent again, it starts a turn");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+    assert!(!rig.compose("thanks", 0));
+    rig.cli_takes("thanks");
+    rig.cli_replies("welcome");
+
+    assert_eq!(rig.banner(), None);
+    assert_eq!(rig.told(), [
+        "user: start", "queued: check the tests", "reply: one", "end",
+        "reply: the tests pass", "end",
+        "user: check the tests", "reply: still passing", "end",
+        "user: thanks", "reply: welcome", "end",
+    ]);
+    assert!(rig.events().iter().any(|e| matches!(e.payload, Payload::TurnStarted { prompt_seq: Some(seq), .. } if seq == queued)), "the card is cleared into the turn that answers it");
+    // The lapsed message is matched once: the same words sent again are a
+    // message of their own.
+    assert_eq!(rig.taken_as_prompts(), ["check the tests"]);
 }
 
 #[test]
@@ -1596,10 +1641,10 @@ fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
 
 /// A CLI that keeps what was queued in its own input when its turn is
 /// stopped (as Claude Code did before it sent it): the reader is told the
-/// message was not sent, and the same words typed into the terminal later
-/// are a message of their own, not that one's echo.
+/// message was not sent. When it is sent from there after all, it is that
+/// message (#1284), not a second one beside a card that never clears.
 #[test]
-fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_swallows_nothing() {
+fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_still_that_message_when_sent() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
         rig.compose("start", 0);
@@ -1620,7 +1665,8 @@ fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_sw
         rig.cli_takes("continue");
         rig.cli_replies("continuing");
         assert_eq!(rig.banner(), None, "{kind:?}");
-        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "user: continue", "reply: continuing", "end"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "reply: continuing", "end"], "{kind:?}");
+        assert_eq!(rig.taken_as_prompts(), ["continue"], "{kind:?}");
     }
 }
 
