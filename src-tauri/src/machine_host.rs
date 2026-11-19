@@ -309,24 +309,6 @@ pub fn installed() -> Option<&'static Arc<MachineHost>> {
     INSTALLED.get()
 }
 
-/// Whether a desktop-launched runtime keeps the window's host key, which
-/// only the window and the runtime hold (`key::window_owned`).
-pub fn window_owns_key() -> bool {
-    key::window_owned()
-}
-
-impl MachineHost {
-    /// Who the pairing guard may let through with no terminal
-    /// (`serve_cli::consent`): the window, by the host key it handed over,
-    /// where the key is the window's.
-    #[cfg(unix)]
-    pub fn consent_window(&self) -> crate::serve_cli::consent::Window {
-        use crate::serve_cli::consent::Window;
-        let state = self.state.lock().unwrap();
-        Window::desktop(self.keys.needs_window(), state.keypair.as_ref().map(|keypair| zeroize::Zeroizing::new(*keypair.secret())))
-    }
-}
-
 /// The listener's port: [`PORT`], or `TERMINALX_MACHINE_HOST_PORT` for tests.
 fn configured_port() -> u16 {
     match std::env::var(wire::PORT_ENV) {

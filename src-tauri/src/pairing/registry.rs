@@ -57,6 +57,33 @@ impl PairingSecrets {
         Ok(Some(keypair))
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn window_consent_key(&self, create: bool) -> Result<Option<ring::signature::Ed25519KeyPair>> {
+        use ring::signature::Ed25519KeyPair;
+        use ring::rand::{SecureRandom, SystemRandom};
+
+        const ACCOUNT: &str = "window-consent-signing-key";
+        static INITIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _initialize = INITIALIZE.lock().unwrap();
+        if let Some(bytes) = self.read(ACCOUNT)? {
+            let seed = zeroize::Zeroizing::new(bytes);
+            let key = Ed25519KeyPair::from_seed_unchecked(&seed)
+                .map_err(|_| anyhow!("saved window consent key is invalid"))?;
+            return Ok(Some(key));
+        }
+        if !create {
+            return Ok(None);
+        }
+
+        let mut seed = zeroize::Zeroizing::new([0; 32]);
+        SystemRandom::new().fill(seed.as_mut())
+            .map_err(|_| anyhow!("generate window consent signing key"))?;
+        let key = Ed25519KeyPair::from_seed_unchecked(seed.as_ref())
+            .map_err(|_| anyhow!("initialize window consent signing key"))?;
+        self.write(ACCOUNT, seed.as_ref())?;
+        Ok(Some(key))
+    }
+
     pub fn save_device_token(&self, device_id: &str, token: &str) -> Result<()> {
         self.write(&device_account(device_id), token.as_bytes())
     }

@@ -1057,15 +1057,12 @@ as a user service and is paired from its own terminal. The user's guide is
   process it started, one whose controlling terminal is one of its terminals,
   and one with no controlling terminal: on a runtime with no window always;
   on a runtime the desktop launched on a Mac, unless it proves it is the
-  window (PRO-369). The window's client sends a witness too, with a MAC of the
-  witness socket and nonce under a key derived from the machine's host key,
-  which only the window (its Keychain item) and the runtime (the copy the
-  window handed over) hold. `pair` also refuses when its input or output is
-  not a terminal (`src-tauri/src/serve_cli/consent.rs`). Known limits: a
-  same-user process that detaches and opens a pseudo-terminal of its own
-  looks like a person anywhere; and a desktop-launched runtime that keeps its
-  own host key (not on a Mac) holds nothing only the window knows, so there a
-  process that detaches with `setsid` and has no terminal is let through.
+  window (PRO-369). The window signs the witness socket and nonce with its
+  Keychain consent key. The desktop pins the public key when it launches the
+  runtime. Adoption of a machine host key over IPC cannot change the consent
+  key. `pair` also requires a terminal for input and output
+  (`src-tauri/src/serve_cli/consent.rs`). A same-user process that detaches
+  and opens a pseudo-terminal of its own can pass the terminal check.
 - **`projects.add`** on the control socket (new): registers a folder as a
   project (`store::projects::ensure`) and emits `projects_changed`, so
   `machine.changed` reaches connected computers. The runtime is the store's
@@ -1909,13 +1906,13 @@ which runs in a child process because data privacy is one switch per process.
   `machines.json` or the Keychain. That loses this computer's own access and
   gains nothing, so no integrity key guards it.
 - **Consent identifies the window on supported Mac desktops**
-  (`serve_cli::consent`, PRO-369): the window proves it holds the host key in
-  its Keychain item. A desktop runtime without a window-owned key, including
-  a non-Mac desktop or a Mac whose application identifier is missing or
-  invalid, refuses consent-guarded pairing actions even from a terminal. A
-  separately launched headless runtime still permits an unrelated interactive
-  terminal. A same-user process that opens its own pseudo-terminal can pass
-  the terminal check on supported Mac desktops and headless runtimes.
+  (`serve_cli::consent`, PRO-369). Desktop runtimes without a pinned
+  consent key refuse consent-guarded pairing actions. A runtime carried over
+  from a build that predates the pin needs a fresh desktop launch before it
+  can verify the window. A separately launched headless runtime still
+  permits an unrelated interactive terminal. A same-user process that opens
+  its own pseudo-terminal can pass the terminal check on supported Mac
+  desktops and headless runtimes.
 - **A computer on a runtime before PRO-357** does not rotate its token (it
   does not ask for `machine/5`). Its token still expires after 90 days unused.
 - **Whoever holds a computer's client key and token is that computer.** With
