@@ -103,6 +103,8 @@ const blobPrefixes = (orgId: string, workspaceId: string) => [`terminalx:cloud-c
 
 export class CloudCatalog {
   private organizations: CatalogOrganization[] = [];
+  /** Organizations this phone deleted: a list read that started before the deletion does not bring one back. */
+  private readonly removed = new Set<string>();
   private loading = false;
   private error: string | null = null;
   private refreshedAt: number | null = null;
@@ -198,6 +200,24 @@ export class CloudCatalog {
       // Also after a read that failed: the next one is still due (#500).
       this.followChanges();
     }));
+  }
+
+  /**
+   * Delete an organization this person owns (#1292); `confirmationName` is
+   * its name as listed. On success it leaves the list at once, and the read
+   * that follows removes what the phone kept for its workspaces. A refusal,
+   * or an answer that does not confirm it, throws and changes nothing here.
+   */
+  async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
+    await this.options.api.deleteOrganization(orgId, confirmationName);
+    this.removed.add(orgId);
+    if (this.closed) return;
+    this.organizations = this.organizations.filter((entry) => entry.organization.orgId !== orgId);
+    this.publish();
+    void this.saveList();
+    // A read that started before the deletion may have listed it: let it finish, then read again.
+    if (this.flight) await this.flight;
+    await this.refresh();
   }
 
   /** The session for a listed workspace, started on first use. */
@@ -336,7 +356,7 @@ export class CloudCatalog {
     this.publish();
     let organizations: CloudOrganization[];
     try {
-      organizations = await this.options.api.organizations();
+      organizations = (await this.options.api.organizations()).filter((organization) => !this.removed.has(organization.orgId));
     } catch (error) {
       if (this.closed) return;
       this.error = error instanceof CloudApiError ? error.code : "cloud_workspace_unavailable";

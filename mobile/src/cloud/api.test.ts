@@ -183,6 +183,23 @@ describe("the phone's cloud API client", () => {
     expect(Math.abs(client.serverNow() - serverTime)).toBeLessThan(1_500);
   });
 
+  it("deletes an organization with its own name on the account route, and only a matching answer is success (#1292)", async () => {
+    const { client, calls } = api(() => ({ body: { organizationId: "org-1", deleted: true } }));
+    await client.deleteOrganization("org-1", "Test organization");
+    expect(calls).toEqual([expect.objectContaining({ method: "POST", url: "https://login.terminalx.ai/v1/desktop/orgs/org-1/delete", body: { confirmationName: "Test organization" } })]);
+    expect(calls[0].headers).toMatchObject({ authorization: "Bearer access-token" });
+    for (const body of [{}, { organizationId: "org-2", deleted: true }, { organizationId: "org-1", deleted: false }, { organizationId: "org-1" }]) {
+      await expect(api(() => ({ body })).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: expect.stringMatching(/^organization_delete_outcome_unknown$|^cloud_workspace_invalid_response$/) });
+    }
+  });
+
+  it("keeps a deletion refusal's code and only the known blockers", async () => {
+    const blocked = api(() => ({ status: 409, body: { error: "organization_delete_blocked", cleanupPath: "https://evil.invalid", blockers: [{ code: "github_disconnect_required" }, { code: "server detail" }] } }));
+    await expect(blocked.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_blocked", status: 409, blockers: ["github_disconnect_required"] });
+    const wrong = api(() => ({ status: 422, body: { error: "organization_confirmation_invalid" } }));
+    await expect(wrong.client.deleteOrganization("org-1", "x")).rejects.toMatchObject({ code: "organization_confirmation_invalid", blockers: [] });
+  });
+
   it("reports an answer in an unknown shape as one code, whatever the call", async () => {
     const { client } = api(() => ({ status: 202, body: { id: "a1", state: "brand-new-state" } }));
     await expect(client.open("org-1", "ws-1", "i")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", unreachable: false });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
 import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 
 /**
@@ -38,6 +39,8 @@ export class CloudApiError extends Error {
     readonly code: string,
     /** The HTTP status; null when the request never got an answer (offline, timed out). */
     readonly status: number | null,
+    /** For `organization_delete_blocked`: what is still in the way, as known blocker codes only. */
+    readonly blockers: string[] = [],
   ) {
     super(code);
     this.name = "CloudApiError";
@@ -89,7 +92,7 @@ export type CloudWorkspaceSnapshot = z.infer<typeof snapshotSchema>;
 export type CloudTombstone = z.infer<typeof tombstoneSchema>;
 export type CloudRole = z.infer<typeof ROLE>;
 
-const organizationSchema = z.object({ orgId: z.string().min(1), name: z.string(), role: z.string() }).passthrough();
+const organizationSchema = z.object({ orgId: z.string().min(1), name: z.string(), role: z.string(), isPersonal: z.boolean().optional() }).passthrough();
 export type CloudOrganization = z.infer<typeof organizationSchema>;
 
 const attachTicketSchema = z.object({ v: z.literal(1), token: z.string().min(1), expiresAt: z.number(), runtimeGeneration: z.number().int().nonnegative(), protocol: z.literal("terminalx-workspace-rpc/1") });
@@ -162,7 +165,7 @@ export class CloudApi {
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
-    for (const name of ["organizations", "workspaces", "open", "resume", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare"] as const) {
+    for (const name of ["organizations", "workspaces", "open", "resume", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare", "deleteOrganization"] as const) {
       const self = this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
       const original = self[name]!.bind(this);
       self[name] = (...args) =>
@@ -195,6 +198,21 @@ export class CloudApi {
   async doNotWake(): Promise<boolean> {
     if (this.doNotWakeKnown === null) await this.organizations().catch(() => undefined);
     return this.doNotWakeKnown === true;
+  }
+
+  /**
+   * Delete an organization (#1292). The server re-checks that this person
+   * owns it, that it is not a personal organization, that nothing still holds
+   * it, and that `confirmationName` is its name exactly; send the
+   * organization's own name, never what was typed. Only an answer naming this
+   * organization as deleted is success: anything else may or may not have
+   * deleted it (`organization_delete_outcome_unknown`).
+   */
+  async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
+    const answer = z.object({ organizationId: z.string(), deleted: z.boolean() }).passthrough().safeParse(
+      await this.request("POST", `/v1/desktop/orgs/${id(orgId)}/delete`, { confirmationName }),
+    );
+    if (!answer.success || answer.data.organizationId !== orgId || answer.data.deleted !== true) throw new CloudApiError("organization_delete_outcome_unknown", 200);
   }
 
   /** An organization's workspaces as this person may see them. Reading the list never starts compute. */
@@ -327,7 +345,7 @@ export class CloudApi {
     if (!response.ok) {
       const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : "cloud_workspace_unavailable";
       // Only a plain token crosses to the UI as a code.
-      throw new CloudApiError(/^[a-z0-9_.-]{1,96}$/i.test(code) ? code : "cloud_workspace_unavailable", response.status);
+      throw new CloudApiError(/^[a-z0-9_.-]{1,96}$/i.test(code) ? code : "cloud_workspace_unavailable", response.status, code === "organization_delete_blocked" ? organizationDeletionBlockers(parsed) : []);
     }
     if (parsed === null && response.status !== 204) throw new CloudApiError("cloud_workspace_invalid_response", response.status);
     return parsed;

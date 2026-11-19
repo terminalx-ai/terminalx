@@ -9,7 +9,8 @@ import AccountScreen from "../app/account";
 import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
-const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any }));
+const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, organizations: [] as any[] }));
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: mocks.organizations.map((organization) => ({ organization })) }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
 vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
@@ -46,6 +47,7 @@ beforeEach(() => {
   mocks.setName.mockReset();
   mocks.alert.mockReset();
   mocks.notifications = { ...defaultSettings(), allow: true };
+  mocks.organizations = [];
   const studio = host("studio", { customName: "Studio MacBook" });
   mocks.app = {
     session: { user: { displayName: "Alex", email: "alex@example.com" } },
@@ -154,6 +156,21 @@ it("shows the account as one row that opens the account screen, with Sign out on
   await act(async () => signOut.click());
   expect(mocks.app.signOut).toHaveBeenCalledTimes(1);
   expect(mocks.back).toHaveBeenCalledTimes(1);
+});
+
+it("lists the account's organizations with the role in each, each opening its own page (#1292)", async () => {
+  mocks.organizations = [
+    { orgId: "org-personal", name: "Alex", role: "owner", isPersonal: true },
+    { orgId: "org-team", name: "Test organization", role: "owner", isPersonal: false },
+    { orgId: "org-other", name: "Other team", role: "member" },
+  ];
+  await show(<AccountScreen />);
+  expect([...container.querySelectorAll("h2")].map((h) => h.textContent)).toEqual(["Organizations"]);
+  const rows = [...container.querySelectorAll("button[aria-label]")].map((b) => b.getAttribute("aria-label"));
+  expect(rows).toEqual(["Alex, Owner", "Test organization, Owner", "Other team, Member"]);
+  expect(container.textContent).toContain("Personal · Owner");
+  await act(async () => (container.querySelector("button[aria-label='Test organization, Owner']") as HTMLButtonElement).click());
+  expect(mocks.push).toHaveBeenCalledWith({ pathname: "/organization/[orgId]", params: { orgId: "org-team" } });
 });
 
 it("offers Sign in in place of the account row when signed out", async () => {

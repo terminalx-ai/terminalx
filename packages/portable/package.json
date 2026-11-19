@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./manualStatus": "./src/manualStatus.ts",
+    "./organizationDeletion": "./src/organizationDeletion.ts",
     "./agentMarks": "./src/agentMarks.ts",
     "./agentSettings": "./src/agentSettings.ts",
     "./botFace": "./src/botFace.ts",
