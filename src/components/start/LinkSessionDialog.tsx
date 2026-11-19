@@ -18,10 +18,15 @@ export function LinkSessionDialog() {
   const armedAt = request?.armedAt ?? 0;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const wait = armedAt - Date.now();
-    setNow(Date.now());
-    if (wait <= 0) return;
-    const timer = window.setTimeout(() => setNow(Date.now()), wait);
+    let timer: number | undefined;
+    // A timer can fire a millisecond before Date.now() reaches armedAt; then
+    // wait again, or Create would stay disabled until something else renders.
+    const tick = () => {
+      const current = Date.now();
+      setNow(current);
+      if (current < armedAt) timer = window.setTimeout(tick, armedAt - current);
+    };
+    tick();
     return () => window.clearTimeout(timer);
   }, [armedAt]);
   if (!request) return null;
