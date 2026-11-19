@@ -24,6 +24,10 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Self {
+        Self::with_keys(None).await
+    }
+
+    async fn with_keys(keys: Option<(key::KeyStore, u16)>) -> Self {
         let home = crate::store::temp_home();
         let data = tempfile::tempdir().unwrap();
         let sink = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -49,9 +53,14 @@ impl Rig {
             None,
         )
         .unwrap();
-        let host = MachineHost::idle_for_test(data.path(), rpc.clone(), key.clone());
-        host.state.lock().unwrap().enabled = true;
         let lifetime = crate::local_runtime::Lifetime::new(Duration::from_secs(60));
+        let host = if let Some((keys, port)) = keys {
+            MachineHost::new(data.path().into(), keys, sink.clone(), Rpc::Ready(rpc.clone()), Some(lifetime.clone()), port, false)
+        } else {
+            let host = MachineHost::idle_for_test(data.path(), rpc.clone(), key.clone());
+            host.state.lock().unwrap().enabled = true;
+            host
+        };
         let phones = phones::Phones::new(sessions, sink.clone(), lifetime.clone(), || {}).unwrap();
         host.phones.set(phones.clone()).ok().unwrap();
         let cell = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -95,8 +104,8 @@ impl Rig {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_seen_at: approved.then(|| chrono::Utc::now().to_rfc3339()),
                 revoked_at: None,
-                installation_id: None,
-                created_request_id: None,
+                installation_id: automatic.then(|| "installation".into()),
+                created_request_id: automatic.then(|| "grant".into()),
                 fingerprint: None,
                 approved_at: None,
                 connection: None,
@@ -133,7 +142,7 @@ impl Rig {
 
     async fn connect(&self, id: &str, token: &str, kind: &str, secret: [u8; 32]) -> Phone {
         self.open(id, kind);
-        let mut socket = self.socket().await;
+        let socket = self.socket().await;
         let handshake = E2eeClientHandshake::with_secret(
             secret,
             &self.key.public_key_b64(),
@@ -141,6 +150,125 @@ impl Rig {
             Some(&self.key.host_id()),
         )
         .unwrap();
+        Phone::authenticate(socket, handshake, token).await
+    }
+
+    async fn command(&mut self) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), self.commands.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_runtime_applies_account_revocations_to_direct_phones() {
+    use crate::machine_account::{self, tests::{service, session_body}, Api};
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    let account = AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(),
+        display_name: "Owner".into(), host_display_name: None, binding_generation: 5,
+    };
+    save_account_mirror(&account).unwrap();
+    rig.phones.tick(now_ms());
+    rig.pair("phone", "token", true, true);
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    // The poll and direct listener must work without either desktop or Relay.
+    assert!(!rig.host.window_available());
+    rig.relay.stop();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.enabled = false;
+        state.desktop_phones = true;
+    }
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
+    rig.host.state.lock().unwrap().listening = Some(listener);
+    let connect = || async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &rig.key.public_key_b64(), "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, "token").await
+    };
+
+    let (base, seen, handle) = service(vec![
+        (200, json!({"revocations": []})),
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ]);
+    let authority = rig.phones.watch_account_revocations();
+    assert!(connect().await.read().await.is_none(), "admission requires an account check");
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority.clone(), Arc::new(Api::new(&base))));
+    let entry = DeviceRegistry.find_by_token("token", Some(5)).unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while authority.check(&entry).is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let mut phone = connect().await;
+    phone.authenticated().await;
+    assert_eq!(phone.call("sessions.summaries", json!({})).await["ok"], true);
+    authority.hint();
+    assert!(phone.read().await.is_none(), "revocation closes the active phone");
+    assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
+    assert!(connect().await.read().await.is_none(), "the saved token cannot reconnect");
+    poller.abort();
+    handle.join().unwrap();
+    let seen = seen.lock().unwrap();
+    let root = format!("/v1/desktop/host-account-bindings/{host_id}/revocations");
+    assert_eq!(seen[0], (format!("{root}?bindingGeneration=5"), Value::Null, Some("Bearer access-1".into())));
+    assert_eq!(seen[1], seen[0]);
+    assert_eq!(seen[2], (format!("{root}/revoke-1/acknowledge"), json!({"bindingGeneration": 5}), Some("Bearer access-1".into())));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refusing_a_relay_invite_still_creates_a_nearby_phone_code() {
+    let rig = Rig::new().await;
+    let mut control = rig.relay.phone_test_hold_control();
+    let phones = rig.phones.clone();
+    let key = rig.key.clone();
+    let epoch = *phones.stopped().borrow();
+    let creating = tokio::task::spawn_blocking(move || phones.create_code(&key, Some(6768), epoch));
+    let (invite, reply) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(pending) = control.take() { break pending; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(invite["type"], "invite-create");
+    reply.send(Ok(json!({"type":"control-error", "reqId":invite["reqId"]}))).unwrap();
+    let offer = decode_offer(&creating.await.unwrap().unwrap().link);
+    assert!(offer.relay.is_none());
+    assert!(offer.direct_endpoints.iter().any(|endpoint| endpoint.ends_with(":6768")));
+    assert_ne!(offer.paired_device_id, invite["relayDeviceId"].as_str().unwrap());
+    let (cleanup, _) = control.take().expect("retire the possibly issued invite");
+    assert_eq!(cleanup["relayDeviceId"], invite["relayDeviceId"]);
+    assert!(DeviceRegistry.find_by_token(&offer.device_token, None).unwrap().is_some());
+}
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.host.stop_serving();
+        self.relay.stop();
+    }
+}
+struct Phone {
+    socket: Socket,
+    session: E2eeSession,
+}
+impl Phone {
+    async fn authenticate(mut socket: Socket, handshake: E2eeClientHandshake, token: &str) -> Self {
         socket
             .send(Message::Text(
                 serde_json::to_string(handshake.hello()).unwrap().into(),
@@ -162,27 +290,8 @@ impl Rig {
             ))
             .await
             .unwrap();
-        Phone { socket, session }
+        Self { socket, session }
     }
-
-    async fn command(&mut self) -> Value {
-        tokio::time::timeout(Duration::from_secs(5), self.commands.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    }
-}
-impl Drop for Rig {
-    fn drop(&mut self) {
-        self.host.stop_serving();
-        self.relay.stop();
-    }
-}
-struct Phone {
-    socket: Socket,
-    session: E2eeSession,
-}
-impl Phone {
     async fn read(&mut self) -> Option<Value> {
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(5), self.socket.next())
@@ -514,20 +623,136 @@ async fn retiring_the_relay_cancels_idle_and_pre_auth_phone_connections() {
 }
 
 #[cfg(feature = "desktop")]
+struct WindowPhoneOwner {
+    build: crate::local_runtime::client::Build,
+}
+
+#[cfg(feature = "desktop")]
+impl crate::phone::Owner for WindowPhoneOwner {
+    fn attachment(&self) -> Result<crate::local_runtime::client::AttachmentIdentity> {
+        Ok(crate::local_runtime::client::AttachmentIdentity { epoch: "test-epoch".into(), lease: "test-lease".into() })
+    }
+    fn mobile(&self, _: &crate::local_runtime::mobile::Actor, _: &str, _: Value) -> Result<Value> { Ok(json!({})) }
+    fn build(&self) -> &crate::local_runtime::client::Build { &self.build }
+    fn disconnect(&self) {}
+}
+
+#[cfg(feature = "desktop")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn window_paired_phone_reconnects_after_detach_with_computer_operation_off() {
+    use crate::keychain::{testing::MemorySecrets, SecretStore};
+    use crate::local_runtime::mobile::model::{PairingConnectionMode, PairingOffer};
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn direct_phone(port: u16, offer: &PairingOffer) -> Phone {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp).await.unwrap();
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &offer.public_key_b64, "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, &offer.device_token).await
+    }
+
+    let secrets = Arc::new(MemorySecrets::default());
+    let keys = key::KeyStore::at(key::Location::Keychain { service: "test.handoff.machine-host".into() }, secrets.clone());
+    let window_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let rig = Rig::with_keys(Some((keys, window_port))).await;
+    secrets.set("test.handoff.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
+    let mut window = crate::pairing::PairingManager::with_secrets_for_test("test.handoff", secrets.clone());
+    window.set_phone_port_for_test(window_port);
+    window.set_phone_owner_for_test(Arc::new(WindowPhoneOwner { build: crate::local_runtime::client::Build {
+        version: None, mobile: Default::default(), handover: None,
+    }}));
+    let lease = rig.lifetime.hold().unwrap();
+    let epoch = rig.lifetime.epoch();
+    assert_eq!(rig.host.status().host_key, HostKeyState::Needed);
+    let created = window.generate_pairing(PairingConnectionMode::LocalOnly).await.unwrap();
+    let offer = decode_offer(&created.active_pairing.unwrap().pairing_url);
+    let mut phone = direct_phone(window_port, &offer).await;
+    let pending = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(pending) = window.status().pending_approval { break pending; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    window.approve_pairing(&pending.request_id).unwrap();
+    phone.authenticated().await;
+    assert!(crate::phone::registry::has_paired_phone().unwrap());
+
+    rig.host.execute(wire::ADOPT_KEY, json!({
+        "epoch": epoch, "lease": lease,
+        "secretB64": STANDARD.encode(secrets.stored("test.handoff.pairing", "host-e2ee-key").unwrap()),
+    })).unwrap();
+    assert_eq!(secrets.stored("test.handoff.machine-host", "host-e2ee-key").unwrap(), rig.key.secret());
+    window.stop();
+    rig.lifetime.release(&lease);
+    assert!(phone.read().await.is_none());
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            rig.host.clone().reconcile(false).await;
+            let status = rig.host.status();
+            if status.listening.is_some() { break status; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert!(rig.host.keeps_runtime());
+    assert!(!status.enabled, "the computer-operation switch stays off");
+    assert!(status.phones.hosting);
+    assert_eq!(status.listening.unwrap().parse::<std::net::SocketAddr>().unwrap().port(), window_port);
+
+    let window = crate::pairing::PairingManager::with_secrets_for_test("test.handoff", secrets);
+    window.set_phone_owner_for_test(Arc::new(WindowPhoneOwner { build: crate::local_runtime::client::Build {
+        version: None, mobile: Default::default(), handover: None,
+    }}));
+    let lease = rig.lifetime.hold().unwrap();
+    let run = rig._data.path().join("run");
+    std::fs::create_dir(&run).unwrap();
+    let path = run.join("w");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    rig.host.execute(wire::PHONE_ROUTE, json!({"epoch": epoch, "lease": lease, "socket": path})).unwrap();
+    let route = tokio::spawn({
+        let window = window.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            window.routed_phone(stream).await.unwrap();
+        }
+    });
+    let mut forwarded = direct_phone(window_port, &offer).await;
+    forwarded.authenticated().await;
+    assert!(rig.phones.status().connected.is_empty(), "the window served this connection");
+    window.stop();
+    rig.lifetime.release(&lease);
+    assert!(forwarded.read().await.is_none());
+    route.await.unwrap();
+    rig.host.clone().reconcile(false).await;
+    assert!(!rig.host.status().phone_route);
+
+    let session: crate::store::index::SessionEntry = serde_json::from_value(json!({
+        "id": "window-session", "projectPath": "/repo", "cwd": "/repo", "title": "Review",
+        "created": "2026-01-01", "modified": "2026-01-01",
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    let mut reconnected = direct_phone(window_port, &offer).await;
+    reconnected.authenticated().await;
+    let summaries = reconnected.call("sessions.summaries", json!({})).await;
+    assert_eq!(summaries["result"]["sessions"][0]["id"], "window-session");
+    assert_eq!(reconnected.call("rpc.hello", json!({})).await["ok"], false);
+
+    let mut remote = rig.connect(&offer.paired_device_id, &offer.device_token, "resume", [7; 32]).await;
+    remote.authenticated().await;
+    assert_eq!(remote.call("sessions.summaries", json!({})).await["ok"], true);
+}
+
+fn decode_offer(link: &str) -> crate::local_runtime::mobile::model::PairingOffer {
+    let url = url::Url::parse(link).unwrap();
+    let code = url.query_pairs().find(|(key, _)| key == "code").unwrap().1;
+    serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(code.as_bytes()).unwrap()).unwrap()
+}
+
+#[cfg(feature = "desktop")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
     use crate::keychain::SecretStore;
-    use crate::local_runtime::client::{AttachmentIdentity, Build};
-    use crate::local_runtime::mobile::Actor;
-    struct TestOwner { build: Build }
-    impl crate::phone::Owner for TestOwner {
-        fn attachment(&self) -> Result<AttachmentIdentity> {
-            Ok(AttachmentIdentity { epoch: "test-epoch".into(), lease: "test-lease".into() })
-        }
-        fn mobile(&self, _: &Actor, _: &str, _: Value) -> Result<Value> { Ok(json!({})) }
-        fn build(&self) -> &Build { &self.build }
-        fn disconnect(&self) {}
-    }
+    use crate::local_runtime::client::Build;
     let mut rig = Rig::new().await;
     rig.pair("phone", "token", false, true);
     rig.pair("replacement", "replacement-token", false, true);
@@ -542,7 +767,7 @@ async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
     let secrets = Arc::new(crate::keychain::testing::MemorySecrets::default());
     secrets.set("test.forwarded-relay.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
     let manager = crate::pairing::PairingManager::with_secrets_for_test("test.forwarded-relay", secrets);
-    manager.set_phone_owner_for_test(Arc::new(TestOwner { build: Build {
+    manager.set_phone_owner_for_test(Arc::new(WindowPhoneOwner { build: Build {
         version: None, mobile: Default::default(), handover: None,
     }}));
     let window = tokio::spawn(async move {
@@ -578,21 +803,16 @@ async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_phone_waits_for_approval_and_keeps_its_identity_after_reconnect() {
-    let rig = Rig::new().await;
-    let created = rig.phones.create_code(&rig.key, 6768).unwrap();
-    let url = url::Url::parse(&created.link).unwrap();
-    let code = url
-        .query_pairs()
-        .find(|(key, _)| key == "code")
-        .unwrap()
-        .1
-        .into_owned();
-    let offer: crate::local_runtime::mobile::model::PairingOffer = serde_json::from_slice(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(code)
-            .unwrap(),
-    )
-    .unwrap();
+    let mut rig = Rig::new().await;
+    let created: wire::CreatedPhoneCode = serde_json::from_value(rig.host.phone_code().unwrap()).unwrap();
+    let offer = decode_offer(&created.link);
+    let invite = offer.relay.as_ref().expect("terminal QR carries a Relay invite");
+    assert_eq!(invite.relay_host_id, rig.key.host_id());
+    assert_eq!(created.expires_at, invite.invite_expires_at);
+    assert!(offer.direct_endpoints.is_empty(), "the server has no direct listener");
+    let minted = rig.command().await;
+    assert_eq!(minted["type"], "invite-create");
+    assert_eq!(minted["relayDeviceId"], offer.paired_device_id);
     let mut phone = rig
         .connect(
             &offer.paired_device_id,
@@ -612,6 +832,13 @@ async fn relay_phone_waits_for_approval_and_keeps_its_identity_after_reconnect()
     assert!(rig.phones.status().connected.is_empty());
     rig.phones.approve(&pending.request_id).unwrap();
     phone.authenticated().await;
+    let installed = phone.call("pairing.provisionRelay", json!({
+        "reqId": "pairing-install", "newResumeTokenHash": crate::relay_e2ee::random_token(),
+    })).await;
+    assert_eq!(installed["ok"], true, "{installed}");
+    let install = rig.command().await;
+    assert_eq!(install["authorization"]["mode"], "relay-basis");
+    assert_eq!(install["relayDeviceId"], offer.paired_device_id);
     drop(phone);
     let mut resumed = rig
         .connect(
@@ -735,7 +962,7 @@ async fn stale_relay_assignments_are_rejected_before_opening_the_data_leg() {
     let error = rig
         .phones
         .clone()
-        .serve_relay(rig.key.clone(), forwarded, 6768, epoch)
+        .serve_relay(rig.key.clone(), forwarded, Some(6768), epoch)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("stale host assignment"));

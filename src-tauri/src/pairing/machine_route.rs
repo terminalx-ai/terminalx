@@ -1,7 +1,7 @@
 //! The window's side of a machine whose runtime hosts operating computers
 //! (PRO-341, `crate::machine_wire`). The window and the runtime never both
-//! listen on TCP 6768. While "Let other computers operate this Mac" is on the
-//! runtime owns the port, and the window:
+//! listen on TCP 6768. The runtime may take the port for computers or for
+//! saved phones when the window closes. While the runtime owns it, the window:
 //!
 //! - closes its own listener and the phones connected to it (they reconnect,
 //!   now through the runtime), so the runtime can bind the port;
@@ -10,8 +10,7 @@
 //! - takes phones from a private Unix socket it registers with the runtime
 //!   (`runtime.machineHost.phoneRoute`), and serves them exactly as before.
 //!
-//! When the switch goes off the runtime closes the phones it passed on, and
-//! the window binds the port again.
+//! If the runtime stops hosting, the window may bind the port again.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,7 +68,7 @@ pub(super) enum RuntimeRelay {
 /// waited for: the window registers itself until the runtime's registration
 /// retires it.
 fn runtime_relay(status: Option<&Status>) -> RuntimeRelay {
-    let Some(status) = status.filter(|status| status.enabled) else { return RuntimeRelay::Off };
+    let Some(status) = status.filter(|status| status.hosting()) else { return RuntimeRelay::Off };
     match (status.relay_state, &status.relay) {
         (wire::RelayState::Registered, Some(registration)) => RuntimeRelay::Registered(registration.clone()),
         (wire::RelayState::Registered | wire::RelayState::Connecting, _) => RuntimeRelay::Connecting,
@@ -116,7 +115,12 @@ impl PairingManager {
     /// Read and apply the runtime's current machine host status. Blocking IPC.
     pub(crate) fn reconcile_machine(self: &Arc<Self>, runtime: &Arc<Desktop>) {
         match runtime.machine_host_status() {
-            Ok(status) => self.follow_machine(runtime, status),
+            Ok(status) => {
+                if crate::phone::registry::has_paired_phone().unwrap_or(false) {
+                    self.account.sync_runtime_copy();
+                }
+                self.follow_machine(runtime, status);
+            }
             Err(error) => log::debug!("machine host status unavailable: {error:#}"),
         }
     }
@@ -140,14 +144,19 @@ impl PairingManager {
             return;
         }
         let owns = status.as_ref().is_some_and(Status::runtime_owns_direct);
-        let needs_key = status.as_ref().is_some_and(|status| status.enabled && status.host_key == HostKeyState::Needed);
-        let signed_out = status.as_ref().is_some_and(|status| status.enabled && status.relay_state == wire::RelayState::SignedOut);
-        let relay = {
+        let needs_key = status.as_ref().is_some_and(|status| {
+            status.host_key == HostKeyState::Needed
+                && (status.hosting() || crate::phone::registry::has_paired_phone().unwrap_or(false))
+        });
+        let signed_out = status.as_ref().is_some_and(|status| status.hosting() && status.relay_state == wire::RelayState::SignedOut);
+        let (relay, stopped_phone_hosting) = {
             let mut side = self.machine.lock().unwrap();
             let before = side.runtime_relay();
+            let stopped = status.as_ref().is_some_and(|status| !status.phones.hosting)
+                && side.status.as_ref().is_some_and(|status| status.phones.hosting);
             side.status = status;
             let after = side.runtime_relay();
-            (before != after).then_some(after)
+            ((before != after).then_some(after), stopped)
         };
         if let Some(relay) = &relay {
             // The window's relay supervisor picks again: its own
@@ -161,8 +170,13 @@ impl PairingManager {
         }
         // The runtime found no session to register with while this window
         // is signed in: give it this one (an app updated with the switch on).
-        if signed_out && self.account.current_scope().is_some() {
+        if stopped_phone_hosting || (signed_out && self.account.current_scope().is_some()) {
             self.account.sync_runtime_copy();
+        }
+        if needs_key {
+            if let Err(error) = self.adopt_key(runtime) {
+                log::warn!("could not give the runtime this Mac's host key: {error:#}");
+            }
         }
         // The runtime passes phones' relay connections to the phone route
         // while it is registered, whoever holds the direct port.
@@ -173,11 +187,6 @@ impl PairingManager {
             }
         }
         if owns {
-            if needs_key {
-                if let Err(error) = self.adopt_key(runtime) {
-                    log::warn!("could not give the runtime this Mac's host key: {error:#}");
-                }
-            }
             self.release_direct_port();
             if self.inner.lock().unwrap().direct_wanted {
                 if let Err(error) = self.ensure_phone_route(runtime, true) {
@@ -215,6 +224,18 @@ impl PairingManager {
         Ok(())
     }
 
+    /// Set up the background path before acknowledging a newly paired
+    /// phone so the window can be closed as soon as it connects.
+    pub(super) fn keep_new_phone_available(&self) {
+        let Some(runtime) = self.runtime.lock().unwrap().clone() else { return };
+        if runtime.machine_host_status().ok().flatten().is_some_and(|status| status.host_key == HostKeyState::Needed) {
+            if let Err(error) = self.adopt_key(&runtime) {
+                log::warn!("could not give the runtime this Mac's phone pairing key: {error:#}");
+            }
+        }
+        self.account.sync_runtime_copy();
+    }
+
     /// Direct connections while the runtime owns the port: its phone route.
     pub(super) fn take_phones_from_runtime(self: &Arc<Self>) -> std::io::Result<()> {
         let runtime = self.runtime.lock().unwrap().clone().ok_or_else(|| std::io::Error::other("no runtime is attached"))?;
@@ -222,7 +243,7 @@ impl PairingManager {
     }
 
     /// Close the window's own listener on the port and the phones on it.
-    fn release_direct_port(&self) {
+    pub(super) fn release_direct_port(&self) {
         let accept = {
             let mut inner = self.inner.lock().unwrap();
             if inner.direct_via_runtime {

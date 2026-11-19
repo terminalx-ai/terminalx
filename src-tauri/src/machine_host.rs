@@ -13,6 +13,8 @@ pub(crate) mod direct;
 pub(crate) mod key;
 pub(crate) mod pairing;
 #[cfg(unix)]
+mod phone_revocations;
+#[cfg(unix)]
 pub(crate) mod phones;
 pub mod registry;
 #[cfg(all(test, feature = "desktop"))]
@@ -142,6 +144,7 @@ struct State {
     allowed: bool,
     /// Allowed, and data privacy mode is off.
     enabled: bool,
+    desktop_phones: bool,
     keep_awake: bool,
     keypair: Option<HostKeypair>,
     key_error: Option<String>,
@@ -176,6 +179,12 @@ struct State {
     /// account binds this machine (`409 host_binding_owner_conflict`), and
     /// when. Asked again after [`RELAY_REFUSED_RETRY`].
     relay_refused: Option<(String, Instant)>,
+}
+
+impl State {
+    fn hosting(&self) -> bool {
+        self.enabled || self.desktop_phones
+    }
 }
 
 /// How long a machine another account binds waits before asking again.
@@ -253,6 +262,7 @@ struct AccountRelay {
     link: Arc<crate::remote::account_link::AccountLink>,
     /// Wakes the supervisor on each change of the registration.
     watch: tokio::task::JoinHandle<()>,
+    directory: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(unix)]
@@ -385,6 +395,13 @@ impl MachineHost {
                 }
             }) {
                 Ok(phones) => {
+                    if host.keys.needs_window() {
+                        tokio::spawn(phone_revocations::watch(
+                            Arc::downgrade(&host),
+                            phones.watch_account_revocations(),
+                            Arc::new(crate::machine_account::Api::new(&crate::machine_account::api_base_url())),
+                        ));
+                    }
                     let _ = host.phones.set(phones);
                 }
                 Err(error) => log::warn!("machine host: phones cannot be served here: {error:#}"),
@@ -493,7 +510,7 @@ impl MachineHost {
     /// service), or a computer is still connected.
     pub fn keeps_runtime(&self) -> bool {
         let state = self.state.lock().unwrap();
-        state.enabled || state.connections.values().any(|connections| !connections.is_empty())
+        state.hosting() || state.connections.values().any(|connections| !connections.is_empty())
     }
 
     pub fn enabled(&self) -> bool {
@@ -566,14 +583,14 @@ impl MachineHost {
             // desktop-launched runtime waits for the window's.
             (None, None) => HostKeyState::Needed,
         };
-        let error = if !state.enabled {
+        let error = if !state.hosting() {
             None
         } else {
             state.key_error.clone().or_else(|| state.bind_error.clone())
         };
         // A key in error or a port it cannot bind leaves the window serving
         // phones on the port; a port still in use is the window's to give up.
-        let takes_port = state.enabled && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
+        let takes_port = state.hosting() && host_key != HostKeyState::Error && (state.bind_error.is_none() || state.port_busy);
         let (pending, code, paused_until) = state.pairing.view(now_ms());
         let phone_route = state.phone_route.as_ref().is_some_and(|route| route.attachment.valid());
         let (relay_state, relay) = self.relay_view(state);
@@ -589,7 +606,7 @@ impl MachineHost {
             pending,
             code,
             paused_until,
-            phones: wire::PhoneStatus { window_open: phone_route || self.window_available(), ..self.phone_status() },
+            phones: wire::PhoneStatus { hosting: state.desktop_phones, window_open: phone_route || self.window_available(), ..self.phone_status() },
             relay_state,
             relay,
         }
@@ -614,7 +631,7 @@ impl MachineHost {
             }
             return (unregistered_relay_state(relay.link.ended(), &relay.host.status().borrow()), None);
         }
-        if !state.enabled || !self.account_relay_allowed {
+        if !state.hosting() || !self.account_relay_allowed {
             return (wire::RelayState::Off, None);
         }
         if state.relay_superseded.is_some() {
@@ -640,7 +657,7 @@ impl MachineHost {
     #[cfg(unix)]
     pub(crate) fn phone_admission(&self) -> Option<PhoneAdmission> {
         let state = self.state.lock().unwrap();
-        if !state.enabled || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) { return None; }
+        if !state.hosting() || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) { return None; }
         let phones = self.phones.get()?.clone();
         let stopped = phones.stopped();
         let epoch = *stopped.borrow();
@@ -685,25 +702,39 @@ impl MachineHost {
     /// with the switch.
     async fn reconcile(self: Arc<Self>, read: bool) {
         let settings = if read { tokio::task::spawn_blocking(crate::store::settings::load).await.ok() } else { None };
-        let was = {
+        #[cfg(unix)]
+        let desktop_phones = if self.phones.get().is_some() && self.keys.needs_window() {
+            match tokio::task::spawn_blocking(crate::phone::registry::has_paired_phone).await {
+                Ok(Ok(paired)) => paired,
+                _ => false,
+            }
+        } else { false };
+        #[cfg(not(unix))]
+        let desktop_phones = false;
+        let (was_hosting, was_enabled, hosting, enabled) = {
             let mut state = self.state.lock().unwrap();
             if let Some(settings) = &settings {
                 state.allowed = settings.machines.allow_operating;
                 state.keep_awake = settings.pairing.keep_awake;
             }
-            let was = state.enabled;
-            state.enabled = state.allowed && !crate::data_privacy::enabled();
-            let enabled = state.enabled;
+            let was = (state.hosting(), state.enabled);
+            let network = !crate::data_privacy::enabled();
+            state.enabled = state.allowed && network;
             if state.phone_route.as_ref().is_some_and(|route| !route.attachment.valid()) {
                 state.phone_route = None;
             }
+            // Leave a first pairing on the window's active routes. Moving
+            // them before the phone installs its resume token can strand it.
+            state.desktop_phones = desktop_phones && network
+                && (was.0 || (state.phone_route.is_none() && !self.window_available()));
             // A code or a request that ran out leaves the status at once.
             state.pairing.tick(now_ms());
-            (was, enabled)
+            (was.0, was.1, state.hosting(), state.enabled)
         };
-        let (was, enabled) = was;
-        if was && !enabled {
+        if was_hosting && !hosting {
             self.stop_serving();
+        } else if was_enabled && !enabled {
+            Self::stop_computers(&mut self.state.lock().unwrap(), self.activity.clone());
         }
         #[cfg(unix)]
         if let Some(phones) = self.phones.get().cloned() {
@@ -717,7 +748,7 @@ impl MachineHost {
             })
             .await;
         }
-        if enabled {
+        if hosting {
             if let Err(error) = self.clone().serve().await {
                 let busy = error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AddrInUse));
                 let mut state = self.state.lock().unwrap();
@@ -725,7 +756,7 @@ impl MachineHost {
                 state.port_busy = busy;
             }
         }
-        self.clone().reconcile_relay(read).await;
+        self.clone().reconcile_relay(read || was_hosting != hosting).await;
         self.hold_awake();
         self.publish();
     }
@@ -740,7 +771,7 @@ impl MachineHost {
         }
         let (enabled, secret) = {
             let state = self.state.lock().unwrap();
-            (state.enabled, state.keypair.as_ref().map(|keypair| *keypair.secret()))
+            (state.hosting(), state.keypair.as_ref().map(|keypair| *keypair.secret()))
         };
         let rpc = match &*self.rpc.lock().unwrap() {
             Rpc::Ready(rpc) => Some(rpc.clone()),
@@ -813,12 +844,25 @@ impl MachineHost {
 
     /// Register with the relay as `secret`'s host, serving `rpc`.
     fn start_relay(self: &Arc<Self>, secret: [u8; 32], rpc: Arc<WorkspaceRpc>) {
-        let link = Arc::new(crate::remote::account_link::AccountLink::new(self.data_dir.clone(), secret, self.account_window()));
+        let window = self.account_window();
+        #[cfg(unix)]
+        let publish_directory = std::env::var("TERMINALX_LOCAL_DESKTOP").as_deref() != Ok("1") && self.phones.get().is_some();
+        #[cfg(not(unix))]
+        let publish_directory = false;
+        let link = Arc::new(crate::remote::account_link::AccountLink::new(self.data_dir.clone(), secret, window));
         let host = crate::remote::host::RelayHost::new(link.clone(), rpc, None);
         // Before it registers, so no connection is answered without them.
         host.set_routes(self.clone());
         let sink = self.sink.clone();
-        host.on_pairing_hint(Arc::new(move || sink.emit(wire::RELAY_HINT_EVENT, &json!({}))));
+        #[cfg(unix)]
+        let weak = Arc::downgrade(self);
+        host.on_pairing_hint(Arc::new(move || {
+            #[cfg(unix)]
+            if let Some(phones) = weak.upgrade().and_then(|machine| machine.phones.get().cloned()) {
+                phones.account_revocation_hint();
+            }
+            sink.emit(wire::RELAY_HINT_EVENT, &json!({}));
+        }));
         self.use_relay(&host);
         let mut status = host.status();
         let weak = Arc::downgrade(self);
@@ -831,8 +875,11 @@ impl MachineHost {
                 machine.wake.notify_one();
             }
         });
+        let directory = publish_directory.then(|| tokio::spawn(crate::machine_account::directory::publish(
+            self.data_dir.clone(), secret, link.clone(), host.clone(),
+        )));
         tokio::spawn(host.clone().run());
-        *self.account_relay.lock().unwrap() = Some(AccountRelay { host, link, watch });
+        *self.account_relay.lock().unwrap() = Some(AccountRelay { host, link, watch, directory });
         log::info!("machine host: registering with the relay for the signed-in account");
     }
 
@@ -842,6 +889,9 @@ impl MachineHost {
         let Some(relay) = self.account_relay.lock().unwrap().take() else { return };
         relay.watch.abort();
         relay.host.stop();
+        if let Some(directory) = relay.directory {
+            directory.abort();
+        }
         *self.relay.lock().unwrap() = None;
         log::info!("machine host: no relay registration ({why})");
     }
@@ -928,16 +978,7 @@ impl MachineHost {
             listening.stop();
         }
         state.bind_error = None;
-        state.pairing.end(wire::REFUSED_CODE_INACTIVE);
-        let labels = std::mem::take(&mut state.labels);
-        for (computer_id, connections) in state.connections.drain() {
-            for tracked in connections {
-                let _ = tracked.cancel.send(());
-            }
-            let label = labels.get(&computer_id).cloned().unwrap_or_default();
-            let log = self.activity.clone();
-            Self::off_task(move || log.record(activity::Entry::new(activity::Kind::Disconnected, Some((&computer_id, &label)), None)));
-        }
+        Self::stop_computers(&mut state, self.activity.clone());
         // A connection on the port keeps the window from binding it again.
         for (_, cancel) in state.phones.drain() {
             let _ = cancel.send(());
@@ -949,7 +990,20 @@ impl MachineHost {
         if let Some(phones) = self.phones.get().cloned() {
             Self::off_task(move || phones.stop());
         }
-        log::info!("machine host: off; no listener, every computer disconnected");
+        log::info!("machine host: off; listener and connections closed");
+    }
+
+    fn stop_computers(state: &mut State, activity: activity::Log) {
+        state.pairing.end(wire::REFUSED_CODE_INACTIVE);
+        let labels = std::mem::take(&mut state.labels);
+        for (computer_id, connections) in state.connections.drain() {
+            for tracked in connections {
+                let _ = tracked.cancel.send(());
+            }
+            let label = labels.get(&computer_id).cloned().unwrap_or_default();
+            let log = activity.clone();
+            Self::off_task(move || log.record(activity::Entry::new(activity::Kind::Disconnected, Some((&computer_id, &label)), None)));
+        }
     }
 
     async fn serve(self: Arc<Self>) -> Result<()> {
@@ -1152,7 +1206,7 @@ impl MachineHost {
     pub(crate) fn track_phone(&self, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
-        state.enabled.then(|| {
+        state.hosting().then(|| {
             state.phones.insert(id, cancel);
             id
         })
@@ -1539,17 +1593,20 @@ impl MachineHost {
     #[cfg(unix)]
     fn phone_code(&self) -> Result<Value, ControlError> {
         let phones = self.served_phones()?.clone();
-        if self.phone_route().is_some() {
-            return Err(window_takes_phones("Pair the phone in TerminalX: Settings → Devices."));
-        }
-        let (keypair, port) = {
+        let (keypair, port, epoch) = {
             let state = self.state.lock().unwrap();
-            (state.keypair.clone(), state.listening.as_ref().map(|listening| listening.address.port()))
+            if self.window_available() || state.phone_route.as_ref().is_some_and(|route| route.attachment.valid()) {
+                return Err(window_takes_phones("Pair the phone in TerminalX: Settings → Devices."));
+            }
+            if !state.hosting() {
+                return Err(ControlError::new("not_enabled", "Phone hosting is off.", None::<String>));
+            }
+            (state.keypair.clone(), state.listening.as_ref().map(|listener| listener.address.port()), *phones.stopped().borrow())
         };
-        let (Some(keypair), Some(port)) = (keypair, port) else {
-            return Err(ControlError::new("not_enabled", "This machine is not reachable yet: turn on \"Let other computers operate this machine\" and wait for it to listen.", None::<String>));
+        let Some(keypair) = keypair else {
+            return Err(ControlError::new("not_enabled", "The machine's host key is not ready yet.", None::<String>));
         };
-        phones.create_code(&keypair, port).map(|created| serde_json::to_value(created).expect("a code serialises"))
+        phones.create_code(&keypair, port, epoch).map(|created| serde_json::to_value(created).expect("a code serialises"))
     }
 
     pub fn execute(&self, command: &str, params: Value) -> Result<Value, ControlError> {
@@ -1567,6 +1624,7 @@ impl MachineHost {
                 let mut state = self.state.lock().unwrap();
                 state.key_error = None;
                 state.keypair = Some(keypair);
+                self.settings_changed.notify_one();
                 Ok(json!({ "adopted": true }))
             }
             wire::PHONE_ROUTE => {
@@ -1726,14 +1784,14 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         // A window registered after this point invalidates the entire runtime
         // connection, including a phone still in its handshake or approval.
         let state = self.state.lock().unwrap();
+        if !state.hosting() { return false; }
         let route = state.phone_route.as_ref().filter(|route| route.attachment.valid()).map(|route| route.socket.clone());
         if route.is_none() {
             #[cfg(unix)]
             {
-                if !state.enabled { return false; }
                 let Some(phones) = self.phones.get().cloned() else { return false };
                 let Some(keypair) = state.keypair.clone() else { return false };
-                let port = state.listening.as_ref().map(|listener| listener.address.port()).unwrap_or(self.port);
+                let port = state.listening.as_ref().map(|listener| listener.address.port());
                 let mut stopped = phones.stopped();
                 let epoch = *stopped.borrow();
                 drop(state);

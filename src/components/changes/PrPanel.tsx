@@ -21,7 +21,8 @@ import { getMergedCleanup, holdMergedWorkspace, LOCAL_HOST, mergedCleanupOn, req
 import { noteMerge } from "@/lib/mergeMethods";
 import { useSessionStore } from "@/lib/sessions";
 import { pipelineSettings } from "@/lib/issuePipeline";
-import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
+import { openWorkspaceDelete } from "@/lib/dialogs";
+import { canDeleteMergedWorkspace, offersWorkspaceDelete, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { Landed, WorkspaceDisposition, WorkStatus } from "@/types/session";
 import { Deployments, PrChecks, webUrl } from "./PrChecks";
 import { actionsRuns, checkCounts, isFailingCheck, runSignature, withPendingChecks, type PendingCheckRun } from "@/lib/checks";
@@ -96,6 +97,7 @@ export function PrPanel({
   busy,
   onSettle,
   workspace,
+  machineWorkspace,
   inline = false,
   held = false,
   selectedPr,
@@ -117,6 +119,7 @@ export function PrPanel({
   onSettle?: () => void;
   /** A managed workspace that can use the guarded workspace cleanup flow. */
   workspace?: WorkspaceCleanup;
+  machineWorkspace?: RemovableWorkspace;
   /** A section of the Branch tab, scrolled with it, rather than a panel of its own. */
   inline?: boolean;
   /**
@@ -177,7 +180,9 @@ export function PrPanel({
   const store = useSessionStore();
   const project = store.projects.find((entry) => entry.path === store.sessions.find((entry) => entry.id === sessionId)?.projectPath);
   const shortcutMethod = project ? pipelineSettings(project).mergeMethod : null;
-  const workspaceKey = workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
+  const workspaceKey = machineWorkspace
+    ? `${machineWorkspace.host.key}\0${machineWorkspace.path}\0${selection}`
+    : workspace ? `${workspace.projectPath}\0${cwd}\0${branch ?? ""}` : null;
 
   useEffect(() => { setLoginSource(null); }, [source]);
   // A pull request linked or unlinked from the session's menu shows at once.
@@ -240,6 +245,12 @@ export function PrPanel({
         setCheckedWorkspace(workspaceCheck);
         setError(pullRequests.error ?? actionError.current);
         setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
+        // The machine's cleanup check can finish independently of PR loading and actions.
+        if (machineWorkspace && workspaceKey && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
+          void machineWorkspace.host.disposition().then((disposition) => {
+            if (!cancelled) setCheckedWorkspace({ key: workspaceKey, disposition });
+          }).catch(() => {});
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -378,7 +389,7 @@ export function PrPanel({
   /** Only a link made with "Link pull request…" (PRO-294) is undone; a PR the session opened stays. */
   const unlink = (row: SessionPr): (() => void) | undefined => {
     const association = row.association;
-    if (selectedPr || !sessionId || !association?.linked) return undefined;
+    if (source.cloud || selectedPr || !sessionId || !association?.linked) return undefined;
     return () => void act("unlink", async () => {
       await unlinkPr(sessionId, association.url);
       return `Unlinked #${association.number}. Its checks and review are no longer shown here.`;
@@ -446,9 +457,13 @@ export function PrPanel({
   const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
-  const canDelete = !!workspaceKey && checkedWorkspace?.key === workspaceKey
+  const disposition = !!workspaceKey && checkedWorkspace?.key === workspaceKey
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
-    && canDeleteMergedWorkspace(checkedWorkspace.disposition);
+    ? checkedWorkspace.disposition : null;
+  const canDelete = canDeleteMergedWorkspace(disposition);
+  const deleteOnMachine = machineWorkspace && fresh && open.length === 0 && offersWorkspaceDelete(
+    disposition, busy || machineWorkspace.host.turnRunning(disposition?.sessionIds ?? []),
+  ) ? () => openWorkspaceDelete(machineWorkspace.projectPath, machineWorkspace.path, machineWorkspace.name, machineWorkspace.host) : undefined;
 
   return (
     <div className={cn("flex flex-col", inline ? "gap-2" : "h-full min-h-0 overflow-y-auto scrollbar-thin")}>
@@ -510,8 +525,12 @@ export function PrPanel({
           onFix={onFixErrors && pr.state === "OPEN" && ownWork(row) ? () => { void onFixErrors(pr).catch(() => {}); } : undefined} />;
         const isMerged = pr.state === "MERGED";
         // Once merged: what to do with this session next, said under WHAT NEXT (design 05.12).
-        const whatNext = isMerged && inline && row.current && cwd && !source.cloud
-          ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+        const whatNext = isMerged && inline && row.current
+          ? deleteOnMachine && pr.url === latestCurrent?.url
+            ? <Button size="xs" variant="outline" className="self-start" onClick={deleteOnMachine}>Delete workspace</Button>
+            : cwd && !source.cloud
+              ? <MergedWorkspaceStep cwd={cwd} embedded onArchive={canDelete && merged ? workspace?.onDelete : undefined} />
+              : undefined
           : undefined;
         // This owns the description as well as its editor, including in a PR tab.
         const conversation = <PrConversation key={`${selection}:${row.identity}`} source={source} row={row} active={active} refresh={conversationRefresh}
@@ -523,7 +542,7 @@ export function PrPanel({
             setRows((previous) => previous.map((entry) => entry.identity === row.identity && entry.pr && (entry.pr.title !== title || entry.pr.body !== body) ? { ...entry, pr: { ...entry.pr, title, body } } : entry));
           }} />;
         const onUnlink = unlink(row);
-        if (inline) return <div key={row.identity}><InlinePr onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks}
+        if (inline) return <div key={row.identity}><InlinePr linked={row.association?.linked} onUnlink={onUnlink} unlinkDisabled={!!working} reviews={reviews} onOpen={openInTab ? () => openInTab(row) : undefined} pr={pr} ready={ready} held={held} checks={checks}
           commits={row.current && status?.branch === pr.head ? status.aheadOfBase : null} summary={summaries[row.identity]} actions={pr.state === "OPEN" && source.canWrite && (pr.isDraft || canQueue(pr) || (ready.ok && !pr.mergeQueueEnabled)) && (
           <>
             {pr.isDraft && (
@@ -744,7 +763,7 @@ function reviewLine(reviewers: PrReviewer[]): string | null {
  * state pill, title and number; its branch into the base, commits and size;
  * who reviews it and its open threads.
  */
-function PrHeader({ pr, commits, summary, onOpen, onUnlink, unlinkDisabled }: { pr: PullRequest; commits?: number | null; summary?: PrSummary; onOpen?: () => void; onUnlink?: () => void; unlinkDisabled: boolean }) {
+function PrHeader({ pr, commits, summary, linked, onOpen, onUnlink, unlinkDisabled }: { pr: PullRequest; commits?: number | null; summary?: PrSummary; linked?: boolean; onOpen?: () => void; onUnlink?: () => void; unlinkDisabled: boolean }) {
   const review = summary ? reviewLine(summary.reviewers) : null;
   const threads = summary?.unresolvedThreads ?? 0;
   return (
@@ -753,7 +772,7 @@ function PrHeader({ pr, commits, summary, onOpen, onUnlink, unlinkDisabled }: { 
         <StatePill pr={pr} />
         <button type="button" onClick={() => void openUrl(pr.url)} className="min-w-0 truncate text-left text-[13px] font-medium text-foreground hover:underline" title={pr.title}>{pr.title}</button>
         <span className="shrink-0 font-mono text-xs text-faint">#{pr.number}</span>
-        {onUnlink && <LinkedTag />}
+        {linked && <LinkedTag />}
         <span className="ml-auto flex shrink-0 items-center">
           {onOpen && <WithTooltip label={`Open PR #${pr.number} in centre tab`}><Button size="icon-xs" variant="ghost" aria-label={`Open PR #${pr.number} in centre tab`} onClick={onOpen}><Maximize2 /></Button></WithTooltip>}
           {onUnlink && <WithTooltip label={`Unlink #${pr.number}`}><Button size="icon-xs" variant="ghost" aria-label={`Unlink #${pr.number}`} disabled={unlinkDisabled} onClick={onUnlink}><Unplug /></Button></WithTooltip>}
@@ -796,11 +815,11 @@ function StatusCard({ pr, ready, actions }: { pr: PullRequest; ready: ReturnType
   );
 }
 
-function InlinePr({ pr, ready, held, actions, checks, reviews, onOpen, onUnlink, unlinkDisabled = false, commits, summary }: { onOpen?: () => void; onUnlink?: () => void; unlinkDisabled?: boolean; pr: PullRequest; ready: ReturnType<typeof mergeReadiness>; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode; commits?: number | null; summary?: PrSummary }) {
+function InlinePr({ pr, ready, held, actions, checks, reviews, linked, onOpen, onUnlink, unlinkDisabled = false, commits, summary }: { linked?: boolean; onOpen?: () => void; onUnlink?: () => void; unlinkDisabled?: boolean; pr: PullRequest; ready: ReturnType<typeof mergeReadiness>; held: boolean; actions: ReactNode; checks: ReactNode; reviews: ReactNode; commits?: number | null; summary?: PrSummary }) {
   const failing = pr.checks.some(isFailingCheck);
   return (
     <div className="flex min-w-0 flex-col" data-testid="branch-pr">
-      <PrHeader pr={pr} commits={commits} summary={summary} onOpen={onOpen} onUnlink={onUnlink} unlinkDisabled={unlinkDisabled} />
+      <PrHeader pr={pr} commits={commits} summary={summary} linked={linked} onOpen={onOpen} onUnlink={onUnlink} unlinkDisabled={unlinkDisabled} />
       {/* With a check failing, the red band under it is the status; the card stays only for what can be done besides (Mark ready). */}
       {pr.state === "OPEN" && !held && (!failing || actions) && <StatusCard pr={pr} ready={ready} actions={actions || undefined} />}
       {pr.state === "OPEN" && held && pr.mergeQueueEntry && <p className="px-3 pt-2 text-xs text-muted-foreground">{ready.label}</p>}

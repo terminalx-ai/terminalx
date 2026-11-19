@@ -70,10 +70,20 @@ export function worktreeInProject(projectPath: string | null | undefined, cwd: s
 export function sessionRepository(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
   if (session?.fileRepository !== undefined) return session.fileRepository;
   if (!repositories) return null;
+  const checkout = sessionCheckoutRepository(repositories, project, session);
   const wanted = sessionFilePath(project, session);
-  const containing = containingRepository(repositories, wanted);
-  if (wanted === null || wanted.startsWith("/")) return containing;
-  return containing ?? repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
+  if (checkout || wanted === null || (wanted.startsWith("/") && !session?.worktreeName)) return checkout;
+  return repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
+}
+
+/** The session's checkout when discovery can identify it. Git actions targeting the session need this. */
+function sessionCheckoutRepository(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
+  if (!session) return null;
+  if (session.fileRepository !== undefined) return session.fileRepository;
+  if (!repositories) return null;
+  const path = sessionFilePath(project, session);
+  const checkout = containingRepository(repositories, path === "" ? "." : path);
+  return checkout === "." && session.worktreeName ? null : checkout;
 }
 
 function sessionFilePath(project: MachineProject | null, session: RuntimeSession | null): string | null {
@@ -189,7 +199,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const project = entry?.projects.find((candidate) => candidate.projectId === projectId) ?? null;
   const runtimeSession = entry?.sessions.find((candidate) => candidate.id === runtimeSessionId) ?? null;
   const ownSession = runtimeSession && (!runtimeSession.projectId || runtimeSession.projectId === projectId) ? runtimeSession : null;
-  const ownSessionId = ownSession?.id;
+  const hasSession = ownSession !== null;
   const preferredRepo = ownSession?.fileRepository;
 
   // Agent tabs: the shared store (no cache or checkpoints for a machine), then the machine's own list on each connect.
@@ -231,14 +241,14 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   // Git: the project's repositories; the session's worktree first.
   const [picked, setPicked] = useState<string | null>(null);
   const discoverRepositories = useMemo(() => {
-    if (!generation || !projectClient || !ownSessionId) return undefined;
+    if (!generation || !projectClient || !hasSession) return undefined;
     // Changes and Files share discovery for this connection, independent of the file source's root.
     let request: Promise<RemoteRepository[]> | undefined;
     return () => request ??= listRepositories(projectClient, preferredRepo ?? undefined).catch((error: unknown) => {
       request = undefined;
       throw error;
     });
-  }, [generation, projectClient, ownSessionId, preferredRepo]);
+  }, [generation, projectClient, hasSession, preferredRepo]);
   const [discovery, setDiscovery] = useState<{ load: NonNullable<typeof discoverRepositories>; repositories: RemoteRepository[] } | null>(null);
   const repositories = discovery?.load === discoverRepositories ? discovery?.repositories ?? null : null;
   useEffect(() => {
@@ -251,12 +261,15 @@ export function useMachineSession(key: string): CloudSessionModel | null {
       cancelled = true;
     };
   }, [discoverRepositories]);
+  const checkoutRepository = sessionCheckoutRepository(repositories, project, ownSession);
   const defaultRepository = sessionRepository(repositories, project, ownSession);
   const repository = picked && repositories?.some((repo) => repo.repo === picked) ? picked : defaultRepository;
-  const gitSource = useMemo(
-    () => (connected && projectClient && repository ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repository), canWrite: manage, author: desktopGitIdentity }) : undefined),
-    [connected, projectClient, repository, projectKey, manage],
+  const gitSourceFor = useCallback(
+    (repo: string | null) => connected && projectClient && repo ? cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit(projectClient, repo), canWrite: manage, author: desktopGitIdentity }) : undefined,
+    [connected, projectClient, projectKey, manage],
   );
+  const checkoutGitSource = useMemo(() => gitSourceFor(checkoutRepository), [gitSourceFor, checkoutRepository]);
+  const gitSource = useMemo(() => repository === checkoutRepository ? checkoutGitSource : gitSourceFor(repository), [repository, checkoutRepository, checkoutGitSource, gitSourceFor]);
 
   // Files use the same checkout as the session's default Changes source.
   // An absolute base (a worktree outside the project) reads `machine://m:p//abs/path`; a relative one never has an empty part.
@@ -447,7 +460,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState },
+    machine: { machineId, projectId, record: machine, name, state: machineState, checkoutGitSource },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,

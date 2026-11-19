@@ -1,7 +1,9 @@
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Button } from "./button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./dialog";
-import { answerConfirm, usePendingConfirm } from "@/lib/confirm";
+import { answerConfirm, chooseInApp, usePendingConfirm, type ConfirmAnswer, type ConfirmRequest } from "@/lib/confirm";
 import { cn } from "@/lib/cn";
 
 /**
@@ -58,10 +60,65 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
 /**
  * Draws the question `confirmInApp` is waiting on. Mounted once per window.
  *
- * Quit is asked natively even with a window; tray quit may have no window (PRO-455). See docs/CONFIRMATIONS.md.
  * Cloud control's agreement is a system alert on purpose: an agent driving this web view must not be able to give it.
  */
 export function ConfirmDialogHost() {
+  useEffect(() => {
+    if (!isTauri()) return;
+    const window = getCurrentWebviewWindow();
+    if (window.label !== "main") return;
+    let stopped = false;
+    let active: { id: string; controller: AbortController } | undefined;
+    const unlisten = window.listen<[string, ConfirmRequest | null]>("quit-prompt", async ({ payload: [id, request] }) => {
+      if (stopped) return;
+      if (!request) {
+        if (active?.id === id) active.controller.abort();
+        return;
+      }
+      if (active?.id === id) return;
+      active?.controller.abort();
+      const controller = new AbortController();
+      active = { id, controller };
+      const { signal } = controller;
+      const send = (reply: "opened" | "heartbeat" | ConfirmAnswer) =>
+        invoke<boolean>("reply_to_quit_prompt", { id, reply });
+
+      try {
+        if (!await send("opened") || signal.aborted) return;
+        // Keep one heartbeat in flight. Stop renewing as soon as a choice is made.
+        let renewing = false;
+        const heartbeat = setInterval(async () => {
+          if (renewing || signal.aborted) return;
+          renewing = true;
+          try {
+            if (!await send("heartbeat")) controller.abort();
+          } catch {
+            // The next heartbeat can renew the wait if IPC recovers.
+          } finally {
+            renewing = false;
+          }
+        }, 2_000);
+        const answer = await chooseInApp(request, signal).finally(() => clearInterval(heartbeat));
+        if (signal.aborted) return;
+        try {
+          await send(answer);
+        } catch {
+          // The ID makes a retry safe if Rust already received the answer.
+          if (!signal.aborted) await send(answer);
+        }
+      } catch (error) {
+        console.error("Quit confirmation failed", error);
+      } finally {
+        if (active?.controller === controller) active = undefined;
+      }
+    }).catch((error) => console.error("Quit confirmation listener failed", error));
+    return () => {
+      stopped = true;
+      active?.controller.abort();
+      void unlisten.then((stop) => stop?.());
+    };
+  }, []);
+
   const pending = usePendingConfirm();
   if (!pending) return null;
   const { id, request } = pending;

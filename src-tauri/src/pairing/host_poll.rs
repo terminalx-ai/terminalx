@@ -336,14 +336,22 @@ impl PairingManager {
                 log::warn!("fence revoked mobile grant: {error:#}");
             }
         }
-        if let Ok(Some(device)) = self.registry.revoke_automatic_grant(
+        match self.registry.revoke_automatic_grant(
             &context.user_id,
             &revocation.client_installation_id,
             &revocation.grant_request_id,
         ) {
-            let _ = self.secrets.delete_device_token(&device.id);
-            self.cancel_connections(&device.id);
-            relay.revoke(device.id);
+            Ok(Some(device)) => {
+                self.account.sync_runtime_copy();
+                let _ = self.secrets.delete_device_token(&device.id);
+                self.cancel_connections(&device.id);
+                relay.revoke(device.id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("save revoked mobile grant before acknowledging: {error:#}");
+                return;
+            }
         }
         let base = base.to_string();
         let context = context.clone();

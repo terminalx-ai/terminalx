@@ -474,7 +474,7 @@ fn create_session_workspace(req: NewSession, name: Option<&str>, account: Option
                 None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
             }
         };
-        entry.set_checkout_root(Some(&wt.path));
+        entry.bind_checkout_root(&wt.path);
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
         entry.branch = Some(wt.branch);
@@ -524,7 +524,7 @@ fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str)
         return Ok(false);
     }
     entry.cwd = cwd.to_string_lossy().into_owned();
-    entry.set_checkout_root(Some(&top.to_string_lossy()));
+    entry.bind_checkout_root(&top.to_string_lossy());
     entry.branch = git::current_branch(&cwd);
     if top != project {
         entry.worktree_name = top.file_name().map(|name| name.to_string_lossy().into_owned());
@@ -779,7 +779,11 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
         session.kind = SessionKind::Project;
         session.project_path = project.clone();
         session.cwd = workspace.cwd.clone();
-        session.set_checkout_root(workspace.checkout_root());
+        if let Some(root) = workspace.checkout_root() {
+            session.bind_checkout_root(root);
+        } else {
+            session.set_checkout_root(None);
+        }
         session.branch = workspace.branch.clone();
         session.worktree_name = workspace.worktree_name.clone();
         session.worktree_removed = false;
@@ -1289,6 +1293,9 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     let before = crate::landed::check(&project, &target, request.fetch);
     if !permitted(&before, &request.confirmation) {
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
+    }
+    if request.archive.is_none() && target.exists() {
+        crate::archive_script::require_no_script(&project).map_err(err)?;
     }
     // From the stop to the end nothing starts in the workspace: a prompt to
     // one of its sessions is refused, and every other session's is admitted
@@ -2229,8 +2236,9 @@ mod tests {
         let terminals = Arc::new(crate::pty::Terminals::new());
         let sink: Arc<dyn EventSink> = Arc::new(sink());
         let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
-        // A caller without a runner cannot bypass a configured hook.
-        assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("archive script"));
+        // A caller without a runner cannot bypass a configured hook or stop the session.
+        let refusal = remove_workspace(&*sink, &removal, &|_| panic!("archive refusal stopped the session")).unwrap_err();
+        assert!(refusal.contains("archive script"), "{refusal}");
         removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
         let error = remove_workspace(&*sink, &removal, &|_| {}).unwrap_err();
         let failure = crate::archive_script::Failure::from_error(&error).unwrap();

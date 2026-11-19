@@ -1375,11 +1375,11 @@ async fn a_machine_session_reports_its_usage_and_continuation_on_the_machine() {
 
     // The runtime can hand off recent messages from the saved app log when
     // the provider has no complete transcript for this tab.
-    let prompt = "Check the machine's saved context.";
+    let prompt = "Review usage";
     let reply = "The machine retained this exchange.";
     let log = crate::store::log_path(&session_id, &tab_id).unwrap();
     for (seq, payload) in [
-        (1, json!({ "type": "user_message", "text": prompt })),
+        (1, json!({ "type": "user_message", "text": prompt, "images": [], "queued": false })),
         (2, json!({ "type": "assistant_text", "text": reply })),
     ] {
         let event = json!({

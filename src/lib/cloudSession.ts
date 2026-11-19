@@ -251,6 +251,8 @@ export interface MachineSessionPlace {
   /** The paired machine's record; null once it is no longer paired. */
   record: PairedMachine | null;
   name: string;
+  /** Git for the session's checkout, independent of the side panel's repository picker. */
+  checkoutGitSource: GitSource | undefined;
   /** How the machine is reached now (21.09): direct, relay, reconnecting, offline… */
   state: MachineConnectionState;
 }

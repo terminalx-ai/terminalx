@@ -1160,6 +1160,7 @@ pub fn run() {
             commands::github_head_branch_setting,
             commands::github_enable_head_branch_deletion,
             quit::set_quit_warning,
+            quit::reply_to_quit_prompt,
             commands::issues_list,
             commands::issue_pipelines_list,
             commands::issue_pipeline_start,
@@ -1250,6 +1251,11 @@ pub fn run() {
                 quit::stop_all_and_quit(app);
             }
         })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
+                quit::main_view_lost();
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(drag) = event {
                 drag_text::on_drag_drop(drag);
@@ -1280,6 +1286,7 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
                     if window.label() == "main" {
+                        quit::main_view_lost();
                         // The app goes with it: nothing may attach again.
                         state.runtime_supervisor.halt();
                         let_go_of_unresponsive_runtime(&state);
