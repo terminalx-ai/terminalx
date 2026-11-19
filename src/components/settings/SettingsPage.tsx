@@ -7,7 +7,7 @@ import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSou
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, Bot, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   storage: HardDrive,
   shortcuts: Keyboard,
   experimental: FlaskConical,
+  advanced: Wrench,
   about: Info,
 };
 

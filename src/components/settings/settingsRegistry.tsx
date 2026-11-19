@@ -39,6 +39,8 @@ export const SETTINGS_SECTIONS = {
   organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup", subtitle: "When finished workspaces are deleted, and what is left behind." },
   experimental: { title: "Experimental", group: "More", entry: "experimental.nativeCodex", subtitle: "Early features. They may change or go away." },
+  // PRO-157, design 09.29: the executables again, for whoever looks for them among the folders and limits.
+  advanced: { title: "Advanced", group: "More", entry: "advanced.claudeExecutable", subtitle: "Executables and folders. Most people never need these." },
   about: { title: "About", group: "More", entry: "about.version", subtitle: "Version, updates and changes." },
 } as const satisfies Record<string, { title: string; group: SettingsGroup; entry: string; subtitle: string }>;
 export type SettingsSection = keyof typeof SETTINGS_SECTIONS;
@@ -76,7 +78,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns" | "localVmTasks";
+  requires?: "orchestratorRuns" | "localVmTasks" | "opencode";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -133,6 +135,18 @@ export const SETTINGS_ROWS = [
     description: "Beta gets builds earlier. Either way nothing installs without your say-so.",
     searchTerms: ["about", "updates"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#preferences.updateChannel" },
+  }),
+  defineSetting({
+    id: "advanced.claudeExecutable", section: "advanced", title: "Claude Code executable",
+    description: "Leave empty to use the one on your PATH. TerminalX checks it with --version.",
+    searchTerms: ["advanced", "claude", "executable", "binary", "path", "use system claude code"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#agents.executables" }, layout: "content",
+  }),
+  defineSetting({
+    id: "advanced.codexExecutable", section: "advanced", title: "Codex executable",
+    description: "Leave empty to use the one on your PATH. TerminalX checks it with --version.",
+    searchTerms: ["advanced", "codex", "executable", "binary", "path", "use system codex"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#agents.executables" }, layout: "content",
   }),
   defineSetting({
     id: "about.version", section: "about", title: "About TerminalX",
@@ -211,6 +225,25 @@ export const SETTINGS_ROWS = [
     description: "Install version-matched CLI and computer-use discovery guides.",
     searchTerms: ["agents", "terminalx", "agent", "skill"], scope: "user",
     storage: { kind: "file", location: "~/.claude/skills, ~/.codex/skills" }, layout: "content",
+  }),
+  defineSetting({
+    id: "agents.executable", section: "agents", title: "Executable",
+    description: "Leave empty to use the version TerminalX finds on your PATH. TerminalX checks it with --version.",
+    searchTerms: ["agents", "executable", "binary", "path", "program", "homebrew", "npm", "dev build", "which", "browse", "use system default", "version"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#agents.executables" }, layout: "content",
+  }),
+  defineSetting({
+    id: "agents.settingsFile", section: "agents", title: "Agent settings file",
+    description: "Open an agent’s own settings file in your editor: Claude Code’s settings.json, Codex’s config.toml or OpenCode’s opencode.json.",
+    searchTerms: ["agents", "settings file", "config", "settings.json", "config.toml", "opencode.json", "open in", "editor"], scope: "user",
+    storage: { kind: "file", location: "~/.claude/settings.json, ~/.codex/config.toml, ~/.config/opencode/opencode.json" }, layout: "content",
+  }),
+  defineSetting({
+    id: "agents.opencodeProviders", section: "agents", title: "OpenCode providers",
+    description: "Where OpenCode gets its models: providers with their keys, and the models the composer offers from them.",
+    searchTerms: ["opencode", "providers", "models", "api key", "openrouter", "ollama", "groq", "picker", "logs", "update"], scope: "user",
+    storage: { kind: "file", location: "~/.local/share/opencode/auth.json, ~/.config/opencode/opencode.json" }, layout: "content",
+    requires: "opencode",
   }),
   defineSetting({
     id: "agents.setup", section: "agents", title: "Installed agents",
@@ -367,6 +400,12 @@ export const SETTINGS_ROWS = [
     description: ORCHESTRATOR_RUNS_DESCRIPTION,
     searchTerms: ["experimental", "orchestrator", "orchestration", "runs", "lead", "workers", "plan"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.orchestratorRuns" },
+  }),
+  defineSetting({
+    id: "experimental.opencode", section: "experimental", title: "OpenCode",
+    description: "Offer OpenCode in Settings → Agents, with its providers and models, and in the agent and model pickers. Tabs already on OpenCode run either way.",
+    searchTerms: ["experimental", "opencode", "open code", "providers", "models", "agent"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.opencode" },
   }),
   defineSetting({
     id: "experimental.localVmTasks", section: "experimental", title: "Local VM tasks",

@@ -162,7 +162,7 @@ fn check_in(id: &str, path: Option<String>, account: Option<&std::path::Path>) -
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
         if let Ok(text) = crate::git::output_within(version, Duration::from_secs(3)) {
             // Only retain the version token, never arbitrary command output.
-            result.version = text.split_whitespace().find(|s| s.starts_with(|c: char| c.is_ascii_digit()) && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || ".-_+".contains(c))).map(str::to_owned);
+            result.version = super::executables::version_token(&text);
         }
         result.state = match id {
             "codex" => {

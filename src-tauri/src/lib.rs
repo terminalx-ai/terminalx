@@ -141,6 +141,8 @@ mod keychain;
 #[cfg(feature = "desktop")]
 mod environment_commands;
 #[cfg(feature = "desktop")]
+mod agent_config_commands;
+#[cfg(feature = "desktop")]
 mod configuration_commands;
 #[cfg(feature = "desktop")]
 mod configuration_watch;
@@ -1111,6 +1113,18 @@ pub fn run() {
             commands::set_work_status_settings,
             commands::agent_settings,
             commands::set_agent_idle_stop_minutes,
+            agent_config_commands::agent_executable,
+            agent_config_commands::set_agent_executable,
+            agent_config_commands::agent_config_file,
+            agent_config_commands::open_agent_config_file,
+            agent_config_commands::reveal_agent_path,
+            agent_config_commands::opencode_overview,
+            agent_config_commands::opencode_catalog_models,
+            agent_config_commands::opencode_connect,
+            agent_config_commands::opencode_disconnect,
+            agent_config_commands::opencode_add_model,
+            agent_config_commands::opencode_remove_model,
+            agent_config_commands::opencode_open_logs,
             commands::set_read_only_commands,
             commands::diagnostics_settings,
             commands::set_recovery_incidents,

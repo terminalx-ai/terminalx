@@ -3205,6 +3205,106 @@ export const agentSettings = {
   setIdleStopMinutes: (minutes: number) => invoke<AgentSettings>("set_agent_idle_stop_minutes", { minutes }),
 };
 
+/** The program an agent runs as (PRO-157): the one chosen in Settings, else the PATH's. */
+export interface AgentExecutable {
+  harness: string;
+  /** The path the person chose; null uses the PATH. */
+  chosen: string | null;
+  /** What a new tab runs. */
+  path: string | null;
+  /** What the PATH has, whatever was chosen. */
+  system: string | null;
+  /** `--version` of `path`, when it answered. */
+  version: string | null;
+  /** Why the chosen program cannot be used now. */
+  problem: string | null;
+}
+
+export const agentExecutables = {
+  get: (harness: string) => invoke<AgentExecutable>("agent_executable", { harness }),
+  /** Checked with `--version` first: a program that fails is refused, with why, and the old choice stays. */
+  set: (harness: string, path: string) => invoke<AgentExecutable>("set_agent_executable", { harness, path }),
+  /** Back to the one TerminalX finds on the PATH. */
+  reset: (harness: string) => invoke<AgentExecutable>("set_agent_executable", { harness, path: null }),
+  reveal: (harness: string) => invoke<void>("reveal_agent_path", { harness, what: "executable" }),
+};
+
+/** An agent's own settings file: ~/.claude/settings.json, ~/.codex/config.toml, OpenCode's opencode.json. */
+export interface AgentConfigFile {
+  path: string;
+  displayPath: string;
+  exists: boolean;
+}
+
+export const agentConfigFiles = {
+  get: (harness: string) => invoke<AgentConfigFile>("agent_config_file", { harness }),
+  /** In its default app, or one of the Open in editors; an empty file is made first when there is none. */
+  open: (harness: string, editor: "cursor" | "vscode" | "zed" | null = null) => invoke<void>("open_agent_config_file", { harness, editor }),
+  reveal: (harness: string) => invoke<void>("reveal_agent_path", { harness, what: "config" }),
+};
+
+/** A provider of OpenCode's catalogue (models.dev), plus Ollama on this Mac. */
+export interface OpenCodeCatalogProvider {
+  id: string;
+  name: string;
+  env: string[];
+  api: string | null;
+  doc: string | null;
+  modelCount: number;
+  local: boolean;
+}
+
+/** A provider OpenCode can use now. */
+export interface OpenCodeConnected {
+  id: string;
+  name: string;
+  /** "api": a key in OpenCode's auth.json; "oauth"/"wellknown": a sign-in OpenCode made; "config": in its config file. */
+  auth: "api" | "oauth" | "wellknown" | "config";
+  maskedKey: string | null;
+  baseUrl: string | null;
+  /** The models the picker offers from it. */
+  models: string[];
+  /** No list in the config file yet: OpenCode offers every model, the picker none. */
+  unlisted: boolean;
+  catalogModels: number;
+}
+
+export interface OpenCodePickerModel {
+  /** `provider/model`, as a tab stores it. */
+  id: string;
+  provider: string;
+  providerName: string;
+  model: string;
+  name: string;
+}
+
+export interface OpenCodeOverview {
+  configPath: string;
+  configExists: boolean;
+  /** Why TerminalX won't rewrite the config file now (comments, broken JSON). */
+  configProblem: string | null;
+  authPath: string;
+  logDir: string;
+  connected: OpenCodeConnected[];
+  models: OpenCodePickerModel[];
+  catalog: OpenCodeCatalogProvider[];
+  catalogProblem: string | null;
+}
+
+export type OpenCodeKeyCheck = { result: "accepted" } | { result: "notChecked"; reason: string };
+
+export const opencode = {
+  overview: (fetch = true) => invoke<OpenCodeOverview>("opencode_overview", { fetch }),
+  catalogModels: (provider: string) => invoke<{ id: string; name: string }[]>("opencode_catalog_models", { provider }),
+  /** Checked with the provider first; a refused key is an error and nothing is saved. `baseUrl` "" clears one, undefined leaves it. */
+  connect: (provider: string, key: string, baseUrl?: string) =>
+    invoke<{ overview: OpenCodeOverview; check: OpenCodeKeyCheck }>("opencode_connect", { provider, key, baseUrl: baseUrl ?? null }),
+  disconnect: (provider: string) => invoke<OpenCodeOverview>("opencode_disconnect", { provider }),
+  addModel: (provider: string, model: string) => invoke<OpenCodeOverview>("opencode_add_model", { provider, model }),
+  removeModel: (provider: string, model: string) => invoke<OpenCodeOverview>("opencode_remove_model", { provider, model }),
+  openLogs: () => invoke<void>("opencode_open_logs"),
+};
+
 /** When a finished conversation is archived (#718). */
 export interface ConversationSettings {
   /** Days a conversation may go without a message before it is archived; 0 is never. */
@@ -3234,6 +3334,8 @@ export interface ExperimentalSettings {
   orchestratorRuns?: boolean;
   /** Show Local VM tasks and chosen computers: Settings → Local VMs, a tab's computer choice, its task cards (PRO-114). */
   localVmTasks?: boolean;
+  /** Offer OpenCode: Settings → Agents with its providers and models, the agent pickers and the model picker (PRO-157). */
+  opencode?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -3243,6 +3345,7 @@ export const experimental = {
   setSessionCost: (sessionCost: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { sessionCost }),
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
+  setOpenCode: (opencode: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { opencode }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;

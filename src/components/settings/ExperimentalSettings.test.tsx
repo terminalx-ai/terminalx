@@ -7,13 +7,19 @@ const mocks = vi.hoisted(() => ({
   setNativeCodex: vi.fn(),
   setSessionCost: vi.fn(),
   setOrchestratorRuns: vi.fn(),
+  setOpenCode: vi.fn(),
+  refreshHarnesses: vi.fn(async () => {}),
+  refreshModels: vi.fn(async () => {}),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
+
+vi.mock("@/lib/sessions", () => ({ refreshHarnesses: mocks.refreshHarnesses }));
+vi.mock("@/lib/models", () => ({ refreshModels: mocks.refreshModels }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
@@ -29,6 +35,9 @@ beforeEach(() => {
   mocks.setNativeCodex.mockReset();
   mocks.setSessionCost.mockReset();
   mocks.setOrchestratorRuns.mockReset();
+  mocks.setOpenCode.mockReset();
+  mocks.refreshHarnesses.mockClear();
+  mocks.refreshModels.mockClear();
 });
 afterEach(cleanup);
 
@@ -139,5 +148,33 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     fireEvent.click(runs());
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
     expect(runs().getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("Settings → Experimental: OpenCode (PRO-157)", () => {
+  const openCode = () => screen.getByRole("switch", { name: "OpenCode" });
+
+  it("is off until turned on, then offers OpenCode in the agent and model pickers at once", async () => {
+    mocks.setOpenCode.mockResolvedValue({ nativeCodex: false, opencode: true });
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(openCode().hasAttribute("disabled")).toBe(false));
+    expect(openCode().getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId("experimental-settings").textContent).toContain("Tabs already on OpenCode run either way.");
+    fireEvent.click(openCode());
+    await waitFor(() => expect(openCode().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setOpenCode).toHaveBeenCalledWith(true);
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.refreshHarnesses).toHaveBeenCalledTimes(1));
+    expect(mocks.refreshModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the switch back and says why when saving fails", async () => {
+    mocks.setOpenCode.mockRejectedValue(new Error("The settings file has a problem."));
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(openCode().hasAttribute("disabled")).toBe(false));
+    fireEvent.click(openCode());
+    expect((await screen.findByRole("alert")).textContent).toBe("The settings file has a problem.");
+    expect(openCode().getAttribute("aria-checked")).toBe("false");
+    expect(mocks.refreshHarnesses).not.toHaveBeenCalled();
   });
 });
