@@ -3137,6 +3137,27 @@ async fn application() -> (tokio::net::TcpListener, u16) {
     (listener, port)
 }
 
+/// A loopback port bound but never listened on, on both addresses
+/// `ports.open` tries: a connect there is refused, and while the sockets are
+/// held no other socket can bind that port (they leave out SO_REUSEADDR,
+/// which a second bind of the same port needs on both sockets).
+fn unlistened_port() -> (Vec<tokio::net::TcpSocket>, u16) {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    for _ in 0..64 {
+        let v4 = tokio::net::TcpSocket::new_v4().unwrap();
+        v4.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let port = v4.local_addr().unwrap().port();
+        // Without IPv6 loopback nothing can listen on ::1 either.
+        let Ok(v6) = tokio::net::TcpSocket::new_v6() else { return (vec![v4], port) };
+        match v6.bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))) {
+            Ok(()) => return (vec![v4, v6], port),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(_) => return (vec![v4], port),
+        }
+    }
+    panic!("no loopback port was free on both 127.0.0.1 and ::1");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
     let f = fixture();
@@ -3170,9 +3191,10 @@ async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
 async fn a_port_stream_reaches_only_the_workspace_loopback_and_only_what_listens() {
     let f = fixture();
     let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
-    // A port nothing listens on.
-    let (listener, port) = application().await;
-    drop(listener);
+    // A port nothing listens on, held for the whole test (#1298): a dropped
+    // listener's port went back to the pool, and another test running at the
+    // same time could get it and listen there, so `ports.open` reached it.
+    let (_held, port) = unlistened_port();
     assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "port_unreachable");
     // There is no way to name a host: only a port number is read.
     for params in [json!({ "port": 0 }), json!({ "port": 70000 }), json!({ "port": "3000" }), json!({ "host": "169.254.169.254", "port": -1 }), json!({})] {
