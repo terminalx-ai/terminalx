@@ -114,8 +114,9 @@ function backend(cmd: string, args: Record<string, unknown> = {}) {
         requestId: (payload.requestId as string) ?? null,
         state: "queued",
         wake: "queued",
-        createdAt: 1,
-        updatedAt: 1,
+        // The mailbox stamps a command when it takes it: after anything already in it.
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       };
       outbox = [...outbox, entry];
       return Promise.resolve(entry);
@@ -367,6 +368,11 @@ describe("cloud agent tabs", () => {
     fireEvent.click(within(unknown.closest<HTMLElement>('[data-testid="queued-message"]')!).getByRole("button", { name: "Send again" }));
     await waitFor(() => expect(enqueued).toHaveLength(2));
     expect(enqueued[1]).toMatchObject({ kind: "send", payload: { text: "deploy it" } });
+    // The resend is the message now: the old card goes, so it is never drawn twice.
+    await waitFor(() => expect(screen.queryByText("May not have been sent")).toBeNull());
+    const cards = screen.getAllByTestId("queued-message").filter((node) => node.textContent?.includes("deploy it"));
+    expect(cards).toHaveLength(1);
+    expect(within(cards[0]!).queryByRole("button", { name: "Send again" })).toBeNull();
   });
 
   it("answers a permission request once, however often it is clicked", async () => {

@@ -41,21 +41,29 @@ export function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | nu
 }
 
 /**
- * What this window has seen of each message on its way, by command id. Ids
- * are unique across workspaces, and a tab's view coming back (another tab
- * chosen meanwhile) keeps following what it followed.
+ * What this window has seen of each message on its way, by tab, then by
+ * command id: a tab's view coming back (another tab chosen meanwhile) keeps
+ * following what it followed, and each tab lets go of its own messages once
+ * neither the mailbox nor the runtime lists them.
  */
-const tracks = new Map<string, PendingTrack>();
+const tracksByTab = new Map<string, Map<string, PendingTrack>>();
 
 /** The cloud messages to draw as Queued cards for a tab, followed until the conversation has each (#1291). */
 export function usePendingCloudMessages(
+  /** The tab, by a key unique across workspaces. */
+  tabKey: string,
   entries: readonly OutboxEntry[],
   followUps: readonly { clientCommandId: string; text: string; actorId?: string | null }[],
   events: readonly AgentEvent[],
+  /** The tab's history is read: only then is its newest event the one a message on its way comes after. */
+  historyRead: boolean,
 ): PendingCloudMessage[] {
   const now = Date.now();
+  let tracks = tracksByTab.get(tabKey);
+  if (!tracks) tracksByTab.set(tabKey, (tracks = new Map()));
   // Idempotent: a message is noted once, when first seen on its way, and once when first seen typed.
-  trackPending(tracks, entries, followUps, events.at(-1)?.seq ?? 0, now);
+  // Until the history is read nothing is noted: what waits is drawn, and none of it is taken for delivered.
+  if (historyRead) trackPending(tracks, entries, followUps, events.at(-1)?.seq ?? 0, now);
   const messages = pendingCloudMessages(entries, followUps, events, tracks, now);
   // A typed message whose event never comes goes when its grace runs out: look again then.
   const [, setTick] = useState(0);

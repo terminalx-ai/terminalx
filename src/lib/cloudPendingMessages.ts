@@ -57,7 +57,10 @@ const FAILED_STATES = new Set(["rejected", "outcome-unknown"]);
  * Note each message first seen on its way, by command id, with the tab's
  * newest event then; and when one the runtime typed was first seen settled.
  * Only what was seen on its way is followed to delivery: a message applied
- * before this window looked is already in the conversation.
+ * before this window looked is already in the conversation. Called only once
+ * the tab's history is read: noted earlier, its newest event would be 0 and
+ * an older message of the same words would pass for its delivery. A message
+ * neither the mailbox nor the runtime lists any more is let go.
  */
 export function trackPending(
   tracks: Map<string, PendingTrack>,
@@ -67,6 +70,8 @@ export function trackPending(
   now: number,
 ) {
   const held = new Set(followUps.map((followUp) => followUp.clientCommandId));
+  const listed = new Set([...held, ...entries.map((entry) => entry.clientCommandId)]);
+  for (const id of [...tracks.keys()]) if (!listed.has(id)) tracks.delete(id);
   for (const id of held) if (!tracks.has(id)) tracks.set(id, { afterSeq: newestSeq });
   for (const entry of entries) {
     if (!MESSAGE_KINDS.has(entry.kind)) continue;
@@ -79,10 +84,18 @@ export function trackPending(
   }
 }
 
-/** Whether a `user_message` is this text: a shared tab's message carries who it is from ahead of it. */
-function sameText(event: AgentEvent, text: string): boolean {
+/**
+ * Whether a `user_message` is this message: the same words (a shared tab's
+ * message carries who it is from ahead of them), and images when it has
+ * some. A message of images alone has no words to go by: only a message of
+ * images with no words is it (who sent it is in `author`, not in the text).
+ */
+function sameMessage(event: AgentEvent, text: string, images: number): boolean {
   const payload = event.payload;
-  return payload.type === "user_message" && (payload.text === text || payload.text.endsWith(text));
+  if (payload.type !== "user_message") return false;
+  if (images > 0 && !payload.images?.length) return false;
+  if (!text) return images > 0 && payload.text.trim() === "";
+  return payload.text === text || payload.text.endsWith(text);
 }
 
 /**
@@ -101,11 +114,11 @@ export function pendingCloudMessages(
 ): PendingCloudMessage[] {
   const byId = new Map(entries.map((entry) => [entry.clientCommandId, entry]));
   const claimed = new Set<number>();
-  const arrived = (id: string, text: string): boolean => {
+  const arrived = (id: string, text: string, images: number): boolean => {
     const track = tracks.get(id);
     if (!track) return false;
     for (const event of events) {
-      if (event.seq <= track.afterSeq || claimed.has(event.seq) || !sameText(event, text)) continue;
+      if (event.seq <= track.afterSeq || claimed.has(event.seq) || !sameMessage(event, text, images)) continue;
       claimed.add(event.seq);
       return true;
     }
@@ -113,22 +126,25 @@ export function pendingCloudMessages(
   };
   const sorted = [...entries].filter((entry) => MESSAGE_KINDS.has(entry.kind)).sort((a, b) => a.createdAt - b.createdAt);
   const held = new Set(followUps.map((followUp) => followUp.clientCommandId));
+  // A message not delivered and sent again (Send again, or the same words from the composer) is the later one now.
+  const sentAgain = (failed: OutboxEntry) =>
+    sorted.some((later) => later.createdAt > failed.createdAt && later.state !== "cancelled" && (later.text ?? "") === (failed.text ?? "") && (later.images ?? 0) === (failed.images ?? 0));
   const typed: PendingCloudMessage[] = [];
   const later: PendingCloudMessage[] = [];
   for (const entry of sorted) {
     if (held.has(entry.clientCommandId)) continue;
     const base = { id: entry.clientCommandId, kind: entry.kind as "send" | "steer", text: entry.text ?? "", images: entry.images ?? 0, actorId: null, entry };
     if (FAILED_STATES.has(entry.state)) {
-      later.push({ ...base, phase: "failed" });
+      if (!sentAgain(entry)) later.push({ ...base, phase: "failed" });
       continue;
     }
     if (WAITING_STATES.has(entry.state)) {
-      if (!arrived(entry.clientCommandId, base.text)) later.push({ ...base, phase: "waiting" });
+      if (!arrived(entry.clientCommandId, base.text, base.images)) later.push({ ...base, phase: "waiting" });
       continue;
     }
     // Applied: typed, or handed on from the runtime's follow-ups; drawn until its own event is in, within the grace.
     const track = tracks.get(entry.clientCommandId);
-    if (entry.state !== "applied" || !track || arrived(entry.clientCommandId, base.text)) continue;
+    if (entry.state !== "applied" || !track || arrived(entry.clientCommandId, base.text, base.images)) continue;
     if (track.appliedAt !== undefined && now - track.appliedAt >= DELIVERY_GRACE_MS) continue;
     typed.push({ ...base, phase: "waiting" });
   }
@@ -136,7 +152,7 @@ export function pendingCloudMessages(
   for (const followUp of followUps) {
     const entry = byId.get(followUp.clientCommandId) ?? null;
     // Its event can come in before the runtime's list says it went.
-    if (arrived(followUp.clientCommandId, followUp.text)) continue;
+    if (arrived(followUp.clientCommandId, followUp.text, entry?.images ?? 0)) continue;
     queued.push({
       id: followUp.clientCommandId,
       kind: entry?.kind === "steer" ? "steer" : "send",

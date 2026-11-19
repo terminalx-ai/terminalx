@@ -704,7 +704,7 @@ function CloudAgentPane({
   const sending = pendingMessage && !hasArrived(conversation.events(), pendingMessage) ? pendingMessage : null;
   const entries = outboxFor(snapshot, tab.tabId);
   // #1291: messages on their way, drawn at the transcript's end as Queued cards until the conversation has them.
-  const pendingMessages = usePendingCloudMessages(entries, info.followUps, conversation.events());
+  const pendingMessages = usePendingCloudMessages(`${collabKey}:${tab.tabId}`, entries, info.followUps, conversation.events(), tab.historyRead || sleeping);
   const turnOpen = transcript.turns.length > 0 && !transcript.turns[transcript.turns.length - 1]!.completed;
   const endedMidTurn = exited && (info.status === "in_progress" || info.status === "waiting" || turnOpen);
   const deciding = entries.some((entry) => entry.kind === "permission-decision" && !TERMINAL_OUTBOX_STATES.has(entry.state));

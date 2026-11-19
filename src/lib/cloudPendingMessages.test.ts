@@ -69,7 +69,10 @@ describe("a cloud message on its way (#1291)", () => {
       ["c-other", "held"],
       ["c-2", "waiting"],
     ]);
-    expect(step(tracks, [queued], [], [said(1, "text c-1"), said(2, "Alice: theirs")])).toEqual([]);
+    // Its event carries its images; someone else's carries their name ahead of the words.
+    const withImages = { ...said(1, "text c-1"), payload: { type: "user_message", text: "text c-1", queued: false, images: [{ url: "a.png" }, { url: "b.png" }] } } as AgentEvent;
+    expect(step(tracks, [queued], [], [said(1, "text c-1")]).map((m) => m.id)).toEqual(["c-1"]);
+    expect(step(tracks, [queued], [], [withImages, said(2, "Alice: theirs")])).toEqual([]);
   });
 
   it("claims one event per message, so the same words sent twice are two cards until both are in", () => {
@@ -88,6 +91,51 @@ describe("a cloud message on its way (#1291)", () => {
     ]);
     expect(isMessageCommand({ kind: "steer" })).toBe(true);
     expect(isMessageCommand({ kind: "permission-decision" })).toBe(false);
+  });
+});
+
+describe("review of #1291", () => {
+  it("draws a message that was not delivered no more once it is sent again, so it is never drawn twice", () => {
+    const failed = entry("c-1", { state: "outcome-unknown", text: "deploy it", createdAt: 1 });
+    const refused = entry("c-2", { state: "rejected", category: "lease-held", text: "other words", createdAt: 1 });
+    expect(step(new Map(), [failed, refused], [], []).map((m) => m.id)).toEqual(["c-1", "c-2"]);
+    const tracks = new Map<string, PendingTrack>();
+    const again = entry("c-3", { text: "deploy it", createdAt: 2 });
+    expect(step(tracks, [failed, refused, again], [], []).map((m) => [m.id, m.phase])).toEqual([["c-2", "failed"], ["c-3", "waiting"]]);
+    // Delivered: only the conversation draws it, and the old card does not come back.
+    const delivered = { ...again, state: "applied" as const };
+    expect(step(tracks, [failed, refused, delivered], [], [said(1, "deploy it")]).map((m) => m.id)).toEqual(["c-2"]);
+    // A cancelled resend does not count.
+    expect(step(new Map(), [failed, { ...again, state: "cancelled" }], [], []).map((m) => m.id)).toEqual(["c-1"]);
+  });
+
+  it("takes only a message of images with no words for a message of images alone", () => {
+    const tracks = new Map<string, PendingTrack>();
+    const images = [entry("c-1", { text: "", images: 1 })];
+    step(tracks, images, [], []);
+    const someoneElse = said(1, "what about the tests?");
+    expect(step(tracks, images, [], [someoneElse])).toHaveLength(1);
+    const theirImage = { ...said(2, ""), payload: { type: "user_message", text: "", queued: false, images: [{ url: "i.png" }] } } as AgentEvent;
+    expect(step(tracks, images, [], [someoneElse, theirImage])).toEqual([]);
+    // Words with images need the images too.
+    const tracks2 = new Map<string, PendingTrack>();
+    const worded = [entry("c-2", { text: "look", images: 1 })];
+    step(tracks2, worded, [], []);
+    expect(step(tracks2, worded, [], [said(1, "look")])).toHaveLength(1);
+  });
+
+  it("takes nothing for delivered while the message was never noted (the history not read yet)", () => {
+    const queued = [entry("c-1", { text: "continue" })];
+    // Not noted: an older "continue" in the history is not its delivery.
+    expect(pendingCloudMessages(queued, [], [said(7, "continue")], new Map(), 0)).toHaveLength(1);
+  });
+
+  it("lets go of a message neither the mailbox nor the runtime lists any more", () => {
+    const tracks = new Map<string, PendingTrack>();
+    step(tracks, [entry("c-1"), entry("c-2")], [{ clientCommandId: "c-f", text: "later" }], []);
+    expect([...tracks.keys()].sort()).toEqual(["c-1", "c-2", "c-f"]);
+    step(tracks, [entry("c-2")], [], []);
+    expect([...tracks.keys()]).toEqual(["c-2"]);
   });
 });
 
