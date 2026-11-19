@@ -125,6 +125,14 @@ impl Target {
     pub(crate) fn repository_url(&self) -> String {
         format!("https://{}/{}/{}", self.host, self.owner, self.name)
     }
+
+    pub(crate) fn require_exact_cli_host(&self) -> Result<()> {
+        // gh's PR URL parser drops ports and strips a leading www.
+        if self.host.contains(':') || self.host.starts_with("www.") {
+            bail!("GitHub CLI cannot target this pull request hostname exactly.");
+        }
+        Ok(())
+    }
 }
 
 fn string(v: &Value, key: &str) -> String { v[key].as_str().unwrap_or_default().into() }
@@ -274,15 +282,20 @@ pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) ->
     let _request = crate::github_process::scope();
     match action {
         Action::Edit { title, body, expected_title, expected_body } => {
+            target.require_exact_cli_host()?;
             let title = title.trim();
             if title.is_empty() || title.len() > 1024 || body.len() > 65536 { bail!("Enter a title and a description of at most 64 KB."); }
-            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "title,body"])?)?;
+            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "url,title,body"])?)?;
+            if current["url"].as_str().and_then(|url| crate::pr_associations::identity(url).ok()).as_deref() != Some(&target.url) {
+                bail!("GitHub returned a different pull request.");
+            }
             if current["title"].as_str() != Some(&expected_title) || current["body"].as_str() != Some(&expected_body) {
                 bail!("The title or description changed on GitHub. Copy your draft, cancel, then edit the latest version.");
             }
             run(&["pr", "edit", &target.url, "--title", title, "--body", &body])?;
         }
         Action::Approve { viewer } => {
+            target.require_exact_cli_host()?;
             // Recheck the acting account immediately before writing: a local
             // gh token can also be an App token, or have changed since reading.
             let account: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, "user"])?)?;
@@ -497,7 +510,7 @@ mod tests {
         let mut calls = Vec::new();
         let mut run = |args: &[&str]| {
             calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(if args.starts_with(&["pr", "view"]) { json!({"title":"Before","body":"Original"}).to_string() }
+            Ok(if args.starts_with(&["pr", "view"]) { json!({"url":target.url,"title":"Before","body":"Original"}).to_string() }
                 else if args.last() == Some(&"user") { json!({"type":"User","login":"ada"}).to_string() }
                 else { String::new() })
         };
@@ -505,7 +518,7 @@ mod tests {
         act_with(&target, Action::Approve { viewer: "ada".into() }, &mut run).unwrap();
         act_with(&target, Action::Request { login: "ada".into(), team: false }, &mut run).unwrap();
         act_with(&target, Action::Remove { login: "OWNER/core".into(), team: true }, &mut run).unwrap();
-        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "title,body"]);
+        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "url,title,body"]);
         assert_eq!(calls[1], ["pr", "edit", &target.url, "--title", "A title", "--body", "$(secret)\n`literal`"]);
         assert_eq!(calls[2], ["api", "--hostname", "git.example.com", "user"]);
         assert_eq!(calls[3], ["pr", "review", &target.url, "--approve"]);
@@ -537,15 +550,31 @@ mod tests {
 
     #[test]
     fn editing_refuses_a_concurrent_change_without_writing() {
-        for current in [json!({"title":"Changed","body":"Original"}), json!({"title":"Before","body":"Changed"}), json!({})] {
+        let target = target();
+        for current in [
+            json!({"url":target.url,"title":"Changed","body":"Original"}),
+            json!({"url":target.url,"title":"Before","body":"Changed"}),
+            json!({"url":target.url}),
+        ] {
             let mut calls = 0;
-            let error = act_with(&target(), Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
                 calls += 1;
                 assert!(args.starts_with(&["pr", "view"]));
                 Ok(current.to_string())
             }).unwrap_err();
             assert!(error.to_string().contains("changed on GitHub"));
             assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn editing_refuses_hosts_github_cli_would_rewrite() {
+        for host in ["github.example.test:8443", "www.github.example.test"] {
+            let target = Target::new(&format!("https://{host}/acme/widgets/pull/799")).unwrap();
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |_| {
+                panic!("an inexact host must be rejected before running gh");
+            }).unwrap_err();
+            assert!(error.to_string().contains("hostname exactly"));
         }
     }
 

@@ -709,21 +709,6 @@ fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_bas
 }
 
 #[test]
-fn association_origins_use_the_github_cli_ssh_hostname() {
-    for origin in ["git@work:Octo/Repo.git", "ssh://git@work:2222/Octo/Repo.git"] {
-        let repository = origin_repository(origin, |remote| {
-            assert_eq!(remote, "ssh://work");
-            Some("github.enterprise.test".into())
-        });
-        assert_eq!(repository.as_deref(), Some("https://github.enterprise.test/octo/repo"));
-    }
-    let repository = origin_repository("https://github.enterprise.test:8443/Octo/Repo.git", |_| {
-        panic!("HTTPS origins do not use SSH host aliases");
-    });
-    assert_eq!(repository.as_deref(), Some("https://github.enterprise.test:8443/octo/repo"));
-}
-
-#[test]
 fn machine_pr_creation_records_the_native_session_association() {
     let _home = crate::store::temp_home();
     let mut f = fixture();
@@ -734,14 +719,8 @@ fn machine_pr_creation_records_the_native_session_association() {
     let locator = checkout.to_str().unwrap();
     git(&f.root, &["worktree", "add", "-qb", "feature/pr", locator]);
     f.call("git.push", json!({ "repo": locator })).unwrap();
-    // Keep Git transport local while exercising the Enterprise origin and gh URL.
-    git(&f.root, &["remote", "set-url", "origin", "git@github.test:Octo/Repo.git"]);
-    git(&f.root, &["config", "ssh.variant", "simple"]);
-    let ssh = format!(
-        "sh -c 'if [ \"$2\" = -G ]; then printf \"hostname github.test\\nuser git\\nport 22\\n\"; else exec git-upload-pack \"$1\"; fi' -- '{}'",
-        remote.display(),
-    );
-    git(&f.root, &["config", "core.sshCommand", &ssh]);
+    // Git uses a local mirror while gh selects the Enterprise remote.
+    git(&f.root, &["remote", "add", "enterprise", "git@work:Octo/Repo.git"]);
     std::fs::write(f.state.join("repo-url"), "https://github.test/Octo/Repo").unwrap();
     let conversation = include_str!("../fixtures/github_pr_conversation.json")
         .replace("https://github.com/acme/widgets/pull/799", "https://github.test/octo/repo/pull/1")
@@ -769,18 +748,20 @@ fn machine_pr_creation_records_the_native_session_association() {
     assert_eq!(association["url"], created["pr"]["url"]);
     assert_eq!(association["repo"], locator);
     assert_eq!(association["linked"], false);
+    let legacy = f.git.handle_negotiated("git.prAssociations", &json!({ "sessionId": "native" }), false).unwrap().unwrap();
+    assert_eq!(legacy["associations"][0]["url"], association["url"]);
+    assert!(legacy["associations"][0]["repo"].is_null());
+    let unsupported = f.git.handle_negotiated("git.prReady", &json!({ "repo": locator, "url": association["url"] }), false).unwrap().unwrap_err();
+    assert_eq!(unsupported.code, "capability_not_granted");
 
     let conversation = f.call("git.prConversation", json!({ "repo": association["repo"], "url": association["url"] })).unwrap();
     assert_eq!(conversation["activity"].as_array().unwrap().len(), 11);
     assert!(f.gh_calls().contains("\"graphql\", \"--hostname\", \"github.test\""));
-    // A pipeline record can name the root, where gh defaults to another
-    // repository with the same PR number. Use the returned locator and verify
-    // that ready and merge change only the PR identified by the URL.
+    // A recovered record can name the root, where gh defaults to another
+    // repository with the same PR number despite a matching origin.
     let url = association["url"].as_str().unwrap();
     crate::pr_associations::record_local("root-association", &f.root, url, "feature/pr").unwrap();
-    let root_rows = f.call("git.prAssociations", json!({ "sessionId": "root-association" })).unwrap();
-    let root_repo = &root_rows["associations"][0]["repo"];
-    assert_eq!(root_repo, ".");
+    git(&f.root, &["remote", "set-url", "origin", "https://github.test/octo/repo.git"]);
     let alternate = f.base.join("alternate-github");
     std::fs::create_dir(&alternate).unwrap();
     let alternate_url = "https://github.test/other/repo/pull/1";
@@ -793,27 +774,49 @@ fn machine_pr_creation_records_the_native_session_association() {
         "#!/bin/sh\nstate='{}'\nif [ \"$(pwd -P)\" = '{}' ] && [ \"$3\" != '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" exec '{}' \"$@\"\n",
         f.state.display(), f.root.display(), url, alternate.display(), fake.display(),
     )).unwrap();
-    let numeric = f.call("git.prs", json!({ "repo": root_repo, "number": 1 })).unwrap();
+    let root_rows = f.call("git.prAssociations", json!({ "sessionId": "root-association" })).unwrap();
+    let resolved = &root_rows["associations"][0]["repo"];
+    assert_eq!(resolved, locator);
+    let numeric = f.call("git.prs", json!({ "repo": ".", "number": 1 })).unwrap();
     assert_eq!(numeric["prs"][0]["url"], alternate_url);
-    let pinned = f.call("git.prs", json!({ "repo": root_repo, "number": 1, "url": url })).unwrap();
+    let pinned = f.call("git.prs", json!({ "repo": resolved, "number": 1, "url": url })).unwrap();
     assert_eq!(pinned["prs"][0]["url"], url);
     for method in ["git.prReady", "git.prMerge"] {
-        assert_eq!(f.code(method, json!({ "repo": root_repo, "url": "https://github.test/unrelated/repo/pull/1" })), "invalid_params");
-        assert_eq!(f.code(method, json!({ "repo": root_repo, "number": 2, "url": url })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": ".", "url": url })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": resolved, "url": "https://github.test/unrelated/repo/pull/1" })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": resolved, "number": 2, "url": url })), "invalid_params");
         for host in ["github.test:8443", "www.github.test"] {
-            let error = f.call(method, json!({ "repo": root_repo, "url": format!("https://{host}/octo/repo/pull/1") })).unwrap_err();
+            let error = f.call(method, json!({ "repo": resolved, "url": format!("https://{host}/octo/repo/pull/1") })).unwrap_err();
             assert_eq!(error.code, "invalid_params");
             assert!(error.message.contains("hostname exactly"));
         }
     }
-    let ready = f.call("git.prReady", json!({ "repo": root_repo, "url": url })).unwrap();
+    let ready = f.call("git.prReady", json!({ "repo": resolved, "url": url })).unwrap();
     assert_eq!(ready["pr"]["url"], url);
     assert_eq!(ready["pr"]["isDraft"], false);
-    let merged = f.call("git.prMerge", json!({ "repo": root_repo, "url": url, "method": "squash" })).unwrap();
+    let merged = f.call("git.prMerge", json!({ "repo": resolved, "url": url, "method": "squash" })).unwrap();
     assert_eq!(merged["pr"]["url"], url);
     assert_eq!(merged["pr"]["state"], "MERGED");
     let untouched: Value = serde_json::from_slice(&std::fs::read(alternate.join("pr-1.json")).unwrap()).unwrap();
     assert_eq!(untouched, alternate_pr);
+
+    // The PR command can follow a rename even if repo view still returns the
+    // old URL. No write may run after a different PR URL comes back.
+    let mut relocated = alternate_pr;
+    relocated["url"] = json!("https://github.test/new-owner/repo/pull/1");
+    std::fs::write(f.state.join("pr-1.json"), relocated.to_string()).unwrap();
+    std::fs::write(f.state.join("redirect-from"), url).unwrap();
+    let calls_before = f.gh_calls();
+    for method in ["git.prReady", "git.prMerge", "git.prConversationAction"] {
+        let error = f.call(method, json!({ "repo": resolved, "url": url, "action": {
+            "kind": "edit", "title": "New title", "body": "", "expectedTitle": "Add pr", "expectedBody": ""
+        } })).unwrap_err();
+        assert!(error.message.contains("different pull request"), "{error:?}");
+    }
+    let calls = f.gh_calls();
+    for verb in ["ready", "merge", "edit"] {
+        assert!(!calls[calls_before.len()..].contains(&format!("[\"pr\", \"{verb}\"")));
+    }
 
     git(&f.root, &["worktree", "remove", locator]);
     git(&f.root, &["remote", "set-url", "origin", "https://github.com/octo/repo.git"]);
@@ -1040,8 +1043,8 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     let remote = f.remote("origin");
     let repo = f.clone(&remote, "app");
     let other = f.clone(&remote, "libs/other");
-    git(&repo, &["remote", "set-url", "origin", "git@github.com:acme/widgets.git"]);
-    git(&other, &["remote", "set-url", "origin", "https://github.com/acme/other.git"]);
+    git(&repo, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/widgets"]);
+    git(&other, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/other"]);
     let session = |id: &str, path: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
         "id": id, "projectPath": path, "cwd": path, "title": "fixture", "created": "", "modified": ""
     })).unwrap();
@@ -1079,6 +1082,7 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     }).unwrap();
     let read = || f.call("git.prAssociations", json!({"sessionId":"author"})).unwrap();
     let first = read();
+    assert_eq!(f.git.handle_negotiated("git.prAssociations", &json!({"sessionId":"author"}), false).unwrap().unwrap(), first);
     let associations = first["associations"].as_array().unwrap();
     assert_eq!(associations.len(), 3);
     assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/widgets/pull/1" && a["repo"] == "app" && a["linked"] == false));

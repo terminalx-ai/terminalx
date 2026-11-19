@@ -42,7 +42,7 @@ case "$*" in
  *'assignableUsers('*) printf '{"data":{"repository":{"assignableUsers":{"nodes":[{"login":"ada"}]}}}}\n' ;;
  'api graphql '*)
    case " $* " in *' timeline=next '*) exec /bin/cat "$TERMINALX_HOME/page2" ;; *) exec /bin/cat "$TERMINALX_HOME/page1" ;; esac ;;
- 'pr view '*) printf '{"title":"Title","body":"Body"}\n' ;;
+ 'pr view '*) printf '{"url":"https://github.com/acme/widgets/pull/799","title":"Title","body":"Body"}\n' ;;
  'api --hostname github.com user') printf '{"type":"User","login":"reviewer"}\n' ;;
  'pr edit '*|'pr review '*|*'requested_reviewers'*) printf 'mutation\n' >> "$TERMINALX_HOME/mutations" ;;
  *) printf 'Unexpected gh call: %s\n' "$*" >&2; exit 9 ;;

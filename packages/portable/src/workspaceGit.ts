@@ -317,6 +317,10 @@ export class RemoteGit {
     return this.read("git.branches");
   }
 
+  get supportsPrUrl(): boolean {
+    return this.client.hasCapability?.("git-pr-target/1") ?? false;
+  }
+
   /** Refresh a retained PR by URL where supported, with a number and branch for older runtimes.
    * Callers still verify the returned identity. */
   prs(branch?: string, number?: number, url?: string): Promise<{ branch: string; prs: RemotePullRequest[] }> {

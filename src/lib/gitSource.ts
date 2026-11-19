@@ -317,17 +317,24 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey) throw new Error("Reconnect this PR's workspace to refresh it.");
       if (!association.scope.repo) throw new Error("This PR’s repository is unavailable in the workspace.");
       const repository = new RemoteGit(remote.client, association.scope.repo);
+      const read = async () => {
+        const { prs } = await repository.prs(association.head, association.number, repository.supportsPrUrl ? association.url : undefined);
+        const pr = prs.find((pr) => pr.url.toLowerCase().replace(/\/$/, "") === association.url.toLowerCase().replace(/\/$/, ""));
+        if (!pr) throw new Error(`GitHub did not return associated PR #${association.number}.`);
+        return pr;
+      };
+      const writeTarget = async () => {
+        if (repository.supportsPrUrl) return association.url;
+        if (fromMachine) throw new Error("Update this machine's runtime to change an associated pull request.");
+        // Older cloud runtimes accept only a number. Check their current
+        // route even if branch discovery already showed this PR in the UI.
+        await read();
+        return association.number;
+      };
       return {
-        read: async () => {
-          const { prs } = await repository.prs(association.head, association.number, association.url);
-          const pr = prs.find((pr) => pr.url.toLowerCase().replace(/\/$/, "") === association.url.toLowerCase().replace(/\/$/, ""));
-          if (!pr) throw new Error(`GitHub did not return associated PR #${association.number}.`);
-          return pr;
-        },
-        // Omit the number so an older runtime cannot silently use its default
-        // repository for a URL-bound mutation.
-        ready: () => repository.readyPr(association.url).then(() => undefined),
-        merge: (method) => repository.mergePr(association.url, method).then(() => undefined),
+        read,
+        ready: async () => { await repository.readyPr(await writeTarget()); },
+        merge: async (method) => { await repository.mergePr(await writeTarget(), method); },
       };
     },
     conversation: (pr, association) => {

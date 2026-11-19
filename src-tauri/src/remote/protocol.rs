@@ -85,10 +85,13 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 28] = [
+pub const CAPABILITIES: [&str; 29] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1",
 ];
+
+/// URL-bound PR reads and writes and actionable machine association locators.
+pub const GIT_PR_TARGET: &str = "git-pr-target/1";
 
 /// The namespace of live agent commands (spelled out in [`CAPABILITIES`]).
 pub const AGENT_COMMANDS: &str = "agent-commands/1";
@@ -364,7 +367,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "collab/1" => &["collab.", "presence.", "notes.", "lease."],
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
-        "git/1" => &["git."],
+        "git/1" | GIT_PR_TARGET => &["git."],
         "session/1" | "session/2" | "session/3" | "session-repository/1" | "session-base/1" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
@@ -696,10 +699,11 @@ mod tests {
         assert_eq!(granted, vec!["pty/1", "session/1"]);
         // A session/1-only client is not handed the additions.
         let old = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]}), &workspace).unwrap();
-        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "session/3", "agents/1", AGENT_PTY].contains(&capability.as_str())));
+        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "session/3", "agents/1", AGENT_PTY, GIT_PR_TARGET].contains(&capability.as_str())));
         let new = negotiate(&json!({"protocol": PROTOCOL, "want": CAPABILITIES}), &workspace).unwrap();
         assert_eq!(new, CAPABILITIES.to_vec());
         assert!(CAPABILITIES.contains(&AGENT_PTY));
+        assert!(served(true).contains(&GIT_PR_TARGET));
         assert_eq!(negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/9"]}), &workspace).unwrap_err().code, "update_required");
         assert_eq!(negotiate(&json!({"protocol": "terminalx-workspace-rpc/2", "want": ["pty/1"]}), &workspace).unwrap_err().code, "update_required");
         // A runtime grants only what it offers, whatever this build knows.

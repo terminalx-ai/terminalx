@@ -16,6 +16,7 @@ Faults, by file in the state directory:
   offline            every call fails to connect
   drop-after-create  the next create lands, then reports a dropped connection
   mergeable          its text is the mergeable state of new pull requests
+  redirect-from      the old URL of a pull request the server has relocated
   checks.json        statusCheckRollup of every pull request
   pr-<n>.json        a pull request; a test may write one (e.g. a fork's,
                      "isCrossRepository": true)
@@ -88,10 +89,15 @@ def main(args):
         fail("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login")
     if flag("offline"):
         fail("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com")
-    if args[:2] == ["repo", "view"] and flag("repo-url"):
-        with open(path("repo-url")) as f:
-            print(json.dumps({"url": f.read().strip()}))
-        return
+    if args[:2] == ["repo", "view"]:
+        if flag("repo-url"):
+            with open(path("repo-url")) as f:
+                print(json.dumps({"url": f.read().strip()}))
+            return
+        configured = subprocess.run(["git", "config", "--get", "terminalx.testGithubRepoUrl"], capture_output=True, text=True)
+        if configured.returncode == 0:
+            print(json.dumps({"url": configured.stdout.strip()}))
+            return
     if args[:2] == ["api", "graphql"] and flag("conversation.json") and "PullRequestConversation" in option(args, "-f", ""):
         with open(path("conversation.json")) as f:
             print(f.read())
@@ -163,7 +169,11 @@ def main(args):
     number = int(target) if target.isdigit() else None
     pr = next((pr for pr in prs if pr["number"] == number), None)
     if pr is not None and rest and rest[0].startswith("https://"):
-        if rest[0].rstrip("/").lower() != pr["url"].rstrip("/").lower():
+        redirect_from = ""
+        if flag("redirect-from"):
+            with open(path("redirect-from")) as f:
+                redirect_from = f.read().strip()
+        if rest[0].rstrip("/").lower() not in (pr["url"].rstrip("/").lower(), redirect_from):
             pr = None
     if pr is None:
         fail("GraphQL: Could not resolve to a PullRequest with the number of %s." % (rest[0] if rest else ""))
