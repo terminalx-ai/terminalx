@@ -3772,3 +3772,71 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     assert!(refused(answer("phone", TAB)).contains("that question is no longer open"));
     lifetime.command("runtime.detach", lease).unwrap();
 }
+
+/// A record of Claude Code's `!` shell passthrough, as 2.1.319 writes it.
+fn shell_record(uuid: &str, content: &str) -> String {
+    format!("{}\n", json!({ "type": "user", "uuid": uuid, "timestamp": "2026-11-19T10:00:00.000Z", "message": { "role": "user", "content": content } }))
+}
+
+const SHELL_INPUT: &str = "<bash-input> git status</bash-input>";
+const SHELL_OUTPUT: &str = "<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>";
+
+fn user_texts(rig: &Rig) -> Vec<String> {
+    rig.events().into_iter().filter_map(|event| match event.payload { Payload::UserMessage { text, .. } => Some(text), _ => None }).collect()
+}
+
+/// #1294: a `!` command typed in the terminal is no prompt. Both its records
+/// are drawn, and neither opens a turn: no model turn or Stop would end it.
+#[test]
+fn a_shell_command_typed_in_the_terminal_opens_no_turn() {
+    let rig = Rig::new();
+    rig.append(&shell_record("shell-in", SHELL_INPUT));
+    rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+    assert!(!rig.turn_open());
+    assert_ne!(rig.status(), TabStatus::InProgress);
+    assert_eq!(user_texts(&rig), [SHELL_INPUT, SHELL_OUTPUT]);
+}
+
+/// #1294: a `!command` sent from the composer opens a turn as it goes, and
+/// its output settles it, whether the CLI records the output apart or in the
+/// command's own record. The output is drawn either way; the command's
+/// record is the composer prompt's echo, not a second message.
+#[test]
+fn a_shell_command_from_the_composer_settles_at_its_output() {
+    for combined in [false, true] {
+        let rig = Rig::new();
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+        let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+        assert!(!queued);
+        assert!(rig.turn_open());
+        if combined {
+            rig.append(&shell_record("shell-both", &format!("{SHELL_INPUT}\n{SHELL_OUTPUT}")));
+        } else {
+            rig.append(&shell_record("shell-in", SHELL_INPUT));
+            rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+        }
+        assert_eq!(user_texts(&rig), ["!git status", SHELL_OUTPUT], "combined: {combined}");
+        assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended), "combined: {combined}");
+        rig.advance(PATIENCE.settle + MOMENT);
+        rig.tick();
+        assert!(!rig.turn_open(), "combined: {combined}");
+        assert_eq!(rig.recovery(), None, "combined: {combined}");
+    }
+}
+
+/// #1294: should the agent take up a `!` command's output (Claude Code
+/// 2.1.295 did), the turn is the agent's and is not cut short at the output.
+#[test]
+fn a_shell_command_the_agent_answers_ends_with_the_agents_turn() {
+    let rig = Rig::new();
+    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+    rig.append(&shell_record("shell-in", SHELL_INPUT));
+    rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+    let reply = json!({ "type": "assistant", "uuid": "shell-reply", "timestamp": "2026-11-19T10:00:05.000Z", "message": { "id": "m1", "role": "assistant", "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "The tree is clean." }] } });
+    rig.append(&format!("{reply}\n"));
+    assert_eq!(rig.transcript_turn(), None);
+    rig.advance(PATIENCE.settle + MOMENT);
+    rig.tick();
+    assert!(rig.turn_open());
+}

@@ -18,6 +18,7 @@ import { messageTime } from "@terminalx/portable/transcript";
 import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
 import { iconFor, ToolCallRow, ToolGroupRow } from "./ToolCallRow";
+import { ShellBlock } from "./ShellBlock";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
@@ -307,9 +308,9 @@ function inFoldSummary(item: WorkItem): boolean {
   return item.kind === "tool" || item.kind === "tool_group" || item.kind === "reasoning" || item.kind === "subagent";
 }
 
-/** What a folded turn still shows: the answer, and the reader's own words (#551). */
+/** What a folded turn still shows: the answer, and the reader's own words (#551) and `!` commands (#1294). */
 function outsideFold(item: WorkItem): boolean {
-  return item.kind === "text" || item.kind === "message" || item.kind === "queued" || item.kind === "media";
+  return item.kind === "text" || item.kind === "message" || item.kind === "queued" || item.kind === "media" || item.kind === "shell";
 }
 
 type Outcome = { tone: "ok" | "stopped" | "failed"; word: string; label: string; duration: string | null };
@@ -541,6 +542,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
           {item.done && <Check className="size-3.5 text-faint" />}
         </div>
       );
+    case "shell":
+      return <ShellBlock item={item} linkContext={linkContext} />;
     case "media":
       return linkContext ? <div className="mb-3"><ChatMedia paths={item.paths} context={linkContext} /></div> : null;
     case "decision":

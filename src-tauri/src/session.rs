@@ -632,6 +632,12 @@ impl ComposerEcho {
         if rest == text || (self.command && text.split_whitespace().next() == Some(rest)) {
             return true;
         }
+        // A `!` command (#1294): Claude Code runs it in its shell and records
+        // the command without the `!`, as `<bash-input>`. The chat turns the
+        // `!command` the composer published into the command's block.
+        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), bash_input(rest)) {
+            return ran.split_whitespace().eq(sent.split_whitespace());
+        }
         // The CLI may reflow a paste or enclose it (or its chunks) in these
         // tags. Compare every word: a shared prefix/suffix alone could swallow
         // a different prompt typed in the terminal.
@@ -649,6 +655,25 @@ impl ComposerEcho {
     fn expired(&self, now: Instant) -> bool {
         now.duration_since(self.sent_at) > if self.queued { QUEUED_ECHO_GRACE } else { COMPOSER_ECHO_TTL }
     }
+}
+
+/// What a composer `!command`'s echo still has to draw (#1294): the output
+/// Claude Code recorded with the command, in one record, as a record of its
+/// own. The reducer puts it under the `!command` the composer published.
+fn shell_output_of_echo(rt: &TabRuntime, payload: &Payload) -> Option<Payload> {
+    let Payload::UserMessage { text, cwd, .. } = payload else { return None };
+    if rt.harness != "claude" || !claude::transcript::shell_record(text).is_some_and(|shell| shell.input && shell.output) {
+        return None;
+    }
+    let output = text[text.find("</bash-input>")? + "</bash-input>".len()..].trim_start();
+    Some(Payload::UserMessage { author: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
+}
+
+/// The command in a record of Claude Code's `!` shell passthrough (#1294):
+/// `<bash-input> git status</bash-input>`, maybe with the output after it.
+fn bash_input(recorded: &str) -> Option<&str> {
+    let after = recorded.trim_start().strip_prefix("<bash-input>")?;
+    Some(&after[..after.find("</bash-input>")?])
 }
 
 /// Peel the run of `[Image #N] [Image #N+1] …` labels off the front of an
@@ -1276,7 +1301,9 @@ impl TabRuntime {
     /// open. Its clock starts here unless a turn with work in it was already
     /// running: a prompt then is one typed into that turn.
     fn prompt_taken(&mut self, prompt: &str, source: &'static str) {
-        let command = tui::is_slash_command(prompt);
+        // A `!` command (#1294) is run by Claude Code itself, like a bare
+        // slash command: no model turn, no Stop. Its output record settles it.
+        let command = tui::is_slash_command(prompt) || (self.harness == "claude" && prompt.trim_start().starts_with('!'));
         let compact = self.harness == "claude" && prompt.split_whitespace().next() == Some("/compact");
         let ended = matches!(&self.engine, Engine::Cli(p) if p.transcript_turn.is_some_and(tui::TurnMark::ends));
         let fresh = !self.turn_open || (self.turn_by_command && !command)
@@ -6746,6 +6773,13 @@ impl SessionManager {
                         self.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: echo.seq }, None);
                     }
                 }
+                // A `!` command recorded with its output in the same record
+                // (#1294): the echo was the command, and the output is still
+                // to be drawn, under the `!command` the composer published.
+                if let Some(output) = shell_output_of_echo(&rt, &payload) {
+                    self.shell_settled(&mut rt);
+                    self.apply(&mut rt, output, None);
+                }
                 continue;
             }
             if let (Payload::AssistantText { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
@@ -6759,12 +6793,32 @@ impl SessionManager {
             }
             // Model/tool work is not a bare command, even after compaction.
             if matches!(payload, Payload::AssistantText { .. } | Payload::Reasoning { .. } | Payload::ToolCallStarted { .. }) {
+                // The agent took up a `!` command's output after all (#1294):
+                // its turn is the agent's now, and ends as any other does,
+                // not at the output that settled the command.
+                if rt.turn_by_command {
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        p.transcript_turn = None;
+                    }
+                }
                 rt.turn_by_command = false;
             }
             if let Payload::UserMessage { text, .. } = &payload {
                 if rt.repeats_completed_compact(text) {
                     self.apply(&mut rt, payload, None);
                     continue;
+                }
+                // Claude Code's record of a `!` command (#1294) is no prompt:
+                // it opens no turn, and its output ends the one a `!command`
+                // from the composer opened.
+                if rt.harness == "claude" {
+                    if let Some(shell) = claude::transcript::shell_record(text) {
+                        if shell.output {
+                            self.shell_settled(&mut rt);
+                        }
+                        self.apply(&mut rt, payload, None);
+                        continue;
+                    }
                 }
                 self.delivery_confirmed(&mut rt);
                 // A prompt typed into the terminal with no hook ahead of it
@@ -6912,6 +6966,18 @@ impl SessionManager {
     /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
     /// a close with no turn behind it, and the latch stops the second of the
     /// two closers that race for a PTY-first tab.
+    /// A `!` command's output came (#1294). The turn a `!command` from the
+    /// composer opened ends with it, once the tab has been quiet for a moment
+    /// (`watch_tabs`): Claude Code runs no model turn and no `Stop` for it.
+    /// A turn the agent was already working on is left to end on its own.
+    fn shell_settled(&self, rt: &mut TabRuntime) {
+        if rt.turn_open && rt.turn_by_command {
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.transcript_turn = Some(tui::TurnMark::Ended);
+            }
+        }
+    }
+
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
         if !rt.turn_open {
             return;
@@ -8976,6 +9042,20 @@ mod tests {
         assert!(!ComposerEcho::new("compare".into(), 2).matches("[Image #1] compare"));
         assert!(!ComposerEcho::new("compare".into(), 1).matches("[Image #1] [Image #2] compare"));
         assert!(ComposerEcho::new(String::new(), 1).matches("[Image #1]"));
+    }
+
+    /// A `!command` sent from the composer comes back as the CLI's record of
+    /// the command it ran (#1294), not as a second message.
+    #[test]
+    fn composer_echo_matches_a_shell_passthrough_command() {
+        let echo = ComposerEcho::new("!git status".into(), 0);
+        assert!(echo.matches("<bash-input> git status</bash-input>"));
+        assert!(echo.matches("<bash-input>git  status</bash-input>\n<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>"));
+        assert!(!echo.matches("<bash-input> git log</bash-input>"));
+        assert!(!echo.matches("<bash-stdout>git status</bash-stdout>"));
+        assert!(!ComposerEcho::new("git status".into(), 0).matches("<bash-input> git status</bash-input>"));
+        assert_eq!(bash_input("<bash-input>ls</bash-input>"), Some("ls"));
+        assert_eq!(bash_input("<bash-input>ls"), None);
     }
 
     /// Claude Code writes the pasted-image labels straight into the prompt
