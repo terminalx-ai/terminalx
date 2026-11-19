@@ -697,7 +697,7 @@ export function Composer({
           aria-describedby={goalMissing ? `${tab.id}-goal-missing` : undefined}
           rows={1}
           placeholder={placeholder}
-          className="max-h-60 w-full resize-none bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
+          className="max-h-60 w-full resize-none scrollbar-visible bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
         <div className="mt-1 flex items-center gap-1" data-composer-toolbar>
           <DropdownMenu {...modelMenu.root}>

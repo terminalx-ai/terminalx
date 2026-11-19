@@ -875,6 +875,16 @@ describe("the session header's location and connection chips", () => {
     fireEvent.click(element, { button: 0 });
   };
 
+  it("has Run, Git and Share where a local session has them: Run off with why, Git opening Changes, Share the workspace's people (#1289)", async () => {
+    await openConnected();
+    const run = screen.getByTestId("cloud-run-menu-unavailable");
+    expect(run.getAttribute("title")).toContain("Saved actions and previews run on this computer");
+    expect((within(run).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("cloud-git-button")).toBeDefined();
+    fireEvent.click(screen.getByTestId("cloud-share-button"));
+    expect(await screen.findByTestId("cloud-share-dialog")).toBeDefined();
+  });
+
   it("the location chip holds the workspace's Stop, Archive and Delete", async () => {
     await openConnected();
     click(screen.getByTestId("session-location"));

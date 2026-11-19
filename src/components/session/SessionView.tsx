@@ -52,6 +52,7 @@ import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
+import { CloudHeaderActions } from "./CloudHeaderActions";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { CloudWorkspaceDetails } from "@/components/cloud/CloudWorkspaceDetails";
@@ -912,6 +913,8 @@ export function SessionView({
             {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} workspace={cloud?.removableWorkspace} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
+            {/* A cloud workspace session's Run, Git and Share, where a local session has them (#1289). */}
+            {cloud && !machine && !compact && <CloudHeaderActions cloud={cloud} runMenuReason={backend.unavailable?.runMenu ?? null} />}
             {continueTab && (
               <WithTooltip label={continueLabel}>
                 <Button variant="ghost" size="icon-sm" aria-label={continueLabel} onClick={continueTab}>

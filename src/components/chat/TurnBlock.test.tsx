@@ -405,6 +405,15 @@ describe("a turn's order and its failure", () => {
     expect(onRetryInNewChat).toHaveBeenCalledWith(value);
   });
 
+  it("shows Retry in a new chat off, with why, where the session cannot open one (#1289)", () => {
+    const value = { ...turn([]), toolCount: 0, editedFiles: 0, completed: { seq: 9, status: "error", ts: "2026-10-03T00:01:00Z" }, finalText: "overloaded", work: [{ kind: "error", key: "e8", seq: 8, text: "overloaded" }] } as unknown as Turn;
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} onRetry={vi.fn()} retryInNewChatUnavailable="not from here" />);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+    const off = screen.getByRole("button", { name: /^Retry in a new chat/ }) as HTMLButtonElement;
+    expect(off.disabled).toBe(true);
+    expect(screen.getByTestId("retry-in-new-chat-unavailable").getAttribute("title")).toBe("not from here");
+  });
+
   it("keeps an earlier error that said something else as its own row", () => {
     const value = { ...turn([]), toolCount: 0, editedFiles: 0, completed: { seq: 9, status: "error", ts: "2026-10-03T00:01:00Z" }, finalText: "Gave up", work: [{ kind: "error", key: "e8", seq: 8, text: "Hook failed" }] } as unknown as Turn;
     render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
@@ -461,6 +470,26 @@ describe("the turn's menu (PRO-379)", () => {
     expect(copyText).toHaveBeenCalledWith("**Done.**");
     pick(/^Second opinion from Codex/);
     expect(onSecondOpinion).toHaveBeenCalledOnce();
+  });
+
+  it("shows what a session cannot take here off, with why, where it would be (#1289)", () => {
+    render(<TurnBlock turn={answered()} sessionId="s" stream={[]} working={false} forkUnavailable="no fork here" resetUnavailable="no reset here" secondOpinionUnavailable="no second opinion here" />);
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    for (const [name, reason] of [[/^Fork/, "no fork here"], [/^Reset chat to here/, "no reset here"], [/^Second opinion/, "no second opinion here"]] as const) {
+      const item = screen.getByRole("menuitem", { name });
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      expect(item.textContent).toContain(reason);
+    }
+    // No footer button for an action that cannot be taken: only the menu says why.
+    expect(screen.queryByRole("button", { name: /^Second opinion/ })).toBeNull();
+  });
+
+  it("a given handler wins over a reason", () => {
+    const onFork = vi.fn();
+    render(<TurnBlock turn={answered()} sessionId="s" stream={[]} working={false} onFork={onFork} forkUnavailable="no fork here" />);
+    openMenu(screen.getByRole("button", { name: "Turn actions" }));
+    expect(screen.getByRole("menuitem", { name: /^Fork to new tab/ }).getAttribute("aria-disabled")).toBeNull();
+    expect(screen.queryByText("no fork here")).toBeNull();
   });
 
   it("offers nothing for a turn that did not finish well but its second opinion", () => {

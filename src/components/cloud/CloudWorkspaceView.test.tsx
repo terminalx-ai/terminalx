@@ -51,14 +51,16 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} proposeDimension
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { onContextLoss() {} dispose() {} } }));
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
-// The agent tabs have their own tests (CloudAgents.test.tsx); here only what the view hands them.
+// The agent sessions list has its own tests (CloudAgents.test.tsx); here only what the view hands it.
 const agentViews = vi.hoisted(() => [] as Record<string, unknown>[]);
 const integration = vi.hoisted(() => ({ realAgents: false }));
+/** Where the view sends a session to open: the shared session view (#1289). */
+const openSession = vi.fn();
 vi.mock("./CloudAgents", async (original) => {
   const actual = await original<typeof import("./CloudAgents")>();
-  return { CloudAgentsView: (props: React.ComponentProps<typeof actual.CloudAgentsView>) => {
+  return { CloudAgentSessions: (props: React.ComponentProps<typeof actual.CloudAgentSessions>) => {
     agentViews.push(props);
-    if (integration.realAgents) return <actual.CloudAgentsView {...props} />;
+    if (integration.realAgents) return <actual.CloudAgentSessions {...props} />;
     return <div data-testid="cloud-agents-stub" />;
   } };
 });
@@ -199,7 +201,7 @@ function Host({ workspaceId, workspaceState }: { workspaceId: string; workspaceS
     <>
       <ExecutionLocation provider="box" name={name} />
       <span data-testid="cloud-connection-state">{describeConnection(state)}</span>
-      <WorkspaceView opened={{ connection, name, provider: "box", workspaceState }} state={state} />
+      <WorkspaceView onOpenSession={openSession} opened={{ connection, name, provider: "box", workspaceState }} state={state} />
     </>
   );
 }
@@ -224,19 +226,18 @@ describe("the cloud workspace view", () => {
     const opened = { connection: fakeConnection("m1"), name: "Mac mini", provider: null, workspaceState: null, machine: { record, status, label: "Offline" } };
     integration.realAgents = true;
     // Offline reaches the transport as a reconnect with attempt 0.
-    const { rerender } = render(<WorkspaceView opened={opened} state={{ state: "reconnecting", attempt: 0, reason: "offline", retryInMs: 10_000 } as never} />);
+    const { rerender } = render(<WorkspaceView onOpenSession={openSession} opened={opened} state={{ state: "reconnecting", attempt: 0, reason: "offline", retryInMs: 10_000 } as never} />);
     expect(screen.getByTestId("workspace-connection-status").textContent).toBe(status);
     expect(document.body.textContent).toContain("Terminals appear once Mac mini is connected.");
     // Every tab speaks from the machine's state and names the machine: the Agent and Ports tabs as well (Files and Git need the real api module here; WebKit covers them).
     fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
-    expect(screen.getByTestId("cloud-agent-connection").textContent).toBe("Connection: Offline");
+    expect(await screen.findByText("Agent sessions appear here once Mac mini is connected or has saved conversations.")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Ports" }));
     expect(screen.getByTestId("cloud-ports-restarting").textContent).toContain(status);
-    expect(screen.queryByTestId("cloud-agent-provisioning")).toBeNull();
     expect(document.body.textContent).not.toMatch(/Reconnecting|\(attempt|workspace/i);
 
     listed = [];
-    rerender(<WorkspaceView opened={opened} state={connectedState() as never} />);
+    rerender(<WorkspaceView onOpenSession={openSession} opened={opened} state={connectedState() as never} />);
     expect(screen.queryByTestId("workspace-connection-status")).toBeNull();
     const tab = await screen.findByTestId("cloud-terminal-tab");
     expect(tab.querySelector("button")!.getAttribute("title")).toBe("Terminal 1 runs on Mac mini");
@@ -343,8 +344,9 @@ describe("the cloud workspace view", () => {
     await waitFor(() => expect(screen.queryByTestId("cloud-terminal-tab")).toBeNull());
   });
 
-  it("hands a stopped workspace's saved agent chats to the agent view, with its state", async () => {
+  it("hands a stopped workspace's saved agent sessions to the agent view, with its state", async () => {
     await openReady("ws-asleep", "suspended");
+    fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
     await screen.findByTestId("cloud-agents-stub");
     expect(agentViews.at(-1)).toMatchObject({ scope: { organizationId: "org-1", workspaceId: "ws-asleep" }, workspaceState: "suspended" });
   });
@@ -535,55 +537,13 @@ describe("shared cloud workspaces (PRO-30)", () => {
   });
 });
 
-// Review of #272: a wake that failed left the Agent pane reading "Starting" on a stopped workspace.
-describe("what the view tells the agent pane about a wake", () => {
-  const handed = () => agentViews[agentViews.length - 1] as { waking: boolean; wakeWorkspace: () => void };
-  function Stopped({ connection, waking }: { connection: CloudWorkspaceConnection; waking?: boolean }) {
-    const [state, setState] = useState<WorkspaceConnectionState>({ state: "waitingForRuntime" } as WorkspaceConnectionState);
-    useEffect(() => connection.client.onState(setState), [connection]);
-    return <WorkspaceView opened={{ connection, name: "Stopped", provider: "box", workspaceState: "suspended", waking }} state={state} />;
-  }
-
-  it("is waking only while a wake it asked for is out: a refused one reads stopped again", async () => {
-    const connection = fakeConnection("ws-stopped");
-    let refuse: (reason: unknown) => void = () => undefined;
-    vi.mocked(connection.activate).mockReturnValue(new Promise((_, reject) => (refuse = reject)) as never);
-    render(<Stopped connection={connection} />);
-    await screen.findByTestId("cloud-agents-stub");
-    expect(handed().waking).toBe(false);
-    act(() => handed().wakeWorkspace());
-    expect(connection.activate).toHaveBeenCalledWith("wake");
-    expect(handed().waking).toBe(true);
-    // The running limit, say: the wake is refused.
-    await act(async () => refuse({ code: "cloud_workspace_concurrency_exceeded" }));
-    expect(handed().waking).toBe(false);
-  });
-
-  it("stops being waking once connected, and follows the header's Resume without latching it", async () => {
-    const connection = fakeConnection("ws-stopped-2");
-    vi.mocked(connection.activate).mockResolvedValue(undefined as never);
-    const { rerender } = render(<Stopped connection={connection} />);
-    await screen.findByTestId("cloud-agents-stub");
-    act(() => handed().wakeWorkspace());
-    expect(handed().waking).toBe(true);
-    act(() => emit(connectedState()));
-    expect(handed().waking).toBe(false);
-
-    // The header's Resume is under way, then fails: nothing here remembers it.
-    rerender(<Stopped connection={connection} waking />);
-    expect(handed().waking).toBe(true);
-    rerender(<Stopped connection={connection} waking={false} />);
-    expect(handed().waking).toBe(false);
-  });
-});
-
 it("opens the existing agent-start view on recovery without sending a prompt or waking the workspace", async () => {
   const opened = { connection: fakeConnection("recovery"), name: "Recovery", provider: "box", workspaceState: "ready" };
-  const { rerender } = render(<WorkspaceView opened={opened} state={connectedState() as never} />);
+  const { rerender } = render(<WorkspaceView onOpenSession={openSession} opened={opened} state={connectedState() as never} />);
   expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("false");
-  rerender(<WorkspaceView opened={opened} state={connectedState() as never} agentRequest={1} />);
+  rerender(<WorkspaceView onOpenSession={openSession} opened={opened} state={connectedState() as never} agentRequest={1} />);
   await waitFor(() => expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("true"));
-  expect(agentViews.at(-1)).toMatchObject({ active: true, scope: { organizationId: "org-1", workspaceId: "recovery" } });
+  expect(agentViews.at(-1)).toMatchObject({ scope: { organizationId: "org-1", workspaceId: "recovery" } });
   expect(opened.connection.activate).not.toHaveBeenCalled();
   expect(client.mutate).not.toHaveBeenCalled();
 });
@@ -602,14 +562,14 @@ it("reaches the supported agent-start path from recovery and starts once without
     const [request, setRequest] = useState(0);
     return <TooltipProvider>
       <CloudWorkspaceAttention item={row} onOpenSession={() => setRequest((value) => value + 1)} />
-      <WorkspaceView opened={{ connection, name: "Recovery", provider: "box", workspaceState: "ready" }} state={state as never} agentRequest={request} />
+      <WorkspaceView onOpenSession={openSession} opened={{ connection, name: "Recovery", provider: "box", workspaceState: "ready" }} state={state as never} agentRequest={request} />
     </TooltipProvider>;
   }
   const { unmount } = render(<Recovery />);
   fireEvent.click(screen.getByRole("button", { name: "Open session" }));
   await waitFor(() => expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("true"));
   expect(client.createAgentTab).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "New agent tab" }));
+  fireEvent.click(screen.getByRole("button", { name: "New agent session" }));
   const start = screen.getByRole("button", { name: "Start agent" });
   fireEvent.click(start);
   fireEvent.click(start);

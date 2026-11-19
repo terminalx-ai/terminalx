@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ORGANIZATION_DELETION_REFUSALS, organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
 import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 
 /**
@@ -22,6 +23,12 @@ import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
 /** The capability flag of a server that knows `wake: false`; an older one rejects the key. */
 const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
+/**
+ * The capability flag of a server whose organization delete route takes a
+ * phone's token (terminalx-saas#279). Without it the route takes desktop
+ * tokens only, so the phone does not offer deletion.
+ */
+export const ORGANIZATION_DELETE_CAPABILITY = "organizations.delete.mobile.v1";
 
 // Ask for every registered provider. The names are for servers that predate
 // the described-provider contract (PRO-415).
@@ -33,11 +40,22 @@ const CONTRACT_HEADERS = {
   "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
 } as const;
 
+/**
+ * Why a request got no usable answer, beside its code: `timeout` (no answer in
+ * time, so the server may still have acted on it), `network` (it never left
+ * the phone or the connection failed), `unreadable` (an error answer that was
+ * not the service's JSON).
+ */
+export type CloudApiFailureReason = "timeout" | "network" | "unreadable";
+
 export class CloudApiError extends Error {
   constructor(
     readonly code: string,
     /** The HTTP status; null when the request never got an answer (offline, timed out). */
     readonly status: number | null,
+    readonly reason: CloudApiFailureReason | null = null,
+    /** For `organization_delete_blocked`: what is still in the way, as known blocker codes only. */
+    readonly blockers: string[] = [],
   ) {
     super(code);
     this.name = "CloudApiError";
@@ -89,7 +107,7 @@ export type CloudWorkspaceSnapshot = z.infer<typeof snapshotSchema>;
 export type CloudTombstone = z.infer<typeof tombstoneSchema>;
 export type CloudRole = z.infer<typeof ROLE>;
 
-const organizationSchema = z.object({ orgId: z.string().min(1), name: z.string(), role: z.string() }).passthrough();
+const organizationSchema = z.object({ orgId: z.string().min(1), name: z.string(), role: z.string(), isPersonal: z.boolean().optional() }).passthrough();
 export type CloudOrganization = z.infer<typeof organizationSchema>;
 
 const attachTicketSchema = z.object({ v: z.literal(1), token: z.string().min(1), expiresAt: z.number(), runtimeGeneration: z.number().int().nonnegative(), protocol: z.literal("terminalx-workspace-rpc/1") });
@@ -159,10 +177,13 @@ export class CloudApi {
   /** Whether the server knows `wake: false`; null until its capabilities were read. */
   private doNotWakeKnown: boolean | null = null;
 
+  /** Whether the server takes this phone's token for deleting an organization, from the last capabilities read. */
+  private phoneDeletion = false;
+
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
-    for (const name of ["organizations", "workspaces", "open", "resume", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare"] as const) {
+    for (const name of ["organizations", "workspaces", "open", "resume", "enqueue", "commands", "commandStatuses", "cancelCommand", "checkpoints", "checkpoint", "members", "shares", "putShare", "revokeShare", "deleteOrganization"] as const) {
       const self = this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
       const original = self[name]!.bind(this);
       self[name] = (...args) =>
@@ -184,6 +205,7 @@ export class CloudApi {
     const body = await this.request("POST", "/v1/desktop/auth/capabilities", {});
     const parsed = z.object({ organizations: z.array(organizationSchema), capabilities: z.object({ flags: z.record(z.string(), z.unknown()) }).passthrough().nullish() }).passthrough().parse(body);
     this.doNotWakeKnown = parsed.capabilities?.flags[DO_NOT_WAKE_CAPABILITY] === true;
+    this.phoneDeletion = parsed.capabilities?.flags[ORGANIZATION_DELETE_CAPABILITY] === true;
     return parsed.organizations;
   }
 
@@ -195,6 +217,32 @@ export class CloudApi {
   async doNotWake(): Promise<boolean> {
     if (this.doNotWakeKnown === null) await this.organizations().catch(() => undefined);
     return this.doNotWakeKnown === true;
+  }
+
+  /**
+   * Delete an organization (#1292). The server re-checks that this person
+   * owns it, that it is not a personal organization, that nothing still holds
+   * it, and that `confirmationName` is its name exactly; send the
+   * organization's own name, never what was typed. Only an answer naming this
+   * organization as deleted is success: anything else may or may not have
+   * deleted it (`organization_delete_outcome_unknown`).
+   */
+  async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
+    let body: unknown;
+    try {
+      body = await this.request("POST", `/v1/desktop/orgs/${id(orgId)}/delete`, { confirmationName });
+    } catch (error) {
+      // As the desktop decodes it: a known refusal, or signed out before sending; anything else may have deleted it.
+      if (error instanceof CloudApiError && (error.code === "account_signed_out" || (ORGANIZATION_DELETION_REFUSALS as readonly string[]).includes(error.code))) throw error;
+      throw new CloudApiError("organization_delete_outcome_unknown", error instanceof CloudApiError ? error.status : null);
+    }
+    const answer = z.object({ organizationId: z.string(), deleted: z.boolean() }).passthrough().safeParse(body);
+    if (!answer.success || answer.data.organizationId !== orgId || answer.data.deleted !== true) throw new CloudApiError("organization_delete_outcome_unknown", 200);
+  }
+
+  /** Whether this server deletes organizations for a phone, as of the last organizations read. */
+  deletesOrganizations(): boolean {
+    return this.phoneDeletion;
   }
 
   /** An organization's workspaces as this person may see them. Reading the list never starts compute. */
@@ -222,7 +270,10 @@ export class CloudApi {
    * with the workspace and the queued operation; the list says when it runs.
    */
   async resume(orgId: string, workspaceId: string): Promise<CloudWorkspaceSnapshot> {
-    const snapshot = snapshotSchema.parse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/resume`, {}));
+    const parsed = snapshotSchema.safeParse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/resume`, {}));
+    // An answer this app cannot read is said as such, not as a failure with no reason (#1290).
+    if (!parsed.success) throw new CloudApiError("cloud_workspace_invalid_response", 200);
+    const snapshot = parsed.data;
     // An answer about another workspace is not the answer to this request.
     if (snapshot.workspace.id !== workspaceId || snapshot.workspace.orgId !== orgId) throw new CloudApiError("cloud_workspace_invalid_response", 200);
     return snapshot;
@@ -300,7 +351,11 @@ export class CloudApi {
     const token = await this.options.accessToken();
     if (!token) throw new CloudApiError("account_signed_out", 401);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30_000);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.options.timeoutMs ?? 30_000);
     let response: Response;
     try {
       response = await this.fetcher(`${this.options.origin}${path}`, {
@@ -310,7 +365,7 @@ export class CloudApi {
         signal: controller.signal,
       });
     } catch {
-      throw new CloudApiError("cloud_workspace_unavailable", null);
+      throw new CloudApiError("cloud_workspace_unavailable", null, timedOut ? "timeout" : "network");
     } finally {
       clearTimeout(timer);
     }
@@ -325,9 +380,10 @@ export class CloudApi {
       parsed = null;
     }
     if (!response.ok) {
-      const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : "cloud_workspace_unavailable";
+      const code = parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string" ? (parsed as { error: string }).error : null;
       // Only a plain token crosses to the UI as a code.
-      throw new CloudApiError(/^[a-z0-9_.-]{1,96}$/i.test(code) ? code : "cloud_workspace_unavailable", response.status);
+      if (code === null || !/^[a-z0-9_.-]{1,96}$/i.test(code)) throw new CloudApiError("cloud_workspace_unavailable", response.status, "unreadable");
+      throw new CloudApiError(code, response.status, null, code === "organization_delete_blocked" ? organizationDeletionBlockers(parsed) : []);
     }
     if (parsed === null && response.status !== 204) throw new CloudApiError("cloud_workspace_invalid_response", response.status);
     return parsed;
