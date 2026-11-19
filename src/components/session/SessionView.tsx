@@ -254,6 +254,11 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
  * 7. The port-forward chip (PRO-355) with nothing forwarded is left out of a
  *    header up to 480 px wide (`PortForwardChip`): the Ports tab forwards a
  *    port just the same. One that counts forwards stays.
+ * 8. A cloud workspace's Run, Git and Share (#1289, `CloudHeaderActions`)
+ *    are icons alone in a header up to 720 px wide and left out of one up to
+ *    600 px wide, before any chip gives way to them: Run is off there, Git
+ *    opens the side panel's Changes tab, and Share is in the workspace menu
+ *    of the location chip and of the sidebar row.
  *
  * At that narrow width, breadcrumb padding, gaps and chip margins tighten
  * to keep the title readable beside the full-height 40px action buttons.
