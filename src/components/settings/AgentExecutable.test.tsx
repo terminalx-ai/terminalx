@@ -89,7 +89,8 @@ describe("Executable row (PRO-157, design 10.01)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
     await waitFor(() => expect(note()).toBe("From your PATH · ~/.local/bin/claude · 2.3.41"));
     expect(invoke).toHaveBeenLastCalledWith("set_agent_executable", { harness: "claude", path: null });
-    expect(field().value).toBe("");
+    // The field follows the saved value in an effect, one render after the note changes.
+    await waitFor(() => expect(field().value).toBe(""));
   });
 
   it("clearing the field is Reset, and a cancelled Browse… changes nothing", async () => {
