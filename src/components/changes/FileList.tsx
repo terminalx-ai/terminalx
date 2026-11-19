@@ -54,7 +54,7 @@ export function FileList({
           <span aria-hidden>{status.letter}</span><span className="sr-only">{status.word}</span>
         </span>
         <span className={cn("min-w-0 shrink truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-faint">{!folders && dirName(f.path)}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">{!folders && dirName(f.path)}</span>
         {!!counts.get(f.path) && <span className="shrink-0 text-[11px] text-info">{counts.get(f.path)} {counts.get(f.path) === 1 ? "comment" : "comments"}</span>}
         <span className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums">
           {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{f.additions > 0 && f.deletions > 0 && " "}

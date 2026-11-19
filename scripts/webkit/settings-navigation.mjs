@@ -37,6 +37,8 @@ try {
       };
       const repositories = nav.getByRole("group", { name: "Projects", exact: true });
       const first = repositories.getByRole("button", { name: "A repository with a very long name that should be truncated", exact: true });
+      // Before a project is opened: an open project adds its own pages (PRO-387) under its row.
+      const closedScrolls = await nav.evaluate((element) => element.scrollHeight > element.clientHeight);
       await first.click();
       const cleanup = settings.getByRole("radiogroup", { name: "Delete merged workspaces of A repository with a very long name that should be truncated" });
       await cleanup.getByRole("radio", { name: "Off", exact: true }).click();
@@ -53,12 +55,15 @@ try {
           return b.width && (b.left < n.left - 1 || b.right > n.right + 1);
         });
         const longName = nav.querySelector("button[title] span");
-        return { navScrolls: nav.scrollHeight > nav.clientHeight, separateColumns: n.right <= c.left + 1,
+        const pages = nav.querySelector('[role="group"][aria-label$=" settings"]');
+        return { navScrolls: nav.scrollHeight > nav.clientHeight, navOverflow: nav.scrollHeight - nav.clientHeight, openPages: pages?.getBoundingClientRect().height ?? null, separateColumns: n.right <= c.left + 1,
           pageOverflow: root.scrollWidth > root.clientWidth + 1, contentOverflow: column.scrollWidth > column.clientWidth + 1,
           outside: outside.length, nameTruncates: longName.scrollWidth > longName.clientWidth,
         };
       });
-      checks[projectCount > 2 ? "long project lists scroll inside navigation" : "short project lists leave all five groups visible"] = projectCount > 2 ? layout.navScrolls : !layout.navScrolls;
+      checks[projectCount > 2 ? "long project lists scroll inside navigation" : "short project lists leave all five groups visible"] = projectCount > 2 ? closedScrolls && layout.navScrolls : !closedScrolls;
+      // Opened, the navigation is taller by that project's pages and by nothing else.
+      if (projectCount <= 2) checks["an open project's pages are all the navigation can scroll by"] = layout.openPages > 0 && layout.navOverflow <= layout.openPages;
       checks["navigation and content stay in separate columns"] = layout.separateColumns;
       checks["nothing scrolls horizontally"] = !layout.pageOverflow && !layout.contentOverflow && layout.outside === 0;
       checks["long repository names truncate"] = layout.nameTruncates;

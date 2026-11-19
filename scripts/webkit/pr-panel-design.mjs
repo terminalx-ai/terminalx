@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // PRO-395: the PR panel against designs 05.08, 05.10, 05.12 and 05.19 in real WebKit, dark and light, 1440 wide.
 // Open with reviewers and activity, Ready with the merge menu, Merged with what next, and the Link PR dialog.
+// The pull request's header, its state pill and the order of its sections are the Checks tab's (PRO-394, design 05.02).
 //   pnpm build && node scripts/webkit/pr-panel-design.mjs [screenshot-dir]
 import { mkdir } from "node:fs/promises";
 import { launch, open, report, serve, sidebar } from "./harness.mjs";
@@ -91,7 +92,8 @@ try {
           "says where the action lives": (await dialog.getByTestId("link-pr-where").textContent()) === "Session more › Issue and pull request › Link pull request…",
         }, geometry);
       } else {
-        await page.getByRole("button", { name: "Branch", exact: true }).click();
+        // The panel's tab is "Checks" since PRO-394 (design 05.02); it was "Branch".
+        await page.getByRole("button", { name: "Checks", exact: true }).click();
         const section = page.getByTestId("branch-pull-request");
         if (mode === "merged") {
           await section.getByTestId("pr-merged-card").waitFor();
@@ -112,18 +114,23 @@ try {
             description: parseFloat(getComputedStyle(element.querySelector('[data-testid="pr-description"] .prose-chat')).fontSize),
             activity: [...element.querySelectorAll('[data-testid="pr-activity-item"]')].map((row) => parseFloat(getComputedStyle(row).fontSize)),
             overflow: element.scrollWidth - element.clientWidth,
-            headings: [...element.querySelectorAll("h3")].map((h) => h.textContent),
+            headings: [...element.querySelectorAll("h3, h4")].map((h) => h.textContent),
+            pill: element.querySelector('[data-testid="pr-state"]')?.textContent ?? null,
+            header: element.querySelector('[data-testid="pr-header"]')?.innerText ?? null,
           }));
           const text = await section.innerText();
           failed += report(`${mode} ${colorScheme}`, {
             "description and activity at 12–13px": sizes.description >= 12 && sizes.description <= 13 && sizes.activity.every((size) => size >= 12 && size <= 13),
-            "sections in the design's order": sizes.headings.join() === "Review,Checks,Description,Activity",
+            // The Checks tab leads with its checks (PRO-394, design 05.02); the conversation's sections follow.
+            "sections in the design's order": sizes.headings.join() === "Checks,Review,Description,Activity",
             "no empty review threads row": !text.includes("Review threads") && !text.includes("No review threads"),
             "relative times": !/\d{1,2}\/\d{1,2}\/\d{4}/.test(text) && /4m/.test(text) && /1h/.test(text),
             "nothing leaves the panel": sizes.overflow <= 1,
             ...(mode === "open"
               ? { "review summary and rows": /1 approved · 1 waiting · 0 unresolved/.test(text) && text.includes("Aisha Khan") && /Requested · 18h/.test(text) }
-              : { "Ready pill and ready card": text.includes("Ready\n") && /Ready to merge\s*7 of 7 checks passed · approved by Aisha Khan/.test(text) }),
+              // The pill says the pull request's state, never its readiness (PRO-394): the header says who approved, and
+              // the line under it that it can merge, with every check passed.
+              : { "Open pill, a header that says who approved, and Ready to merge with 7 of 7 passed": sizes.pill === "Open" && /Approved by aisha-khan/.test(sizes.header ?? "") && /Ready to merge\s*approved\s*Merge\s*CHECKS\s*7 of 7 passed/.test(text) }),
           }, { sizes, text });
           if (mode === "ready") {
             await section.getByRole("button", { name: "Merge", exact: true }).click();

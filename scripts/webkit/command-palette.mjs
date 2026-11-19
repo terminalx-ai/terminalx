@@ -7,7 +7,9 @@
 // place. Its search is a full-width header row. Actions are one 36px line each
 // (icon, label, grey detail, one keycap per chord), under "This session ·
 // <title>" and "App", the app's most used first. Tab switches tabs and the
-// footer says so. Settings lists its pages General first. Nothing is drawn
+// footer says so. Settings lists its pages General first, Machines (a page the
+// design does not draw, on for everyone since PRO-360) after Devices, the page
+// it sits with in Settings. Nothing is drawn
 // under 12px.
 //
 // Move to section is a view of the palette, not a dialog with a select: Back
@@ -242,7 +244,7 @@ try {
         "every action is one 36px line inside the palette": rowShapes.length > 20 && rowShapes.every((row) => row.height === 36 && row.inside && row.oneLine),
         "a chord is one keycap, at 12px": rowShapes.every((row) => row.caps <= 1) && newSession.text.length >= 2 && newSession.size >= 12 && newSession.radius === "5px",
         "nothing in the palette is drawn under 12px": [actionsSmallest, settingsSmallest, moveSmallest].every((size) => size >= 12),
-        "Settings lists its pages General first, in the design's order": pages.slice(0, 8).join("|") === "General|Account|Appearance|Shortcuts|Integrations|Devices|Agents|Environment" && settingsFooter.includes("Type to search every setting, not only pages"),
+        "Settings lists its pages General first, in the design's order": pages.slice(0, 9).join("|") === "General|Account|Appearance|Shortcuts|Integrations|Devices|Machines|Agents|Environment" && settingsFooter.includes("Type to search every setting, not only pages"),
         "Move to section is a view of the palette, not a dialog with a select": noSelect && back === "Back to actionsMoveFix duplicate permission cardsto a section",
         "sections carry their emoji and session count": sectionRows.join("|") === "🚀Release 0.91 session|🐛Bugs1 session|Later0 sessions|📖Docs refresh2 sessions",
         "the session's own section is checked and is the row it opens on": checked.join("|") === "🐛Bugs1 session" && current === "🐛Bugs1 session",

@@ -119,9 +119,9 @@ try {
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor({ state: "detached" });
     assert.equal(await page.getByRole("tab", { name: "Agent a2", exact: true }).count(), 1);
 
-    // Menu split and last-tab close use the same model as a drag.
+    // The menu's move to the other pane (PRO-381: "Move to the right pane", with its key on macOS) and last-tab close use the same model as a drag.
     await page.getByRole("tab", { name: "Agent a2", exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Split right", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Move to the right pane(\s*⌘\s*\\)?$/ }).click();
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor();
     await strip(page, "right").getByRole("button", { name: "Close Agent a2", exact: true }).click();
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor({ state: "detached" });
@@ -129,7 +129,7 @@ try {
     // Two actual xterms, with backend resize requests from each ResizeObserver.
     await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
     await page.getByRole("tab", { name: "Terminal 2", exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Split right", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Move to the right pane(\s*⌘\s*\\)?$/ }).click();
     const separator = page.getByRole("separator", { name: "Resize tab panes" });
     await separator.waitFor();
     await page.waitForFunction(() => ["s-a:one", "s-a:two"].every((id) => window.__RESIZES__.some((entry) => entry.id === id && entry.cols > 0)));

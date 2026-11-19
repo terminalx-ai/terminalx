@@ -162,7 +162,9 @@ try {
   }));
   failed += report("removed toast", {
     "says where the key went and which login new tabs use": /Deleted from the Keychain\. New tabs sign in with Claude Max \(ada@example\.com\)\./.test(await removed.textContent()),
-    "has no restart offer (PRO-377)": (await removed.getByRole("button", { name: /Restart/ }).count()) === 0 && !(await removed.textContent()).includes("running"),
+    // #1130: the two tabs still on the key are named, with what they cost and what removal leaves undone.
+    "says the running tabs keep their login and may still be billed to it, and that the key is not revoked (#1130)": (await removed.textContent()).endsWith("New tabs sign in with Claude Max (ada@example.com). 2 running tabs keep their current login until you restart them. Usage in these tabs may still be billed to their current login. This does not revoke the key with your provider."),
+    "has no restart offer (PRO-377)": (await removed.getByRole("button", { name: /Restart/ }).count()) === 0,
   });
   await removed.getByRole("button", { name: "Dismiss" }).click();
 

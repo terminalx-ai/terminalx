@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PRO-295 (screen 05.20): the two branch toasts, in WebKit, light and dark.
-// On a detached HEAD, Rename… on the branch row raises "Check out a branch
+// On a detached HEAD, Rename branch… on the branch row raises "Check out a branch
 // before renaming" naming the short commit, with "Create a branch here"
 // filled in and no Copy error; the button makes the branch and the header
 // then names it. A comparison branch that cannot be used raises "Couldn't
@@ -61,10 +61,10 @@ try {
     const header = page.locator("main header").first();
     await header.getByText("detached at 3f2a91c").waitFor();
 
-    // Rename on the detached branch row.
+    // Rename branch on the detached branch row.
     const row = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: /^detached at 3f2a91c/ }).first();
     await row.click({ button: "right" });
-    await page.getByRole("menu").getByRole("menuitem", { name: /^Rename/ }).click();
+    await page.getByRole("menu").getByRole("menuitem", { name: "Rename branch…", exact: true }).click();
     const alerts = page.locator('[role="alert"][data-error-toast]');
     const rename = alerts.filter({ hasText: "Check out a branch before renaming" });
     await rename.waitFor();
@@ -118,7 +118,7 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `branch-created-${colorScheme}.png`) });
 
     failed += report(`branch toasts, ${colorScheme}`, {
-      "Rename… on a detached HEAD opens no dialog and raises the toast with the short commit": dialog === 0 && renameText.includes("This worktree is on a detached HEAD at 3f2a91c, so there's no branch to rename."),
+      "Rename branch… on a detached HEAD opens no dialog and raises the toast with the short commit": dialog === 0 && renameText.includes("This worktree is on a detached HEAD at 3f2a91c, so there's no branch to rename."),
       "the rename toast offers Create a branch here, and no Copy error": renameButtons.join("|") === "Create a branch here|",
       "a gone comparison branch raises Couldn't switch with a reason and what is still compared": switchText.includes("The branch may have been deleted on its remote, or not fetched here yet. Changes still compare against origin/main."),
       "git's line is shown alone, in monospace": lineText === "fatal: Needed a single revision" && /mono/i.test(lineFont),

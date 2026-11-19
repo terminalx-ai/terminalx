@@ -33,11 +33,12 @@ const HEADER_HEIGHT = 36;
 const OVERSCAN = 6;
 /**
  * Fixed widths for every column but the session's, which takes the rest. The
- * default set (02.01, 02.05) needs 864px plus the name's minimum, so it fits
- * the table's 1140px at a 1440-wide window with the sidebar open.
+ * name's minimum is what is left at a 1440-wide window with the sidebar and
+ * the Views rail open: the columns shown by default, without Where, fit the
+ * table's 996px exactly. With a machine paired, Where's 84px scrolls.
  */
 const WIDTHS: Record<Exclude<TableColumnId, "name">, number> = { project: 120, where: 84, branch: 140, changes: 88, status: 196, agent: 116, pr: 80, owner: 60, updated: 60, created: 80 };
-const NAME_MIN = 220;
+const NAME_MIN = 184;
 const width = (id: TableColumnId) => id === "name" ? undefined : WIDTHS[id];
 
 export function SessionTable({ containerRef, navigationRef, rows, hiddenColumns, sort, onSort, selectedId, onFocus, onOpen, loading, compact = false, where = false }: {

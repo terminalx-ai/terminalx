@@ -54,7 +54,7 @@ function Row({ badge, path, title, trailing, onOpen, current = false }: { badge:
   const inner = <>
     {badge}
     <span className="min-w-0 shrink truncate font-mono text-[12.5px]">{fileName(path)}</span>
-    <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-faint">{dirName(path)}</span>
+    <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">{dirName(path)}</span>
     <span className="ml-auto shrink-0 whitespace-nowrap">{trailing}</span>
   </>;
   const className = "flex h-8 w-full min-w-0 items-center gap-2 px-3 text-left";

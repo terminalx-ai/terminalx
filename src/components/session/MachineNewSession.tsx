@@ -247,7 +247,7 @@ export function WhereMenu({
             localProject ? (
               <>
                 {localWorktree ? "New worktree in " : "In "}
-                <span className="font-mono text-[11.5px]">{homePath(localProject.path)}</span>
+                <span className="font-mono text-xs">{homePath(localProject.path)}</span>
               </>
             ) : (
               "Your projects on this Mac"

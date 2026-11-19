@@ -349,7 +349,7 @@ function tier(layout) {
     "the right-click menu",
     {
       // The design's groups (PRO-381, 03.14); the rest is under More.
-      "offers the tab's own actions": ["Rename chat…", "Mark as unread", "Pin tab", "Mute notifications for this tab", "Move to the right pane", "Switch to terminal view", "Fork to new tab", "Copy transcript", "Copy link to this tab", "More", "Close tab", "Close other tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))),
+      "offers the tab's own actions": ["Rename chat…", "Mark as unread", "Pin tab", "Mute notifications for this tab", "Move to the right pane", "Switch to terminal view", "Fork conversation to new session", "Copy transcript", "Copy link to this tab", "More", "Close tab", "Close other tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))),
       "keeps the rest under More": ["Duplicate tab", "Close tabs to the right", "Close tabs to the left", "Close all tabs"].every((wanted) => items.some((item) => item.trim().startsWith(wanted))) === false,
     },
     items,
