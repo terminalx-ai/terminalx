@@ -631,7 +631,7 @@ fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, works
 /// only follows a 4103 close.
 fn close_code(state: &ClientState) -> Option<u16> {
     match state {
-        ClientState::Reconnecting { close_code, .. } => *close_code,
+        ClientState::Reconnecting { close_code, .. } | ClientState::WaitingForRuntime { close_code } => *close_code,
         ClientState::UpdateRequired => Some(4103),
         _ => None,
     }
