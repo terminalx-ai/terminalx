@@ -67,6 +67,10 @@ export function createChatSearchIndex() {
         case "reasoning": add(item.key, item.text, false, ["fold", item.key]); break;
         case "message":
         case "queued": add(`message:${item.seq}`, item.text); break;
+        case "shell":
+          add(`${item.key}:command`, item.command, true);
+          add(`${item.key}:output`, [item.stdout, item.stderr].filter(Boolean).join("\n"), true, [`shell:${item.key}`]);
+          break;
         case "error":
           add(item.key, item.text, false, ["fold"]);
           add(`${item.key}:detail`, item.detail, false, ["fold"]);

@@ -16,7 +16,7 @@ const caps = { images: true, steer: false, permissionModes: true, effort: false,
 const harness: HarnessInfo = { id: "opencode", name: "OpenCode", binary: "opencode", available: true, path: "/opt/homebrew/bin/opencode", installHint: "", installUrl: "https://opencode.ai", caps };
 
 const provider = (id: string, name: string, more: Partial<OpenCodeCatalogProvider> = {}): OpenCodeCatalogProvider =>
-  ({ id, name, env: [`${id.toUpperCase()}_API_KEY`], api: null, doc: null, modelCount: 10, local: false, ...more });
+  ({ id, name, env: [`${id.toUpperCase()}_API_KEY`], api: null, doc: null, modelCount: 10, local: false, baseUrl: null, ...more });
 const CATALOG = [
   provider("anthropic", "Anthropic", { modelCount: 17 }), provider("openai", "OpenAI"), provider("openrouter", "OpenRouter", { modelCount: 375, api: "https://openrouter.ai/api/v1" }),
   provider("ollama", "Ollama", { env: [], api: "http://localhost:11434/v1", modelCount: 0, local: true }), provider("groq", "Groq"), provider("google", "Google"),
@@ -26,16 +26,20 @@ const CATALOG = [
 /** OpenCode's files as `harness::opencode::manage` reads and writes them. */
 let connected: OpenCodeConnected[];
 let refuse: string | null;
+let catalog: OpenCodeCatalogProvider[];
+let authProblem: string | null;
 const overview = (): OpenCodeOverview => ({
   configPath: "~/.config/opencode/opencode.json", configExists: true, configProblem: null, authPath: "~/.local/share/opencode/auth.json", logDir: "~/.local/share/opencode/log",
   connected,
   models: connected.flatMap((p) => p.models.map((model) => ({ id: `${p.id}/${model}`, provider: p.id, providerName: p.name, model, name: model === "openai/gpt-5" ? "GPT-5" : model }))),
-  catalog: CATALOG, catalogProblem: null,
+  catalog, catalogProblem: null, authProblem,
 });
 
 beforeEach(() => {
   connected = [];
   refuse = null;
+  catalog = CATALOG;
+  authProblem = null;
   invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
     switch (command) {
       case "opencode_overview": return overview();
@@ -103,7 +107,7 @@ describe("Agents › OpenCode (PRO-157, designs 10.14–10.16)", () => {
     fireEvent.change(form.getByLabelText("OpenRouter API key"), { target: { value: "sk-or-v1-secret" } });
     fireEvent.click(form.getByRole("button", { name: /Connect OpenRouter/ }));
     await waitFor(() => expect(dialog().getByTestId("connected-provider")).toBeTruthy());
-    expect(invoke).toHaveBeenCalledWith("opencode_connect", { provider: "openrouter", key: "sk-or-v1-secret", baseUrl: "" });
+    expect(invoke).toHaveBeenCalledWith("opencode_connect", { provider: "openrouter", key: "sk-or-v1-secret", baseUrl: null });
 
     const detail = within(dialog().getByTestId("connected-provider"));
     expect(detail.getByText("sk-or-••••••••8c1e")).toBeTruthy();
@@ -170,5 +174,37 @@ describe("Agents › OpenCode (PRO-157, designs 10.14–10.16)", () => {
     const form = within(dialog().getByTestId("connect-provider"));
     expect(form.queryByLabelText("Ollama API key")).toBeNull();
     expect((form.getByLabelText("Base URL") as HTMLInputElement).value).toBe("http://localhost:11434/v1");
+  });
+
+  it("reconnects through the gateway the config still has, leaving it as it is", async () => {
+    const gateway = "https://gateway.example.internal/openrouter/v1";
+    catalog = CATALOG.map((p) => p.id === "openrouter" ? { ...p, baseUrl: gateway } : p);
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Configure providers" }));
+    fireEvent.click(dialog().getByRole("button", { name: "Add OpenRouter" }));
+    const form = within(dialog().getByTestId("connect-provider"));
+    expect((form.getByLabelText("Base URL") as HTMLInputElement).value).toBe(gateway);
+    fireEvent.change(form.getByLabelText("OpenRouter API key"), { target: { value: "gw-key" } });
+    fireEvent.click(form.getByRole("button", { name: /Connect OpenRouter/ }));
+    // null: Rust checks the key at, and keeps, the address already saved.
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("opencode_connect", { provider: "openrouter", key: "gw-key", baseUrl: null }));
+  });
+
+  it("clears a saved gateway only when the field is emptied", async () => {
+    catalog = CATALOG.map((p) => p.id === "openrouter" ? { ...p, baseUrl: "https://gateway.example.internal/v1" } : p);
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "Configure providers" }));
+    fireEvent.click(dialog().getByRole("button", { name: "Add OpenRouter" }));
+    const form = within(dialog().getByTestId("connect-provider"));
+    fireEvent.change(form.getByLabelText("Base URL"), { target: { value: "" } });
+    fireEvent.change(form.getByLabelText("OpenRouter API key"), { target: { value: "direct-key" } });
+    fireEvent.click(form.getByRole("button", { name: /Connect OpenRouter/ }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("opencode_connect", { provider: "openrouter", key: "direct-key", baseUrl: "" }));
+  });
+
+  it("says why OpenCode's key file is left alone when it can't be read", async () => {
+    authProblem = "~/.local/share/opencode/auth.json isn’t valid JSON, so TerminalX won’t change it: saving would drop OpenCode’s other sign-ins. Run `opencode auth list` or fix the file, then try again.";
+    show();
+    expect((await screen.findByTestId("opencode-auth-problem")).textContent).toBe(authProblem);
   });
 });

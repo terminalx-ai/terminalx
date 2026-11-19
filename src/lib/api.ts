@@ -3260,6 +3260,8 @@ export interface OpenCodeCatalogProvider {
   doc: string | null;
   modelCount: number;
   local: boolean;
+  /** The address set for it in OpenCode's config, kept while it is disconnected. */
+  baseUrl: string | null;
 }
 
 /** A provider OpenCode can use now. */
@@ -3297,6 +3299,8 @@ export interface OpenCodeOverview {
   models: OpenCodePickerModel[];
   catalog: OpenCodeCatalogProvider[];
   catalogProblem: string | null;
+  /** Why TerminalX won't change OpenCode's key file now (it can't be read). */
+  authProblem: string | null;
 }
 
 export type OpenCodeKeyCheck = { result: "accepted" } | { result: "notChecked"; reason: string };

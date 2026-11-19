@@ -211,6 +211,28 @@ fn interruption(text: &str) -> bool {
     text.starts_with("[Request interrupted by user")
 }
 
+/// What a record of Claude Code's `!` shell passthrough holds (#1294): the
+/// command (`<bash-input>`), what it printed (`<bash-stdout>`,
+/// `<bash-stderr>`, `<bash-exit-code>`), or both in one record. Neither is a
+/// prompt: the CLI runs the command itself and starts no model turn for it.
+/// `None` for anything else, a message that only mentions the tags among
+/// other words included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellRecord {
+    pub input: bool,
+    pub output: bool,
+}
+
+pub fn shell_record(text: &str) -> Option<ShellRecord> {
+    let text = text.trim();
+    let opens = ["<bash-input>", "<bash-stdout>", "<bash-stderr>", "<bash-exit-code>"].iter().any(|tag| text.starts_with(tag));
+    let closes = ["</bash-input>", "</bash-stdout>", "</bash-stderr>", "</bash-exit-code>"].iter().any(|tag| text.ends_with(tag));
+    (opens && closes).then(|| ShellRecord {
+        input: text.starts_with("<bash-input>"),
+        output: ["<bash-stdout>", "<bash-stderr>", "<bash-exit-code>"].iter().any(|tag| text.contains(tag)),
+    })
+}
+
 /// What a local slash command prints (`/model`'s "Set model to …") and the
 /// caveat the CLI writes ahead of it. They are `user` records only because
 /// that is where the CLI keeps what the model should see next; nobody typed
@@ -400,6 +422,8 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             let before = out.len();
             decode_user(&v, out);
             return match out.get(before)? {
+                // A `!` command (#1294) opens no turn: no model turn follows it.
+                Payload::UserMessage { text, .. } if shell_record(text).is_some() => None,
                 Payload::UserMessage { .. } => Some(TurnMark::Opened),
                 Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
                 _ => None,
@@ -882,6 +906,23 @@ mod tests {
 
     fn said(payloads: &[Payload]) -> Vec<String> {
         payloads.iter().filter_map(|p| match p { Payload::TurnStarted { started_by: Some(by), prompt_seq: None, .. } => Some(by.clone()), _ => None }).collect()
+    }
+
+    /// #1294. Claude Code's records of a `!` command are drawn (the chat makes
+    /// one shell block of them) and open no turn; a prompt that only mentions
+    /// the tags is the reader's prompt as ever.
+    #[test]
+    fn a_shell_command_is_drawn_and_opens_no_turn() {
+        let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
+        for content in ["<bash-input> git status</bash-input>", "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>", "<bash-input>ls</bash-input>\n<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"] {
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(&record(content), &HashSet::new(), &mut out), None, "{content}");
+            assert!(matches!(&out[..], [Payload::UserMessage { text, .. }] if text == content), "{content}");
+        }
+        assert_eq!(turn_mark(&record("why does <bash-input>ls</bash-input> show up?")), Some(TurnMark::Opened));
+        assert_eq!(shell_record("<bash-input>ls</bash-input>"), Some(ShellRecord { input: true, output: false }));
+        assert_eq!(shell_record("<bash-stdout></bash-stdout><bash-stderr>x</bash-stderr>"), Some(ShellRecord { input: false, output: true }));
+        assert_eq!(shell_record("<bash-input>ls</bash-input> please"), None);
     }
 
     /// #540. A scheduled turn is written as a meta prompt, which was dropped
