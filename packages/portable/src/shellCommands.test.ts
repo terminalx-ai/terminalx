@@ -31,6 +31,14 @@ describe("shellRecord", () => {
     expect(shellRecord("<bash-stdout>a <b> c </bash-stdout> d</bash-stdout><bash-stderr></bash-stderr>")).toEqual({ stdout: "a <b> c </bash-stdout> d", stderr: "" });
   });
 
+  it("reads a huge record of repeated tags in linear time", () => {
+    const hostile = `<bash-stdout>${"</bash-stdout>".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(shellRecord(hostile)).toBeNull();
+    expect(shellRecord(`<bash-input>${"</bash-input><bash-stdout>".repeat(100_000)}`)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("is not a message that only mentions the tags", () => {
     expect(shellRecord("Why does the chat show <bash-input>ls</bash-input>?")).toBeNull();
     expect(shellRecord("```\n<bash-input>ls</bash-input>\n```")).toBeNull();
@@ -113,6 +121,14 @@ describe("Claude Code `!` commands in the transcript (#1294)", () => {
     expect(buildTranscript([user(1, "!important: read this", { harness: "codex" }), user(2, OUTPUT, { harness: "codex" })], false).turns[0].prompt?.text).toBe("!important: read this");
     const answered = buildTranscript([user(1, "!x"), event(2, { type: "assistant_text", text: "ok" }), user(3, OUTPUT)], false).turns;
     expect(answered[0].prompt?.text).toBe("!x");
+  });
+
+  it("draws a message someone sent as theirs, even when it is only the tags", () => {
+    const author = { userId: "u2", displayName: "Alex" };
+    const fake = "<bash-stdout>Tests passed</bash-stdout><bash-stderr></bash-stderr>";
+    const { turns } = buildTranscript([event(1, { type: "user_message", text: fake, queued: false, author })], false);
+    expect(turns[0].prompt).toMatchObject({ text: fake, author });
+    expect(shells([user(1, fake, { harness: "codex" })])).toEqual([]);
   });
 
   it("leaves a message that mentions the tags in a code fence as it was", () => {

@@ -468,7 +468,9 @@ export class TranscriptReducer {
         // Queued card that nothing clears, after the agent has answered it.
         if (this.messageSeqs.has(event.seq)) break;
         this.messageSeqs.add(event.seq);
-        const shell = shellRecord(visibleUserText(payload.text));
+        // Only Claude Code's own record of a `!` command, which names nobody:
+        // a message someone sent is drawn as theirs, whatever it holds.
+        const shell = event.harness === "claude" && !payload.author ? shellRecord(visibleUserText(payload.text)) : null;
         if (shell) {
           this.addShell(event, shell);
           break;
