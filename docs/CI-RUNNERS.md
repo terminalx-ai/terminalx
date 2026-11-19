@@ -12,7 +12,7 @@ The latency target and both ten-run comparisons remain unproven; see
 | --- | --- | --- |
 | `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, frontend build, portable icon tests, CI policy/selector/measurement tests. |
 | `vitest` | GitHub-hosted Ubuntu, four at once | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
-| `webkit-layout` | GitHub-hosted Ubuntu | All WebKit layout checks, permission-details among them, after the frontend build, in Playwright's WebKit build. `scripts/webkit/run-all.mjs` runs several at once. |
+| `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks, permission-details among them, after the frontend build. `scripts/webkit/run-all.mjs` runs several at once. |
 | `linux-rust` | GitHub-hosted Ubuntu on **every PR** | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
 | `linux-rust-tests` | GitHub-hosted Ubuntu, three at once, on **every PR** | Full default-feature `cargo test --locked` in three exact parts (below). |
 | `macos-native` | GitHub-hosted macOS, **when selected** | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and the full macOS Rust suite. |
@@ -116,7 +116,8 @@ reported a day later. `macos-native` was 70% of those minutes and
 compiler on this crate needs more, so a build that takes under four minutes on
 Linux takes 20 to 33 there.
 
-So only two jobs take a macOS runner, and only when they are selected:
+`webkit-layout` takes a macOS runner on every run. Two more take one only
+when they are selected:
 
 - `macos-native`: pushes to `main`, nightly, manual runs, and pull requests
   selected by `infra/ci-runners/macos-rust.py` (next section). An unselected
@@ -131,9 +132,14 @@ the newest waiting commit: an older commit still waiting when a newer one
 arrives is cancelled and its `check` fails. The newest commit of a burst of
 merges is always tested.
 
-The WebKit layout checks run on Linux, in the WebKit build Playwright ships
-for every system. The legacy runtime diagnostic's macOS leg is gone: its
-tests patch `platform.system` to Linux and to Darwin themselves.
+The WebKit layout checks stay on macOS. They were tried on Linux on 19
+November 2026, in the WebKit build Playwright ships there: 40 of the 107
+failed, against 6 on macOS that day. The fixtures use macOS paths
+(`/private/...`), the app shows Ctrl where the checks read ⌘, and others
+time out. Moving them needs those checks made portable first.
+
+The legacy runtime diagnostic's macOS leg is gone: its tests patch
+`platform.system` to Linux and to Darwin themselves.
 
 ## The suites in parts
 
@@ -191,7 +197,8 @@ python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
 **Coverage no longer provided on every PR:** frontend-only, documentation-only,
 and shared Rust changes outside those paths no longer take a macOS runner
 before merge: no macOS Rust tests, Clippy, Swift tests or Apple icon checks.
-They still run the full Linux Rust suite, Linux Clippy and the WebKit checks. Platform differences in otherwise shared Rust code
+They still run the full Linux Rust suite, Linux Clippy and the WebKit checks
+(on macOS). Platform differences in otherwise shared Rust code
 can therefore be detected only by main/nightly macOS tests; use manual dispatch
 on the PR branch when that risk is relevant. macOS-selected PRs retain the full
 suite, so their latency can exceed the ordinary PR target.

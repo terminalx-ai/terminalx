@@ -96,7 +96,7 @@ def validate(workflow):
             assert set(job["strategy"]["matrix"]["os"]) <= HOSTED - {"macos-latest"}, "custom or unselected macOS matrix runner"
         else:
             assert runner in HOSTED, "custom PR runner"
-            assert (runner == "macos-latest") == (name in SELECTED), "macOS runner time outside the selected jobs"
+            assert (runner == "macos-latest") == (name in SELECTED or name == "webkit-layout"), "macOS runner time outside the selected jobs and the WebKit checks"
         restored = None
         for step in job["steps"]:
             action = step.get("uses", "")
@@ -261,7 +261,7 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(change)
 
     def test_macos_runner_outside_the_selected_jobs_is_rejected(self):
-        self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"runs-on": "macos-latest"}))
+        self.rejects(lambda w: w["jobs"]["frontend"].update({"runs-on": "macos-latest"}))
         self.rejects(lambda w: w["jobs"]["legacy-runtime-probe"]["strategy"]["matrix"].update(os=["ubuntu-latest", "macos-latest"]))
 
     def test_unselected_job_condition_is_rejected(self):

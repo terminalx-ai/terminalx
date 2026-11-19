@@ -5,10 +5,10 @@ name: CI
 # YAML is not a runner access boundary: see docs/CI-RUNNERS.md before enabling it.
 #
 # macOS runners are the scarce ones: a handful run at once for the whole
-# account, and a job that needs one waits behind every other. Only macos-native
-# and machine-compat use one, and only when `macos-rust-changes` selects them
-# (docs/CI-RUNNERS.md "macOS runner time"). Everything else runs on Linux, the
-# long suites in parts on several runners at once.
+# account, and a job that needs one waits behind every other. webkit-layout
+# needs one on every run; macos-native and machine-compat take one only when
+# `macos-rust-changes` selects them (docs/CI-RUNNERS.md "macOS runner time").
+# Everything else runs on Linux, the long suites in parts on several runners.
 
 on:
   push:
@@ -112,10 +112,12 @@ jobs:
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
 
-  # On Linux: Playwright brings its own WebKit build on every system, and a
-  # Linux runner starts at once.
+  # On macOS, on every run. On Linux 40 of the 107 checks fail for reasons that
+  # are Linux's, not the app's: the fixtures use macOS paths (/private/...),
+  # the app shows Ctrl where the checks read ⌘, and a third time out
+  # (docs/CI-RUNNERS.md "macOS runner time").
   webkit-layout:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -131,7 +133,7 @@ jobs:
       - name: Build the frontend
         run: pnpm build
       - name: Install WebKit for the layout checks
-        run: pnpm exec playwright install --with-deps webkit
+        run: pnpm exec playwright install webkit
       # scripts/webkit/run-all.mjs runs them several at once, permission-details among them.
       - name: WebKit layout checks
         run: pnpm test:webkit-layout
