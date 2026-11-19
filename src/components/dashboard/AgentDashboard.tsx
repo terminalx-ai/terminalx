@@ -239,7 +239,9 @@ export function AgentDashboard() {
       owner: session.ownerId ? owners.get(session.ownerId) ?? null : null,
       ownerCell: isCloudDashboardSession(session) ? (session.ownerId ? <OwnerProfile orgId={session.orgId} userId={session.ownerId} name={owners.get(session.ownerId) ?? "Owner unavailable"} /> : "Owner unavailable") : undefined,
       locationCell: isCloudDashboardSession(session) ? <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"><Cloud aria-hidden className="size-[13px] shrink-0 text-info" /><span className="min-w-0 truncate">Cloud</span><PresenceFaces orgId={session.orgId} workspaceId={session.workspaceId} quiet /></span> : undefined,
-      updated: session.lastMessageAt ?? session.modified,
+      // A cloud row's last activity is its workspace's own lastActivityAt and nothing else:
+      // absent or invalid stays unknown rather than borrowing another time (docs/PHASE2-PRESENCE-UI.md).
+      updated: isCloudDashboardSession(session) ? cloudLastActive(catalog.orgs[session.orgId]?.workspaces.find((item) => item.workspace.id === session.workspaceId)?.workspace.lastActivityAt) : session.lastMessageAt ?? session.modified,
       created: session.created ?? null,
     };
   }), sort) : [], [filtered, workspaceByPath, harnessNames, prs, owners, projectName, sort, preferences.view, showWhere, machineById, catalog]);
@@ -390,7 +392,7 @@ export function AgentDashboard() {
             </>
           )}
         </FilterChip>
-        <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-1.5 @min-[1100px]:shrink-0 @min-[1100px]:flex-nowrap">
           {[...visibleIds].map((orgId) => <PresenceFaces key={orgId} orgId={orgId} />)}
           {team.controls}
           <ActiveNow people={people} />
@@ -461,6 +463,11 @@ export function AgentDashboard() {
       </div>
     </div>
   );
+}
+
+/** A workspace's reported last activity as the table's time, or null when it reports none. */
+function cloudLastActive(at: number | null | undefined): string | null {
+  return at == null || !Number.isFinite(new Date(at).getTime()) ? null : new Date(at).toISOString();
 }
 
 /** The All machines button's label: the choice, by name. */
