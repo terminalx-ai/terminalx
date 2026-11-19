@@ -3,6 +3,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { organizationRoleName as roleName } from "@mobile/cloud/words";
+import { organizationDeletionOffered } from "@terminalx/portable/organizationDeletion";
 import { OrganizationDelete } from "@mobile/ui/OrganizationDelete";
 import { Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -28,9 +29,11 @@ export default function OrganizationScreen() {
         <Text style={[styles.detail, { color: palette.muted }]}>{organization.isPersonal ? `Your personal organization · ${roleName(organization.role)}` : `Your role · ${roleName(organization.role)}`}</Text>
       </Card>
       {/* The list is the server's answer from this run, not one kept from before: a role read earlier decides nothing. */}
-      {snapshot.saved ? null : <OrganizationDelete organization={organization}
+      {snapshot.saved ? null : snapshot.deletesOrganizations ? <OrganizationDelete organization={organization}
         remove={(name) => catalog.deleteOrganization(organization.orgId, name)}
-        onDeleted={() => router.back()} />}
+        onDeleted={() => router.back()} />
+        // A server that takes deletion from desktop tokens only (terminalx-saas#279): say where it can be done.
+        : organizationDeletionOffered(organization) ? <Text style={[styles.note, { color: palette.muted }]}>To delete this organization, use the TerminalX desktop app or the web console. Your account service does not take deletion from the phone yet.</Text> : null}
     </ScrollView> : <EmptyState title="Organization unavailable" detail={catalog ? "It is no longer on this account. Go back to see your organizations." : "Sign in to see your organizations."} />}
   </>;
 }
@@ -41,4 +44,5 @@ const styles = StyleSheet.create({
   label: { fontSize: 13 },
   name: { fontSize: 17, fontWeight: "600" },
   detail: { fontSize: 15, lineHeight: 21 },
+  note: { fontSize: 13, lineHeight: 18, marginHorizontal: 4 },
 });

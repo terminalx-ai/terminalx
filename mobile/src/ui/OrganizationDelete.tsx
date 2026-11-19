@@ -58,12 +58,7 @@ function Confirmation({ organization, remove, onDeleted }: Props) {
       // Done: the confirmation is spent, so a tap while the screen goes away sends nothing more.
       if (epoch.current === attempt) { setConfirming(null); setTyped(""); onDeleted(); }
     } catch (failure) {
-      if (epoch.current !== attempt) return;
-      // A token the server does not take here: an expired sign-in, or a server that does not yet take deletion from a phone.
-      const code = failure && typeof failure === "object" && "code" in failure ? String(failure.code) : "";
-      setError(code === "invalid_access_token"
-        ? "The account service did not accept this phone's sign-in for deleting an organization. Sign in again; if it still refuses, delete it from the desktop app or the web console."
-        : organizationDeletionError(failure));
+      if (epoch.current === attempt) setError(organizationDeletionError(failure));
     } finally {
       if (epoch.current === attempt) {
         // A refusal keeps what was typed, and is never tried again on its own.

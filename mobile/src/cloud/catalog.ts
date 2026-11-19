@@ -57,6 +57,8 @@ export interface CatalogSnapshot {
   saved: boolean;
   /** Generated titles this phone learned, by `titleKey`. */
   titles: Readonly<Record<string, string>>;
+  /** The server takes this phone's request to delete an organization (read with the organizations). */
+  deletesOrganizations: boolean;
 }
 
 /** Where a workspace's generated title is found in `CatalogSnapshot.titles`. */
@@ -109,10 +111,11 @@ export class CloudCatalog {
   private error: string | null = null;
   private refreshedAt: number | null = null;
   private saved = false;
+  private deletesOrganizations = false;
   private titles: Record<string, string> = {};
   /** Organizations whose workspaces came from a successful read, in this run or the saved one: what is shown for them is a list, not a guess. */
   private everRead = new Set<string>();
-  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
+  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
   private readonly retained = new Map<string, number>();
@@ -385,6 +388,7 @@ export class CloudCatalog {
     this.error = null;
     this.loading = false;
     this.saved = false;
+    this.deletesOrganizations = this.options.api.deletesOrganizations?.() === true;
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
     void this.saveList();
@@ -537,7 +541,7 @@ export class CloudCatalog {
   }
 
   private publish(): void {
-    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles };
+    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles, deletesOrganizations: this.deletesOrganizations };
     for (const listener of [...this.listeners]) listener();
   }
 }

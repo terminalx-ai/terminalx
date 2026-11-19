@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
+import { ORGANIZATION_DELETION_REFUSALS, organizationDeletionBlockers } from "@terminalx/portable/organizationDeletion";
 import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 
 /**
@@ -23,6 +23,12 @@ import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
 export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
 /** The capability flag of a server that knows `wake: false`; an older one rejects the key. */
 const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
+/**
+ * The capability flag of a server whose organization delete route takes a
+ * phone's token (terminalx-saas#279). Without it the route takes desktop
+ * tokens only, so the phone does not offer deletion.
+ */
+export const ORGANIZATION_DELETE_CAPABILITY = "organizations.delete.mobile.v1";
 
 // Ask for every registered provider. The names are for servers that predate
 // the described-provider contract (PRO-415).
@@ -162,6 +168,9 @@ export class CloudApi {
   /** Whether the server knows `wake: false`; null until its capabilities were read. */
   private doNotWakeKnown: boolean | null = null;
 
+  /** Whether the server takes this phone's token for deleting an organization, from the last capabilities read. */
+  private phoneDeletion = false;
+
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
@@ -187,6 +196,7 @@ export class CloudApi {
     const body = await this.request("POST", "/v1/desktop/auth/capabilities", {});
     const parsed = z.object({ organizations: z.array(organizationSchema), capabilities: z.object({ flags: z.record(z.string(), z.unknown()) }).passthrough().nullish() }).passthrough().parse(body);
     this.doNotWakeKnown = parsed.capabilities?.flags[DO_NOT_WAKE_CAPABILITY] === true;
+    this.phoneDeletion = parsed.capabilities?.flags[ORGANIZATION_DELETE_CAPABILITY] === true;
     return parsed.organizations;
   }
 
@@ -209,10 +219,21 @@ export class CloudApi {
    * deleted it (`organization_delete_outcome_unknown`).
    */
   async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
-    const answer = z.object({ organizationId: z.string(), deleted: z.boolean() }).passthrough().safeParse(
-      await this.request("POST", `/v1/desktop/orgs/${id(orgId)}/delete`, { confirmationName }),
-    );
+    let body: unknown;
+    try {
+      body = await this.request("POST", `/v1/desktop/orgs/${id(orgId)}/delete`, { confirmationName });
+    } catch (error) {
+      // As the desktop decodes it: a known refusal, or signed out before sending; anything else may have deleted it.
+      if (error instanceof CloudApiError && (error.code === "account_signed_out" || (ORGANIZATION_DELETION_REFUSALS as readonly string[]).includes(error.code))) throw error;
+      throw new CloudApiError("organization_delete_outcome_unknown", error instanceof CloudApiError ? error.status : null);
+    }
+    const answer = z.object({ organizationId: z.string(), deleted: z.boolean() }).passthrough().safeParse(body);
     if (!answer.success || answer.data.organizationId !== orgId || answer.data.deleted !== true) throw new CloudApiError("organization_delete_outcome_unknown", 200);
+  }
+
+  /** Whether this server deletes organizations for a phone, as of the last organizations read. */
+  deletesOrganizations(): boolean {
+    return this.phoneDeletion;
   }
 
   /** An organization's workspaces as this person may see them. Reading the list never starts compute. */

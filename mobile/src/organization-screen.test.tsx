@@ -3,10 +3,11 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import OrganizationScreen from "../app/organization/[orgId]";
+import { organizationDeletionError } from "@terminalx/portable/organizationDeletion";
 import { OrganizationDelete } from "./ui/OrganizationDelete";
 
 // #1292: an owner deletes an organization from the phone, with the desktop's wording and rule.
-const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false } }));
+const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: mocks.copy }));
 vi.mock("expo-router", () => ({ Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back }) }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: () => mocks.snapshot }));
@@ -46,7 +47,7 @@ beforeEach(() => {
   mocks.back.mockReset();
   mocks.params = { orgId: "org-team" };
   mocks.catalog = { deleteOrganization: vi.fn(async () => {}) };
-  mocks.snapshot = { organizations: [{ organization: team }], saved: false };
+  mocks.snapshot = { organizations: [{ organization: team }], saved: false, deletesOrganizations: true };
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -58,7 +59,7 @@ it.each([
   ["a member", { ...team, role: "member" }],
   ["the owner of a personal organization", { ...team, isPersonal: true }],
 ])("does not offer deletion to %s", async (_who, organization) => {
-  mocks.snapshot = { organizations: [{ organization }], saved: false };
+  mocks.snapshot = { organizations: [{ organization }], saved: false, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(container.textContent).toContain("Test organization");
   expect(container.textContent).not.toContain("Delete organization");
@@ -66,10 +67,10 @@ it.each([
 });
 
 it("offers it to the owner with the shared warning, and waits for a fresh list before offering it", async () => {
-  mocks.snapshot = { organizations: [{ organization: team }], saved: true };
+  mocks.snapshot = { organizations: [{ organization: team }], saved: true, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(button("Delete organization…")).toBeNull();
-  mocks.snapshot = { organizations: [{ organization: team }], saved: false };
+  mocks.snapshot = { organizations: [{ organization: team }], saved: false, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(container.textContent).toContain("Permanently delete Test organization. Members will lose access. This cannot be undone.");
   expect(button("Delete organization…")).not.toBeNull();
@@ -112,13 +113,23 @@ it("shows a refusal in the shared words, keeps what was typed, and never retries
   expect(onDeleted).not.toHaveBeenCalled();
 });
 
-it("says plainly when the account service does not take this phone's sign-in for deletion", async () => {
+it("words an expired sign-in as the desktop does", async () => {
   const remove = vi.fn(async () => { throw Object.assign(new Error("401"), { code: "invalid_access_token" }); });
   await show(<OrganizationDelete organization={team} remove={remove} onDeleted={vi.fn()} />);
   await click("Delete organization…");
   await type("Test organization");
   await click("Delete Test organization permanently");
-  expect(container.querySelector("[role='alert']")!.textContent).toContain("delete it from the desktop app or the web console");
+  expect(container.querySelector("[role='alert']")!.textContent).toBe(organizationDeletionError({ code: "invalid_access_token" }));
+});
+
+it("points the owner to the desktop app or the web console while the server does not take deletion from a phone", async () => {
+  mocks.snapshot = { organizations: [{ organization: team }], saved: false, deletesOrganizations: false };
+  await show(<OrganizationScreen />);
+  expect(button("Delete organization…")).toBeNull();
+  expect(container.textContent).toContain("use the TerminalX desktop app or the web console");
+  mocks.snapshot = { organizations: [{ organization: { ...team, role: "admin" } }], saved: false, deletesOrganizations: false };
+  await show(<OrganizationScreen />);
+  expect(container.textContent).not.toContain("delete this organization");
 });
 
 it("drops an open confirmation when the organization is renamed or the role changes", async () => {
@@ -136,7 +147,7 @@ it("drops an open confirmation when the organization is renamed or the role chan
 });
 
 it("says the organization is gone when it is no longer listed", async () => {
-  mocks.snapshot = { organizations: [], saved: false };
+  mocks.snapshot = { organizations: [], saved: false, deletesOrganizations: true };
   await show(<OrganizationScreen />);
   expect(container.textContent).toContain("Organization unavailable");
 });

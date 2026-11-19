@@ -177,6 +177,15 @@ describe("the phone's cloud catalog", () => {
     expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]);
   });
 
+  it("says whether the server takes deletion from this phone, as read with the organizations", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(false);
+    Object.assign(h.api, { deletesOrganizations: () => true });
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(true);
+  });
+
   it("changes nothing when the server refuses the deletion", async () => {
     const h = harness();
     await h.catalog.refresh();

@@ -200,6 +200,26 @@ describe("the phone's cloud API client", () => {
     await expect(wrong.client.deleteOrganization("org-1", "x")).rejects.toMatchObject({ code: "organization_confirmation_invalid", blockers: [] });
   });
 
+  it("reads any other deletion failure as an unknown outcome, as the desktop does", async () => {
+    for (const answer of [{ status: 409, body: { error: "organization_delete_unavailable" } }, { status: 409, body: { error: "account_context_changed" } }, { status: 500, body: { error: "internal" } }, { status: 401, body: { error: "unauthorized" } }]) {
+      await expect(api(() => answer).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: answer.status });
+    }
+    await expect(api(() => Promise.reject(new Error("offline"))).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: null });
+    const signedOut = api(() => ({ body: {} }), null);
+    await expect(signedOut.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "account_signed_out" });
+    expect(signedOut.calls).toEqual([]);
+  });
+
+  it("offers deletion from the phone only when the server says its route takes a phone's token", async () => {
+    const older = api(() => ({ body: { organizations: [], capabilities: { flags: {} } } }));
+    expect(older.client.deletesOrganizations()).toBe(false);
+    await older.client.organizations();
+    expect(older.client.deletesOrganizations()).toBe(false);
+    const newer = api(() => ({ body: { organizations: [], capabilities: { flags: { "organizations.delete.mobile.v1": true } } } }));
+    await newer.client.organizations();
+    expect(newer.client.deletesOrganizations()).toBe(true);
+  });
+
   it("reports an answer in an unknown shape as one code, whatever the call", async () => {
     const { client } = api(() => ({ status: 202, body: { id: "a1", state: "brand-new-state" } }));
     await expect(client.open("org-1", "ws-1", "i")).rejects.toMatchObject({ code: "cloud_workspace_invalid_response", unreachable: false });
