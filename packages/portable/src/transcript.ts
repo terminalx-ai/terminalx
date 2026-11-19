@@ -1,5 +1,5 @@
 import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
-import { withoutHarnessBlocks } from "./harnessText";
+import { shellRecord, withoutHarnessBlocks, type ShellRecord } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
 /** Turns an event log into the platform-neutral transcript model. */
@@ -59,7 +59,14 @@ export type WorkItem =
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
   | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number }
   /** Pictures a tool made (an image generator's output), shown even when the tool calls fold. */
-  | { kind: "media"; paths: string[]; key: string; seq: number };
+  | { kind: "media"; paths: string[]; key: string; seq: number }
+  /**
+   * A command the reader ran through Claude Code's `!` shell passthrough
+   * (#1294): not a prompt, and nothing the agent did. `command` is absent when
+   * only its output is on record; `done` once that output came. Empty output
+   * is "".
+   */
+  | { kind: "shell"; command?: string; stdout: string; stderr: string; exitCode?: number; done: boolean; author?: { userId: string; displayName: string }; key: string; seq: number; ts?: string };
 
 export interface Turn {
   key: string;
@@ -392,6 +399,38 @@ export class TranscriptReducer {
     else turn.work.push({ kind: "compaction", summary, key: `k${event.seq}`, seq: event.seq });
   }
 
+  /**
+   * A `!` command's record (#1294). Its input and its output are written
+   * apart and drawn as one block, in the turn already open or a turn of its
+   * own; neither is a prompt. Typed in the composer, the command went out as
+   * `!command` and was drawn as one: its output turns that prompt, which the
+   * agent has done nothing about, into the block.
+   */
+  private addShell(event: AgentEvent, record: ShellRecord) {
+    const done = record.stdout !== undefined || record.stderr !== undefined || record.exitCode !== undefined;
+    const filled = { stdout: record.stdout ?? "", stderr: record.stderr ?? "", ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}), done };
+    const current = this.current;
+    if (record.command === undefined && current) {
+      const last = current.work[current.work.length - 1];
+      if (last?.kind === "shell" && !last.done) {
+        Object.assign(last, filled);
+        this.touch(current);
+        return;
+      }
+      const typed = current.prompt?.text.trim();
+      if (event.harness === "claude" && typed?.startsWith("!") && !current.completed && !current.work.some((item) => item.kind !== "queued")) {
+        const prompt = current.prompt!;
+        delete current.prompt;
+        current.work.unshift({ kind: "shell", command: typed.slice(1).trim(), ...filled, ...(prompt.author ? { author: prompt.author } : {}), key: `sh${prompt.seq}`, seq: prompt.seq, ts: prompt.ts });
+        // The tab is not working on it: nothing was asked of the agent.
+        this.workingSince = undefined;
+        this.touch(current);
+        return;
+      }
+    }
+    this.ensureTurn(event).work.push({ kind: "shell", ...(record.command !== undefined ? { command: record.command } : {}), ...filled, key: `sh${event.seq}`, seq: event.seq, ts: event.ts });
+  }
+
   private newTurn(event: AgentEvent, prompt?: Turn["prompt"]): Turn {
     const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
     if (prompt) turn.prompt = prompt;
@@ -420,6 +459,11 @@ export class TranscriptReducer {
       case "user_message": {
         if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           this.attachSummary(event, payload.text);
+          break;
+        }
+        const shell = shellRecord(visibleUserText(payload.text));
+        if (shell) {
+          this.addShell(event, shell);
           break;
         }
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
@@ -830,6 +874,7 @@ export class TranscriptReducer {
           return { kind: "tool", call, key: item.key };
         }
         case "subagent":
+        case "shell":
           return { ...item };
         case "compaction": {
           const lifecycle = overrides?.get(item);

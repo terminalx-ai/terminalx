@@ -11,6 +11,7 @@ import { Markdown, MarkdownBlock } from "./Markdown";
 import { LinkedText, linkedText } from "./LinkedText";
 import { deliveryNote, messageDelivery, turnRows, type MessageDelivery, type TurnRow } from "./transcript-rows";
 import { WorkGroup } from "./WorkGroup";
+import { ShellBlock } from "./ShellBlock";
 import { PromptImages } from "./PromptImages";
 
 // How a conversation is drawn: the same cards for a session on a paired Mac
@@ -184,6 +185,7 @@ function WorkRow({ item }: { item: WorkItem }) {
   // `turnRows` draws these as the reader's rows; here for a work item drawn on its own.
   if (item.kind === "queued") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} images={item.images} delivery={messageDelivery(item, true)} />;
   if (item.kind === "message") return <ReaderBubble text={item.text} ts={item.messageTs} note={deliveryNote(item)} images={item.images} delivery={messageDelivery(item, false)} />;
+  if (item.kind === "shell") return <ShellBlock item={item} />;
   if (item.kind === "decision") return <LinkedText style={[styles.reasoning, { color: item.allowed ? palette.success : palette.danger }]}>{item.label}</LinkedText>;
   if (item.kind === "subagent") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`${item.label ?? "Background agent"} · ${item.done ? "done" : "working"}`}</LinkedText>;
   // Running, it has no row: the conversation's `CompactingLine` says so (#644).

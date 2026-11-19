@@ -594,6 +594,12 @@ impl ComposerEcho {
         if rest == text || (self.command && text.split_whitespace().next() == Some(rest)) {
             return true;
         }
+        // A `!` command (#1294): Claude Code runs it in its shell and records
+        // the command without the `!`, as `<bash-input>`. The chat turns the
+        // `!command` the composer published into the command's block.
+        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), bash_input(rest)) {
+            return ran.split_whitespace().eq(sent.split_whitespace());
+        }
         // The CLI may reflow a paste or enclose it (or its chunks) in these
         // tags. Compare every word: a shared prefix/suffix alone could swallow
         // a different prompt typed in the terminal.
@@ -611,6 +617,13 @@ impl ComposerEcho {
     fn expired(&self, now: Instant) -> bool {
         now.duration_since(self.sent_at) > if self.queued { QUEUED_ECHO_GRACE } else { COMPOSER_ECHO_TTL }
     }
+}
+
+/// The command in a record of Claude Code's `!` shell passthrough (#1294):
+/// `<bash-input> git status</bash-input>`, maybe with the output after it.
+fn bash_input(recorded: &str) -> Option<&str> {
+    let after = recorded.trim_start().strip_prefix("<bash-input>")?;
+    Some(&after[..after.find("</bash-input>")?])
 }
 
 /// Peel the run of `[Image #N] [Image #N+1] …` labels off the front of an
@@ -8920,6 +8933,20 @@ mod tests {
         assert!(!ComposerEcho::new("compare".into(), 2).matches("[Image #1] compare"));
         assert!(!ComposerEcho::new("compare".into(), 1).matches("[Image #1] [Image #2] compare"));
         assert!(ComposerEcho::new(String::new(), 1).matches("[Image #1]"));
+    }
+
+    /// A `!command` sent from the composer comes back as the CLI's record of
+    /// the command it ran (#1294), not as a second message.
+    #[test]
+    fn composer_echo_matches_a_shell_passthrough_command() {
+        let echo = ComposerEcho::new("!git status".into(), 0);
+        assert!(echo.matches("<bash-input> git status</bash-input>"));
+        assert!(echo.matches("<bash-input>git  status</bash-input>\n<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>"));
+        assert!(!echo.matches("<bash-input> git log</bash-input>"));
+        assert!(!echo.matches("<bash-stdout>git status</bash-stdout>"));
+        assert!(!ComposerEcho::new("git status".into(), 0).matches("<bash-input> git status</bash-input>"));
+        assert_eq!(bash_input("<bash-input>ls</bash-input>"), Some("ls"));
+        assert_eq!(bash_input("<bash-input>ls"), None);
     }
 
     /// Claude Code writes the pasted-image labels straight into the prompt

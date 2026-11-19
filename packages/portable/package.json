@@ -10,6 +10,7 @@
     "./agentSettings": "./src/agentSettings.ts",
     "./botFace": "./src/botFace.ts",
     "./codexCitations": "./src/codexCitations.ts",
+    "./harnessText": "./src/harnessText.ts",
     "./continuation": "./src/continuation.ts",
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",
