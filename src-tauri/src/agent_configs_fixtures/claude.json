@@ -1,0 +1,56 @@
+{
+  "numStartups": 412,
+  "installMethod": "native",
+  "autoUpdates": false,
+  "theme": "dark",
+  "tipsHistory": {
+    "new-user-warmup": 7,
+    "memory-command": 31
+  },
+  "userID": "example-user-id",
+  "projects": {
+    "/Users/example/code/app": {
+      "allowedTools": [],
+      "mcpServers": {},
+      "hasTrustDialogAccepted": true,
+      "lastCost": 0.4312
+    }
+  },
+  "mcpServers": {
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "env": {}
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SENTRY_TOKEN}"
+      }
+    },
+    "github": {
+      "type": "stdio",
+      "command": "gh",
+      "args": [
+        "mcp-server"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "legacy-events": {
+      "type": "sse",
+      "url": "https://events.example.com/sse"
+    }
+  },
+  "hasCompletedOnboarding": true,
+  "lastReleaseNotesSeen": "2.1.40"
+}

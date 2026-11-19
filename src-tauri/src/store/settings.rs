@@ -526,6 +526,11 @@ pub struct AgentSettings {
     /// for that alone.
     #[serde(deserialize_with = "idle_stop_minutes")]
     pub idle_stop_minutes: u32,
+    /// The CLI each agent runs as, by harness id, when the person chose one
+    /// in Settings → Agents (PRO-157). An agent with no entry is looked up on
+    /// the PATH (`binpath`). Each path was checked with `--version` when it
+    /// was chosen; one that is gone since is not stood in for.
+    pub executables: std::collections::BTreeMap<String, String>,
 }
 
 /// The idle limits the settings control offers; 0 is "never".
@@ -543,7 +548,7 @@ fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true }
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true, executables: Default::default() }
     }
 }
 
@@ -613,6 +618,11 @@ pub struct ExperimentalSettings {
     /// gets the Local VM's tools while it runs, as before, and a choice kept
     /// from while it was on is not read. `terminalx vm` works either way.
     pub local_vm_tasks: bool,
+    /// Offer OpenCode again (PRO-157): in Settings → Agents with its
+    /// providers and models, in the agent pickers and in the model picker.
+    /// Off, it stays hidden as `harness::HIDDEN_HARNESSES` has it, and a tab
+    /// already on it still runs.
+    pub opencode: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -855,7 +865,7 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"opencode":false}));
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);

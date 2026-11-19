@@ -49,6 +49,14 @@ export function resuming(item: Pick<CloudWorkspaceListItem, "latestOperation">):
   return isOpen(item.latestOperation) && item.latestOperation?.action === "resume";
 }
 
+/**
+ * The machine is on its way up as far as the list knows: being provisioned, or
+ * resumed. Not running yet, and not a sign that a connection to it went stale.
+ */
+export function machineStarting(item: CloudWorkspaceListItem): boolean {
+  return item.workspace.state === "provisioning" || resuming(item);
+}
+
 /** The machine runs as far as the list knows: ready, with no stop, archive or delete taking it down. */
 export function machineRunning(item: CloudWorkspaceListItem): boolean {
   const operation = item.latestOperation;

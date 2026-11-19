@@ -543,7 +543,7 @@ describe("workspace lifecycle menus", () => {
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [] });
     mount();
     let menu = await openMenu("Menu for Acme");
-    expect(items(menu)).toEqual(["Refresh cloud workspaces", "New section", "New cloud workspace…", "Hide organization"]);
+    expect(items(menu)).toEqual(["Refresh cloud workspaces", "New section", "New cloud workspace…", "Organization settings…", "Hide organization"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "New cloud workspace…" }));
     expect(openNewWorkspace).toHaveBeenCalledTimes(1);
     menu = await openMenu("Menu for Acme");
@@ -564,6 +564,34 @@ describe("workspace lifecycle menus", () => {
     expect(within(menu).getByRole("menuitem", { name: "From repository…" }).getAttribute("aria-disabled")).toBeNull();
     expect(within(menu).getByTestId("cloud-add-blank-project").getAttribute("aria-disabled")).toBe("true");
     expect(within(menu).getByTestId("cloud-add-blank-project").textContent).toContain("admins only");
+  });
+
+  // #1286: one click from an organization's row to its settings, for every member and any organization, active or not.
+  it("opens an organization's settings from its gear and its menu, also when it is not the active one", async () => {
+    const { onOpenOrganizationSettings, takeOrganizationRequest } = await import("@/lib/settingsLinks");
+    const opened = vi.fn();
+    const stop = onOpenOrganizationSettings(opened);
+    try {
+      await standard();
+      mount();
+      // Beta is a member's, and not the active organization.
+      const gear = within(org(OTHER)).getByRole("button", { name: "Settings for Beta" });
+      expect(gear.tagName).toBe("BUTTON");
+      expect(gear.tabIndex).toBe(0);
+      act(() => gear.focus());
+      expect((await screen.findByRole("tooltip")).textContent).toBe("Settings for Beta");
+      fireEvent.click(gear);
+      expect(opened).toHaveBeenLastCalledWith("organizations.overview");
+      expect(takeOrganizationRequest()).toBe(OTHER);
+
+      const menu = await openMenu("Menu for Acme");
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Organization settings…" }));
+      expect(opened).toHaveBeenCalledTimes(2);
+      expect(takeOrganizationRequest()).toBe(ORG);
+      expectNoAttachOrResume();
+    } finally {
+      stop();
+    }
   });
 
   // PRO-107: GitHub is on the organization's own page now, not in Settings → Account.

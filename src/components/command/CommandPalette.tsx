@@ -173,6 +173,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   storage: HardDrive,
   shortcuts: Keyboard,
   experimental: FlaskConical,
+  advanced: Wrench,
   about: Info,
 };
 

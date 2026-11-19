@@ -129,10 +129,22 @@ pub fn login_path() -> String {
     .clone()
 }
 
-/// Absolute path of `name`, if it can be found. A hit is cached; a miss is
-/// re-checked once it is [`MISS_RECHECK`] old, by the cheap directory scan
-/// only, since the login shell already said no.
+/// Absolute path of `name`, if it can be found. An agent CLI the person
+/// chose a program for in Settings (PRO-157, `harness::executables`) is that
+/// program, read fresh every time so a change applies to the next tab;
+/// one that is gone is `None`, not the PATH's. Anything else: a hit is
+/// cached; a miss is re-checked once it is [`MISS_RECHECK`] old, by the
+/// cheap directory scan only, since the login shell already said no.
 pub fn resolve(name: &str) -> Option<PathBuf> {
+    if let Some(chosen) = crate::harness::executables::chosen_for_binary(name) {
+        return chosen;
+    }
+    resolve_at(name, Instant::now())
+}
+
+/// [`resolve`] without the person's choice: what the PATH and the usual
+/// install directories have. "Use system default" in Settings shows it.
+pub fn resolve_system(name: &str) -> Option<PathBuf> {
     resolve_at(name, Instant::now())
 }
 
