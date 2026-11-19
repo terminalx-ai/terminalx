@@ -8,7 +8,7 @@
 // - A resend after a dropped connection keeps its `clientRequestId`, so the
 //   runtime answers it from its cache. Trying again after a refusal is a new
 //   request, and the runtime checks the remote before repeating anything.
-import { WorkspaceRpcError, type WorkspaceRpcClient } from "./workspace";
+import { WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceRpcClient } from "./workspace";
 
 export interface GitAuthor {
   name: string;
@@ -282,8 +282,9 @@ export class RemoteGit {
     return this.client.call<T>(method, { ...params, repo: this.repo });
   }
 
-  private write<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    return this.client.mutate<T>(method, { ...params, repo: this.repo });
+  private write<T>(method: string, params: Record<string, unknown> = {}, connection?: WorkspaceConnectionState): Promise<T> {
+    const request = { ...params, repo: this.repo };
+    return connection ? this.client.mutate<T>(method, request, undefined, connection) : this.client.mutate<T>(method, request);
   }
 
   status(): Promise<RemoteGitStatus> {
@@ -327,8 +328,12 @@ export class RemoteGit {
     return this.read("git.branches");
   }
 
-  /** With `number`, refresh one retained PR independently of its old branch.
-   * Older runtimes use `branch`; callers still verify the returned identity. */
+  get supportsPrUrl(): boolean {
+    return this.client.hasCapability?.("git-pr-target/1") ?? false;
+  }
+
+  /** Refresh a retained PR by URL where supported, with a number and branch for older runtimes.
+   * Callers still verify the returned identity. */
   prs(branch?: string, number?: number, url?: string): Promise<{ branch: string; prs: RemotePullRequest[] }> {
     return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}), ...(url ? { url } : {}) });
   }
@@ -401,16 +406,17 @@ export class RemoteGit {
     return this.write("git.prCreateForSession", { ...rest, ...(base ? { base } : {}), ...(pushHead === undefined ? {} : { pushHead }) });
   }
 
-  readyPr(number: number, url?: string): Promise<unknown> {
-    return this.write("git.prReady", { number, ...(url ? { url } : {}) });
+  readyPr(pr: number | string, url?: string, connection?: WorkspaceConnectionState): Promise<unknown> {
+    return this.write("git.prReady", typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) }, connection);
   }
 
   /**
    * `head` pins the merge to the commit the person saw: GitHub refuses it
    * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
    */
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue", head?: string, url?: string): Promise<unknown> {
-    return this.write("git.prMerge", { number, method, ...(head ? { head } : {}), ...(url ? { url } : {}) });
+  mergePr(pr: number | string, method: "merge" | "squash" | "rebase" | "queue", head?: string, url?: string, connection?: WorkspaceConnectionState): Promise<unknown> {
+    const target = typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) };
+    return this.write("git.prMerge", head ? { ...target, method, head } : { ...target, method }, connection);
   }
 }
 
