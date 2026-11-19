@@ -150,6 +150,37 @@
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+  /* A bar the reader can see and drag: the chat transcript and the composer (#1287).
+     Pseudo-elements only: WebKit (and Chromium) drop every ::-webkit-scrollbar rule once
+     scrollbar-width or scrollbar-color is set, and fall back to the native overlay bar,
+     which takes no room and shows only for a moment after a scroll. Firefox, which has no
+     pseudo-elements, takes the standard properties instead. */
+  .scrollbar-visible::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+  .scrollbar-visible::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb-visible);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    min-height: 32px;
+  }
+  .scrollbar-visible::-webkit-scrollbar-thumb:hover,
+  .scrollbar-visible::-webkit-scrollbar-thumb:active {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+  }
+  .scrollbar-visible::-webkit-scrollbar-track,
+  .scrollbar-visible::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    .scrollbar-visible {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb-visible) transparent;
+    }
+  }
   /* Scrolls with no bar: the tab row, which a wheel, a drag or its own menu moves. */
   .scrollbar-none {
     scrollbar-width: none;

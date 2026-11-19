@@ -20,6 +20,8 @@
 
 :root {
   --radius: 0.625rem;
+  /* The width of a .scrollbar-visible bar; overlays beside one leave it this much room. */
+  --scrollbar-size: 10px;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -106,6 +108,8 @@
   --shadow-button: 0 1px 4px oklch(0 0 0 / 40%);
   --vibrancy-alpha: 80%;
   --scrollbar-thumb: oklch(1 0 0 / 14%);
+  --scrollbar-thumb-visible: oklch(1 0 0 / 30%);
+  --scrollbar-thumb-hover: oklch(1 0 0 / 48%);
   --code-bg: oklch(0 0 0 / 22%);
   --selection: oklch(0.75 0.12 250 / 35%);
   color-scheme: dark;
@@ -133,6 +137,8 @@
   --shadow-button: 0 1px 4px oklch(0 0 0 / 14%);
   --vibrancy-alpha: 92%;
   --scrollbar-thumb: oklch(0 0 0 / 16%);
+  --scrollbar-thumb-visible: oklch(0 0 0 / 30%);
+  --scrollbar-thumb-hover: oklch(0 0 0 / 46%);
   --code-bg: oklch(0 0 0 / 4%);
   --selection: oklch(0.6 0.15 250 / 25%);
   color-scheme: light;
