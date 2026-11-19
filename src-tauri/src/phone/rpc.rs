@@ -1290,7 +1290,7 @@ fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: 
     // event: it is sent alone, and cut down to fit if it must be.
     start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
     let mut hash = sync_hash(session, tab)?;
-    hash_events(&mut hash, &events[..])?;
+    hash_events(&mut hash, events)?;
     let page = events[start..].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
     Ok(SyncedPage {
         value: json!({
@@ -2756,7 +2756,7 @@ mod tests {
 
         // A line still being written is left to the whole read, which skips it, until it ends.
         let partial = serde_json::to_string(&prompt(1301)).unwrap();
-        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(partial[..20].as_bytes()).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&partial.as_bytes()[..20]).unwrap();
         let verified = cache.matching("session", "tab", &checkpoint).unwrap();
         assert!(super::super::sync_cache::read_after(&path, &verified).unwrap().is_none());
         let (seqs, checkpoint, _) = drain_cached(&cache, &path, Some(checkpoint), direct());
