@@ -528,6 +528,35 @@ fn display_remote(url: &str) -> String {
     }
 }
 
+/// Compare Git transport URLs with the repository in a canonical HTTPS PR URL.
+fn origin_repository(origin: &str) -> Option<String> {
+    let url = if origin.contains("://") {
+        url::Url::parse(origin).ok()?
+    } else {
+        let (authority, path) = origin.split_once(':')?;
+        if authority.contains(['/', '\\']) {
+            return None;
+        }
+        url::Url::parse(&format!("ssh://{authority}/{path}")).ok()?
+    };
+    if !matches!(url.scheme(), "https" | "http" | "ssh" | "git" | "git+ssh" | "ssh+git")
+        || url.query().is_some() || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_start_matches('/').trim_end_matches('/');
+    let repo = path.strip_suffix(".git").unwrap_or(path);
+    if !crate::issues::is_github_repo(repo) {
+        return None;
+    }
+    let host = url.host()?;
+    let authority = match url.port().filter(|_| matches!(url.scheme(), "http" | "https")) {
+        Some(port) if port != 443 => format!("{host}:{port}"),
+        _ => host.to_string(),
+    };
+    Some(format!("https://{authority}/{repo}").to_ascii_lowercase())
+}
+
 /// A branch name as `git check-ref-format --branch` accepts it (so `fix#1`,
 /// `user+topic` and non-ASCII names pass), and never an option.
 pub fn valid_ref_name(name: &str) -> bool {
@@ -1471,16 +1500,37 @@ impl WorkspaceGit {
     }
 
     fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>) -> Value {
-        let repositories: Vec<_> = self.repositories().0.into_iter().filter_map(|name| {
-            let origin = crate::git::remote_url(&self.dir(&name))?;
-            let identity = crate::issues::github_repo_from_url(&origin)?;
-            Some((name, format!("https://github.com/{}/pull/", identity.to_ascii_lowercase())))
-        }).collect();
+        use crate::pr_associations::Scope;
+
+        if associations.is_empty() {
+            return json!({ "associations": [] });
+        }
+        let names = if self.project { self.project_repositories() } else { self.repositories().0 };
+        let mut identities = std::collections::HashMap::new();
+        let mut matches = |name: &str, repository: &str| {
+            identities.entry(name.to_owned()).or_insert_with(|| {
+                if !self.verified_machine_repo(name) {
+                    return None;
+                }
+                let origin = crate::git::remote_url(&self.dir(name))?;
+                origin_repository(&origin)
+            }).as_deref() == Some(repository)
+        };
         json!({ "associations": associations.into_iter().map(|association| {
-            // Match repository identity, never whichever checkout is live.
-            // Keep unavailable identities too, so missing repositories cannot
-            // turn an incomplete history into permission to clean up.
-            let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
+            let repo = association.url.rsplit_once("/pull/").and_then(|(repository, _)| {
+                // The recorded checkout must still be registered and match the PR's
+                // host and repository. It can be outside the discovery limit.
+                let selected = match &association.scope {
+                    Scope::Local { cwd } => names.iter().find(|name| self.dir(name) == Path::new(cwd)),
+                    Scope::Cloud { .. } => None,
+                };
+                selected.filter(|name| matches(name, repository)).or_else(|| {
+                    // Journal and pipeline records may only know the project root.
+                    // Keep the association even if no available origin matches it.
+                    let limit = if self.project { MAX_PROJECT_REPOSITORIES } else { names.len() };
+                    names.iter().take(limit).find(|name| matches(name, repository))
+                })
+            });
             json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }

@@ -715,13 +715,28 @@ fn machine_pr_creation_records_the_native_session_association() {
     let remote = f.remote("origin");
     f.clone(&remote, ".");
     f.git.project = true;
+    let checkout = f.base.join("feature-worktree");
+    let locator = checkout.to_str().unwrap();
+    git(&f.root, &["worktree", "add", "-qb", "feature/pr", locator]);
+    f.call("git.push", json!({ "repo": locator })).unwrap();
+    // Keep Git transport local while exercising the Enterprise origin and gh URL.
+    git(&f.root, &["remote", "set-url", "origin", "git@github.test:Octo/Repo.git"]);
+    git(&f.root, &["config", "ssh.variant", "simple"]);
+    let ssh = format!(
+        "sh -c 'if [ \"$2\" = -G ]; then printf \"hostname github.test\\nuser git\\nport 22\\n\"; else exec git-upload-pack \"$1\"; fi' -- '{}'",
+        remote.display(),
+    );
+    git(&f.root, &["config", "core.sshCommand", &ssh]);
+    std::fs::write(f.state.join("repo-url"), "https://github.test/Octo/Repo").unwrap();
+    let conversation = include_str!("../fixtures/github_pr_conversation.json")
+        .replace("https://github.com/acme/widgets/pull/799", "https://github.test/octo/repo/pull/1")
+        .replace("https://github.com/acme/widgets/", "https://github.test/octo/repo/");
+    std::fs::write(f.state.join("conversation.json"), conversation).unwrap();
     let session = |id: &str, project: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
-        "id": id, "projectPath": project, "cwd": project, "title": "fixture", "created": "", "modified": ""
+        "id": id, "projectPath": project, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
     })).unwrap();
     crate::store::index::save(&[session("native", &f.root), session("outside", &f.base)]).unwrap();
-    f.call("git.checkout", json!({ "repo": ".", "branch": "feature/pr", "create": true })).unwrap();
-    f.call("git.push", json!({ "repo": "." })).unwrap();
-    let create = |id: &str| json!({ "repo": ".", "title": "Add pr", "base": "main", "sessionId": id });
+    let create = |id: &str| json!({ "repo": locator, "title": "Add pr", "base": "main", "draft": true, "sessionId": id });
     assert_eq!(f.code("git.prCreate", create("outside")), "not_found");
     assert!(!f.gh_calls().contains("\"create\""));
 
@@ -731,10 +746,30 @@ fn machine_pr_creation_records_the_native_session_association() {
     assert_eq!(repeat["existing"], true);
     assert_eq!(repeat["sessionAssociated"], true);
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
-    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    let read = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    let rows = read();
     assert_eq!(rows["associations"].as_array().unwrap().len(), 1);
-    assert_eq!(rows["associations"][0]["url"], created["pr"]["url"]);
-    assert_eq!(rows["associations"][0]["linked"], false);
+    let association = &rows["associations"][0];
+    assert_eq!(association["url"], "https://github.test/octo/repo/pull/1");
+    assert_eq!(association["url"], created["pr"]["url"]);
+    assert_eq!(association["repo"], locator);
+    assert_eq!(association["linked"], false);
+
+    let ready = f.call("git.prReady", json!({ "repo": association["repo"], "number": association["number"] })).unwrap();
+    assert_eq!(ready["repo"], locator);
+    assert_eq!(ready["pr"]["isDraft"], false);
+    let conversation = f.call("git.prConversation", json!({ "repo": association["repo"], "url": association["url"] })).unwrap();
+    assert_eq!(conversation["activity"].as_array().unwrap().len(), 11);
+    assert!(f.gh_calls().contains("\"graphql\", \"--hostname\", \"github.test\""));
+    let merged = f.call("git.prMerge", json!({ "repo": association["repo"], "number": association["number"], "method": "squash" })).unwrap();
+    assert_eq!(merged["repo"], locator);
+    assert_eq!(merged["pr"]["state"], "MERGED");
+
+    git(&f.root, &["worktree", "remove", locator]);
+    git(&f.root, &["remote", "set-url", "origin", "https://github.com/octo/repo.git"]);
+    let unavailable = read();
+    assert_eq!(unavailable["associations"][0]["url"], association["url"]);
+    assert!(unavailable["associations"][0]["repo"].is_null());
 }
 
 #[test]
