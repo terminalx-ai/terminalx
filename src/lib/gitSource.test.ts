@@ -28,6 +28,17 @@ it("sends the selected branch and the machine session together when creating a P
   expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic", associateExisting: false });
 });
 
+it("offers explicit linking when a failed machine Create finds an unassociated PR", async () => {
+  const mutate = vi.fn().mockResolvedValue({
+    pr: { number: 17 }, created: false, existing: true, reconciled: true, sessionAssociated: false,
+  });
+  const remote = new RemoteGit({ mutate } as unknown as WorkspaceRpcClient, "topic");
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => null });
+  await expect(source.createPr({
+    title: "Topic", body: "", base: "main", draft: false, sessionId: "machine:m1:p1:s1",
+  })).resolves.toBe("Pull request #17 is already open. Use Link existing branch PR to add it to this session.");
+});
+
 it("refuses to fall back to an unguarded commit on an older machine", async () => {
   const call = vi.fn().mockResolvedValue({ branch: "topic", head: "abc" });
   const mutate = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.commitForPush"));

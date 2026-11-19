@@ -738,6 +738,45 @@ fn machine_pr_creation_records_the_native_session_association() {
 }
 
 #[test]
+fn a_concurrent_machine_pr_is_reported_as_existing_and_keeps_its_single_session() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, ".");
+    f.git.project = true;
+    let session = |id: &str| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": f.root, "cwd": repo, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session("native"), session("other")]).unwrap();
+    git(&repo, &["checkout", "-qb", "feature/race"]);
+    f.call("git.push", json!({"repo": "."})).unwrap();
+    f.fault("concurrent-create");
+
+    let legacy_create = json!({"repo": ".", "title": "Create PR", "base": "main", "sessionId": "native"});
+    let read = |session| f.call("git.prAssociations", json!({"sessionId": session})).unwrap()["associations"].clone();
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let response = f.call("git.prCreate", create).unwrap();
+    assert_eq!(response["pr"]["title"], "Opened by another contributor");
+    assert_eq!(response["created"], false);
+    assert_eq!(response["existing"], true);
+    assert_eq!(response["reconciled"], true);
+    assert_eq!(response["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+
+    f.call("git.prLinkBranch", json!({
+        "repo": ".", "branch": "feature/race", "sessionId": "other", "url": response["pr"]["url"],
+    })).unwrap();
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+    assert_eq!(read("other").as_array().unwrap().len(), 1);
+    assert_eq!(read("other")[0]["url"], response["pr"]["url"]);
+    assert_eq!(f.gh_calls().matches(r#"["pr", "create","#).count(), 1);
+}
+
+#[test]
 fn machine_branch_pr_links_are_verified_durable_and_removable() {
     let _home = crate::store::temp_home();
     let mut f = fixture();
@@ -875,6 +914,8 @@ fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     f.fault("drop-after-create");
     let created = f.call("git.prCreate", json!({ "repo": "app", "title": "Drop" })).unwrap();
     assert_eq!(created["reconciled"], true);
+    assert_eq!(created["created"], false);
+    assert_eq!(created["existing"], true);
     assert_eq!(created["pr"]["base"], "main", "the default branch is the default base");
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
 }

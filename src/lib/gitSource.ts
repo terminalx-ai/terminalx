@@ -357,8 +357,9 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       if (runtimeId && result.existing && result.sessionAssociated === false) return `Pull request #${result.pr.number} is already open. Use Link existing branch PR to add it to this session.`;
       if (runtimeId && !result.sessionAssociated) return `Pull request #${result.pr.number} is open on GitHub. This machine runtime could not save it to the session.`;
       if (sessionId && !fromMachine) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);
+      if (result.reconciled) return `Found pull request #${result.pr.number} on GitHub after the create request failed.`;
       if (result.existing) return `Pull request #${result.pr.number} for this branch already exists; it is linked below, not duplicated.`;
-      return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;
+      return null;
     },
     readyPr: (number) => remote.readyPr(number).then(() => undefined),
     mergePr: (number, method, head) => remote.mergePr(number, method, head).then(() => undefined),

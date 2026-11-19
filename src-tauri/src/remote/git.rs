@@ -1681,9 +1681,7 @@ impl WorkspaceGit {
                     let url = crate::pr_associations::identity(&pr.url).map_err(RpcError::internal)?;
                     crate::pr_associations::for_session(&session.id, vec![]).map_err(RpcError::internal)?
                         .iter().any(|row| row.url == url)
-                } else if existing || reconciled {
-                    // An open PR discovered after a failed create is also
-                    // ambiguous. Preserve withdrawals and keep new links removable.
+                } else if existing {
                     crate::pr_associations::reconcile_existing(&session.id, &repo.dir, &pr.url, &pr.head)
                         .map_err(RpcError::internal)?
                 } else {
@@ -1711,12 +1709,23 @@ impl WorkspaceGit {
             args.push("--draft");
         }
         let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
-        // Created or not, what GitHub now has is the answer.
-        match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(_), Ok(Some(pr))) => answer(pr, false, false),
-            (Err(_), Ok(Some(pr))) => answer(pr, false, true),
-            (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
-            (Err(error), _) => Err(error),
+        let listed = self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT);
+        match created {
+            Ok(url) => {
+                let confirmed = crate::pr_associations::identity(url.trim()).ok().zip(listed.ok())
+                    .and_then(|(url, prs)| prs.into_iter().find(|pr| pr.state == "OPEN" && Self::verify_pr_url(pr, &url).is_ok()));
+                match confirmed {
+                    Some(pr) => answer(pr, false, false),
+                    None => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
+                }
+            }
+            // A duplicate or a lost reply can both leave a PR on this branch.
+            // Without a creation URL, apply the same association rules as the
+            // initial discovery and report the PR as existing.
+            Err(error) => match listed.ok().and_then(open) {
+                Some(pr) => answer(pr, true, true),
+                None => Err(error),
+            },
         }
     }
 
