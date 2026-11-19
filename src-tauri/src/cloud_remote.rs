@@ -344,7 +344,11 @@ impl CloudRemote {
                     ClientEvent::State(state) => {
                         if let Some(code) = close_code(&state) {
                             // A machine has no identity: its close is recorded without an Organization and never exported.
-                            closes.record(identity.as_ref().map(|identity| identity.organization_id.as_str()), workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
+                            closes.record_for(
+                                identity.as_ref().map(|identity| (identity.user_id.as_str(), identity.profile_id.as_str())),
+                                identity.as_ref().map(|identity| identity.organization_id.as_str()),
+                                workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis(),
+                            );
                         }
                         // A participant gets the key only while the workspace
                         // is shared with them (saas contract §21.5).
@@ -627,7 +631,7 @@ fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, works
 /// only follows a 4103 close.
 fn close_code(state: &ClientState) -> Option<u16> {
     match state {
-        ClientState::Reconnecting { close_code, .. } => *close_code,
+        ClientState::Reconnecting { close_code, .. } | ClientState::WaitingForRuntime { close_code } => *close_code,
         ClientState::UpdateRequired => Some(4103),
         _ => None,
     }

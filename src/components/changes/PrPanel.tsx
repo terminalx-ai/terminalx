@@ -139,6 +139,7 @@ export function PrPanel({
   const [hasRemote, setHasRemote] = useState<boolean | null>(null);
   const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
+  const [pendingCreation, setPendingCreation] = useState(false);
   const [branchPrLinks, setBranchPrLinks] = useState(false);
   const [linkUrl, setLinkUrl] = useState<string | null>(null);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}\0${selectedPr?.url ?? ""}`;
@@ -237,6 +238,7 @@ export function PrPanel({
       .then(([{ pullRequests, workStatus, landedWork }, workspaceCheck]) => {
         if (cancelled) return;
         setRows(pullRequests.rows);
+        setPendingCreation(!!pullRequests.pendingCreation);
         setBranchPrLinks(pullRequests.branchPrLinks === true);
         // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
         if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
@@ -249,7 +251,7 @@ export function PrPanel({
         setError(pullRequests.error ?? actionError.current);
         setErrorFrom(pullRequests.error || !actionError.current ? "load" : "action");
         // The machine's cleanup check can finish independently of PR loading and actions.
-        if (machineWorkspace && workspaceKey && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
+        if (machineWorkspace && workspaceKey && !pullRequests.pendingCreation && pullRequests.rows.some((row) => row.current && row.pr?.state === "MERGED")) {
           void machineWorkspace.host.disposition().then((disposition) => {
             if (!cancelled) setCheckedWorkspace({ key: workspaceKey, disposition });
           }).catch(() => {});
@@ -459,7 +461,7 @@ export function PrPanel({
   const needsLandedProof = visibleRows.some((row) => row.current && row.pr?.state === "MERGED");
   const canCreate = !selectedPr && fresh && (!needsLandedProof || landed !== null) && !workLanded && !currentOpen && status && status.defaultBranch && currentBranch && currentBranch !== status.defaultBranch && (status.aheadOfBase ?? 0) > 0;
   const latestCurrent = visibleRows.filter((row) => row.current && row.pr?.head === currentBranch).sort((a, b) => (b.pr?.number ?? 0) - (a.pr?.number ?? 0))[0]?.pr;
-  const merged = fresh && !busy && latestCurrent?.state === "MERGED" && open.length === 0
+  const merged = fresh && !busy && !pendingCreation && latestCurrent?.state === "MERGED" && open.length === 0
     && status && !status.dirty && status.ahead === 0 && workLanded;
   const showDraft = inline && !selectedPr && fresh && !!status && !!currentBranch && !!status.defaultBranch && currentBranch !== status.defaultBranch && !currentOpen && !merged;
   const linkBranchPr = source.linkBranchPr;
@@ -469,7 +471,7 @@ export function PrPanel({
     && checkedWorkspace.disposition.branch === currentBranch && checkedWorkspace.disposition.pr?.url === latestCurrent?.url
     ? checkedWorkspace.disposition : null;
   const canDelete = canDeleteMergedWorkspace(disposition);
-  const deleteOnMachine = machineWorkspace && fresh && open.length === 0 && offersWorkspaceDelete(
+  const deleteOnMachine = machineWorkspace && fresh && !pendingCreation && open.length === 0 && offersWorkspaceDelete(
     disposition, busy || machineWorkspace.host.turnRunning(disposition?.sessionIds ?? []),
   ) ? () => openWorkspaceDelete(machineWorkspace.projectPath, machineWorkspace.path, machineWorkspace.name, machineWorkspace.host) : undefined;
 
@@ -488,6 +490,7 @@ export function PrPanel({
         <p className="px-4 text-xs text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
+      {loadedSelection === selection && pendingCreation && <p className="px-4 text-xs text-muted-foreground">A recently created pull request is awaiting verification. Retry creation from its branch before removing this workspace.</p>}
       {canLinkBranchPr && (linkUrl === null ? (
         <Button size="xs" variant="outline" className="mx-3 self-start" disabled={!!working} onClick={() => setLinkUrl("")}>Link existing branch PR</Button>
       ) : (
@@ -654,9 +657,15 @@ export function PrPanel({
           working={working === "create"}
           disabled={!!working || !fresh || !!currentOpen}
           onCreate={() => void act("create", async () => {
-            // Unpushed commits go up first: GitHub opens a pull request from what it has.
-            if (!status.upstream || status.ahead > 0) await source.push();
-            return source.createPr({ title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId });
+            const request = { title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId, branch: currentBranch };
+            if (!status.upstream || status.ahead > 0) {
+              if (source.createPrWithPush) {
+                if (!status.head) throw new Error("Refresh the branch before publishing.");
+                return source.createPrWithPush(request, status.head);
+              }
+              await source.push();
+            }
+            return source.createPr(request);
           }).then((ok) => {
             if (!ok) return;
             setTitle("");
@@ -688,7 +697,7 @@ export function PrPanel({
           className="flex flex-col gap-2 px-3 py-3"
           onSubmit={(e) => {
             e.preventDefault();
-            void act("create", () => source.createPr({ title: title.trim(), body, base: base ?? status?.defaultBranch ?? null, draft, sessionId })).then((ok) => {
+            void act("create", () => source.createPr({ title: title.trim(), body, base: base ?? status?.defaultBranch ?? null, draft, sessionId, branch: currentBranch ?? undefined })).then((ok) => {
               if (!ok) return;
               setCreating(false);
               setTitle("");

@@ -6,14 +6,21 @@ import SettingsScreen from "../app/(tabs)/settings";
 import PrivacyScreen from "../app/privacy";
 import ConnectionLogScreen from "../app/connection-log";
 import AccountScreen from "../app/account";
+import SupportReportScreen from "../app/support-report";
+import { pairingInstance, endPairingInstance } from "./store/pairing-instance";
 import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
+const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), hosts: vi.fn(), preventRemove: vi.fn() }));
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, organizations: [] as any[] }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: mocks.organizations.map((organization) => ({ organization })) }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
+vi.mock("@mobile/support/api", () => ({ supportApi: support }));
+vi.mock("expo-clipboard", () => ({ setStringAsync: support.copy }));
+vi.mock("@mobile/store/hosts", () => ({ readHosts: support.hosts }));
+vi.mock("@mobile/transport/connection", () => ({ scopedConnectionSnapshot: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
+vi.mock("expo-router", () => ({ usePreventRemove: support.preventRemove, useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@mobile/notifications/store", () => ({ useNotificationSettings: () => mocks.notifications }));
@@ -22,6 +29,7 @@ vi.mock("react-native", () => {
   const View = ({ children, testID, style }: { children?: ReactNode; testID?: string; style?: unknown }) => <div data-testid={testID} data-bg={flat(style).backgroundColor as string | undefined}>{children}</div>;
   return {
     View, Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>, ScrollView: View,
+    TextInput: ({ accessibilityLabel, value, onChangeText }: any) => <input aria-label={accessibilityLabel} value={value} onChange={(event) => onChangeText(event.currentTarget.value)} />,
     Platform: { OS: "ios" }, Alert: { alert: mocks.alert }, useColorScheme: () => "dark",
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1, absoluteFill: {} },
     Pressable: ({ children, onPress, accessibilityLabel, accessibilityState }: any) => <button aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
@@ -29,7 +37,7 @@ vi.mock("react-native", () => {
   };
 });
 vi.mock("@mobile/ui/primitives", () => ({
-  Button: ({ label, onPress }: any) => <button onClick={onPress}>{label}</button>,
+  Button: ({ label, onPress, disabled }: any) => <button onClick={onPress} disabled={disabled}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>, Screen: ({ children }: any) => <div>{children}</div>,
   SectionTitle: ({ children }: any) => <h2>{children}</h2>,
 }));
@@ -43,6 +51,12 @@ const show = (screen: ReactNode) => act(async () => { root.render(screen); });
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.push.mockReset();
+  support.preview.mockReset();
+  support.submit.mockReset();
+  support.copy.mockReset();
+  support.events.mockReset();
+  support.hosts.mockReset().mockImplementation(async () => mocks.app.hosts);
+  support.preventRemove.mockReset();
   mocks.back.mockReset();
   mocks.setName.mockReset();
   mocks.alert.mockReset();
@@ -180,4 +194,85 @@ it("offers Sign in in place of the account row when signed out", async () => {
   expect(container.textContent).toContain("Not signed in");
   [...container.querySelectorAll("button")].find((b) => b.textContent === "Sign in")!.click();
   expect(mocks.app.signIn).toHaveBeenCalledTimes(1);
+});
+
+const supportReceipt = "c1e725d7-9bcb-49f6-abf1-5fdf0f1d3464";
+
+const tap = (label: string) => act(async () => {
+  [...container.querySelectorAll("button")].find((button) => button.textContent === label)!.click();
+});
+
+it("opens support reports from Settings and cancels before sending", async () => {
+  await show(<SettingsScreen />);
+  await tap("Send a support report");
+  expect(mocks.push).toHaveBeenCalledWith("/support-report");
+
+  await show(<SupportReportScreen />);
+  expect(support.preview).not.toHaveBeenCalled();
+  await tap("Cancel");
+  expect(mocks.back).toHaveBeenCalled();
+  expect(support.submit).not.toHaveBeenCalled();
+});
+
+function prepareMobileSupport(now: number) {
+  mocks.app.session.user.userId = "my-account";
+  const machine = { ...mocks.app.hosts[0], provenance: { kind: "automatic", userId: "my-account" } };
+  mocks.app.hosts = [machine];
+  support.events.mockReturnValue({
+    events: [{ at: now - 500, kind: "connected", classification: "relay", detail: "ghp_CANARY" }],
+    retainedSince: now - 499, pairings: [{ hostId: machine.id, instance: pairingInstance(machine.id) }],
+  });
+  support.preview.mockResolvedValue({
+    key: supportReceipt, from: now - 1000, to: now, server: { status: "omitted", events: [], capturedAt: now, truncated: false },
+  });
+  return machine;
+}
+
+async function showMobilePreview() {
+  await show(<SupportReportScreen />);
+  await act(async () => container.querySelector<HTMLInputElement>('[aria-label="This phone’s connection events"]')!.click());
+  expect(support.events).not.toHaveBeenCalled();
+  await tap("Prepare preview");
+  expect(container.textContent).toContain("Phone: Included");
+}
+
+it("previews scoped mobile events and retries the reviewed submission before confirming delivery", async () => {
+  const now = Date.now();
+  prepareMobileSupport(now);
+  support.submit.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ reference: supportReceipt });
+  await showMobilePreview();
+  expect(support.events).toHaveBeenCalledWith(mocks.app.logs, "my-account", mocks.app.hosts, { from: now - 1000, to: now });
+  await tap("Send to TerminalX Support");
+  expect(container.textContent).not.toContain("Report delivered");
+  expect(support.preventRemove).toHaveBeenCalledWith(true);
+  await show(<SettingsScreen />);
+  await show(<SupportReportScreen />);
+  await tap("Retry same report");
+  expect(container.textContent).toContain(supportReceipt);
+  expect(support.submit.mock.calls[0]!.slice(0, 2)).toEqual(support.submit.mock.calls[1]!.slice(0, 2));
+  expect(JSON.stringify(support.submit.mock.calls)).not.toContain("ghp_CANARY");
+  await tap("Done");
+});
+
+it("hides a pending report after the contributing machine is forgotten and paired again", async () => {
+  const machine = prepareMobileSupport(Date.now());
+  support.submit.mockRejectedValueOnce(new Error("offline"));
+  await showMobilePreview();
+  await tap("Send to TerminalX Support");
+  await show(<SettingsScreen />);
+  endPairingInstance(machine.id);
+  pairingInstance(machine.id);
+  await show(<SupportReportScreen />);
+  expect(container.textContent).toContain("Pairing access changed");
+  expect(container.textContent).not.toMatch(/Review diagnostic fields|Copy local report|Retry same report/);
+  expect(support.submit).toHaveBeenCalledTimes(1);
+});
+
+it("refuses to copy if the saved pairing disappeared before the settings view refreshed", async () => {
+  prepareMobileSupport(Date.now());
+  await showMobilePreview();
+  support.hosts.mockResolvedValueOnce([]);
+  await tap("Copy local report");
+  expect(container.textContent).toContain("Pairing access changed");
+  expect(support.copy).not.toHaveBeenCalled();
 });

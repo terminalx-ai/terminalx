@@ -18,6 +18,9 @@ import { cn } from "@/lib/cn";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
 import { addedAccounts, AgentAccountsSection, useAgentAccountsView } from "./AgentAccounts";
+import { AgentConfigFileRow, AgentExecutableRow, shortPath } from "./AgentExecutable";
+import { OpenCodeAgent } from "./OpenCodeAgent";
+import { RegisteredSetting } from "./settingsRegistry";
 
 const BADGES: Record<AgentReadiness["state"], string> = {
   missing: "Not installed",
@@ -69,10 +72,6 @@ function relative(at: string, now: number): string {
   return `at ${new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-function shortPath(path: string | undefined): string | undefined {
-  const home = path?.match(/^\/Users\/[^/]+|^\/home\/[^/]+/)?.[0];
-  return home && path ? `~${path.slice(home.length)}` : path;
-}
 
 function hostOf(url: string): string {
   try { return new URL(url).host; } catch { return url; }
@@ -150,6 +149,7 @@ function AgentTab({ harness, readiness, onLogin }: {
   const value = readiness?.value ?? null;
   const checking = readiness?.checking ?? true;
   const recheck = () => { void refreshHarnesses().then(() => readiness?.refresh()).catch(() => readiness?.refresh()); };
+  if (harness.id === "opencode") return <OpenCodeAgent harness={harness} readiness={value} checking={checking} recheck={recheck} />;
   if (takesApiKey(harness.id)) return <KeyedAgent harness={harness} readiness={value} checking={checking} refresh={readiness?.refresh} recheck={recheck} onLogin={onLogin} />;
   return <div>
     <StatusLine dot={value?.state === "ready" ? "ok" : checking ? "busy" : "off"} onRefresh={recheck} refreshing={checking}>
@@ -161,6 +161,22 @@ function AgentTab({ harness, readiness, onLogin }: {
       ["Executable", harness.path ? <Mono>{shortPath(harness.path)}</Mono> : null],
     ]} />
     {value?.state !== "ready" && <div className="mt-3"><AgentSetup harness={harness} value={value} checking={checking} onRefresh={recheck} headless /></div>}
+    <AgentFiles harness={harness} onChanged={recheck} />
+  </div>;
+}
+
+/** What each agent's own settings file is called on its row (10.01, 10.02). */
+const CONFIG_TITLES: Record<string, string> = { claude: "Claude settings file", codex: "Codex config", cursor: "Cursor settings file" };
+
+/** The program an agent runs as and its own settings file (PRO-157). A change re-checks the agent. */
+function AgentFiles({ harness, onChanged }: { harness: HarnessInfo; onChanged: () => void }) {
+  return <div className="mt-2" data-testid="agent-files">
+    <RegisteredSetting setting="agents.executable" instance={harness.id}>
+      <div><AgentExecutableRow harness={harness.id} agentName={harness.name} onChanged={onChanged} /></div>
+    </RegisteredSetting>
+    <RegisteredSetting setting="agents.settingsFile" instance={harness.id}>
+      <div><AgentConfigFileRow harness={harness.id} title={CONFIG_TITLES[harness.id] ?? `${harness.name} settings file`} last /></div>
+    </RegisteredSetting>
   </div>;
 }
 
@@ -341,6 +357,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     {needsSetup && <div className="mt-3"><AgentSetup harness={harness} value={own} checking={checking} onRefresh={recheck} headless /></div>}
     {takesAccounts(harness.id) && <AgentAccountsSection harness={harness.id} agentName={harness.name} accounts={accounts} localReadiness={own} login={status}
       onChanged={() => { void login.refresh(); void refresh?.(); }} />}
+    <AgentFiles harness={harness} onChanged={recheck} />
   </div>;
 }
 

@@ -213,6 +213,32 @@ describe("starting a session from a terminalx://new link (PRO-130)", () => {
     expect(within(dialog()).getByText("Merge when green stays off for a session started from a link.")).toBeTruthy();
   });
 
+  it("arms Create even when its timer fires a moment before the clock reaches the arming time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let clock = 1_000_000;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      render(<LinkSessionDialog />);
+      await act(() => askToStartFromLink(link({ project: "/code/notes" })));
+      const armedAt = getLinkSessionRequest()!.armedAt;
+      expect(createButton().disabled).toBe(true);
+      // The timer fires, but the wall clock is still a millisecond short.
+      clock = armedAt - 1;
+      await act(async () => {
+        vi.advanceTimersByTime(LINK_ARMING_MS);
+      });
+      expect(createButton().disabled).toBe(true);
+      clock = armedAt;
+      await act(async () => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(createButton().disabled).toBe(false);
+      now.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts only the request that was on screen: a link that took its place is asked about anew", async () => {
     render(<LinkSessionDialog />);
     await act(() => askToStartFromLink(link({ prompt: "first" })));

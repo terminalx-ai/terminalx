@@ -62,6 +62,7 @@ const ACTIONS = [
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
+  { id: "app.supportReport", label: "Send a support report", group: "App", keys: [], menu: { section: "help", order: 3, label: "Send a Support Report…" } },
 
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
   // Keep Mod+G / Mod+Shift+G for next/previous search matches in editors and chats.
