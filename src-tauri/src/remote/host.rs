@@ -580,6 +580,14 @@ impl RelayHost {
                 match command {
                     ControlCommand::Forward { frame, req_id, respond } => {
                         sent.send(frame.clone()).unwrap();
+                        if frame["type"] == "invite-create" {
+                            let _ = respond.send(Ok(json!({
+                                "type": "invite-created", "reqId": req_id,
+                                "inviteToken": crate::relay_e2ee::random_token(),
+                                "expiresAt": chrono::Utc::now().timestamp_millis() + 60_000,
+                            })));
+                            continue;
+                        }
                         let kind = match frame["type"].as_str().unwrap() {
                             "device-credential-install" => "device-credential-installed",
                             "device-credential-install-status" => "device-credential-install-status-result",

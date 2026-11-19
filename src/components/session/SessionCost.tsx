@@ -127,6 +127,7 @@ export interface MachineUsage {
   name: string;
   /** The session's id on the machine, which its `terminalx` names it by. */
   sessionId: string;
+  generation: string;
   /** Reads `session.usage` on the machine; `null` while it is not connected. */
   read: (() => Promise<RuntimeSessionUsage>) | null;
 }
@@ -221,38 +222,77 @@ export function SessionCost({ session, className, machine }: { session: SessionE
   const enabled = settings?.sessionCost === true;
   const [open, setOpen] = useState(false);
   const [answer, setAnswer] = useState<{ sessionId: string; usage: RuntimeSessionUsage } | null>(null);
-  const models = useMemo(() => sessionModels(session), [session]);
-  const total = useMemo(() => totals(models), [models]);
   const read = machine?.read ?? null;
   const machineSession = machine?.sessionId ?? null;
-  const reread = useMemo(() => machine
-    ? async () => {
-      if (!read) return;
+  const generation = machine?.generation;
+  const readable = !machine || !!read;
+  const readKey = JSON.stringify([session.id, generation, readable]);
+  const currentReadKey = useRef(readKey);
+  currentReadKey.current = readKey;
+  const machineAnswer = answer?.sessionId === session.id ? answer.usage : null;
+  const usageSession = useMemo(() => {
+    if (!machineAnswer) return session;
+    const refreshed = new Map(machineAnswer.usage.tabs.map((tab) => [tab.tabId, tab]));
+    return { ...session, tabs: session.tabs.map((tab) => {
+      const usage = refreshed.get(tab.id);
+      // Turn-end updates from the session list can arrive after this refresh.
+      if (!usage || (tab.usage && tab.usage.updated >= usage.updated)) return tab;
+      return { ...tab, usage: { models: usage.models, updated: usage.updated } };
+    }) };
+  }, [session, machineAnswer]);
+  const models = useMemo(() => sessionModels(usageSession), [usageSession]);
+  const total = useMemo(() => totals(models), [models]);
+  const latestRequest = useRef(0);
+  const reread = async () => {
+    if (machine) {
+      if (!read) return false;
+      const request = ++latestRequest.current;
       try {
         const usage = await read();
-        setAnswer({ sessionId: machineSession!, usage });
+        if (request !== latestRequest.current || currentReadKey.current !== readKey || usage.usage.sessionId !== machineSession) return false;
+        setAnswer({ sessionId: session.id, usage });
+        return true;
       } catch {
-        // Not reachable or refused: the totals the session list carries stay.
+        return false;
       }
     }
-    : () => refresh(session.id).then(() => undefined), [!!machine, read, machineSession, session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    return (await refresh(session.id)) !== null;
+  };
+  const latestReread = useRef(reread);
+  latestReread.current = reread;
   // A session last worked on before totals were kept has none until its next
-  // turn: read them once, so the header is not empty in the meantime.
+  // turn: backfill so the header is not empty in the meantime.
   const backfilled = useRef<string | null>(null);
   // A machine's tab names no conversation here: one that has messages is one the machine may have totals for.
   const unread = session.tabs.some((tab) => machine ? tab.hasMessages : tab.providerSessionId) && session.tabs.every((tab) => !tab.usage);
-  const readable = !machine || !!read;
+  const remote = !!machine;
   useEffect(() => {
     if (!enabled || !unread || !readable || backfilled.current === session.id) return;
-    backfilled.current = session.id;
-    void reread();
-  }, [enabled, unread, readable, session.id, reread]);
+    if (!remote) {
+      backfilled.current = session.id;
+      void latestReread.current();
+      return;
+    }
+    let canceled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const backfill = async (canRetry: boolean) => {
+      const read = await latestReread.current();
+      if (canceled) return;
+      if (read) backfilled.current = session.id;
+      else if (canRetry) retry = setTimeout(() => void backfill(false), 1_000);
+    };
+    // Retry a transient timeout once on this connection. A new connection
+    // gets its own attempt if there still is no successful read.
+    void backfill(true);
+    return () => {
+      canceled = true;
+      clearTimeout(retry);
+    };
+  }, [enabled, unread, readable, session.id, generation, remote]);
   // Read again once each time the popover opens. Keyed on `open` alone: the
   // caller's `read` is a new function on every render, and on a machine each
   // read re-reads every tab's transcripts there, whose move renders this
   // again (PRO-408 review).
-  const latestReread = useRef(reread);
-  latestReread.current = reread;
   useEffect(() => {
     if (open) void latestReread.current();
   }, [open, session.id]);
@@ -277,8 +317,8 @@ export function SessionCost({ session, className, machine }: { session: SessionE
     <Popover.Portal>
       <Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={12} aria-label="Session usage"
         className="z-(--z-menu) w-[400px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl border border-hairline bg-popover text-sm text-popover-foreground shadow-surface outline-none">
-        <UsagePopover session={session} models={models} total={total} onClose={() => setOpen(false)}
-          machine={machine ? { name: machine.name, sessionId: machine.sessionId, answer: answer?.sessionId === machine.sessionId ? answer.usage : null } : undefined} />
+        <UsagePopover session={usageSession} models={models} total={total} onClose={() => setOpen(false)}
+          machine={machine ? { name: machine.name, sessionId: machine.sessionId, answer: machineAnswer } : undefined} />
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>;

@@ -12,7 +12,7 @@ import { api, errorMessage } from "@/lib/api";
 import { readChangesChoice } from "@/lib/changesScope";
 import { useDataPrivacy, PRIVACY_MESSAGE } from "@/lib/dataPrivacy";
 import { openLinkIssue, openRenameSession } from "@/lib/dialogs";
-import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { useShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { copyShareLink, openSessionShare } from "@/lib/localSharing";
 import { showPanelTab } from "@/lib/panelTab";
 import { isQuickChat } from "@/lib/quickChats";
@@ -74,6 +74,8 @@ export function SessionMenu({ session, branch, cloud = false, terminalView, onCo
   const target = chosen ?? defaultBranch;
   const linkIssue = () => openLinkIssue(session.id);
   const copyLink = () => void copyShareLink(session.id).catch(failed("Could not copy a link to the session"));
+  useShortcut("session.linkIssue", linkIssue, { enabled: !quick && !session.issue });
+  useShortcut("session.copyLink", copyLink, { enabled: !cloud && !privacy.enabled });
   return (
     <>
       {mirror.on && <RepoMirrorButton mirror={mirror} />}
@@ -120,12 +122,14 @@ export function SessionMenu({ session, branch, cloud = false, terminalView, onCo
           ) : (
             <DropdownMenuItem data-row="link-issue" onSelect={linkIssue}>
               <CircleDot /> Link issue
+              {shortcut("session.linkIssue")}
             </DropdownMenuItem>
           ))}
           {!cloud && (
             <>
               <DropdownMenuItem data-row="copy-link" disabled={privacy.enabled} title={privacy.enabled ? PRIVACY_MESSAGE : undefined} onSelect={copyLink}>
                 <Link /> Copy link
+                {shortcut("session.copyLink")}
               </DropdownMenuItem>
               <DropdownMenuItem data-row="share" disabled={privacy.enabled} title={privacy.enabled ? PRIVACY_MESSAGE : undefined} onSelect={() => openSessionShare(session.id)}>
                 <UserPlus /> Share session…

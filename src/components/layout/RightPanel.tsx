@@ -18,6 +18,7 @@ import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { noteChangesCount, useChangesCount, useChecksMark } from "@/lib/panelMarks";
 import { openFile } from "@/lib/editors";
 import { pathInFileRoot, type FileSource } from "@/lib/workspaceFiles";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
@@ -61,6 +62,7 @@ export function RightPanel({
   labelMode,
   settleSessionId,
   workspace,
+  machineWorkspace,
   gitSource,
   fileSource,
   repositories,
@@ -97,6 +99,7 @@ export function RightPanel({
   settleSessionId?: string;
   /** Present only for a managed, non-main workspace. */
   workspace?: { projectPath: string; name: string };
+  machineWorkspace?: RemovableWorkspace;
   /** Where Branch and Changes read Git; the local checkout at `cwd` when absent. */
   gitSource?: GitSource;
   /** Where Files reads; the local checkout at `cwd` when absent. */
@@ -318,6 +321,7 @@ export function RightPanel({
                   branch: resolvedBranch,
                   active: tab === "branch",
                   busy: live,
+                  machineWorkspace,
                   onSettle:
                     settleSessionId && workspace
                       ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })

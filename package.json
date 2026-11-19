@@ -60,6 +60,8 @@
     "test:webkit-helper-titles": "node scripts/webkit/helper-titles.mjs",
     "test:webkit-automatic-session-status": "node scripts/webkit/automatic-session-status.mjs",
     "test:webkit-session-start": "node scripts/webkit/session-start.mjs",
+    "test:webkit-session-menu": "node scripts/webkit/session-menu.mjs",
+    "test:webkit-composer-controls": "node scripts/webkit/composer-controls.mjs",
     "test:webkit-attachment-preview": "node scripts/webkit/attachment-preview.mjs",
     "bench:orchestration": "node scripts/orchestration-bench/cli.mjs"
   },

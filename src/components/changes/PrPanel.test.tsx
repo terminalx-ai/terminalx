@@ -2,7 +2,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { RemoteGit } from "@terminalx/portable/workspaceGit";
 import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { cloudGitSource } from "@/lib/gitSource";
-import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
+import { act, cleanup, fireEvent, render as rtlRender, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PrAssociation, PullRequest } from "@/lib/api";
 import type { WorkspaceDisposition } from "@/types/session";
@@ -84,6 +85,7 @@ function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: (
 
 afterEach(() => {
   cleanup();
+  closeWorkspaceRemove();
   vi.useRealTimers();
   mocks.invoke.mockReset();
 });
@@ -111,7 +113,79 @@ it.each([false, true])("once merged shows the merged card and summaries, not the
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
 });
 
+function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>) {
+  const projectKey = "machine:mini:project";
+  const sessionId = `${projectKey}:session`;
+  mocks.invoke.mockImplementation(async (command: string, args: { additions: unknown[] }) => {
+    if (command === "pr_associations") return args.additions;
+    throw Error(command);
+  });
+  let pr = mergedPr;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus(mergedPr.head, 0);
+    if (method === "git.prs") return { prs: [pr] };
+    if (method === "git.prAssociations") return { associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
+    if (method === "git.prConversation") return { ...pr, reviewers: [], activity: [] };
+    throw Error(method);
+  });
+  const source = cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const workspace = {
+    projectPath: projectKey, path: cwd, name: "feature",
+    host: { key: "machine:mini|session", disposition: vi.fn(disposition), remove: vi.fn(), turnRunning: () => false },
+  };
+  return {
+    workspace,
+    setPr: (next: PullRequest) => { pr = next; },
+    panel: (branch: string | null = mergedPr.head) => (
+      <PrPanel cwd="machine://mini:project/worktree" source={source} sessionId={sessionId} branch={branch} active busy={false} inline machineWorkspace={workspace} />
+    ),
+  };
+}
+
 describe("merged workspace action", () => {
+  it.each([
+    { uncommitted: 0, unpushed: 0 },
+    { uncommitted: 1, unpushed: 0 },
+    { uncommitted: 0, unpushed: 1 },
+  ])("uses only the machine's verdict (uncommitted=$uncommitted, unpushed=$unpushed)", async (counts) => {
+    const { panel, workspace } = machinePrPanel(async () => ({ ...cleanMerged, ...counts }));
+    const { result } = renderHook(useDialogs);
+    render(panel());
+    await screen.findByTestId("pr-merged-card");
+    expect(workspace.host.disposition).toHaveBeenCalled();
+    if (counts.uncommitted || counts.unpushed) {
+      expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+    } else {
+      fireEvent.click(await screen.findByRole("button", { name: "Delete workspace" }));
+      expect(result.current.workspaceRemove).toEqual({ ...workspace, mode: "delete" });
+    }
+    expect(mocks.invoke.mock.calls.map(([command]) => command)).not.toContain("workspace_disposition");
+    expect(workspace.host.remove).not.toHaveBeenCalled();
+  });
+
+  it("publishes the PR and updates its actions without waiting for the machine's cleanup check", async () => {
+    let finishCheck!: (value: WorkspaceDisposition) => void;
+    const pendingCheck = new Promise<WorkspaceDisposition>((resolve) => { finishCheck = resolve; });
+    const { panel, setPr, workspace } = machinePrPanel(() => pendingCheck);
+    setPr({ ...mergedPr, state: "OPEN", isDraft: true });
+    const view = render(panel());
+    expect((await screen.findByRole<HTMLButtonElement>("button", { name: "Mark ready" })).disabled).toBe(false);
+    expect(workspace.host.disposition).not.toHaveBeenCalled();
+
+    setPr(mergedPr);
+    view.rerender(panel(null));
+    await screen.findByTestId("pr-merged-card");
+    expect(workspace.host.disposition).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+
+    setPr({ ...mergedPr, state: "OPEN", isDraft: true });
+    view.rerender(panel());
+    expect((await screen.findByRole<HTMLButtonElement>("button", { name: "Mark ready" })).disabled).toBe(false);
+    await act(async () => finishCheck(cleanMerged));
+    expect(workspace.host.disposition).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
+  });
+
   it("offers guarded workspace deletion when a managed workspace is merged and clean", async () => {
     mockBackend(cleanMerged);
     const openDelete = vi.fn();
@@ -438,6 +512,23 @@ it("does not apply landed evidence from a different checkout HEAD", async () => 
   render(<PrPanel cwd={cwd} sessionId="author" branch={mergedPr.head} active busy={false} onSettle={() => {}} />);
   await screen.findByRole("button", { name: "Create pull request" });
   expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
+});
+
+it.each([true, false])("shows a linked machine PR without offering a desktop unlink (inline: %s)", async (inline) => {
+  const workspaceKey = "machine:mini:project";
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus("feature", 3);
+    if (method === "git.prAssociations") return {
+      associations: [{ url: followup.url, head: followup.head, number: followup.number, repo: "app", linked: true }],
+    };
+    if (method === "git.prs") return { prs: [followup] };
+    throw Error(method);
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  render(<PrPanel source={source} sessionId={`${workspaceKey}:author`} branch="feature" active busy={false} inline={inline} />);
+  expect((await screen.findByTestId("pr-linked")).textContent).toBe("Linked");
+  expect(screen.queryByRole("button", { name: `Unlink #${followup.number}` })).toBeNull();
+  expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_unlink")).toBe(false);
 });
 
 it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-created %s merge", async () => {

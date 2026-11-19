@@ -170,7 +170,9 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
           {cloud.machine
-            ? `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
+            ? cloud.connected
+              ? cloud.repositories ? "This session’s checkout is unavailable." : "Finding this session’s checkout…"
+              : `Changes, Files and Git appear once ${cloud.machine.name} is connected.`
             : cloud.locked === "deleted"
             ? "This workspace was deleted. Its changes, files and Git went with it, and any previews that were open ended."
             : cloud.locked
@@ -216,6 +218,7 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
       fileSource={cloud.fileSource}
       onFixErrors={checkFix && tab && !isTerminalTab(tab) ? checkFix.fix : undefined}
       fixBusy={checkFix?.busy}
+      machineWorkspace={cloud.machine ? cloud.removableWorkspace : undefined}
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
@@ -545,9 +548,9 @@ export function SessionView({
     session,
     machineName: machine?.name ?? "",
     backend,
-    gitSource: machine && !cloud?.locked ? cloud?.gitSource : undefined,
+    gitSource: machine && !cloud?.locked ? machine.checkoutGitSource : undefined,
     fileSource: machine ? cloud?.fileSource : undefined,
-    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === cloud.repository)?.remote) || null,
+    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === machine.checkoutRepository)?.remote) || null,
     connected: !!machine && !!cloud?.connected,
     tabId: activeTab?.id,
   });
@@ -561,14 +564,16 @@ export function SessionView({
   // A machine session's checks are read on the machine and sent to its tab there (PRO-408).
   const machineCheckFix = machine && cloud ? {
     name: machine.name,
-    source: cloud.gitSource,
+    source: machine.checkoutGitSource,
+    generation: cloud.backend.generation,
     attach: cloud.client?.hasCapability("machine/8") && cloud.manage ? (tabId: string, prUrl: string) => cloud.client!.checkFailures(cloud.backend.logSessionId, tabId, prUrl) : null,
     send: (tabId: string, text: string) => cloud.backend.send(tabId, text, []),
   } : undefined;
+  const canFixMachineChecks = !!machineCheckFix?.source && !!machineCheckFix.attach;
   const checkFix = useFixCheckErrors({
     sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch,
     // A machine that cannot read check logs (an older TerminalX, or no manage access) offers none: its strip says to update it.
-    enabled: (machine ? !!cloud?.gitSource && !!machineCheckFix?.attach : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
+    enabled: (machine ? canFixMachineChecks : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
     machine: machineCheckFix,
   });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
@@ -670,6 +675,7 @@ export function SessionView({
     : machine && cloud ? <SessionCost session={session} className={HEADER_TIGHT} machine={{
       name: machine.name,
       sessionId: cloud.backend.logSessionId,
+      generation: cloud.backend.generation,
       read: cloud.client?.hasCapability("machine/8") ? () => cloud.client!.sessionUsage(cloud.backend.logSessionId) : null,
     }} />
     : null;
@@ -893,7 +899,7 @@ export function SessionView({
             {/* A machine session's are the machine's, run there (PRO-403). */}
             {machine && cloud && !compact && <MachineRunMenu key={`run-menu:${session.id}`} cloud={cloud} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
-            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} />}
+            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} workspace={cloud?.removableWorkspace} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (
@@ -1123,7 +1129,7 @@ export function SessionView({
       {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
-      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={machineCheckFix?.attach ? checkFix : undefined} />}
+      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={canFixMachineChecks ? checkFix : undefined} />}
       {!compact && prefs.panelOpen && !cloud &&
         (panelTab ? (
           <PanelHost session={session} tab={panelTab} checkFix={checkFix} />

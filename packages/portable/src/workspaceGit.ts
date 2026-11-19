@@ -191,6 +191,8 @@ export interface RemotePrCreateResult {
   /** An open pull request for the branch already existed; it is linked, not duplicated. */
   existing: boolean;
   reconciled?: boolean;
+  /** The machine saved this pull request to the named session. */
+  sessionAssociated?: boolean;
 }
 
 export interface RepositoryFacts {
@@ -221,8 +223,8 @@ export function hasUnpublishedWork(facts: RepositoryFacts): boolean {
 }
 
 /** The repositories of a cloud workspace. */
-export async function listRepositories(client: WorkspaceRpcClient): Promise<RemoteRepository[]> {
-  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories");
+export async function listRepositories(client: WorkspaceRpcClient, preferredRepo?: string): Promise<RemoteRepository[]> {
+  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories", preferredRepo ? { preferredRepo } : undefined);
   return listed.repositories;
 }
 
@@ -321,7 +323,7 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
+  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
   }
 
@@ -358,7 +360,7 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }

@@ -566,6 +566,7 @@ impl PairingManager {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.release_direct_port();
         self.leave_guest();
         self.clear_runtime_sharing();
         if let Some(sessions) = self.sessions.get() {
@@ -683,6 +684,11 @@ impl PairingManager {
     #[cfg(test)]
     pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
         self.phone.set_owner(Some(owner));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_port_for_test(self: &mut Arc<Self>, port: u16) {
+        Arc::get_mut(self).unwrap().direct_port = port;
     }
 
     /// The window's signing key for runtime consent. Reading it can block
@@ -1062,14 +1068,14 @@ impl PairingManager {
         let manager = self.clone();
         inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = async {
                         let socket = tokio_tungstenite::accept_async_with_config(
-                            crate::data_privacy::NetworkIo::new(stream),
+                            crate::data_privacy::NetworkIo::new(&mut stream),
                             Some(pairing_websocket_config()),
                         )
                         .await?;
@@ -1085,6 +1091,11 @@ impl PairingManager {
                             .await
                     }
                     .await;
+                    if manager.is_stopped() || manager.runtime_owns_direct() {
+                        // Let the runtime bind this same port when the window
+                        // closes. A normal server-side FIN leaves TIME_WAIT.
+                        let _ = stream.set_zero_linger();
+                    }
                     if let Err(error) = result {
                         log::debug!("direct paired-device connection ended: {error:#}");
                     }
@@ -1219,6 +1230,10 @@ impl PairingManager {
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
+        if device.last_seen_at.is_none() && device.scope != DeviceScope::Session {
+            let manager = self.clone();
+            let _ = tokio::task::spawn_blocking(move || manager.keep_new_phone_available()).await;
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.pending_pairing_device.as_deref() == Some(&device.id) {
@@ -1424,6 +1439,7 @@ impl PairingManager {
     fn revoke_local(&self, device_id: &str) -> Result<()> {
         self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device_id}))?;
         let _ = self.registry.revoke(device_id)?;
+        self.account.sync_runtime_copy();
         self.secrets.delete_device_token(device_id)?;
         self.cancel_connections(device_id);
         self.inner.lock().unwrap().forget_pending(device_id);
@@ -1431,7 +1447,9 @@ impl PairingManager {
     }
 
     fn discard_unclaimed_pairing(&self, device_id: &str) -> Result<()> {
-        let _ = self.registry.discard_unclaimed(device_id)?;
+        if self.registry.discard_unclaimed(device_id)? {
+            self.account.sync_runtime_copy();
+        }
         self.secrets.delete_device_token(device_id)?;
         self.inner.lock().unwrap().forget_pending(device_id);
         Ok(())
@@ -2251,6 +2269,32 @@ mod tests {
         assert_eq!(named, MachineName { name: own_name.clone(), chosen: false, computer_name: computer });
         assert_eq!(PairingManager::host_name("u1"), own_name);
         assert_eq!(crate::store::settings::load().machine_name, None);
+    }
+
+    #[test]
+    fn removing_the_last_phone_with_the_window_open_removes_the_runtime_session() {
+        use crate::keychain::testing::MemorySecrets;
+        use serde_json::json;
+
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let manager = PairingManager::with_secrets_for_test("com.terminalx.fixture", Arc::new(MemorySecrets::default()));
+        manager.account.set_context_for_test(Some(AccountContext {
+            access_token: "fixture-token".into(), user_id: "u1".into(), email: "u1@example.invalid".into(),
+            display_name: "U1".into(), profile_id: "profile".into(), organization_id: "org".into(),
+            relay_entitled: true, generation: 1,
+        }));
+        assert!(!crate::store::settings::load().machines.allow_operating);
+        let devices = json!({"devices":[{
+            "id":"phone", "label":"Phone", "platform":"ios", "token":"fixture-hash",
+            "scope":"driver", "provenance":"explicit", "bindingGeneration":0,
+            "createdAt":"2026-11-01T00:00:00Z", "approvedAt":"2026-11-01T00:00:00Z",
+        }]});
+        crate::store::write_json(&root.join("devices.json"), &devices).unwrap();
+        manager.account.sync_runtime_copy();
+        assert!(crate::machine_account::load(&root).unwrap().is_some());
+        manager.revoke_local("phone").unwrap();
+        assert!(crate::machine_account::load(&root).unwrap().is_none());
     }
 
     #[test]

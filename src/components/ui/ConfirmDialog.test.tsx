@@ -1,9 +1,26 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfirmDialogHost } from "./ConfirmDialog";
-import { chooseInApp, confirmInApp, pendingConfirm } from "@/lib/confirm";
+import { chooseInApp, confirmInApp, pendingConfirm, type ConfirmRequest } from "@/lib/confirm";
 
-afterEach(cleanup);
+const desktop = vi.hoisted(() => ({
+  isTauri: vi.fn(() => false),
+  invoke: vi.fn(),
+  listen: vi.fn<(
+    event: string,
+    receive: (event: { payload: [string, ConfirmRequest | null] }) => Promise<void>,
+  ) => Promise<() => void>>(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: desktop.isTauri, invoke: desktop.invoke }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main", listen: desktop.listen }),
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.resetAllMocks();
+});
 
 /** Ask, and let React draw the question. The answer comes back boxed: an async function would wait for a bare promise. */
 async function asking<T>(question: () => Promise<T>): Promise<{ answer: Promise<T> }> {
@@ -13,7 +30,6 @@ async function asking<T>(question: () => Promise<T>): Promise<{ answer: Promise<
 }
 const labels = (dialog: HTMLElement) => within(dialog).getAllByRole("button").map((button) => button.textContent);
 
-// PRO-400, design 17.01: in-scope confirmations use the app card; Quit is an exception (PRO-455).
 describe("the app's confirmation dialog", () => {
   it("asks with the question as its title, what happens below, the safe choice left and the red action right", async () => {
     render(<ConfirmDialogHost />);
@@ -81,5 +97,62 @@ describe("the app's confirmation dialog", () => {
     expect(await first).toBe(true);
     await act(async () => { fireEvent.click(within(screen.getByRole("dialog", { name: "Second?" })).getByRole("button", { name: "Cancel" })); });
     expect(await second).toBe(false);
+  });
+
+  it("retries a failed quit reply with the same ID and ignores a rejected claim", async () => {
+    desktop.isTauri.mockReturnValue(true);
+    desktop.listen.mockResolvedValue(() => {});
+    desktop.invoke.mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new Error("lost IPC reply"))
+      .mockResolvedValue(true);
+    render(<ConfirmDialogHost />);
+    const [event, receive] = desktop.listen.mock.calls[0];
+    expect(event).toBe("quit-prompt");
+
+    const request = {
+      title: "Keep work running?",
+      action: "Quit and Keep Running",
+      alternative: "Quit and Stop All",
+      cancel: "Cancel",
+    };
+    await act(() => receive({ payload: ["expired", request] }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    const { answer } = await asking(() => receive({ payload: ["current", request] }));
+    const dialog = screen.getByRole("dialog", { name: request.title });
+    expect(labels(dialog)).toEqual(["Cancel", "Quit and Stop All", "Quit and Keep Running"]);
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Quit and Stop All" })); });
+    await answer;
+    expect(desktop.invoke.mock.calls).toEqual([
+      ["reply_to_quit_prompt", { id: "expired", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "alternative" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "alternative" }],
+    ]);
+  });
+
+  it("renews a waiting quit card and stops when Rust withdraws it", async () => {
+    vi.useFakeTimers();
+    desktop.isTauri.mockReturnValue(true);
+    desktop.listen.mockResolvedValue(() => {});
+    desktop.invoke.mockResolvedValue(true);
+    render(<ConfirmDialogHost />);
+    const [, receive] = desktop.listen.mock.calls[0];
+    const { answer } = await asking(() => receive({
+      payload: ["current", { title: "Quit TerminalX?", action: "Quit Anyway", cancel: "Keep Running" }],
+    }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    await act(() => receive({ payload: ["older", null] }));
+    expect(screen.getByRole("dialog", { name: "Quit TerminalX?" })).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+    await act(() => receive({ payload: ["current", null] }));
+    await answer;
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(4_000));
+    expect(desktop.invoke.mock.calls).toEqual([
+      ["reply_to_quit_prompt", { id: "current", reply: "opened" }],
+      ["reply_to_quit_prompt", { id: "current", reply: "heartbeat" }],
+    ]);
   });
 });

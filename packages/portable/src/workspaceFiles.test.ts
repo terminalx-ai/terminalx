@@ -108,7 +108,8 @@ describe("workspace files", () => {
     // Only a caller rooted at such a worktree may name one; every other call stays workspace-relative.
     expect(() => remoteFilePath("/Users/me/worktrees/read")).toThrow();
     // The runtime decides which absolute paths are the project's worktrees; these never leave as typed.
-    for (const bad of ["/", "/Users/me/worktrees/read/../other", "/Users/me/./worktrees", "/a\\..\\b", "/a\0b", "../x", "C:\\x"]) expect(() => remoteFilePath(bad, true), bad).toThrow();
+    for (const bad of ["/", "/Users/me/worktrees/read/../other", "/Users/me/./worktrees", "/a\0b", "../x", "C:\\x"]) expect(() => remoteFilePath(bad, true), bad).toThrow();
+    expect(remoteFilePath("/Users/me/worktrees/team\\read/file\\name.ts", true)).toBe("/Users/me/worktrees/team\\read/file\\name.ts");
   });
 
   it("reads a large file part by part under one version, starting over once if it changes", async () => {

@@ -4,14 +4,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MachinesScreen from "../app/(tabs)/index";
 import SessionsScreen from "../app/(tabs)/sessions";
-import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "./pairing/contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, HEADLESS_PHONE_PAIRING_CAPABILITY, hostIdForPublicKey } from "./pairing/contracts";
 
 // PRO-87, #987: the device menu on the machine list and on the sessions screen: every machine has one, online or offline.
 const mocks = vi.hoisted(() => ({ app: {} as any, navigate: vi.fn(), dismissTo: vi.fn() }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
-vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
+vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => <div data-pairing-scanner /> }));
 // The ring spinner: the connection line's is the one these tests look for.
 vi.mock("@mobile/ui/Spinner", () => ({ Spinner: ({ testID }: { testID?: string }) => testID === "connection-spinner" ? <i data-spinner /> : <i data-row-spinner /> }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
@@ -361,6 +361,23 @@ describe("one list of machines (#987)", () => {
     await show(<MachinesScreen />);
     await click("Pair Build server");
     expect(mocks.app.pairAvailable).toHaveBeenCalledWith(record);
+  });
+
+  it.each(["row", "menu"])("opens the QR scanner from a headless server's %s", async (source) => {
+    const server = account(10, { displayName: "Build server", capabilities: [HEADLESS_PHONE_PAIRING_CAPABILITY] });
+    signedIn([host()], [server]);
+    await show(<MachinesScreen />);
+    expect(container.textContent).toContain("Run terminalx-serve pair --phone on the server");
+    if (source === "menu") {
+      await click("Device options for Build server");
+      expect(menuItems()).toEqual(["Rename", "Scan pairing QR", "Hide on this phone"]);
+      await click("Scan pairing QR");
+    } else {
+      await click("Pair Build server");
+    }
+    expect(container.querySelector("[data-pairing-scanner]")).not.toBeNull();
+    expect(container.querySelector("[data-modal]")?.textContent).toContain("Run terminalx-serve pair --phone on the server");
+    expect(mocks.app.pairAvailable).not.toHaveBeenCalled();
   });
 
   it("names a machine that calls itself “This Mac” by what it is", async () => {

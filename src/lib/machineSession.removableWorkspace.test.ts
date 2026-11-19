@@ -1,4 +1,4 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceRpcClient, type RuntimeSession } from "@terminalx/portable/workspace";
 import { invoke } from "@tauri-apps/api/core";
@@ -97,6 +97,64 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+});
+
+it("keeps the machine's session checkout available for Fix errors when the panel switches repositories", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }, { repo: firstPath }] });
+    if (method === "git.status") return Promise.resolve({ branch: "first" });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result } = renderHook(() => useMachineSession(firstKey));
+  await waitFor(() => expect(result.current?.repository).toBe(firstPath));
+  act(() => result.current?.selectRepository("."));
+  expect(result.current?.repository).toBe(".");
+  await result.current!.machine!.checkoutGitSource!.workStatus();
+  expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
+});
+
+it("uses the runtime's checkout for Fix errors even when repository discovery omits it", async () => {
+  const { mini } = machines();
+  mini.sessions[0] = { ...mini.sessions[0], cwd: "/remote/alias/first/src", fileRoot: firstPath, fileRepository: firstPath };
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }], truncated: true });
+    if (method === "git.status") return Promise.resolve({ branch: "first" });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result } = renderHook(() => useMachineSession(firstKey));
+  await waitFor(() => expect(result.current?.repositories).toEqual([{ repo: "." }]));
+  expect(request).toHaveBeenCalledWith("git.repositories", { projectId: "project", preferredRepo: firstPath });
+  expect(result.current?.repository).toBe(firstPath);
+  act(() => result.current?.selectRepository("."));
+  expect(result.current?.repository).toBe(".");
+  await result.current!.machine!.checkoutGitSource!.workStatus();
+  expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
+});
+
+it("leaves the default Files and Git sources unavailable for an unresolved legacy worktree", async () => {
+  const { mini } = machines();
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }], truncated: true });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
+  await waitFor(() => expect(result.current?.repositories).toEqual([{ repo: "." }]));
+  expect(result.current?.repository).toBeNull();
+  expect(result.current?.gitSource).toBeUndefined();
+  expect(result.current?.fileSource).toBeUndefined();
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:second");
+  expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
+  rerender("machine:mini:project:base");
+  expect(result.current?.machine?.checkoutGitSource).toBe(result.current?.gitSource);
+  expect(request.mock.calls.some(([method]) => method === "git.status")).toBe(false);
 });
 
 describe("useMachineSession removable workspace", () => {

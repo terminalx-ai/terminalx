@@ -86,6 +86,19 @@ describe("the shortcut registry", () => {
     }
   });
 
+  it("gives the session menu's rows actions of their own, with no keys taken from another action", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      for (const id of ["session.linkIssue", "session.copyLink", "session.archive"] as const) expect(keymap[id], id).toEqual([]);
+      expect(keymap["session.toggleTerminalView"]).toEqual(["mod+shift+t"]);
+      const owner = (chord: string) => SHORTCUT_ACTIONS.filter((entry) => keymap[entry.id].includes(chord)).map((entry) => entry.id);
+      expect(owner("mod+i")).toEqual(["app.issues"]);
+      expect(owner("mod+shift+c")).toEqual(["git.createPr"]);
+    }
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.linkIssue")).toMatchObject({ group: "Session", label: "Link an issue to the session" });
+    expect(SHORTCUT_ACTIONS.find((entry) => entry.id === "session.copyLink")).toMatchObject({ group: "Session", label: "Copy a link to the session" });
+  });
+
   // #1131: the design's theme chord belongs to reopen on macOS.
   it.each([true, false])("keeps light/dark and reopen distinct, including Option-modified key events (mac=%s)", (mac) => {
     const keymap = resolveKeymap({}, mac);

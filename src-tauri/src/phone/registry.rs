@@ -15,7 +15,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use subtle::ConstantTimeEq;
 
-use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceFile, DeviceProvenance, PairingTransport};
+use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceFile, DeviceProvenance, DeviceScope, PairingTransport};
 use crate::relay_e2ee::token_hash;
 
 const FILE: &str = "devices.json";
@@ -25,6 +25,14 @@ const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub struct DeviceRegistry;
+
+/// An approved phone can keep its Mac's runtime available after the window closes.
+pub(crate) fn has_paired_phone() -> Result<bool> {
+    Ok(DeviceRegistry.list()?.iter().any(|device| {
+        device.scope != DeviceScope::Session
+            && (device.approved_at.is_some() || device.last_seen_at.is_some())
+    }))
+}
 
 fn root() -> Result<PathBuf> {
     crate::store::root()

@@ -370,7 +370,7 @@ impl WorkspaceGit {
     pub fn handle(&self, method: &str, params: &Value) -> Option<Result<Value, RpcError>> {
         let _request = crate::github_process::scope();
         let result = match method {
-            "git.repositories" => Ok(self.list()),
+            "git.repositories" => Ok(self.list(params)),
             "git.status" => self.status(params),
             "git.diff" => self.diff(params),
             "git.workingChanges" => self.working_changes(params),
@@ -405,7 +405,7 @@ impl WorkspaceGit {
     /// beside an older blank root. Symlinks, hidden and build directories are skipped.
     pub fn repositories(&self) -> (Vec<String>, bool) {
         if self.project {
-            return self.project_repositories();
+            return self.listed_project_repositories(None);
         }
         // The root itself, or a directory inside a checkout (a package of a
         // monorepo as the target directory, development runtimes).
@@ -443,22 +443,50 @@ impl WorkspaceGit {
 
     /// A machine project: its checkout, then each of its worktrees. The ones
     /// outside its folder are also the only absolute paths `fs/1` takes for it.
-    fn project_repositories(&self) -> (Vec<String>, bool) {
-        if !(self.root.join(".git").exists() || crate::git::is_repo(&self.root)) {
-            self.files.set_worktrees(Vec::new());
-            return (Vec::new(), false);
-        }
+    fn project_repositories(&self) -> Vec<String> {
         let worktrees = super::machine::worktrees(&self.root);
-        self.files.set_worktrees(worktrees.iter().filter(|worktree| !worktree.starts_with(&self.root)).cloned().collect());
         let mut found = vec![".".to_string()];
-        found.extend(worktrees.iter().map(|worktree| self.files.relative(worktree)));
+        found.extend(worktrees.iter().map(|worktree| self.files.relative(&worktree.path)));
+        self.files.set_worktrees(worktrees);
+        if !self.project_has_git() {
+            return Vec::new();
+        }
+        found
+    }
+
+    pub(super) fn project_has_git(&self) -> bool {
+        super::machine::owns_git_checkout(&self.root)
+    }
+
+    fn limit_project_repositories(mut found: Vec<String>, preferred: Option<&str>) -> (Vec<String>, bool) {
         let truncated = found.len() > MAX_PROJECT_REPOSITORIES;
+        if let Some(index) = preferred.and_then(|preferred| found.iter().position(|name| name == preferred)) {
+            if truncated && index >= MAX_PROJECT_REPOSITORIES {
+                found.swap(index, MAX_PROJECT_REPOSITORIES - 1);
+            }
+        }
         found.truncate(MAX_PROJECT_REPOSITORIES);
         (found, truncated)
     }
 
-    fn list(&self) -> Value {
-        let (names, truncated) = self.repositories();
+    /// Git configuration can redirect a registered worktree's working
+    /// directory. Verify the effective checkout before using it for Git.
+    fn verified_machine_repo(&self, name: &str) -> bool {
+        !self.project || crate::git::is_own_worktree(&self.dir(name))
+    }
+
+    fn listed_project_repositories(&self, preferred: Option<&str>) -> (Vec<String>, bool) {
+        let (mut names, truncated) = Self::limit_project_repositories(self.project_repositories(), preferred);
+        names.retain(|name| self.verified_machine_repo(name));
+        (names, truncated)
+    }
+
+    fn list(&self, params: &Value) -> Value {
+        let (names, truncated) = if self.project {
+            self.listed_project_repositories(params["preferredRepo"].as_str())
+        } else {
+            self.repositories()
+        };
         let repositories: Vec<Value> = names
             .iter()
             .map(|name| {
@@ -487,7 +515,13 @@ impl WorkspaceGit {
 
     /// The repository a call names, or the only one there is.
     fn repo(&self, params: &Value) -> Result<Repo, RpcError> {
-        let (names, _) = self.repositories();
+        // A named machine checkout is resolved against the full registration
+        // set. The listing limit only bounds the response to discovery.
+        let names = if self.project && params["repo"].is_string() {
+            self.project_repositories()
+        } else {
+            self.repositories().0
+        };
         match params.get("repo") {
             None | Some(Value::Null) => match names.len() {
                 0 => Err(RpcError::not_found("this workspace has no Git repository")),
@@ -501,7 +535,7 @@ impl WorkspaceGit {
                 let name = if name.is_empty() { "." } else { name.trim_end_matches('/') };
                 names
                     .iter()
-                    .find(|known| known.as_str() == name)
+                    .find(|known| known.as_str() == name && self.verified_machine_repo(known))
                     .map(|known| Repo { dir: self.dir(known), name: known.clone() })
                     .ok_or_else(|| RpcError::not_found(format!("{name} is not a repository in this workspace")))
             }
@@ -989,8 +1023,7 @@ impl WorkspaceGit {
         }
     }
 
-    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
-        let session = required_str(params, "sessionId")?;
+    fn project_session(&self, session: &str) -> Result<crate::store::index::SessionEntry, RpcError> {
         let entry = crate::store::index::get(session).map_err(|_| RpcError::not_found("session not found"))?;
         // The runtime may host more than one workspace. Never expose another
         // workspace's journal or pipeline evidence through this connection.
@@ -999,7 +1032,12 @@ impl WorkspaceGit {
         if !super::session_target::owns_project(&self.root, &entry.project_path) {
             return Err(RpcError::not_found("session is not in this workspace"));
         }
-        let associations = crate::pr_associations::for_session(session, vec![])
+        Ok(entry)
+    }
+
+    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
         Ok(self.locate_pr_associations(associations))
     }
@@ -1015,7 +1053,7 @@ impl WorkspaceGit {
             // Keep unavailable identities too, so missing repositories cannot
             // turn an incomplete history into permission to clean up.
             let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
-            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo })
+            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }
 
@@ -1074,6 +1112,11 @@ impl WorkspaceGit {
 
     fn pr_create(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
+        let session = if self.project && params.get("sessionId").is_some() {
+            Some(self.project_session(required_str(params, "sessionId")?)?)
+        } else {
+            None
+        };
         let branch = self.branch_param(&repo, params)?;
         let title = required_str(params, "title")?.trim();
         if title.is_empty() || title.len() > 1024 {
@@ -1092,9 +1135,21 @@ impl WorkspaceGit {
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
+        let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
+            let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
+            if let Some(session) = &session {
+                crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
+                    .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
+                value["sessionAssociated"] = json!(true);
+            }
+            if reconciled {
+                value["reconciled"] = json!(true);
+            }
+            Ok(value)
+        };
         // One open pull request per branch: a resend, or one made elsewhere, is answered with it.
         if let Some(existing) = open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?) {
-            return Ok(json!({ "repo": repo.name, "pr": existing, "created": false, "existing": true }));
+            return answer(existing, true, false);
         }
         let local = self.local_head(&repo, &branch)?;
         if self.remote_head(&repo, &branch, NETWORK_TIMEOUT)?.as_deref() != Some(local.as_str()) {
@@ -1107,8 +1162,8 @@ impl WorkspaceGit {
         let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // Created or not, what GitHub now has is the answer.
         match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(_), Ok(Some(pr))) => Ok(json!({ "repo": repo.name, "pr": pr, "created": true, "existing": false })),
-            (Err(_), Ok(Some(pr))) => Ok(json!({ "repo": repo.name, "pr": pr, "created": true, "existing": false, "reconciled": true })),
+            (Ok(_), Ok(Some(pr))) => answer(pr, false, false),
+            (Err(_), Ok(Some(pr))) => answer(pr, false, true),
             (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
             (Err(error), _) => Err(error),
         }
