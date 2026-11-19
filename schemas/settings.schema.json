@@ -10,6 +10,13 @@
     "agents": {
       "additionalProperties": false,
       "properties": {
+        "executables": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Leave empty to use the one on your PATH. TerminalX checks it with --version.",
+          "type": "object"
+        },
         "idleStopMinutes": {
           "description": "An agent sitting at its prompt still holds its memory, its MCP servers and its language server. Once it has had nothing to do for this long it is stopped; its conversation stays, and your next message starts it again where it left off. An agent at work, waiting for your answer, or waiting on something it started (a background command, monitor or agent, a wakeup or scheduled job, a process it left running) keeps running, and so does one you started yourself in a terminal. An agent in an archived session, or one whose workspace was removed, is stopped after 10 idle minutes.",
           "enum": [
@@ -70,6 +77,10 @@
         },
         "nativeCodex": {
           "description": "New Codex sessions connect to Codex directly, so the chat shows when it compacts. Needs Codex 0.164.0 or newer; opening the terminal view moves a session to Codex’s own terminal.",
+          "type": "boolean"
+        },
+        "opencode": {
+          "description": "Offer OpenCode in Settings → Agents, with its providers and models, and in the agent and model pickers. Tabs already on OpenCode run either way.",
           "type": "boolean"
         },
         "orchestratorRuns": {
