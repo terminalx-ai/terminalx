@@ -62,7 +62,9 @@ const AskShell = forwardRef<HTMLDivElement, { icon: ReactNode; label: string; to
     );
     return (
       // A toast rising off the composer rises past this card too, never onto its Allow and Deny (PRO-386).
-      <div ref={ref} data-ask-card data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-card">
+      // Its ground is the popover's, which glass mode never veils: --card turns near-transparent there, and a card
+      // drawn over the transcript let the reply's words show through its own (#1293).
+      <div ref={ref} data-ask-card data-toast-avoid="" className="animate-fade-in overflow-hidden rounded-xl border border-hairline-strong bg-popover">
         {heading ? (
           <>
             <div className="flex min-w-0 items-center gap-2.5 px-4 py-2.5" data-testid="ask-header">
