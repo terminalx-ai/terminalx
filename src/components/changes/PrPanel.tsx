@@ -629,7 +629,7 @@ export function PrPanel({
           onCreate={() => void act("create", async () => {
             // Unpushed commits go up first: GitHub opens a pull request from what it has.
             if (!status.upstream || status.ahead > 0) await source.push();
-            return source.createPr({ title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId });
+            return source.createPr({ title: title.trim(), body, base: base ?? status.defaultBranch ?? null, draft, sessionId, branch: currentBranch });
           }).then((ok) => {
             if (!ok) return;
             setTitle("");
@@ -661,7 +661,7 @@ export function PrPanel({
           className="flex flex-col gap-2 px-3 py-3"
           onSubmit={(e) => {
             e.preventDefault();
-            void act("create", () => source.createPr({ title: title.trim(), body, base: base ?? status?.defaultBranch ?? null, draft, sessionId })).then((ok) => {
+            void act("create", () => source.createPr({ title: title.trim(), body, base: base ?? status?.defaultBranch ?? null, draft, sessionId, branch: currentBranch ?? undefined })).then((ok) => {
               if (!ok) return;
               setCreating(false);
               setTitle("");

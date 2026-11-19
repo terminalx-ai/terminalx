@@ -1463,6 +1463,19 @@ impl WorkspaceGit {
         Ok(entry)
     }
 
+    fn verify_pr_creation_checkout(&self, session: &str, repo: &Repo, branch: &str) -> Result<(), RpcError> {
+        let entry = self.project_session(session)?;
+        let same_checkout = std::fs::canonicalize(&entry.cwd)
+            .is_ok_and(|cwd| std::fs::canonicalize(&repo.dir).is_ok_and(|selected| cwd == selected));
+        if entry.worktree_removed || !same_checkout || !crate::git::is_own_worktree(&repo.dir) {
+            return Err(RpcError::new("conflict", "Select this session's checkout before creating a pull request."));
+        }
+        if crate::git::current_branch(&repo.dir).as_deref() != Some(branch) {
+            return Err(RpcError::new("conflict", "The selected branch is no longer checked out in this session. Refresh and try again."));
+        }
+        Ok(())
+    }
+
     fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
@@ -1541,11 +1554,14 @@ impl WorkspaceGit {
     fn pr_create(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let session = if self.project && params.get("sessionId").is_some() {
-            Some(self.project_session(required_str(params, "sessionId")?)?)
+            Some(required_str(params, "sessionId")?)
         } else {
             None
         };
         let branch = self.branch_param(&repo, params)?;
+        if let Some(session) = session {
+            self.verify_pr_creation_checkout(session, &repo, &branch)?;
+        }
         let title = required_str(params, "title")?.trim();
         if title.is_empty() || title.len() > 1024 {
             return Err(RpcError::invalid("a title is required"));
@@ -1565,8 +1581,10 @@ impl WorkspaceGit {
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
         let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
             let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
-            if let Some(session) = &session {
-                crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
+            // GitHub can answer after the checkout changes. Still return the
+            // PR, but only save ownership if the session and head still match.
+            if let Some(session) = session.filter(|session| pr.head == branch && self.verify_pr_creation_checkout(session, &repo, &branch).is_ok()) {
+                crate::pr_associations::record_local(session, &repo.dir, &pr.url, &pr.head)
                     .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
                 value["sessionAssociated"] = json!(true);
             }
