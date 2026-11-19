@@ -94,7 +94,28 @@ struct State {
     revoked: HashSet<(String,String)>,
     revisions: HashMap<String,Arc<Mutex<u64>>>,
     drivers: HashMap<String, Arc<Driver>>,
-    forwarded_output: tokio::sync::watch::Sender<u64>,
+    forwarded: HashMap<String, ForwardedPhone>,
+    legacy_retired: HashSet<String>,
+}
+
+struct ForwardedPhone {
+    legacy: bool,
+    device: Option<String>,
+    output: tokio::sync::watch::Sender<u64>,
+}
+
+#[cfg(unix)]
+pub(crate) struct ForwardedOutput {
+    registry: Arc<Registry>,
+    id: String,
+    pub(crate) authority: tokio::sync::watch::Receiver<u64>,
+}
+
+#[cfg(unix)]
+impl Drop for ForwardedOutput {
+    fn drop(&mut self) {
+        self.registry.0.lock().unwrap().forwarded.remove(&self.id);
+    }
 }
 
 /// The fifth field is each pane's input gate: see [`Registry::desktop_input`].
@@ -449,7 +470,13 @@ impl Registry {
         }
     }
 
+    #[cfg(test)]
     pub fn register(&self, lifetime: &Lifetime, actor: Actor, connection: &str, device_id: &str) -> Result<()> {
+        self.register_connection(lifetime, actor, connection, device_id, None)
+    }
+
+    fn register_connection(&self, lifetime: &Lifetime, actor: Actor, connection: &str, device_id: &str,
+        forwarded: Option<&str>) -> Result<()> {
         if connection.is_empty() || connection.len() > 128 || device_id.is_empty() || device_id.len() > 128 {
             bail!("Invalid paired-device connection.");
         }
@@ -499,6 +526,11 @@ impl Registry {
         // insertion. Same-lease mutations are serialized by _attached.
         if state.connections.contains_key(connection) { bail!("The paired-device connection cannot be rebound."); }
         if state.connections.len() >= 128 { bail!("Too many paired-device connections."); }
+        if let Some(id) = forwarded {
+            let route = state.forwarded.get_mut(id).filter(|route| !route.legacy && route.device.is_none())
+                .context("The forwarded phone connection ended or was already bound.")?;
+            route.device = Some(device_id.into());
+        }
         state.owners.insert(actor.lease.clone(),Owner { actor:actor.clone(),attachment:attachment.clone(),revoked:false });
         state.connections.insert(connection.into(),Arc::new(Grant { actor,privacy:Default::default(),attachment:attachment.clone(),device,active:Mutex::new(true),observations:Default::default() }));
         Ok(())
@@ -597,21 +629,27 @@ impl Registry {
     /// Retire a device whose persisted credential was already revoked.
     /// Both the runtime and window leases can hold grants during takeover.
     pub(crate) fn retire_device(&self, device: &str) {
-        let (grants, forwarded) = {
-            let state = self.0.lock().unwrap();
-            let grants: Vec<_> = state.connections.values()
-                .filter(|grant| grant.device.id == device).cloned().collect();
-            (grants, state.forwarded_output.clone())
+        let grants = {
+            let mut state = self.0.lock().unwrap();
+            // Older windows have no per-device proxy binding. Drain their
+            // opaque output on the first retirement, including on an ACK retry
+            // after a credential was already persisted as revoked.
+            let retire_legacy = state.legacy_retired.insert(device.into());
+            for route in state.forwarded.values().filter(|route|
+                route.device.as_deref() == Some(device) || (route.legacy && retire_legacy)) {
+                route.output.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+            state.connections.values()
+                .filter(|grant| grant.device.id == device).cloned().collect::<Vec<_>>()
         };
-        // A raw direct proxy cannot know which encrypted connection owns a
-        // buffered frame. Retire its old output generation across the route.
-        forwarded.send_modify(|generation| *generation = generation.wrapping_add(1));
         for grant in grants { grant.revoke(); }
     }
 
     #[cfg(unix)]
-    pub(crate) fn forwarded_output(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.0.lock().unwrap().forwarded_output.subscribe()
+    pub(crate) fn forwarded_output(self: &Arc<Self>, id: String, legacy: bool) -> ForwardedOutput {
+        let (output, authority) = tokio::sync::watch::channel(0);
+        self.0.lock().unwrap().forwarded.insert(id.clone(), ForwardedPhone { legacy, device: None, output });
+        ForwardedOutput { registry: self.clone(), id, authority }
     }
 
     pub fn clear(&self, actor: &Actor) -> Result<()> {
@@ -673,6 +711,10 @@ impl ApprovalPhone {
         })).unwrap();
     }
 
+    pub(crate) fn permit(&self, manager: &crate::session::SessionManager, session: &str, tab: &str) -> WritePermit {
+        manager.mobile.permit(&self.actor, "approval-connection", session, tab).unwrap()
+    }
+
     pub(crate) fn revoke(&self, manager: &crate::session::SessionManager) {
         crate::phone::registry::DeviceRegistry.revoke("approval-phone").unwrap();
         manager.mobile.retire_device("approval-phone");
@@ -730,7 +772,10 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             manager.mobile.drain(manager);
             return Ok(serde_json::json!({"pending":manager.mobile.has_pending()}));
         }
-        "register" => { manager.mobile.register(lifetime, actor, string("connection")?, string("deviceId")?)?; return Ok(Value::Null); }
+        "register" => {
+            manager.mobile.register_connection(lifetime, actor, string("connection")?, string("deviceId")?, params["forwardedId"].as_str())?;
+            return Ok(Value::Null);
+        }
         "clear" => { manager.mobile.fence_owner(lifetime, &actor)?; manager.mobile.clear(&actor)?; return Ok(Value::Null); }
         "revoke" => {
             let device = string("deviceId")?;

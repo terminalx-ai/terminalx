@@ -301,9 +301,10 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
                 *self.connection.lock().unwrap() = Some((actor.clone(), params["connection"].as_str().unwrap().into()));
             }
             if method == "check" {
+                let latest = self.connection.lock().unwrap().as_ref().is_some_and(|(_, id)| params["connection"] == *id);
                 let barrier = {
                     let mut barrier = self.before_output.lock().unwrap();
-                    if barrier.as_ref().is_some_and(|barrier| params["connection"] != barrier.first_connection) {
+                    if latest && barrier.as_ref().is_some_and(|barrier| params["connection"] != barrier.first_connection) {
                         barrier.take()
                     } else {
                         None
@@ -325,6 +326,7 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
         host_display_name: None, binding_generation: 5,
     }).unwrap();
     rig.pair("phone", "token", true, true);
+    rig.pair("unrelated", "other-token", false, true);
     let mut session = session_body();
     session["cloud"]["userId"] = json!("owner");
     machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
@@ -342,11 +344,12 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
     rig.host.state.lock().unwrap().listening = Some(listener);
-    let connect = || async {
+    let key = &rig.key;
+    let connect = |token: &'static str| async move {
         let stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
-        let handshake = E2eeClientHandshake::with_secret([7; 32], &rig.key.public_key_b64(), "direct", None).unwrap();
-        Phone::authenticate(socket, handshake, "token").await
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &key.public_key_b64(), "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, token).await
     };
 
     let (poll_started, polling) = tokio::sync::oneshot::channel();
@@ -389,6 +392,7 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     rig.host.register_phone_route(PhoneRoute {
         attachment: rig.lifetime.attachment(&owner.identity.epoch, &owner.identity.lease).unwrap(),
         lease: owner.identity.lease.clone(), socket: route_path,
+        device_scoped: true,
     }).unwrap();
     let secrets = Arc::new(MemorySecrets::default());
     secrets.set("test.revocation-takeover.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
@@ -401,7 +405,9 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
             tokio::spawn(async move { let _ = window.routed_phone(stream).await; });
         }
     });
-    let mut phone = connect().await;
+    let mut healthy = connect("other-token").await;
+    healthy.authenticated().await;
+    let mut phone = connect("token").await;
     phone.authenticated().await;
     assert_eq!(phone.call("sessions.summaries", json!({})).await["result"]["sessions"][0]["id"], "takeover");
     let (actor, connection) = owner.connection.lock().unwrap().clone().unwrap();
@@ -416,7 +422,7 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     *owner.before_output.lock().unwrap() = Some(CheckBarrier {
         first_connection: connection, entered: checked, release: output,
     });
-    let mut checked_before_revoke = connect().await;
+    let mut checked_before_revoke = connect("token").await;
     tokio::time::timeout(Duration::from_secs(5), checking).await.unwrap().unwrap();
     fence_check.send(Box::new(move || {
         assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
@@ -432,7 +438,11 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     send_output.send(()).unwrap();
     assert!(checked_before_revoke.read().await.is_none(), "a pre-revocation grant check cannot authenticate afterward");
     assert!(phone.read().await.is_none(), "an idle revoked phone closes without sending another request");
-    assert!(connect().await.read().await.is_none(), "a revoked credential cannot reconnect");
+    assert!(connect("token").await.read().await.is_none(), "a revoked credential cannot reconnect");
+    for _ in 0..2 {
+        assert!(!rig.phones.revoke("phone").unwrap(), "retry a persisted revocation");
+        assert_eq!(healthy.call("sessions.summaries", json!({})).await["ok"], true);
+    }
     reply_to_ack.send(()).unwrap();
     service.join().unwrap();
     assert_eq!(seen.lock().unwrap()[1].0, format!("/v1/desktop/host-account-bindings/{host_id}/revocations/revoke-1/acknowledge"));
@@ -784,6 +794,7 @@ async fn window_takeover_fences_pre_auth_and_routes_until_its_lease_ends() {
                 .unwrap(),
             lease: lease.clone(),
             socket: path,
+            device_scoped: false,
         })
         .unwrap();
     assert!(
@@ -973,6 +984,7 @@ async fn forwarded_relay_retirement_cancels_only_its_own_window_legs() {
         attachment: rig.lifetime.attachment(rig.lifetime.epoch(), &lease).unwrap(),
         lease,
         socket: path,
+        device_scoped: false,
     }).unwrap();
     let secrets = Arc::new(crate::keychain::testing::MemorySecrets::default());
     secrets.set("test.forwarded-relay.pairing", "host-e2ee-key", rig.key.secret()).unwrap();

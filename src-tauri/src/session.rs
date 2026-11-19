@@ -197,7 +197,7 @@ pub enum Decision {
 }
 
 pub(crate) struct DecisionSender {
-    sender: std::sync::mpsc::Sender<Decision>,
+    sender: std::sync::mpsc::Sender<QueuedDecision>,
     caller: crate::hooks::Caller,
     /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
     /// handover carries with the wait (#765).
@@ -206,8 +206,23 @@ pub(crate) struct DecisionSender {
     session_command: Option<String>,
 }
 
+struct QueuedDecision {
+    decision: Decision,
+    mobile: Option<MobileDecision>,
+}
+
+struct MobileDecision {
+    permit: crate::local_runtime::mobile::WritePermit,
+    label: String,
+    session_command: String,
+}
+
 impl DecisionSender {
     fn send(self, decision: Decision) -> std::result::Result<(), ()> {
+        self.queue(QueuedDecision { decision, mobile: None })
+    }
+
+    fn queue(self, decision: QueuedDecision) -> std::result::Result<(), ()> {
         if !self.caller.connected() { return Err(()); }
         self.sender.send(decision).map_err(|_| ())
     }
@@ -224,7 +239,7 @@ struct Waiting {
 
 /// Own the receiver so a timed-out hook stops accepting answers before it
 /// waits to reacquire the runtime lock. Only the returned decision resumes work.
-fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::Duration) -> Option<Decision> {
+fn wait_for_decision<T>(rx: std::sync::mpsc::Receiver<T>, wait: std::time::Duration) -> Option<T> {
     rx.recv_timeout(wait).ok()
 }
 
@@ -4949,6 +4964,12 @@ impl SessionManager {
                 };
                 let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision, mobile: Some(MobileDecision {
+                        permit: permit.clone(), label, session_command,
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
+                    return Ok(());
+                }
                 tx.send(decision).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
                 (allow, label)
             }
@@ -8062,7 +8083,7 @@ impl SessionManager {
             return self.run_discovery(rt_arc, frame, kind, &input, approved, Answering::Permission);
         }
 
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         {
             let mut rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
@@ -8220,7 +8241,7 @@ impl SessionManager {
     /// say it as that hook prints it, once `mine` finds the tab still has the
     /// CLI that asked. A frame handed over by the runtime this one replaced
     /// waits here too, for the card it asked for there (#765).
-    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
+    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<QueuedDecision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
         let Waiting { kind, gate, request_id, local_owner } = waiting;
         let gate = gate.as_str();
         let wait = match kind {
@@ -8241,7 +8262,40 @@ impl SessionManager {
             p.decisions.remove(&request_id);
         }
         match answer {
-            Some(decision) => {
+            Some(QueuedDecision { decision, mobile: Some(mobile) }) => {
+                let Engine::Cli(cli) = &rt.engine else { return reply_for(kind, gate, Decision::Deny); };
+                let (generation, token) = (cli.generation, cli.origin.token.clone());
+                drop(rt);
+                let denied = reply_for(kind, gate, Decision::Deny);
+                let allow = !matches!(decision, Decision::Deny);
+                let reply = reply_for(kind, gate, decision);
+                let manager = self.clone();
+                let runtime = rt_arc.clone();
+                let MobileDecision { permit, label, session_command } = mobile;
+                let complete = move |delivered| {
+                    let mut rt = runtime.lock().unwrap();
+                    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == generation && cli.origin.token == token) {
+                        return;
+                    }
+                    let Some(ask) = rt.pending.remove(&request_id) else { return; };
+                    if delivered && !session_command.is_empty() {
+                        manager.session_commands.lock().unwrap().entry(rt.key()).or_default().insert(session_command);
+                    }
+                    manager.publish(&mut rt, Payload::PermissionDecided {
+                        request_id, tool_use_id: Some(ask.tool_use_id), allowed: delivered && allow,
+                        label: if delivered { label } else { "Cancelled".into() }, automatic: !delivered,
+                    }, None);
+                    if rt.pending.is_empty() {
+                        manager.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+                        manager.set_status(&mut rt, TabStatus::InProgress);
+                    }
+                    let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                    drop(rt);
+                    manager.observer.answered(&session, &tab);
+                };
+                if crate::hooks::guard_mobile_reply(permit, denied.clone(), complete) { reply } else { denied }
+            }
+            Some(QueuedDecision { decision, mobile: None }) => {
                 if rt.pending.is_empty() {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);

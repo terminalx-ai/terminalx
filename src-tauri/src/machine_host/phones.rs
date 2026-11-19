@@ -260,8 +260,8 @@ impl Phones {
         }
     }
 
-    pub(super) fn forwarded_output(&self) -> watch::Receiver<u64> {
-        self.sessions.mobile.forwarded_output()
+    pub(super) fn forwarded_output(&self, id: String, legacy: bool) -> crate::local_runtime::mobile::ForwardedOutput {
+        self.sessions.mobile.forwarded_output(id, legacy)
     }
 
     #[cfg(test)]
@@ -872,7 +872,7 @@ impl Phones {
         let (_tracked, signals) = tokio::task::spawn_blocking(move || admitting.admit(&admitting_device, &admitting_key, epoch)).await??;
         let result = async {
             let (outbound, inbound) = mpsc::channel(8);
-            let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport()).await?;
+            let mut connection = MobileConnection::open(&self.host, &device, outbound, context.wire_transport(), None).await?;
             if device.provenance == DeviceProvenance::Automatic {
                 if let Some(revocations) = self.revocations.get().cloned() {
                     let device = device.clone();

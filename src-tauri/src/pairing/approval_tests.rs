@@ -148,7 +148,7 @@ async fn connect(manager: &Arc<PairingManager>, host: &HostKeypair, secret: [u8;
             credential_kind: "invite".into(),
             basis_conn_id: "conn-1".into(),
         },
-        None => PairingConnectionContext::Direct { direct_auth_id: "direct-1".into() },
+        None => PairingConnectionContext::Direct { direct_auth_id: "direct-1".into(), forwarded_id: None },
     };
     let (server_manager, expected) = (manager.clone(), expected.map(str::to_string));
     let server = tokio::spawn(async move { server_manager.handle_e2ee_socket(host_socket, context, expected, None).await });

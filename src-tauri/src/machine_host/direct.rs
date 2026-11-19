@@ -353,13 +353,17 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
     #[cfg(unix)]
     {
         // No window takes phones: the runtime serves the phone itself (PRO-359).
-        let Some(route) = host.phone_route() else {
+        let Some((route, device_scoped)) = host.direct_phone_route() else {
             return serve_phone(host, head, stream).await;
         };
-        let mut output = host.phones.get().context("phone authority is unavailable")?.forwarded_output();
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut forwarded = host.phones.get().context("phone authority is unavailable")?.forwarded_output(id.clone(), !device_scoped);
+        let output = &mut forwarded.authority;
         let generation = *output.borrow_and_update();
         let mut window = tokio::net::UnixStream::connect(&route).await.context("reach the window's phone route")?;
-        window.write_all(&encode_header(&Forwarded::Direct { peer: Some(peer.to_string()) })?).await?;
+        let peer = Some(peer.to_string());
+        let header = if device_scoped { Forwarded::DirectBound { peer, forwarded_id: id } } else { Forwarded::Direct { peer } };
+        window.write_all(&encode_header(&header)?).await?;
         window.write_all(&head).await?;
         // Closed when the host gives up the port, so the window can take it
         // back: the phone reconnects to the window's own listener.
@@ -433,19 +437,26 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn revocation_drops_window_bytes_buffered_behind_tcp_backpressure() {
-        let mobile = crate::local_runtime::mobile::Registry::default();
-        let authority = mobile.forwarded_output();
+        let mobile = Arc::new(crate::local_runtime::mobile::Registry::default());
+        let forwarded = mobile.forwarded_output("legacy-route".into(), true);
+        let authority = &forwarded.authority;
         let generation = *authority.borrow();
         let (mut window, mut proxy_input) = tokio::io::duplex(64);
         let (mut proxy_output, mut phone) = tokio::io::duplex(1);
         proxy_output.write_all(b"x").await.unwrap();
         window.write_all(b"buffered session reply").await.unwrap();
-        let mut copy = std::pin::pin!(copy_window_output(&mut proxy_input, &mut proxy_output, &authority, generation));
+        let mut copy = std::pin::pin!(copy_window_output(&mut proxy_input, &mut proxy_output, authority, generation));
         assert!(futures_util::poll!(&mut copy).is_pending());
 
         mobile.retire_device("revoked-phone");
         assert_eq!(phone.read_u8().await.unwrap(), b'x');
         assert!(copy.await.unwrap_err().to_string().contains("revoked"));
+
+        let reconnected = mobile.forwarded_output("legacy-reconnected".into(), true);
+        let session_invitation = mobile.forwarded_output("unbound-session-invitation".into(), false);
+        mobile.retire_device("revoked-phone");
+        assert!(!reconnected.authority.has_changed().unwrap());
+        assert!(!session_invitation.authority.has_changed().unwrap());
     }
 
     #[test]

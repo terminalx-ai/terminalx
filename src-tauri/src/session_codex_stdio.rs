@@ -669,10 +669,9 @@ impl SessionManager {
             {
                 let _policy = collaboration.as_ref().map(|permit| permit.collaboration.enter_admission());
                 let _admission = crate::issue_pipeline::admission::lock();
-                // Mobile/share barriers retain their existing first-byte semantics.
-                // Collaboration is independently checked at EVERY physical
-                // attempt, including after a partial frame and capacity wait.
-                let sender = if offset == 0 || frame.approval().is_some() { sender.as_ref() } else { None };
+                // A partial mobile frame still needs its original grant.
+                // Collaboration is independently checked on every attempt.
+                let sender = sender.as_ref().filter(|sender| offset == 0 || sender.mobile.is_some());
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match sender {

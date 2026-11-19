@@ -2389,7 +2389,7 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
 #[test]
 fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_only_original_launch() {
     use crate::remote::collab::v2::{Snapshot, Permit, Action};
-    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "valid", "explicit-valid", "implicit-valid", "v1"] {
+    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "mobile", "valid", "explicit-valid", "implicit-valid", "v1"] {
         let _home = store::temp_home();
         let root = store::root().unwrap();
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
@@ -2422,7 +2422,9 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
         if change != "v1" { policy.install_v2(snapshot("1", if change == "explicit-valid" { "explicit" } else if change == "implicit-valid" { "implicit" } else { "everyone" })).unwrap(); }
         let (peer, _notifications) = crate::remote::server::Peer::for_user("partial".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
         let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Drive).for_peer(&peer);
-        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None, privacy: None };
+        let phone = (change == "mobile").then(|| crate::local_runtime::mobile::ApprovalPhone::register(&manager));
+        let mobile = phone.as_ref().map(|phone| phone.permit(&manager, "stdio-owner", "tab"));
+        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile, shared: None, privacy: None };
         let attached_peer = peer.clone();
         let (writer, runtime, work) = (manager.clone(), rt_arc.clone(), root.clone());
         let observed = Arc::new(std::sync::atomic::AtomicBool::new(false)); let saw_wait = observed.clone();
@@ -2451,6 +2453,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
                     "source" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
                     "generation" => { let _guard = policy.enter_admission(); policy.runtime_policy.set_generation(2); }
                     "attachment" => rpc.disconnect(&attached_peer),
+                    "mobile" => phone.unwrap().revoke(&writer),
                     "pending" => { index::update_tab("stdio-owner", "tab", |tab| { tab.requested_permission_mode = Some("bypassPermissions".into()); Ok(()) }).unwrap(); }
                     "mode" => { if let Engine::CodexStdio(engine) = &mut runtime.lock().unwrap().engine { engine.actual_stance = None; } }
                     "stop" => writer.stop("stdio-owner", "tab").unwrap(),
@@ -2482,7 +2485,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
             });
             completed.recv_timeout(WAIT).expect("policy/Stop/replacement blocked behind partial frame admission");
             updater.join().unwrap();
-            if matches!(change, "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
+            if matches!(change, "mobile" | "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
         })));
         WRITTEN.with(|written| written.set(0));
         let result = manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None);
