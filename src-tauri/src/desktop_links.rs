@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -24,24 +25,6 @@ fn is_setting_id(id: &str) -> bool {
         && !id.contains("..")
 }
 
-/// The setting link that arrived last and the webview has not taken yet: a
-/// link that launches the app comes before the webview listens, so it waits
-/// here and is taken once, when the webview asks.
-#[derive(Default)]
-pub struct PendingSettingsLink(Mutex<Option<SettingsLink>>);
-
-impl PendingSettingsLink {
-    /// Keep `link` for the webview, in place of one it has not taken.
-    pub fn set(&self, link: SettingsLink) {
-        *self.0.lock().unwrap() = Some(link);
-    }
-
-    /// The waiting link, once: a second take returns None.
-    pub fn take(&self) -> Option<SettingsLink> {
-        self.0.lock().unwrap().take()
-    }
-}
-
 /// The longest session or tab id a tab link may name; the app's ids (UUIDs) are far shorter.
 const MAX_TAB_LINK_ID_LEN: usize = 64;
 
@@ -58,23 +41,6 @@ pub struct TabLink {
 /// Whether it names a tab that is still open is the webview's call.
 fn is_tab_link_id(id: &str) -> bool {
     (1..=MAX_TAB_LINK_ID_LEN).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-}
-
-/// The tab link that arrived last and the webview has not taken yet, as
-/// [`PendingSettingsLink`] keeps a setting link.
-#[derive(Default)]
-pub struct PendingTabLink(Mutex<Option<TabLink>>);
-
-impl PendingTabLink {
-    /// Keep `link` for the webview, in place of one it has not taken.
-    pub fn set(&self, link: TabLink) {
-        *self.0.lock().unwrap() = Some(link);
-    }
-
-    /// The waiting link, once: a second take returns None.
-    pub fn take(&self) -> Option<TabLink> {
-        self.0.lock().unwrap().take()
-    }
 }
 
 /// Selected by the bundled Tauri identity, not Cargo's optimization profile.
@@ -188,6 +154,238 @@ impl DesktopLinks {
         }
         let canonical = format!("{}://tab/{session_id}/{tab_id}", url.scheme());
         (url.as_str() == canonical).then(|| TabLink { session_id: session_id.to_owned(), tab_id: tab_id.to_owned() })
+    }
+}
+
+/// The longest project path a `new` link may name.
+const MAX_LINK_PATH_LEN: usize = 4096;
+/// Git's own limit on a ref's name is the file system's; links keep to this.
+const MAX_LINK_BRANCH_LEN: usize = 255;
+/// The longest first prompt a `new` link may carry.
+const MAX_LINK_PROMPT_LEN: usize = 16 * 1024;
+/// The longest page address a `browser` link may carry.
+const MAX_LINK_PAGE_LEN: usize = 8192;
+/// How much of an invalid link goes back to the webview, to show and copy.
+const MAX_SHOWN_LINK_LEN: usize = 2048;
+/// How much of an unknown route's name the toast quotes.
+const MAX_SHOWN_ROUTE_LEN: usize = 40;
+/// Links kept for a webview that has not taken them; the oldest go first.
+const MAX_PENDING_LINKS: usize = 8;
+
+/// Why a link of this build's scheme cannot be followed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "reason", rename_all = "camelCase")]
+pub enum LinkProblem {
+    /// The link names a route TerminalX has not got (`terminalx://sesion/…`).
+    UnknownRoute { route: String },
+    /// A known route, shaped wrongly: a missing or extra part, a value no
+    /// session, branch or page could have.
+    Malformed { route: String },
+    /// A `browser` link to a page that is not on the web (`file:`, `javascript:`).
+    NotWeb { scheme: String },
+}
+
+/// A `terminalx://` link after validation (PRO-130): all the webview is
+/// handed of it. Every route the app follows is one of these, so settings,
+/// tab, session, new-session and browser links share one event, one queue
+/// and one router in the webview. Auth callbacks, launch and join links are
+/// not routes: they are handled natively and never reach it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DesktopLink {
+    Settings(SettingsLink),
+    Tab(TabLink),
+    /// `session/<id>`: show that session as it was last left.
+    #[serde(rename_all = "camelCase")]
+    Session { session_id: String },
+    /// `new?project=&branch=&prompt=` or `new?linear=<id>`: a new session,
+    /// which the webview starts only after the person says yes. A missing
+    /// project is the one last worked in; a missing branch the project's
+    /// default. At least a prompt or an issue is always there.
+    New {
+        project: Option<String>,
+        branch: Option<String>,
+        prompt: Option<String>,
+        /// A Linear issue's key, upper-cased (`PRO-130`).
+        linear: Option<String>,
+    },
+    /// `browser?url=<http(s) url>`: the page in a Browser tab.
+    Browser { url: String },
+    /// A link of this build's scheme that cannot be followed. `link` is the
+    /// link as it came, cut short, for the toast to show and copy.
+    Invalid { link: String, problem: LinkProblem },
+}
+
+/// Routes handled natively, outside the router: never `Invalid`, whatever their shape,
+/// so an auth callback's code is never handed on.
+const NATIVE_ROUTES: [&str; 3] = ["auth", "launch", "join"];
+
+/// A plausible Git branch name, as `git check-ref-format --branch` would take it.
+fn is_branch_name(name: &str) -> bool {
+    (1..=MAX_LINK_BRANCH_LEN).contains(&name.len())
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && !name.contains("/.")
+        && name != "@"
+        && !name.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+}
+
+/// An absolute path with nothing a path from a link should carry: no
+/// control characters, no `.`/`..` steps. Whether a project is there is the webview's call.
+fn is_project_path(path: &str) -> bool {
+    (2..=MAX_LINK_PATH_LEN).contains(&path.len())
+        && path.starts_with('/')
+        && !path.chars().any(char::is_control)
+        && !path.split('/').any(|step| step == "." || step == "..")
+}
+
+/// A character that draws nothing or reorders what is drawn: zero-width
+/// spaces and joiners, bidi controls, word joiners and invisible operators,
+/// the byte-order mark, interlinear annotations and Unicode tags. In a
+/// prompt they would carry words to the agent that the confirmation dialog
+/// does not show.
+fn is_hidden(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+        | 0xFEFF | 0xFFA0 | 0xFFF9..=0xFFFB | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
+
+/// A first prompt: text, with line breaks and tabs, and no other control
+/// character or hidden one: the dialog shows every character that is sent.
+fn is_link_prompt(prompt: &str) -> bool {
+    !prompt.trim().is_empty()
+        && prompt.len() <= MAX_LINK_PROMPT_LEN
+        && !prompt.chars().any(|c| (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || is_hidden(c))
+}
+
+/// A Linear issue key (`PRO-130`), upper-cased, or None.
+fn linear_key(key: &str) -> Option<String> {
+    let (team, number) = key.split_once('-')?;
+    let team_ok = (1..=10).contains(&team.len())
+        && team.starts_with(|c: char| c.is_ascii_alphabetic())
+        && team.chars().all(|c| c.is_ascii_alphanumeric());
+    let number_ok = (1..=9).contains(&number.len()) && !number.starts_with('0') && number.chars().all(|c| c.is_ascii_digit());
+    (team_ok && number_ok).then(|| key.to_ascii_uppercase())
+}
+
+/// `s` cut to at most `max` bytes, on a character boundary.
+fn cut(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
+/// The query's pairs, decoded, when no name comes twice; None otherwise.
+fn single_pairs(url: &Url) -> Option<Vec<(String, String)>> {
+    let pairs: Vec<(String, String)> = url.query_pairs().map(|(name, value)| (name.into_owned(), value.into_owned())).collect();
+    let mut names: Vec<&str> = pairs.iter().map(|(name, _)| name.as_str()).collect();
+    names.sort_unstable();
+    names.windows(2).all(|pair| pair[0] != pair[1]).then_some(pairs)
+}
+
+impl DesktopLinks {
+    /// What a link of this build's scheme asks for, or None for a link the
+    /// router does not take: another scheme, or a natively handled route
+    /// (auth, launch, join). Every other link of this scheme is a route the
+    /// webview follows, or `Invalid` with why.
+    pub fn route(self, url: &Url) -> Option<DesktopLink> {
+        if !self.accepts_scheme(url.scheme()) {
+            return None;
+        }
+        let host = url.host_str().unwrap_or("");
+        if NATIVE_ROUTES.contains(&host) {
+            return None;
+        }
+        let invalid = |problem: LinkProblem| Some(DesktopLink::Invalid { link: cut(url.as_str(), MAX_SHOWN_LINK_LEN), problem });
+        let malformed = || invalid(LinkProblem::Malformed { route: host.to_owned() });
+        // No route carries credentials, a port or a fragment.
+        let plain = url.username().is_empty() && url.password().is_none() && url.port().is_none() && url.fragment().is_none();
+        match host {
+            "settings" => self.settings_link(url).map(DesktopLink::Settings).or_else(malformed),
+            "tab" => self.tab_link(url).map(DesktopLink::Tab).or_else(malformed),
+            "session" => {
+                let id = url.path().strip_prefix('/').filter(|id| is_tab_link_id(id));
+                match id {
+                    Some(id) if plain && url.query().is_none() => Some(DesktopLink::Session { session_id: id.to_owned() }),
+                    _ => malformed(),
+                }
+            }
+            "new" => {
+                if !plain || !matches!(url.path(), "" | "/") {
+                    return malformed();
+                }
+                let Some(pairs) = single_pairs(url) else { return malformed() };
+                let (mut project, mut branch, mut prompt, mut linear) = (None, None, None, None);
+                for (name, value) in pairs {
+                    match name.as_str() {
+                        "project" if is_project_path(&value) => project = Some(value),
+                        "branch" if is_branch_name(&value) => branch = Some(value),
+                        "prompt" if is_link_prompt(&value) => prompt = Some(value),
+                        "linear" => match linear_key(&value) {
+                            Some(key) => linear = Some(key),
+                            None => return malformed(),
+                        },
+                        _ => return malformed(),
+                    }
+                }
+                if prompt.is_none() && linear.is_none() {
+                    return malformed();
+                }
+                Some(DesktopLink::New { project, branch, prompt, linear })
+            }
+            "browser" => {
+                if !plain || !matches!(url.path(), "" | "/") {
+                    return malformed();
+                }
+                let page = match single_pairs(url).as_deref() {
+                    Some([(name, page)]) if name == "url" && page.len() <= MAX_LINK_PAGE_LEN => page.to_owned(),
+                    _ => return malformed(),
+                };
+                let Ok(page) = Url::parse(&page) else { return malformed() };
+                if !matches!(page.scheme(), "http" | "https") {
+                    return invalid(LinkProblem::NotWeb { scheme: cut(page.scheme(), MAX_SHOWN_ROUTE_LEN) });
+                }
+                // A page behind a name and password in the address reads as one site and is another.
+                if !page.username().is_empty() || page.password().is_some() || page.host_str().is_none() {
+                    return malformed();
+                }
+                Some(DesktopLink::Browser { url: page.into() })
+            }
+            _ => invalid(LinkProblem::UnknownRoute { route: cut(host, MAX_SHOWN_ROUTE_LEN) }),
+        }
+    }
+}
+
+/// Links that arrived and the webview has not taken yet: a link that
+/// launches the app comes before the webview listens, so it waits here and
+/// is taken once, when the webview asks. A few are kept, in order; past
+/// that the oldest goes.
+#[derive(Default)]
+pub struct PendingDesktopLinks(Mutex<VecDeque<DesktopLink>>);
+
+impl PendingDesktopLinks {
+    /// Keep `link` for the webview, after any it has not taken.
+    pub fn push(&self, link: DesktopLink) {
+        let mut queue = self.0.lock().unwrap();
+        if queue.len() == MAX_PENDING_LINKS {
+            queue.pop_front();
+        }
+        queue.push_back(link);
+    }
+
+    /// The waiting links, oldest first, once: a second take returns none.
+    pub fn take(&self) -> Vec<DesktopLink> {
+        self.0.lock().unwrap().drain(..).collect()
     }
 }
 
@@ -326,16 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_settings_link_is_taken_once_and_the_latest_wins() {
-        let pending = PendingSettingsLink::default();
-        assert_eq!(pending.take(), None);
-        pending.set(SettingsLink { id: "general.sounds".into(), enable: false });
-        pending.set(SettingsLink { id: "general.promptMap".into(), enable: true });
-        assert_eq!(pending.take(), Some(SettingsLink { id: "general.promptMap".into(), enable: true }));
-        assert_eq!(pending.take(), None);
-    }
-
-    #[test]
     fn a_settings_link_reaches_the_webview_as_id_and_enable_only() {
         let link = parse(DesktopLinks::Release, "terminalx://settings/general.sounds?enable=1").unwrap();
         assert_eq!(serde_json::to_value(link).unwrap(), serde_json::json!({ "id": "general.sounds", "enable": true }));
@@ -377,9 +565,215 @@ mod tests {
     fn a_tab_link_reaches_the_webview_as_session_and_tab_ids_only() {
         let link = TabLink { session_id: "s1".into(), tab_id: "t1".into() };
         assert_eq!(serde_json::to_value(&link).unwrap(), serde_json::json!({ "sessionId": "s1", "tabId": "t1" }));
-        let pending = PendingTabLink::default();
-        pending.set(link.clone());
-        assert_eq!(pending.take(), Some(link));
-        assert_eq!(pending.take(), None);
+    }
+
+    fn route(link: &str) -> Option<DesktopLink> {
+        DesktopLinks::Release.route(&Url::parse(link).unwrap())
+    }
+
+    fn problem(link: &str) -> LinkProblem {
+        match route(link) {
+            Some(DesktopLink::Invalid { problem, .. }) => problem,
+            other => panic!("{link} was not refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_and_tab_links_go_through_the_one_router() {
+        assert_eq!(route("terminalx://settings/general.sounds?enable=1"), Some(DesktopLink::Settings(SettingsLink { id: "general.sounds".into(), enable: true })));
+        assert_eq!(route("terminalx://tab/s1/t1"), Some(DesktopLink::Tab(TabLink { session_id: "s1".into(), tab_id: "t1".into() })));
+        // A known route in the wrong shape is refused as such, not dropped.
+        assert_eq!(problem("terminalx://settings/general.sounds?enable=0"), LinkProblem::Malformed { route: "settings".into() });
+        assert_eq!(problem("terminalx://tab/s1"), LinkProblem::Malformed { route: "tab".into() });
+        // Each kind reaches the webview tagged, with its own fields and nothing else.
+        assert_eq!(
+            serde_json::to_value(route("terminalx://settings/general.sounds").unwrap()).unwrap(),
+            serde_json::json!({ "kind": "settings", "id": "general.sounds", "enable": false })
+        );
+        assert_eq!(
+            serde_json::to_value(route("terminalx://tab/s1/t1").unwrap()).unwrap(),
+            serde_json::json!({ "kind": "tab", "sessionId": "s1", "tabId": "t1" })
+        );
+    }
+
+    #[test]
+    fn natively_handled_links_and_other_schemes_never_reach_the_router() {
+        for link in [
+            "terminalx://auth/callback?code=secret",
+            "terminalx://auth/elsewhere?code=secret",
+            "terminalx://launch",
+            "terminalx://launch/extra",
+            "terminalx://join#key",
+            "terminalx://join?bad=1",
+            "terminalx-dev://session/s1",
+            "https://session/s1",
+        ] {
+            assert_eq!(route(link), None, "routed {link}");
+        }
+        assert_eq!(DesktopLinks::Dev.route(&Url::parse("terminalx://session/s1").unwrap()), None);
+        assert_eq!(
+            DesktopLinks::Dev.route(&Url::parse("terminalx-dev://session/s1").unwrap()),
+            Some(DesktopLink::Session { session_id: "s1".into() })
+        );
+    }
+
+    #[test]
+    fn a_session_link_names_one_session() {
+        let id = "01a16ab6-6ed3-7d71-ba73-9cb44606db13";
+        assert_eq!(route(&format!("terminalx://session/{id}")), Some(DesktopLink::Session { session_id: id.into() }));
+        assert_eq!(
+            serde_json::to_value(route("terminalx://session/s1").unwrap()).unwrap(),
+            serde_json::json!({ "kind": "session", "sessionId": "s1" })
+        );
+        for link in [
+            "terminalx://session",
+            "terminalx://session/",
+            "terminalx://session/s1/",
+            "terminalx://session/s1/t1",
+            "terminalx://session/s1?tab=t1",
+            "terminalx://session/s1#x",
+            "terminalx://session/s%201",
+            "terminalx://user@session/s1",
+            "terminalx://session:9/s1",
+        ] {
+            assert_eq!(problem(link), LinkProblem::Malformed { route: "session".into() }, "{link}");
+        }
+        let long = "a".repeat(MAX_TAB_LINK_ID_LEN + 1);
+        assert_eq!(problem(&format!("terminalx://session/{long}")), LinkProblem::Malformed { route: "session".into() });
+    }
+
+    #[test]
+    fn a_new_link_carries_its_project_branch_prompt_and_issue_decoded() {
+        assert_eq!(
+            route("terminalx://new?project=%2FUsers%2Fme%2Fcode%2Fweb&branch=release%2F1.2&prompt=Fix+the+flaky+test%0Ain+scripts.test.ts"),
+            Some(DesktopLink::New {
+                project: Some("/Users/me/code/web".into()),
+                branch: Some("release/1.2".into()),
+                prompt: Some("Fix the flaky test\nin scripts.test.ts".into()),
+                linear: None,
+            })
+        );
+        // Order does not matter, and a trailing slash before the query is the same link.
+        assert_eq!(
+            route("terminalx://new/?prompt=hi&project=/srv/app"),
+            Some(DesktopLink::New { project: Some("/srv/app".into()), branch: None, prompt: Some("hi".into()), linear: None })
+        );
+        assert_eq!(
+            route("terminalx://new?linear=pro-130"),
+            Some(DesktopLink::New { project: None, branch: None, prompt: None, linear: Some("PRO-130".into()) })
+        );
+        assert_eq!(
+            serde_json::to_value(route("terminalx://new?linear=PRO-7&prompt=also%20this").unwrap()).unwrap(),
+            serde_json::json!({ "kind": "new", "project": null, "branch": null, "prompt": "also this", "linear": "PRO-7" })
+        );
+    }
+
+    #[test]
+    fn a_new_link_with_nothing_to_start_or_anything_unexpected_is_refused() {
+        let too_long_prompt = format!("terminalx://new?prompt={}", "a".repeat(MAX_LINK_PROMPT_LEN + 1));
+        let too_long_branch = format!("terminalx://new?prompt=x&branch={}", "b".repeat(MAX_LINK_BRANCH_LEN + 1));
+        for link in [
+            "terminalx://new",
+            "terminalx://new?project=/srv/app",
+            "terminalx://new?project=/srv/app&branch=main",
+            "terminalx://new?prompt=",
+            "terminalx://new?prompt=%20%20",
+            "terminalx://new?prompt=a&prompt=b",
+            "terminalx://new?prompt=a&project=/x&project=/y",
+            "terminalx://new?prompt=a&extra=1",
+            "terminalx://new?prompt=a%00b",
+            "terminalx://new?prompt=a%1Bb",
+            // Hidden characters: zero-width space, right-to-left override, BOM, a Unicode tag ("i").
+            "terminalx://new?prompt=a%E2%80%8Bb",
+            "terminalx://new?prompt=a%E2%80%AEb",
+            "terminalx://new?prompt=a%EF%BB%BFb",
+            "terminalx://new?prompt=a%F3%A0%81%A9b",
+            "terminalx://new?prompt=a&project=relative/path",
+            "terminalx://new?prompt=a&project=/srv/../etc",
+            "terminalx://new?prompt=a&project=/srv/./app",
+            "terminalx://new?prompt=a&project=%2F",
+            "terminalx://new?prompt=a&branch=-delete",
+            "terminalx://new?prompt=a&branch=a..b",
+            "terminalx://new?prompt=a&branch=a%20b",
+            "terminalx://new?prompt=a&branch=topic.lock",
+            "terminalx://new?prompt=a&branch=a~1",
+            "terminalx://new?prompt=a&branch=HEAD@{1}",
+            "terminalx://new?prompt=a&branch=/main",
+            "terminalx://new?prompt=a&branch=main/",
+            "terminalx://new?linear=130",
+            "terminalx://new?linear=PRO-",
+            "terminalx://new?linear=PRO-0130",
+            "terminalx://new?linear=PRO-1-2",
+            "terminalx://new?linear=1PRO-2",
+            "terminalx://new?linear=PRO-1&linear=PRO-2",
+            "terminalx://new/extra?prompt=a",
+            "terminalx://new?prompt=a#frag",
+            "terminalx://user@new?prompt=a",
+            "terminalx://new:80?prompt=a",
+            too_long_prompt.as_str(),
+            too_long_branch.as_str(),
+        ] {
+            assert_eq!(problem(link), LinkProblem::Malformed { route: "new".into() }, "{link}");
+        }
+    }
+
+    #[test]
+    fn a_browser_link_opens_only_web_pages() {
+        assert_eq!(
+            route("terminalx://browser?url=http%3A%2F%2Flocalhost%3A61431%2Fo%2Fbilling"),
+            Some(DesktopLink::Browser { url: "http://localhost:61431/o/billing".into() })
+        );
+        assert_eq!(route("terminalx://browser?url=https://example.com/a?b=c"), Some(DesktopLink::Browser { url: "https://example.com/a?b=c".into() }));
+        assert_eq!(problem("terminalx://browser?url=file:///Users/me/report.html"), LinkProblem::NotWeb { scheme: "file".into() });
+        assert_eq!(problem("terminalx://browser?url=javascript:alert(1)"), LinkProblem::NotWeb { scheme: "javascript".into() });
+        assert_eq!(problem("terminalx://browser?url=terminalx://session/s1"), LinkProblem::NotWeb { scheme: "terminalx".into() });
+        for link in [
+            "terminalx://browser",
+            "terminalx://browser?url=",
+            "terminalx://browser?url=not%20a%20url",
+            "terminalx://browser?url=https://a.example&url=https://b.example",
+            "terminalx://browser?url=https://a.example&session=s1",
+            "terminalx://browser?page=https://a.example",
+            "terminalx://browser/extra?url=https://a.example",
+            "terminalx://browser?url=https://user:pw@a.example",
+            "terminalx://browser?url=https://a.example#x",
+        ] {
+            assert_eq!(problem(link), LinkProblem::Malformed { route: "browser".into() }, "{link}");
+        }
+        let long = format!("terminalx://browser?url=https://a.example/{}", "p".repeat(MAX_LINK_PAGE_LEN));
+        assert_eq!(problem(&long), LinkProblem::Malformed { route: "browser".into() });
+    }
+
+    #[test]
+    fn an_unknown_route_is_named_and_the_link_handed_back_cut_short() {
+        assert_eq!(
+            route("terminalx://sesion/tx-22"),
+            Some(DesktopLink::Invalid { link: "terminalx://sesion/tx-22".into(), problem: LinkProblem::UnknownRoute { route: "sesion".into() } })
+        );
+        assert_eq!(
+            serde_json::to_value(route("terminalx://sesion/tx-22").unwrap()).unwrap(),
+            serde_json::json!({ "kind": "invalid", "link": "terminalx://sesion/tx-22", "problem": { "reason": "unknownRoute", "route": "sesion" } })
+        );
+        assert_eq!(problem("terminalx:nothing"), LinkProblem::UnknownRoute { route: "".into() });
+        let long_route = "r".repeat(100);
+        assert_eq!(problem(&format!("terminalx://{long_route}")), LinkProblem::UnknownRoute { route: "r".repeat(MAX_SHOWN_ROUTE_LEN) });
+        let long = format!("terminalx://elsewhere/{}", "é".repeat(MAX_SHOWN_LINK_LEN));
+        let Some(DesktopLink::Invalid { link, .. }) = route(&long) else { panic!("not refused") };
+        assert!(link.len() <= MAX_SHOWN_LINK_LEN && Url::parse(&long).unwrap().as_str().starts_with(&link));
+    }
+
+    #[test]
+    fn pending_links_are_taken_once_in_order_and_only_the_latest_few_are_kept() {
+        let pending = PendingDesktopLinks::default();
+        assert!(pending.take().is_empty());
+        let session = |n: usize| DesktopLink::Session { session_id: format!("s{n}") };
+        pending.push(session(0));
+        pending.push(session(1));
+        assert_eq!(pending.take(), vec![session(0), session(1)]);
+        assert!(pending.take().is_empty());
+        for n in 0..MAX_PENDING_LINKS + 3 {
+            pending.push(session(n));
+        }
+        assert_eq!(pending.take(), (3..MAX_PENDING_LINKS + 3).map(session).collect::<Vec<_>>());
     }
 }

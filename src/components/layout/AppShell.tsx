@@ -10,8 +10,10 @@ import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLink
 import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
-import { bootSettingDeepLinks, useUnknownSettingLink } from "@/lib/settingsDeepLink";
-import { bootTabDeepLinks } from "@/lib/tabDeepLink";
+import { useUnknownSettingLink } from "@/lib/settingsDeepLink";
+import { bootDesktopLinks } from "@/lib/desktopLinks";
+import { bootLastView } from "@/lib/lastView";
+import { LinkSessionDialog } from "@/components/start/LinkSessionDialog";
 import type { SettingId } from "@/components/settings/settingsRegistry";
 import { onProjectSettingsRequest } from "@/lib/projectAdded";
 import { onOrchestratorSettingsRequest, showRunView, useRun } from "@/lib/orchestration";
@@ -166,6 +168,8 @@ export function AppShell() {
     void subscribeAgentEvents();
     void subscribeTabPty();
     void bootSessions();
+    // Launch where the app was left (PRO-130): the session and its panel tab, or the page.
+    bootLastView();
     // Conversations nobody has written in for the limit in Settings go to the archive (#718).
     startIdleArchive();
     void bootAutomations();
@@ -222,9 +226,9 @@ export function AppShell() {
   // naming no row opens Settings at its default page.
   useEffect(() => onOpenSettingRow((id) => openSettings(id)), [openSettings]);
   const openSettingAt = useCallback((row: SettingId | null) => openSettings(row ?? undefined), [openSettings]);
-  useEffect(() => bootSettingDeepLinks(openSettingAt), [openSettingAt]);
-  // A link to a chat tab (PRO-381): the tab menu's "Copy link to this tab".
-  useEffect(() => bootTabDeepLinks(), []);
+  // Every terminalx:// link goes through one router (PRO-130): setting rows, chat tabs (PRO-381, the tab
+  // menu's "Copy link to this tab"), sessions, new sessions (asked about first) and browser pages.
+  useEffect(() => bootDesktopLinks({ openSettingsAt: openSettingAt }), [openSettingAt]);
   // A project's own settings, from the "Project added" notice: its Scripts, where the setup script lives.
   // Or from a project's menu: its general page (Project settings) or its Scripts (Scripts and actions).
   useEffect(() => onProjectSettingsRequest((projectPath, page) => {
@@ -371,6 +375,7 @@ export function AppShell() {
         <CleanupIndicator onOpenStorage={openStorageSettings} />
       </ToastCorner>
       <BypassDialog />
+      <LinkSessionDialog />
       <ImageViewerHost />
       <SessionDialogs />
       <CloudShareDialogHost />
