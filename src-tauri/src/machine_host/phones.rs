@@ -260,6 +260,10 @@ impl Phones {
         }
     }
 
+    pub(super) fn forwarded_output(&self) -> watch::Receiver<u64> {
+        self.sessions.mobile.forwarded_output()
+    }
+
     #[cfg(test)]
     pub(super) fn restart_for_test(&self, sink: Arc<dyn EventSink>) -> Arc<Self> {
         self.stop();

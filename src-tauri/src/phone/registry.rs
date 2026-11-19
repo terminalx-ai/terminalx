@@ -20,6 +20,7 @@ use crate::relay_e2ee::token_hash;
 
 const FILE: &str = "devices.json";
 const LOCK: &str = "devices.lock";
+const ADMISSION: &str = "devices-admission.lock";
 /// How long a change waits for the other process's.
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
@@ -49,7 +50,7 @@ fn rewrite<T>(change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Resu
 }
 
 fn rewrite_in<T>(root: &Path, change: impl FnOnce(&mut DeviceFile) -> Result<(T, bool)>) -> Result<T> {
-    crate::store::transaction::run(&root.join(LOCK), LOCK_WAIT, || {
+    crate::store::transaction::run_with_readers(&root.join(LOCK), &root.join(ADMISSION), LOCK_WAIT, || {
         let mut file = read_in(root)?;
         let (result, changed) = change(&mut file)?;
         if changed {
@@ -69,7 +70,8 @@ impl DeviceRegistry {
     /// A revocation takes the exclusive side of this same lock before
     /// replacing the credential. Hold the read side through the socket flush.
     pub(crate) fn output_permit(&self, device: &DeviceEntry) -> Result<std::fs::File> {
-        let permit = crate::store::transaction::read_lock(&root()?.join(LOCK), LOCK_WAIT)?;
+        let root = root()?;
+        let permit = crate::store::transaction::read_lock(&root.join(LOCK), &root.join(ADMISSION), LOCK_WAIT)?;
         self.check_credential(device)?;
         Ok(permit)
     }

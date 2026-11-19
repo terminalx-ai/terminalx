@@ -14,6 +14,14 @@ fn a_revoked_phone_cannot_deliver_a_queued_opencode_approval() {
 }
 
 #[test]
+fn a_revoked_phone_cannot_deliver_an_opencode_prompt_after_opening() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+        .env(CASE, "prompt-phone").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn privacy_opencode_denied_opening_preserves_local_followups() {
     for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -109,6 +117,35 @@ server.serve_forever()
     assert_eq!(runtime.block_on(rpc.handle(&peer, &json!({"id":"hello","method":"rpc.hello","params":{"protocol":PROTOCOL,"want":["session/1"]}})))["ok"], true);
     let send = |text: &str| runtime.block_on(rpc.handle(&peer, &json!({"id":"send","method":"session.send","params":{
         "sessionId":SESSION,"tabId":TAB,"text":text,"clientRequestId":uuid::Uuid::new_v4().to_string()}})));
+    if kind == "prompt-phone" {
+        let phone = crate::local_runtime::mobile::ApprovalPhone::register(&rig.manager);
+        let (entered, arrived) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
+            // Let session opening complete; stop the follow-on prompt at
+            // its independent HTTP writer.
+            *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                released.recv_timeout(WAIT).unwrap();
+            }));
+        }));
+        phone.send(&rig.manager, SESSION, TAB, "revoked phone prompt");
+        arrived.recv_timeout(WAIT).unwrap();
+        let read = || std::fs::read_to_string(&records).unwrap().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        assert_eq!(read()[0]["path"], "/session");
+        assert_eq!(read().len(), 1);
+        phone.revoke(&rig.manager);
+        release.send(()).unwrap();
+        wait_for("queued phone prompt withdrawn", || rig.events().iter().any(|event|
+            matches!(event.payload, Payload::PromptWithdrawn { unconfirmed: false, .. })));
+        rig.manager.send(SESSION, TAB, "fresh local prompt".into(), vec![]).unwrap();
+        wait_for("local prompt delivered after revocation", || read().len() == 2);
+        assert_eq!(read()[1]["body"]["parts"][0]["text"], "fresh local prompt");
+        rig.manager.stop(SESSION, TAB).unwrap();
+        pump.join().unwrap();
+        return;
+    }
     if let Some(failure) = kind.strip_prefix("failed-answer-") {
         std::fs::write(root.join("approval"), "").unwrap();
         std::fs::write(root.join("fail-answer"), failure).unwrap();

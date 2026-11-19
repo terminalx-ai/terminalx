@@ -50,6 +50,11 @@ impl Authority {
     pub(super) fn hint(&self) {
         self.wake.notify_one();
     }
+
+    #[cfg(test)]
+    pub(super) fn retired_binding_is_settled(&self) -> bool {
+        self.settled.lock().unwrap().is_some()
+    }
 }
 
 pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>, api: Arc<Api>) {
@@ -97,7 +102,9 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
 
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = authority.wake.notified() => {}
+            // Consume hints after the blocking round. A hint received while
+            // it runs must invalidate even the cache that round just wrote.
+            _ = authority.wake.notified() => { *authority.settled.lock().unwrap() = None; }
         }
     }
 }
@@ -112,7 +119,7 @@ fn poll(phones: &Phones, authority: &Authority, api: &Api, link: &AccountLink, h
         return Ok(None);
     }
     // On startup or after a failed acknowledgement, check retired records
-    // too. Once this set is settled, avoid polling it until the devices change.
+    // too. Once settled, wait for a hint or a change to the devices.
     let retired = devices.iter().all(|device| device.revoked_at.is_some()).then(|| RetiredBinding {
         user_id: account.user_id.clone(),
         generation: account.binding_generation,

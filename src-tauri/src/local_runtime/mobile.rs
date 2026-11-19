@@ -94,6 +94,7 @@ struct State {
     revoked: HashSet<(String,String)>,
     revisions: HashMap<String,Arc<Mutex<u64>>>,
     drivers: HashMap<String, Arc<Driver>>,
+    forwarded_output: tokio::sync::watch::Sender<u64>,
 }
 
 /// The fifth field is each pane's input gate: see [`Registry::desktop_input`].
@@ -596,9 +597,21 @@ impl Registry {
     /// Retire a device whose persisted credential was already revoked.
     /// Both the runtime and window leases can hold grants during takeover.
     pub(crate) fn retire_device(&self, device: &str) {
-        let grants: Vec<_> = self.0.lock().unwrap().connections.values()
-            .filter(|grant| grant.device.id == device).cloned().collect();
+        let (grants, forwarded) = {
+            let state = self.0.lock().unwrap();
+            let grants: Vec<_> = state.connections.values()
+                .filter(|grant| grant.device.id == device).cloned().collect();
+            (grants, state.forwarded_output.clone())
+        };
+        // A raw direct proxy cannot know which encrypted connection owns a
+        // buffered frame. Retire its old output generation across the route.
+        forwarded.send_modify(|generation| *generation = generation.wrapping_add(1));
         for grant in grants { grant.revoke(); }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn forwarded_output(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.lock().unwrap().forwarded_output.subscribe()
     }
 
     pub fn clear(&self, actor: &Actor) -> Result<()> {
@@ -650,6 +663,13 @@ impl ApprovalPhone {
         execute(manager, &self.lifetime, "permission", serde_json::json!({
             "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
             "requestId": request, "optionId": option,
+        })).unwrap();
+    }
+
+    pub(crate) fn send(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, text: &str) {
+        execute(manager, &self.lifetime, "send", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "text": text, "prompt": text,
         })).unwrap();
     }
 

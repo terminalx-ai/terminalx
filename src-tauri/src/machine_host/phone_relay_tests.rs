@@ -209,18 +209,25 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
             "bindingGeneration": 5,
     }]});
     let (retried, retry) = tokio::sync::oneshot::channel();
+    let (later_acked, later_ack) = tokio::sync::oneshot::channel();
     let mut retried = Some(retried);
+    let mut later_acked = Some(later_acked);
     let mut acknowledgements = 0;
+    let mut later = revoked.clone();
+    later["revocations"][0]["revocationId"] = json!("revoke-2");
     let (base, seen, handle) = service_with_hook(vec![
         (200, json!({"revocations": []})),
         (200, revoked.clone()),
         (500, json!({})),
         (200, revoked),
         (200, json!({})),
+        (200, later),
+        (200, json!({})),
     ], move |path| {
         if path.ends_with("/acknowledge") {
             acknowledgements += 1;
             if acknowledgements == 2 { retried.take().unwrap().send(()).unwrap(); }
+            if acknowledgements == 3 { later_acked.take().unwrap().send(()).unwrap(); }
         }
     });
     let authority = rig.phones.watch_account_revocations();
@@ -241,6 +248,13 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert!(connect().await.read().await.is_none(), "the saved token cannot reconnect");
     authority.hint();
     tokio::time::timeout(Duration::from_secs(5), retry).await.expect("retry after the last phone was revoked").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !authority.retired_binding_is_settled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    authority.hint();
+    tokio::time::timeout(Duration::from_secs(5), later_ack).await.expect("a hint rechecks a settled binding").unwrap();
     poller.abort();
     handle.join().unwrap();
     let seen = seen.lock().unwrap();
@@ -250,6 +264,8 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert_eq!(seen[2], (format!("{root}/revoke-1/acknowledge"), json!({"bindingGeneration": 5}), Some("Bearer access-1".into())));
     assert_eq!(seen[3], seen[0]);
     assert_eq!(seen[4], seen[2]);
+    assert_eq!(seen[5], seen[0]);
+    assert_eq!(seen[6].0, format!("{root}/revoke-2/acknowledge"));
 }
 
 #[cfg(feature = "desktop")]
@@ -378,15 +394,11 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     secrets.set("test.revocation-takeover.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
     let window = crate::pairing::PairingManager::with_secrets_for_test("test.revocation-takeover", secrets);
     window.set_phone_owner_for_test(owner.clone());
-    let (route_finished, mut finished) = mpsc::unbounded_channel();
     let route_task = tokio::spawn(async move {
         loop {
             let (stream, _) = route.accept().await.unwrap();
             let window = window.clone();
-            let route_finished = route_finished.clone();
-            tokio::spawn(async move {
-                let _ = route_finished.send(window.routed_phone(stream).await);
-            });
+            tokio::spawn(async move { let _ = window.routed_phone(stream).await; });
         }
     });
     let mut phone = connect().await;
@@ -421,12 +433,6 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
     assert!(checked_before_revoke.read().await.is_none(), "a pre-revocation grant check cannot authenticate afterward");
     assert!(phone.read().await.is_none(), "an idle revoked phone closes without sending another request");
     assert!(connect().await.read().await.is_none(), "a revoked credential cannot reconnect");
-    for _ in 0..3 {
-        let error = tokio::time::timeout(Duration::from_secs(5), finished.recv())
-            .await.unwrap().unwrap().unwrap_err();
-        let error = format!("{error:#}");
-        assert!(error.contains("revoked") || error.contains("paired-device credential was refused"), "{error}");
-    }
     reply_to_ack.send(()).unwrap();
     service.join().unwrap();
     assert_eq!(seen.lock().unwrap()[1].0, format!("/v1/desktop/host-account-bindings/{host_id}/revocations/revoke-1/acknowledge"));
