@@ -335,8 +335,16 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
+  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[]; branchPrLinks?: boolean }> {
     return this.read("git.prAssociations", { sessionId });
+  }
+
+  linkBranchPr(sessionId: string, url: string, branch: string): Promise<{ sessionAssociated: boolean }> {
+    return this.write("git.prLinkBranch", { sessionId, url, branch });
+  }
+
+  unlinkPr(sessionId: string, url: string): Promise<unknown> {
+    return this.write("git.prUnlink", { sessionId, url });
   }
 
   prLanded(): Promise<{ safe: boolean; head: string | null; branch: string | null }> {
@@ -377,21 +385,21 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string; sessionId?: string; associateExisting?: boolean }): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }
 
-  readyPr(pr: number | string): Promise<unknown> {
-    return this.write("git.prReady", typeof pr === "string" ? { url: pr } : { number: pr });
+  readyPr(pr: number | string, url?: string): Promise<unknown> {
+    return this.write("git.prReady", typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) });
   }
 
   /**
    * `head` pins the merge to the commit the person saw: GitHub refuses it
    * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
    */
-  mergePr(pr: number | string, method: "merge" | "squash" | "rebase" | "queue", head?: string): Promise<unknown> {
-    const target = typeof pr === "string" ? { url: pr } : { number: pr };
+  mergePr(pr: number | string, method: "merge" | "squash" | "rebase" | "queue", head?: string, url?: string): Promise<unknown> {
+    const target = typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) };
     return this.write("git.prMerge", head ? { ...target, method, head } : { ...target, method });
   }
 }

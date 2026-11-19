@@ -42,7 +42,9 @@ export interface GitSource {
   branchBase?(base: string): ReturnType<RemoteGit["branchBase"]>;
   branchDiffSize?(base: string): Promise<Awaited<ReturnType<RemoteGit["branchDiffSize"]>> | "unsupported">;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
-  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean }>;
+  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean; branchPrLinks?: boolean }>;
+  linkBranchPr?(sessionId: string, url: string, branch: string): Promise<void>;
+  unlinkPr?(sessionId: string, url: string): Promise<void>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
   logCommits(from: string | null, limit: number): Promise<CommitInfo[]>;
   branches(): Promise<BranchInfo[]>;
@@ -193,10 +195,16 @@ export function runtimeSessionIn(workspaceKey: string, sessionKey: string): stri
  * (the person's own Git identity from this computer); the workspace's GitHub
  * credentials never leave the runtime.
  */
-export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null> }): GitSource {
+export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit; canWrite: boolean; author: () => Promise<GitAuthor | null>; sessionCheckout?: boolean }): GitSource {
   let servesBranchDiffSize = true;
   const { remote } = input;
   const fromMachine = !!parseMachineKey(input.workspaceKey);
+  const canManageMachine = fromMachine && input.canWrite;
+  function sessionIdOnRuntime(sessionId: string): string {
+    const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
+    if (!runtimeId) throw new Error("This session belongs to a different workspace.");
+    return runtimeId;
+  }
   const statusOf = async (): Promise<SourceStatus> => {
     const status = await remote.status();
     return {
@@ -284,8 +292,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     ghAvailable: () => Promise.resolve(true),
     prs: (branch) => remote.prs(branch).then((answer) => answer.prs),
     prAssociations: async (sessionId) => {
-      const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
-      if (!runtimeId) throw new Error("This session belongs to a different workspace.");
+      const runtimeId = sessionIdOnRuntime(sessionId);
       let response;
       try { response = await remote.prAssociations(runtimeId); }
       catch (error) {
@@ -301,9 +308,9 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         linked: entry.linked ?? (fromMachine ? true : undefined),
         scope: { kind: "cloud" as const, workspace: input.workspaceKey, repo: entry.repo ?? "" },
       }));
-      // A live machine reply is authoritative, including when a link has
-      // been removed. Desktop associations cannot establish machine ownership.
-      if (fromMachine) return { associations: runtimeRows };
+      // Older desktops stored ownership and read-through links identically.
+      // Only the machine's current registry can provide association rows.
+      if (fromMachine) return { associations: runtimeRows, branchPrLinks: response.branchPrLinks };
       const cached = await gh.associations(sessionId, runtimeRows);
       // The cache may predate the linked bit.
       const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
@@ -312,6 +319,15 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         return flag === undefined ? entry : { ...entry, linked: flag };
       }) };
     },
+    ...(canManageMachine && input.sessionCheckout && {
+      linkBranchPr: async (sessionId: string, url: string, branch: string) => {
+        const result = await remote.linkBranchPr(sessionIdOnRuntime(sessionId), url, branch);
+        if (!result.sessionAssociated) throw new Error("The machine did not save the pull request to this session.");
+      },
+    }),
+    ...(canManageMachine && {
+      unlinkPr: (sessionId: string, url: string) => remote.unlinkPr(sessionIdOnRuntime(sessionId), url).then(() => undefined),
+    }),
     prScope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo },
     prAccess: (association) => {
       if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey) throw new Error("Reconnect this PR's workspace to refresh it.");
@@ -347,11 +363,13 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     createPr: async ({ title, body, base, draft, sessionId, branch }) => {
       const runtimeId = fromMachine && sessionId ? runtimeSessionIn(input.workspaceKey, sessionId) : null;
       if (fromMachine && sessionId && !runtimeId) throw new Error("This session belongs to a different workspace.");
-      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId } : {}) });
+      const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId, associateExisting: false } : {}) });
+      if (runtimeId && result.existing && result.sessionAssociated === false) return `Pull request #${result.pr.number} is already open. Use Link existing branch PR to add it to this session.`;
       if (runtimeId && !result.sessionAssociated) return `Pull request #${result.pr.number} is open on GitHub. This machine runtime could not save it to the session.`;
       if (sessionId && !fromMachine) await gh.associations(sessionId, [{ url: result.pr.url, number: result.pr.number, head: result.pr.head, scope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo } }]);
+      if (result.reconciled) return `Found pull request #${result.pr.number} on GitHub after the create request failed.`;
       if (result.existing) return `Pull request #${result.pr.number} for this branch already exists; it is linked below, not duplicated.`;
-      return result.reconciled ? `Created #${result.pr.number} (found on GitHub after the answer was lost).` : null;
+      return null;
     },
     readyPr: (number) => remote.readyPr(number).then(() => undefined),
     mergePr: (number, method, head) => remote.mergePr(number, method, head).then(() => undefined),

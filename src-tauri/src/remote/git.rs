@@ -626,7 +626,7 @@ impl WorkspaceGit {
     /// Answer a `git.*` method; `None` for any other.
     pub(super) fn handle_negotiated(&self, method: &str, params: &Value, url_targets: bool) -> Option<Result<Value, RpcError>> {
         let _request = crate::github_process::scope();
-        if !url_targets && params.get("url").is_some() && matches!(method, "git.prs" | "git.prReady" | "git.prMerge") {
+        if !url_targets && params.get("url").is_some() && params.get("number").is_none() && matches!(method, "git.prs" | "git.prReady" | "git.prMerge") {
             return Some(Err(RpcError::new("capability_not_granted", "Pull request URL targeting was not negotiated.")));
         }
         let bound;
@@ -665,6 +665,8 @@ impl WorkspaceGit {
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
             "git.prAssociations" => self.pr_associations(params, url_targets),
+            "git.prLinkBranch" => self.pr_link_branch(params),
+            "git.prUnlink" => self.pr_unlink(params),
             "git.prLanded" => self.pr_landed(params),
             "git.prCreate" => self.pr_create(params),
             "git.prReady" => self.pr_ready(params),
@@ -1508,10 +1510,92 @@ impl WorkspaceGit {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        Ok(self.locate_pr_associations(associations, url_targets))
+        let mut response = self.locate_pr_associations(&session, associations, url_targets);
+        if self.project {
+            response["branchPrLinks"] = json!(true);
+        }
+        Ok(response)
     }
 
-    fn locate_pr_associations(&self, associations: Vec<crate::pr_associations::Association>, url_targets: bool) -> Value {
+    fn checkout_contains(root: &Path, cwd: &Path) -> bool {
+        cwd == root || (cwd.starts_with(root)
+            && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
+                .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_deref() == Some(root))
+    }
+
+    /// A prior branch may have contained the directory the link saved.
+    /// Walk back only through missing paths and verify the surviving directory.
+    fn existing_link_directory(cwd: &Path) -> Option<(PathBuf, bool)> {
+        for ancestor in cwd.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(path) if path.is_dir() => return Some((path, ancestor != cwd)),
+                Ok(_) => {}
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn pr_link_branch(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project {
+            return Err(RpcError::forbidden("Branch PR linking is only available on paired machines."));
+        }
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        let repo = self.repo(params)?;
+        let repo_root = repo.dir.canonicalize().map_err(RpcError::internal)?;
+        let matches_checkout = match Path::new(&session.cwd).canonicalize() {
+            Ok(cwd) => Self::checkout_contains(&repo_root, &cwd),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
+                session.checkout_root().and_then(|root| Path::new(root).canonicalize().ok()).as_ref() == Some(&repo_root)
+            }
+            Err(_) => false,
+        };
+        if session.worktree_removed || !matches_checkout {
+            return Err(RpcError::invalid("Select the session's checkout to link its pull request."));
+        }
+        let requested = crate::pr_associations::identity(required_str(params, "url")?)
+            .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
+        let branch = required_str(params, "branch")?;
+        let checkout_matches = || crate::git::current_branch(&repo.dir).as_deref() == Some(branch);
+        if !checkout_matches() {
+            return Err(RpcError::invalid("The session's checkout is no longer on the pull request branch."));
+        }
+        let found = self.list_prs(&repo, branch, "open", NETWORK_TIMEOUT)?.into_iter().find(|pr| {
+            pr.state == "OPEN" && pr.head == branch
+                && crate::pr_associations::identity(&pr.url).is_ok_and(|url| url == requested)
+        });
+        if found.is_none() || !checkout_matches() {
+            return Err(RpcError::not_found("GitHub did not verify an open pull request on the session's branch."));
+        }
+        crate::pr_associations::link_local(&session.id, &repo_root, &requested, branch).map_err(RpcError::internal)?;
+        Ok(json!({ "sessionAssociated": true }))
+    }
+
+    fn pr_unlink(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project {
+            return Err(RpcError::forbidden("PR unlinking is only available on paired machines."));
+        }
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        crate::pr_associations::unlink(&session.id, required_str(params, "url")?).map_err(RpcError::internal)?;
+        Ok(json!({}))
+    }
+
+    fn linked_pr_checkout<'a>(session: &crate::store::index::SessionEntry, cwd: &str, checkouts: &[(&'a String, PathBuf)]) -> Option<&'a String> {
+        let (path, missing) = Self::existing_link_directory(Path::new(cwd))?;
+        let (name, root) = checkouts.iter().filter(|(_, root)| path.starts_with(root))
+            .max_by_key(|(_, root)| root.components().count())?;
+        // A vanished worktree must never resolve to the enclosing project's checkout.
+        if missing && (session.worktree_removed || match session.checkout_root() {
+            Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
+            None => name.as_str() == "." && (session.worktree_name.is_some() || cwd != session.cwd),
+        }) {
+            return None;
+        }
+        Self::checkout_contains(root, &path).then_some(*name)
+    }
+
+    fn locate_pr_associations(&self, session: &crate::store::index::SessionEntry, associations: Vec<crate::pr_associations::Association>, url_targets: bool) -> Value {
         use crate::pr_associations::Scope;
 
         if associations.is_empty() {
@@ -1519,7 +1603,15 @@ impl WorkspaceGit {
         }
         let names = if self.project { self.project_repositories() } else { self.repositories().0 };
         let can_locate = |url: &str| url_targets || url.starts_with("https://github.com/");
+        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked && can_locate(&association.url)) {
+            names.iter().filter_map(|name| Some((name, self.dir(name).canonicalize().ok()?))).collect()
+        } else {
+            Vec::new()
+        };
         let selected: Vec<_> = associations.iter().map(|association| match &association.scope {
+            Scope::Local { cwd } if self.project && association.linked && can_locate(&association.url) => {
+                Self::linked_pr_checkout(session, cwd, &linked_checkouts)
+            }
             Scope::Local { cwd } if can_locate(&association.url) => names.iter().find(|name| self.dir(name) == Path::new(cwd)),
             _ => None,
         }).collect();
@@ -1545,7 +1637,9 @@ impl WorkspaceGit {
         json!({ "associations": associations.into_iter().zip(selected).map(|(association, selected)| {
             let repo = association.url.rsplit_once("/pull/").and_then(|(repository, _)| {
                 if !can_locate(&association.url) { return None; }
-                selected.filter(|name| matches(name, repository)).or_else(|| {
+                let selected = selected.filter(|name| matches(name, repository));
+                if self.project && association.linked { return selected; }
+                selected.or_else(|| {
                     // Journal and pipeline records may only know the project root.
                     // Keep the association even if no available checkout matches.
                     let limit = if self.project { MAX_PROJECT_REPOSITORIES } else { names.len() };
@@ -1644,13 +1738,30 @@ impl WorkspaceGit {
             return Err(RpcError::invalid("the base branch is the branch itself"));
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
+        // Existing git/1 clients rely on Create attaching an open PR. The
+        // newer desktop leaves that choice to the explicit link action.
+        let associate_existing = match params.get("associateExisting") {
+            None => true,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(RpcError::invalid("associateExisting must be a boolean")),
+        };
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
         let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
             let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
             if let Some(session) = &session {
-                crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
-                    .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
-                value["sessionAssociated"] = json!(true);
+                let associated = if existing && !associate_existing {
+                    let url = crate::pr_associations::identity(&pr.url).map_err(RpcError::internal)?;
+                    crate::pr_associations::for_session(&session.id, vec![]).map_err(RpcError::internal)?
+                        .iter().any(|row| row.url == url)
+                } else if existing {
+                    crate::pr_associations::reconcile_existing(&session.id, &repo.dir, &pr.url, &pr.head)
+                        .map_err(RpcError::internal)?
+                } else {
+                    crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
+                        .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
+                    true
+                };
+                value["sessionAssociated"] = json!(associated);
             }
             if reconciled {
                 value["reconciled"] = json!(true);
@@ -1670,12 +1781,23 @@ impl WorkspaceGit {
             args.push("--draft");
         }
         let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
-        // Created or not, what GitHub now has is the answer.
-        match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(_), Ok(Some(pr))) => answer(pr, false, false),
-            (Err(_), Ok(Some(pr))) => answer(pr, false, true),
-            (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
-            (Err(error), _) => Err(error),
+        let listed = self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT);
+        match created {
+            Ok(url) => {
+                let confirmed = crate::pr_associations::identity(url.trim()).ok().zip(listed.ok())
+                    .and_then(|(url, prs)| prs.into_iter().find(|pr| pr.state == "OPEN" && Self::verify_pr_url(pr, &url).is_ok()));
+                match confirmed {
+                    Some(pr) => answer(pr, false, false),
+                    None => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
+                }
+            }
+            // A duplicate or a lost reply can both leave a PR on this branch.
+            // Without a creation URL, apply the same association rules as the
+            // initial discovery and report the PR as existing.
+            Err(error) => match listed.ok().and_then(open) {
+                Some(pr) => answer(pr, true, true),
+                None => Err(error),
+            },
         }
     }
 
@@ -1686,6 +1808,13 @@ impl WorkspaceGit {
             .filter(|number| *number > 0)
             .map(|number| number.to_string())
             .ok_or_else(|| RpcError::invalid("number is required"))
+    }
+
+    fn verify_pr_url(pr: &crate::github::PullRequest, url: &str) -> Result<(), RpcError> {
+        if !crate::pr_associations::identity(&pr.url).is_ok_and(|found| found == url) {
+            return Err(RpcError::not_found("GitHub returned a different pull request for this checkout."));
+        }
+        Ok(())
     }
 
     fn default_pr_repository(&self, repo: &Repo, timeout: Duration) -> Result<String, RpcError> {
@@ -1718,11 +1847,12 @@ impl WorkspaceGit {
     }
 
     fn pr_view(&self, repo: &Repo, selector: &str) -> Result<crate::github::PullRequest, RpcError> {
-        let out = self.gh(repo, &["pr", "view", selector, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+        let number = selector.rsplit('/').next().unwrap_or(selector);
+        let out = self.gh(repo, &["pr", "view", number, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
         let pr = crate::github::parse_pr(&value);
-        if selector.starts_with("https://") && crate::pr_associations::identity(&pr.url).ok().as_deref() != Some(selector) {
-            return Err(RpcError::invalid("GitHub returned a different pull request."));
+        if selector.starts_with("https://") {
+            Self::verify_pr_url(&pr, selector)?;
         }
         Ok(pr)
     }
@@ -1730,10 +1860,12 @@ impl WorkspaceGit {
     fn verified_pr(&self, repo: &Repo, url: &str) -> Result<(Target, String, crate::github::PullRequest), RpcError> {
         let target = Target::new(url).map_err(RpcError::internal)?;
         let fields = format!("id,{}", crate::github::FIELDS);
-        let out = self.gh(repo, &["pr", "view", url, "--json", &fields], NETWORK_TIMEOUT)?;
+        let out = self.gh(repo, &["pr", "view", &target.number, "--json", &fields], NETWORK_TIMEOUT)?;
         let value: Value = serde_json::from_str(&out).map_err(RpcError::internal)?;
+        let pr = crate::github::parse_pr(&value);
+        Self::verify_pr_url(&pr, url)?;
         let id = target.verified_pr_id(&value).map_err(|error| RpcError::invalid(error.to_string()))?.to_owned();
-        Ok((target, id, crate::github::parse_pr(&value)))
+        Ok((target, id, pr))
     }
 
     fn pr_graphql(&self, repo: &Repo, target: &Target, query: &str, fields: &[String]) -> Result<Value, RpcError> {

@@ -186,6 +186,12 @@ def main(args):
             "author": {"login": "octocat"},
             "isCrossRepository": False,
         }
+        if flag("concurrent-create"):
+            os.remove(path("concurrent-create"))
+            pr["title"] = "Opened by another contributor"
+            pr["author"] = {"login": "another-contributor"}
+            save(pr)
+            fail('a pull request for branch "%s" into branch "%s" already exists' % (head, base))
         save(pr)
         if flag("drop-after-create"):
             os.remove(path("drop-after-create"))

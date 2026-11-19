@@ -925,6 +925,179 @@ fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
 }
 
 #[test]
+fn a_concurrent_machine_pr_is_reported_as_existing_and_keeps_its_single_session() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, ".");
+    f.git.project = true;
+    let session = |id: &str| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": f.root, "cwd": repo, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session("native"), session("other")]).unwrap();
+    git(&repo, &["checkout", "-qb", "feature/race"]);
+    f.call("git.push", json!({"repo": "."})).unwrap();
+    f.fault("concurrent-create");
+
+    let legacy_create = json!({"repo": ".", "title": "Create PR", "base": "main", "sessionId": "native"});
+    let read = |session| f.call("git.prAssociations", json!({"sessionId": session})).unwrap()["associations"].clone();
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let response = f.call("git.prCreate", create).unwrap();
+    assert_eq!(response["pr"]["title"], "Opened by another contributor");
+    assert_eq!(response["created"], false);
+    assert_eq!(response["existing"], true);
+    assert_eq!(response["reconciled"], true);
+    assert_eq!(response["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+
+    f.call("git.prLinkBranch", json!({
+        "repo": ".", "branch": "feature/race", "sessionId": "other", "url": response["pr"]["url"],
+    })).unwrap();
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+    assert_eq!(read("other").as_array().unwrap().len(), 1);
+    assert_eq!(read("other")[0]["url"], response["pr"]["url"]);
+    assert_eq!(f.gh_calls().matches(r#"["pr", "create","#).count(), 1);
+}
+
+#[test]
+fn machine_branch_pr_links_are_verified_durable_and_removable() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let root = f.clone(&remote, ".");
+    f.git.project = true;
+    git(&root, &["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
+    git(&root, &["worktree", "add", "-qb", "feature", "feature-tree"]);
+    let checkout = root.join("feature-tree");
+    let cwd = checkout.join("subdir");
+    std::fs::create_dir(&cwd).unwrap();
+    let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": cwd, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    let mut native = session("native", &root, &cwd);
+    native.set_checkout_root(checkout.to_str());
+    crate::store::index::save(&[native, session("outside", &f.base, &cwd)]).unwrap();
+
+    let public_url = "https://github.com/acme/widgets/pull/1";
+    let enterprise_url = "https://github.enterprise.test/acme/widgets/pull/2";
+    let wrong_url = "https://github.com/acme/other/pull/1";
+    std::fs::create_dir_all(&f.state).unwrap();
+    let save_pr = |number, url, state, fork| {
+        std::fs::write(f.state.join(format!("pr-{number}.json")), json!({
+            "id": format!("PR_linked_{number}"), "url": url, "number": number, "title": "Branch PR", "headRefName": "feature",
+            "state": state, "isCrossRepository": fork, "isDraft": true, "mergeable": "MERGEABLE",
+        }).to_string()).unwrap();
+    };
+    save_pr(1, public_url, "OPEN", false);
+    save_pr(2, enterprise_url, "OPEN", false);
+    let closed = "https://github.com/acme/widgets/pull/3";
+    let fork = "https://github.com/acme/widgets/pull/4";
+    save_pr(3, closed, "CLOSED", false);
+    save_pr(4, fork, "OPEN", true);
+    let link = |url| json!({"sessionId": "native", "repo": "feature-tree", "branch": "feature", "url": url});
+    let read = || f.call("git.prAssociations", json!({"sessionId": "native"})).unwrap();
+    let mut wrong_scope = link(public_url);
+    wrong_scope["sessionId"] = json!("outside");
+    assert_eq!(f.code("git.prLinkBranch", wrong_scope), "not_found");
+    let mut wrong_checkout = link(public_url);
+    wrong_checkout["repo"] = json!(".");
+    assert_eq!(f.code("git.prLinkBranch", wrong_checkout), "invalid_params");
+    let mut wrong_branch = link(public_url);
+    wrong_branch["branch"] = json!("main");
+    assert_eq!(f.code("git.prLinkBranch", wrong_branch), "invalid_params");
+    for url in [closed, fork, wrong_url] {
+        assert_eq!(f.code("git.prLinkBranch", link(url)), "not_found");
+    }
+    assert_eq!(read()["associations"], json!([]));
+
+    // Older local desktops saved the directory from which the user linked
+    // the PR. Resolve it to the registered worktree even when its origin is
+    // identical to the project root's origin.
+    let legacy_cwd = checkout.join("legacy-subdir");
+    std::fs::create_dir(&legacy_cwd).unwrap();
+    crate::pr_associations::link_local("native", &legacy_cwd, public_url, "feature").unwrap();
+    assert_eq!(f.call("git.prLinkBranch", link(enterprise_url)).unwrap()["sessionAssociated"], true);
+    std::fs::remove_dir(cwd).unwrap();
+    for url in [public_url, enterprise_url] {
+        assert_eq!(f.call("git.prLinkBranch", link(url)).unwrap()["sessionAssociated"], true);
+    }
+    git(&checkout, &["checkout", "-qb", "next"]);
+    std::fs::remove_dir(legacy_cwd).unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    let rows = read();
+    assert_eq!(rows["branchPrLinks"], true);
+    assert_eq!(rows["associations"], json!([
+        {"url": public_url, "number": 1, "head": "feature", "repo": "feature-tree", "linked": true},
+        {"url": enterprise_url, "number": 2, "head": "feature", "repo": null, "linked": true},
+    ]));
+    let legacy = json!({"repo": rows["associations"][0]["repo"], "number": 1, "url": public_url});
+    assert_eq!(f.git.handle_negotiated("git.prs", &legacy, false).unwrap().unwrap()["prs"][0]["url"], public_url);
+
+    std::fs::write(f.state.join("repo-url"), "https://github.enterprise.test/acme/widgets").unwrap();
+    assert_eq!(read()["associations"], json!([
+        {"url": public_url, "number": 1, "head": "feature", "repo": null, "linked": true},
+        {"url": enterprise_url, "number": 2, "head": "feature", "repo": "feature-tree", "linked": true},
+    ]));
+
+    let exact = json!({"repo": "feature-tree", "number": 2, "url": enterprise_url});
+    assert_eq!(f.call("git.prs", exact.clone()).unwrap()["prs"][0]["url"], enterprise_url);
+    assert_eq!(f.call("git.prReady", exact.clone()).unwrap()["pr"]["isDraft"], false);
+    assert_eq!(f.call("git.prMerge", exact).unwrap()["pr"]["state"], "MERGED");
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("markPullRequestReadyForReview(") && line.contains("\"id=PR_linked_2\"")));
+    assert!(calls.lines().any(|line| line.contains("mergePullRequest(") && line.contains("\"id=PR_linked_2\"")));
+
+    // Same number after gh's checkout routing changes. Refuse before issuing
+    // any GitHub mutation, even if the old locator still exists.
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    save_pr(1, wrong_url, "OPEN", false);
+    let stale_target = json!({"repo": "feature-tree", "number": 1, "url": public_url});
+    for method in ["git.prs", "git.prReady", "git.prMerge"] {
+        assert_eq!(f.code(method, stale_target.clone()), "not_found");
+    }
+    assert_eq!(f.gh_calls().matches("markPullRequestReadyForReview(").count(), 1);
+    assert_eq!(f.gh_calls().matches("mergePullRequest(").count(), 1);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": public_url})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(read()["associations"][0]["url"], enterprise_url);
+    save_pr(1, public_url, "OPEN", false);
+    let legacy_create = json!({
+        "repo": "feature-tree", "title": "Existing", "base": "main", "branch": "feature", "sessionId": "native",
+    });
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let existing = f.call("git.prCreate", create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let existing = f.call("git.prCreate", legacy_create.clone()).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let new_link = "https://github.com/acme/widgets/pull/5";
+    save_pr(5, new_link, "OPEN", false);
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], true);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 2);
+    assert_eq!(read()["associations"][0]["url"], new_link);
+    assert_eq!(read()["associations"][0]["linked"], true);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": new_link})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    git(&checkout, &["checkout", "feature"]);
+    assert_eq!(f.call("git.prLinkBranch", link(public_url)).unwrap()["sessionAssociated"], true);
+    git(&root, &["worktree", "remove", "feature-tree"]);
+    assert!(read()["associations"][0]["repo"].is_null());
+    assert!(!f.gh_calls().contains(r#"["pr", "create","#));
+}
+
+#[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
     let remote = f.remote("origin");
@@ -936,6 +1109,8 @@ fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     f.fault("drop-after-create");
     let created = f.call("git.prCreate", json!({ "repo": "app", "title": "Drop" })).unwrap();
     assert_eq!(created["reconciled"], true);
+    assert_eq!(created["created"], false);
+    assert_eq!(created["existing"], true);
     assert_eq!(created["pr"]["base"], "main", "the default branch is the default base");
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
 }
