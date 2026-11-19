@@ -989,8 +989,7 @@ impl WorkspaceGit {
         }
     }
 
-    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
-        let session = required_str(params, "sessionId")?;
+    fn project_session(&self, session: &str) -> Result<crate::store::index::SessionEntry, RpcError> {
         let entry = crate::store::index::get(session).map_err(|_| RpcError::not_found("session not found"))?;
         // The runtime may host more than one workspace. Never expose another
         // workspace's journal or pipeline evidence through this connection.
@@ -999,7 +998,12 @@ impl WorkspaceGit {
         if !super::session_target::owns_project(&self.root, &entry.project_path) {
             return Err(RpcError::not_found("session is not in this workspace"));
         }
-        let associations = crate::pr_associations::for_session(session, vec![])
+        Ok(entry)
+    }
+
+    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
+        let session = self.project_session(required_str(params, "sessionId")?)?;
+        let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
         Ok(self.locate_pr_associations(associations))
     }
@@ -1015,7 +1019,7 @@ impl WorkspaceGit {
             // Keep unavailable identities too, so missing repositories cannot
             // turn an incomplete history into permission to clean up.
             let repo = repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name);
-            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo })
+            json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }
 
@@ -1074,6 +1078,11 @@ impl WorkspaceGit {
 
     fn pr_create(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
+        let session = if self.project && params.get("sessionId").is_some() {
+            Some(self.project_session(required_str(params, "sessionId")?)?)
+        } else {
+            None
+        };
         let branch = self.branch_param(&repo, params)?;
         let title = required_str(params, "title")?.trim();
         if title.is_empty() || title.len() > 1024 {
@@ -1092,9 +1101,21 @@ impl WorkspaceGit {
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
+        let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
+            let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
+            if let Some(session) = &session {
+                crate::pr_associations::record_local(&session.id, &repo.dir, &pr.url, &pr.head)
+                    .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
+                value["sessionAssociated"] = json!(true);
+            }
+            if reconciled {
+                value["reconciled"] = json!(true);
+            }
+            Ok(value)
+        };
         // One open pull request per branch: a resend, or one made elsewhere, is answered with it.
         if let Some(existing) = open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?) {
-            return Ok(json!({ "repo": repo.name, "pr": existing, "created": false, "existing": true }));
+            return answer(existing, true, false);
         }
         let local = self.local_head(&repo, &branch)?;
         if self.remote_head(&repo, &branch, NETWORK_TIMEOUT)?.as_deref() != Some(local.as_str()) {
@@ -1107,8 +1128,8 @@ impl WorkspaceGit {
         let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // Created or not, what GitHub now has is the answer.
         match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(_), Ok(Some(pr))) => Ok(json!({ "repo": repo.name, "pr": pr, "created": true, "existing": false })),
-            (Err(_), Ok(Some(pr))) => Ok(json!({ "repo": repo.name, "pr": pr, "created": true, "existing": false, "reconciled": true })),
+            (Ok(_), Ok(Some(pr))) => answer(pr, false, false),
+            (Err(_), Ok(Some(pr))) => answer(pr, false, true),
             (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
             (Err(error), _) => Err(error),
         }

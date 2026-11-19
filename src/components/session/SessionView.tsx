@@ -561,14 +561,16 @@ export function SessionView({
   // A machine session's checks are read on the machine and sent to its tab there (PRO-408).
   const machineCheckFix = machine && cloud ? {
     name: machine.name,
-    source: cloud.gitSource,
+    source: machine.checkoutGitSource,
+    generation: cloud.backend.generation,
     attach: cloud.client?.hasCapability("machine/8") && cloud.manage ? (tabId: string, prUrl: string) => cloud.client!.checkFailures(cloud.backend.logSessionId, tabId, prUrl) : null,
     send: (tabId: string, text: string) => cloud.backend.send(tabId, text, []),
   } : undefined;
+  const canFixMachineChecks = !!machineCheckFix?.source && !!machineCheckFix.attach;
   const checkFix = useFixCheckErrors({
     sessionId: session.id, tabId: fixTab?.id, cwd: session.cwd, branch: session.branch,
     // A machine that cannot read check logs (an older TerminalX, or no manage access) offers none: its strip says to update it.
-    enabled: (machine ? !!cloud?.gitSource && !!machineCheckFix?.attach : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
+    enabled: (machine ? canFixMachineChecks : local && !cloud && isGit) && !!fixTab && !isTerminalTab(fixTab),
     machine: machineCheckFix,
   });
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
@@ -670,6 +672,7 @@ export function SessionView({
     : machine && cloud ? <SessionCost session={session} className={HEADER_TIGHT} machine={{
       name: machine.name,
       sessionId: cloud.backend.logSessionId,
+      generation: cloud.backend.generation,
       read: cloud.client?.hasCapability("machine/8") ? () => cloud.client!.sessionUsage(cloud.backend.logSessionId) : null,
     }} />
     : null;
@@ -1123,7 +1126,7 @@ export function SessionView({
       {runShown && <div ref={setPieceColumn} data-testid="run-piece-column" className="flex h-full min-h-0 shrink-0 empty:hidden" />}
 
       <PanelPresence side="right" open={!compact && prefs.panelOpen}>
-      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={machineCheckFix?.attach ? checkFix : undefined} />}
+      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} checkFix={canFixMachineChecks ? checkFix : undefined} />}
       {!compact && prefs.panelOpen && !cloud &&
         (panelTab ? (
           <PanelHost session={session} tab={panelTab} checkFix={checkFix} />

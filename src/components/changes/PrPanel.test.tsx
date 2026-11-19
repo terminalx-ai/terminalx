@@ -440,6 +440,23 @@ it("does not apply landed evidence from a different checkout HEAD", async () => 
   expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
 });
 
+it.each([true, false])("shows a linked machine PR without offering a desktop unlink (inline: %s)", async (inline) => {
+  const workspaceKey = "machine:mini:project";
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.status") return workStatus("feature", 3);
+    if (method === "git.prAssociations") return {
+      associations: [{ url: followup.url, head: followup.head, number: followup.number, repo: "app", linked: true }],
+    };
+    if (method === "git.prs") return { prs: [followup] };
+    throw Error(method);
+  });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  render(<PrPanel source={source} sessionId={`${workspaceKey}:author`} branch="feature" active busy={false} inline={inline} />);
+  expect((await screen.findByTestId("pr-linked")).textContent).toBe("Linked");
+  expect(screen.queryByRole("button", { name: `Unlink #${followup.number}` })).toBeNull();
+  expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_unlink")).toBe(false);
+});
+
 it.each(["squash", "rebase"])("uses runtime landed evidence for a cloud panel-created %s merge", async () => {
   const sessionId = "cloud:org:workspace:author";
   let saved: unknown[] = [];
