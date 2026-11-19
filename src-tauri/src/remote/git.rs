@@ -682,9 +682,10 @@ impl WorkspaceGit {
         }
         let (checkout, url): (String, String) = serde_json::from_str(locator).map_err(|_| RpcError::invalid("Invalid pull request repository locator."))?;
         let target = Target::new(&url).map_err(|error| RpcError::invalid(error.to_string()))?;
-        if target.host != "github.com" || checkout.is_empty() {
+        if checkout.is_empty() {
             return Err(RpcError::invalid("Invalid legacy pull request repository locator."));
         }
+        target.require_exact_cli_host().map_err(|error| RpcError::invalid(error.to_string()))?;
         if params.get("url").is_some()
             && params["url"].as_str().and_then(|url| crate::pr_associations::identity(url).ok()).as_deref() != Some(&target.url)
         {
@@ -1602,17 +1603,19 @@ impl WorkspaceGit {
             return json!({ "associations": [] });
         }
         let names = if self.project { self.project_repositories() } else { self.repositories().0 };
-        let can_locate = |url: &str| url_targets || url.starts_with("https://github.com/");
-        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked && can_locate(&association.url)) {
+        let can_locate = |association: &crate::pr_associations::Association| {
+            url_targets || association.url.starts_with("https://github.com/") || (self.project && association.linked)
+        };
+        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
             names.iter().filter_map(|name| Some((name, self.dir(name).canonicalize().ok()?))).collect()
         } else {
             Vec::new()
         };
         let selected: Vec<_> = associations.iter().map(|association| match &association.scope {
-            Scope::Local { cwd } if self.project && association.linked && can_locate(&association.url) => {
+            Scope::Local { cwd } if self.project && association.linked => {
                 Self::linked_pr_checkout(session, cwd, &linked_checkouts)
             }
-            Scope::Local { cwd } if can_locate(&association.url) => names.iter().find(|name| self.dir(name) == Path::new(cwd)),
+            Scope::Local { cwd } if can_locate(association) => names.iter().find(|name| self.dir(name) == Path::new(cwd)),
             _ => None,
         }).collect();
 
@@ -1620,14 +1623,23 @@ impl WorkspaceGit {
         // Several histories can point at the same checkout, so resolve it once.
         let mut recorded = std::collections::HashSet::new();
         let recorded: Vec<_> = selected.iter().flatten().copied().filter(|name| recorded.insert(*name)).collect();
-        let deadline = Instant::now() + PR_LOCATOR_TIMEOUT;
+        const BATCH_SIZE: usize = 8;
+        let batch_count = u32::try_from(recorded.len().div_ceil(BATCH_SIZE)).unwrap_or(u32::MAX).max(1);
+        let batch_timeout = (2 * PR_LOCATOR_TIMEOUT) / batch_count;
         let mut identities = std::collections::HashMap::new();
-        for batch in recorded.chunks(8) {
+        for batch in recorded.chunks(BATCH_SIZE) {
+            // Reserve time for every batch, including when an earlier host stalls.
+            let deadline = Instant::now() + batch_timeout;
             std::thread::scope(|scope| {
                 let jobs: Vec<_> = batch.iter().map(|&name| {
                     (name, scope.spawn(crate::github_process::queued(move || self.pr_locator_identity(name, deadline))))
                 }).collect();
-                identities.extend(jobs.into_iter().map(|(name, task)| (name.clone(), task.join().unwrap_or_default())));
+                // An unanswered recorded probe can still be retried under the fallback budget.
+                for (name, task) in jobs {
+                    if let Ok(Some(identity)) = task.join() {
+                        identities.insert(name.clone(), Some(identity));
+                    }
+                }
             });
         }
         let deadline = Instant::now() + PR_LOCATOR_TIMEOUT;
@@ -1636,7 +1648,7 @@ impl WorkspaceGit {
         };
         json!({ "associations": associations.into_iter().zip(selected).map(|(association, selected)| {
             let repo = association.url.rsplit_once("/pull/").and_then(|(repository, _)| {
-                if !can_locate(&association.url) { return None; }
+                if !can_locate(&association) { return None; }
                 let selected = selected.filter(|name| matches(name, repository));
                 if self.project && association.linked { return selected; }
                 selected.or_else(|| {
@@ -1907,12 +1919,17 @@ impl WorkspaceGit {
         if head.is_some_and(|head| head != pr.head_sha) {
             return Err(RpcError::new("conflict", "The pull request head changed. Refresh and try again."));
         }
+        if pr.state == "MERGED" && method != "queue" {
+            return Ok(json!({ "repo": repo.name, "pr": pr }));
+        }
+        let queue = self.pr_by_id(repo, &target, &id, "state mergeStateStatus isMergeQueueEnabled mergeQueueEntry { position state } autoMergeRequest { enabledAt }")?;
+        let queue_required = queue["isMergeQueueEnabled"].as_bool()
+            .ok_or_else(|| RpcError::new("outcome_unknown", "GitHub did not confirm whether this branch needs a merge queue."))?;
         let mut fields = vec![format!("id={id}")];
         if let Some(head) = head {
             fields.push(format!("head={head}"));
         }
-        if method == "queue" {
-            let queue = self.pr_by_id(repo, &target, &id, "state mergeStateStatus isMergeQueueEnabled mergeQueueEntry { position state } autoMergeRequest { enabledAt }")?;
+        if method == "queue" || queue_required {
             crate::github::ensure_queue_enabled(&queue).map_err(|error| RpcError::new("conflict", error.to_string()))?;
             const ENQUEUE: &str = "mutation($id: ID!, $head: GitObjectID) { change: enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) { mergeQueueEntry { position state } } }";
             const AUTO: &str = "mutation($id: ID!, $head: GitObjectID) { change: enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head}) { pullRequest { id autoMergeRequest { enabledAt } } } }";
@@ -1932,7 +1949,7 @@ impl WorkspaceGit {
                     pr.auto_merge_enabled = true;
                 }
             }
-        } else if pr.state != "MERGED" {
+        } else {
             fields.push(format!("method={}", method.to_ascii_uppercase()));
             const MERGE: &str = "mutation($id: ID!, $head: GitObjectID, $method: PullRequestMergeMethod!) { change: mergePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}) { pullRequest { id state } } }";
             let result = self.pr_graphql(repo, &target, MERGE, &fields);

@@ -890,6 +890,32 @@ fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
 }
 
 #[test]
+fn a_stalled_recorded_batch_cannot_skip_the_next_checkout() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let remote = f.remote("origin");
+    let session = serde_json::from_value(json!({
+        "id": "recorded", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    for number in 0..8 {
+        let checkout = f.clone(&remote, &format!("slow-{number}"));
+        let url = format!("https://github.com/acme/slow-{number}/pull/1");
+        crate::pr_associations::record_local("recorded", &checkout, &url, "old").unwrap();
+    }
+    let checkout = f.clone(&remote, "valid");
+    let valid_url = "https://github.com/acme/valid/pull/1";
+    crate::pr_associations::record_local("recorded", &checkout, valid_url, "new").unwrap();
+    git(&checkout, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/valid"]);
+    let shim = f.base.join("gh");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    std::fs::write(&shim, script.replacen("#!/bin/sh\n", "#!/bin/sh\ncase \"$(pwd -P)\" in */slow-*) exec sleep 30 ;; esac\n", 1)).unwrap();
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
+    let valid = rows["associations"].as_array().unwrap().iter().find(|row| row["url"] == valid_url).unwrap();
+    assert_eq!(valid["repo"], "valid");
+}
+
+#[test]
 fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
     let f = fixture();
     let remote = f.remote("origin");
@@ -1042,6 +1068,11 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
         {"url": public_url, "number": 1, "head": "feature", "repo": null, "linked": true},
         {"url": enterprise_url, "number": 2, "head": "feature", "repo": "feature-tree", "linked": true},
     ]));
+    let legacy_rows = f.git.handle_negotiated("git.prAssociations", &json!({"sessionId":"native"}), false).unwrap().unwrap();
+    let legacy_enterprise = &legacy_rows["associations"][1]["repo"];
+    assert!(legacy_enterprise.as_str().unwrap().starts_with(LEGACY_PR_REPO_PREFIX));
+    let legacy = json!({"repo": legacy_enterprise, "number": 2, "url": enterprise_url});
+    assert_eq!(f.git.handle_negotiated("git.prs", &legacy, false).unwrap().unwrap()["prs"][0]["url"], enterprise_url);
 
     let exact = json!({"repo": "feature-tree", "number": 2, "url": enterprise_url});
     assert_eq!(f.call("git.prs", exact.clone()).unwrap()["prs"][0]["url"], enterprise_url);
@@ -1184,17 +1215,24 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     assert_eq!(listed["prs"][0]["state"], "OPEN");
     assert_eq!(listed["prs"][0]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
     std::fs::write(f.state.join("repo-url"), "https://github.test/octo/repo").unwrap();
-    let queue = || f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":"queue"})).unwrap();
+    let queue = |method| f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":method})).unwrap();
     std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
-    assert_eq!(queue()["pr"]["autoMergeEnabled"], true);
+    assert_eq!(queue("queue")["pr"]["autoMergeEnabled"], true);
     let mut clean = pr.clone();
     clean["mergeStateStatus"] = json!("CLEAN");
-    std::fs::write(f.state.join("pr-7.json"), clean.to_string()).unwrap();
-    assert_eq!(queue()["pr"]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    for method in ["queue", "merge", "squash", "rebase"] {
+        std::fs::write(f.state.join("pr-7.json"), clean.to_string()).unwrap();
+        let result = queue(method);
+        assert_eq!(result["pr"]["state"], "OPEN");
+        assert_eq!(result["pr"]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    }
     let calls = f.gh_calls();
     assert!(calls.lines().any(|line| line.contains("enablePullRequestAutoMerge(") && line.contains("\"id=PR_queue\"")));
     assert!(calls.lines().any(|line| line.contains("enqueuePullRequest(") && line.contains("\"id=PR_queue\"")));
+    assert!(!calls.contains("change: mergePullRequest("));
     f.fault("queue-offline");
+    assert!(f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":"squash"})).is_err());
+    assert!(!f.gh_calls().contains("change: mergePullRequest("));
     let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
     assert_eq!(listed["prs"][0]["number"], 7);
     assert!(listed["prs"][0]["detailsError"].as_str().unwrap().contains("connecting"));

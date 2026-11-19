@@ -1,6 +1,6 @@
 import { reviewFileReader } from "./reviewThreads";
 import { cloudWorkspaceKey, machineProjectKey, parseCloudWorkspaceKey, parseMachineKey } from "@/types/target";
-import { WorkspaceRpcError } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { RemoteGit, gitErrorMessage, type GitAuthor, type PrConversationAccess } from "@terminalx/portable/workspaceGit";
 import { api, errorMessage, gh, git, type CheckAuthority, type GitHubConnectionStatus, type CheckLog, type PullRequest, type PrAssociation, type PrScope } from "@/lib/api";
 import type { BranchInfo, ChangedFile, CommitInfo, ConflictChoice, ConflictFile, UnfinishedMerge, WorkStatus } from "@/types/session";
@@ -200,6 +200,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
   const { remote } = input;
   const fromMachine = !!parseMachineKey(input.workspaceKey);
   const canManageMachine = fromMachine && input.canWrite;
+  const legacyUrlGuard = new WeakMap<PrAssociation, WorkspaceConnectionState>();
   function sessionIdOnRuntime(sessionId: string): string {
     const runtimeId = runtimeSessionIn(input.workspaceKey, sessionId);
     if (!runtimeId) throw new Error("This session belongs to a different workspace.");
@@ -293,6 +294,7 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     prs: (branch) => remote.prs(branch).then((answer) => answer.prs),
     prAssociations: async (sessionId) => {
       const runtimeId = sessionIdOnRuntime(sessionId);
+      const connection = remote.client.connection;
       let response;
       try { response = await remote.prAssociations(runtimeId); }
       catch (error) {
@@ -310,7 +312,12 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       }));
       // Older desktops stored ownership and read-through links identically.
       // Only the machine's current registry can provide association rows.
-      if (fromMachine) return { associations: runtimeRows, branchPrLinks: response.branchPrLinks };
+      if (fromMachine) {
+        if (response.branchPrLinks && connection === remote.client.connection) {
+          for (const entry of runtimeRows) legacyUrlGuard.set(entry, connection);
+        }
+        return { associations: runtimeRows, branchPrLinks: response.branchPrLinks };
+      }
       const cached = await gh.associations(sessionId, runtimeRows);
       // The cache may predate the linked bit.
       const linked = new Map(runtimeRows.map((entry) => [entry.url, entry.linked]));
@@ -333,26 +340,35 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       if (association.scope.kind !== "cloud" || association.scope.workspace !== input.workspaceKey) throw new Error("Reconnect this PR's workspace to refresh it.");
       if (!association.scope.repo) throw new Error("This PR’s repository is unavailable in the workspace.");
       const repository = new RemoteGit(remote.client, association.scope.repo);
+      const hasLegacyUrlGuard = () => legacyUrlGuard.has(association) && legacyUrlGuard.get(association) === remote.client.connection;
       const read = async () => {
-        const { prs } = await repository.prs(association.head, association.number, repository.supportsPrUrl ? association.url : undefined);
+        const { prs } = await repository.prs(association.head, association.number, repository.supportsPrUrl || hasLegacyUrlGuard() ? association.url : undefined);
         const pr = prs.find((pr) => pr.url.toLowerCase().replace(/\/$/, "") === association.url.toLowerCase().replace(/\/$/, ""));
         if (!pr) throw new Error(`GitHub did not return associated PR #${association.number}.`);
         return pr;
       };
       const writeTarget = async () => {
-        if (repository.supportsPrUrl) return association.url;
+        if (repository.supportsPrUrl) return { target: association.url };
+        const connection = remote.client.connection;
+        if (hasLegacyUrlGuard()) return { target: association.number, url: association.url, connection };
         if (fromMachine && !association.url.toLowerCase().startsWith("https://github.com/")) {
           throw new Error("Update this machine's runtime to change an Enterprise pull request.");
         }
-        // Older cloud runtimes accept only a number. Check their current
+        // Older runtimes accept only a number. Check their current
         // route even if branch discovery already showed this PR in the UI.
         await read();
-        return association.number;
+        return { target: association.number, connection };
       };
       return {
         read,
-        ready: async () => { await repository.readyPr(await writeTarget()); },
-        merge: async (method) => { await repository.mergePr(await writeTarget(), method); },
+        ready: async () => {
+          const { target, url, connection } = await writeTarget();
+          await repository.readyPr(target, url, connection);
+        },
+        merge: async (method) => {
+          const { target, url, connection } = await writeTarget();
+          await repository.mergePr(target, method, undefined, url, connection);
+        },
       };
     },
     conversation: (pr, association) => {

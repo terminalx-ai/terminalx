@@ -114,6 +114,8 @@ def main(args):
             if pr is None:
                 fail("GraphQL: unknown pull request ID")
             if "node(id:" in query:
+                if "isMergeQueueEnabled" in query and flag("queue-offline"):
+                    fail("error connecting to api.github.com")
                 print(json.dumps({"data": {"node": {**pr, "isMergeQueueEnabled": flag("merge-queue")}}}))
                 return
             if variables.get("head", pr.get("headRefOid")) != pr.get("headRefOid"):

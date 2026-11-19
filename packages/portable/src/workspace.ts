@@ -1062,7 +1062,7 @@ export class WorkspaceRpcClient {
     const view = new Proxy(this, {
       get: (target, property) => {
         if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => target.call<T>(method, scoped(method, params));
-        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => target.mutate<T>(method, scoped(method, params), id);
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string, connection?: WorkspaceConnectionState) => target.mutate<T>(method, scoped(method, params), id, connection);
         if (property === "watchFiles") return (path: string, onChange: (paths: string[] | null) => void) => target.watchFiles(path, onChange, { projectId });
         if (property === "createPty")
           return (params: Parameters<WorkspaceRpcClient["createPty"]>[0]) => target.createPty(params.sessionId === undefined && params.projectId === undefined ? { ...params, projectId } : params);
@@ -1098,11 +1098,17 @@ export class WorkspaceRpcClient {
   /**
    * A mutation. The id is fixed before the first send, so a resend after a
    * dropped connection is the same request to the runtime.
+   * Bind to a connection when a live response established a required guard.
    */
-  async mutate<T = Record<string, unknown>>(method: string, params: Record<string, unknown>, clientRequestId = this.newRequestId()): Promise<T> {
+  async mutate<T = Record<string, unknown>>(method: string, params: Record<string, unknown>, clientRequestId = this.newRequestId(), connection?: WorkspaceConnectionState): Promise<T> {
     this.assertGranted(method);
     const request = { ...params, clientRequestId };
-    return this.resending(() => this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result)));
+    return this.resending(() => {
+      if (connection && this.state !== connection) {
+        throw new WorkspaceRpcError("outcome_unknown", "The workspace connection changed. Refresh the pull request and try again.", method);
+      }
+      return this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result));
+    });
   }
 
   /**
