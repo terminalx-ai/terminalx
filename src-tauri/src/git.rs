@@ -465,10 +465,16 @@ fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
     let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
     let index_path = if Path::new(&index).is_absolute() { PathBuf::from(&index) } else { cwd.join(&index) };
     let tmp = std::env::temp_dir().join(format!("raccoon-index-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
-    if index_path.exists() {
-        std::fs::copy(&index_path, &tmp)?;
-    }
     let result = (|| {
+        if index_path.exists() {
+            std::fs::copy(&index_path, &tmp)?;
+            // Git trusts an entry's cached stat only when the entry is older than the index file
+            // itself; one written in the same second is "racily clean" and gets its content
+            // read again. A copy made later would otherwise vouch for an entry its source did
+            // not, and a same-size edit made within that second would be missed (#1298).
+            let modified = std::fs::metadata(&index_path)?.modified()?;
+            std::fs::File::options().write(true).open(&tmp)?.set_modified(modified)?;
+        }
         let mut c = git();
         c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["add", "-A", "--", "."]);
         let o = c.output()?;
@@ -2102,6 +2108,34 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    /// #1298: a same-size edit made in the second the index last recorded the file is "racily
+    /// clean" to Git, and a snapshot must still read its content, not trust the cached stat.
+    /// Timestamps are set by hand so this does not depend on when the clock ticks.
+    #[test]
+    fn a_snapshot_reads_a_racily_clean_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        run(p, &["init", "-q", "-b", "main"]).unwrap();
+        run(p, &["config", "user.email", "t@example.com"]).unwrap();
+        run(p, &["config", "user.name", "T"]).unwrap();
+        // The change time cannot be set by hand; leaving it out leaves the mtime as the only clock.
+        run(p, &["config", "core.trustctime", "false"]).unwrap();
+        let file = p.join("a.txt");
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        let stamp = |path: &Path| std::fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
+        std::fs::write(&file, "hello\n").unwrap();
+        stamp(&file);
+        run(p, &["add", "."]).unwrap();
+        run(p, &["commit", "-q", "-m", "init"]).unwrap();
+        // Rewritten in place, same size and mtime, within the second the index was written.
+        std::fs::write(&file, "howdy\n").unwrap();
+        stamp(&file);
+        stamp(&p.join(".git/index"));
+        let tree = snapshot_tree(p).unwrap();
+        let blob = run(p, &["rev-parse", &format!("{tree}:a.txt")]).unwrap();
+        assert_eq!(blob.trim(), run(p, &["hash-object", "a.txt"]).unwrap().trim());
     }
 
     #[test]

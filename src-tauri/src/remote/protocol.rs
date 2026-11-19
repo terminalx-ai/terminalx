@@ -255,6 +255,7 @@ pub const METHODS: &[Method] = &[
     method("git.pushHead", "git/1", Manage, true),
     method("git.pull", "git/1", Manage, true),
     method("git.prCreate", "git/1", Manage, true),
+    method("git.prCreateForSession", "git/1", Manage, true),
     method("git.prLinkBranch", "git/1", Manage, true),
     method("git.prUnlink", "git/1", Manage, true),
     method("git.prReady", "git/1", Manage, true),

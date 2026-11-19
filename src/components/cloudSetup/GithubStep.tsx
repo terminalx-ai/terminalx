@@ -5,12 +5,11 @@ import { organizationMembers } from "@/lib/organizationMembers";
 import {
   INSTALLATION_STATE_LABEL,
   MAX_SELECTED_REPOSITORIES,
-  attemptErrorMessage,
   githubAppErrorCode,
   githubAppErrorMessage,
   organizationGithubApp,
   repositoryExplanation,
-  type ConnectAttempt,
+  type AttemptOutcome,
   type GithubAppSummary,
   type GithubInstallation,
   type LiveRepositories,
@@ -20,14 +19,9 @@ import {
 import { cn } from "@/lib/cn";
 import { PrimaryButton, StepActions, StepError, StepPage } from "./FlowLayout";
 import type { StepProps } from "./stepProps";
+import { CONNECT_POLL_INTERVAL_MS, useGithubConnectAttempt } from "@/lib/useGithubConnectAttempt";
 
-const POLL_INTERVAL_MS = 2000;
 const SEARCH_DELAY_MS = 300;
-
-const ATTEMPT_END_MESSAGE: Record<string, string> = {
-  expired: "The connection attempt expired before GitHub finished. Connect again.",
-  canceled: "Connection canceled.",
-};
 
 /** One installation's repositories as GitHub lists them now (unfiltered). */
 interface Listing {
@@ -85,7 +79,7 @@ const choiceKey = (choice: RepositoryChoice) => `${choice.installationId}:${choi
  * whole selection (the server replaces it) only when it changed. GitHub can
  * wait: Continue goes on with nothing chosen.
  */
-export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INTERVAL_MS }: StepProps & { pollIntervalMs?: number }) {
+export function GithubStep({ organization, onContinue, pollIntervalMs = CONNECT_POLL_INTERVAL_MS }: StepProps & { pollIntervalMs?: number }) {
   const [summary, setSummary] = useState<GithubAppSummary | null>(null);
   const summaryRef = useRef<GithubAppSummary | null>(null);
   summaryRef.current = summary;
@@ -95,7 +89,6 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INT
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
-  const [attempt, setAttempt] = useState<ConnectAttempt | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [lists, setLists] = useState<Record<string, Listing>>({});
   const [drafts, setDrafts] = useState<Record<string, Set<number>>>({});
@@ -113,8 +106,6 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INT
   const loadSeq = useRef(0);
   const listSeq = useRef<Record<string, number>>({});
   const searchSeq = useRef(0);
-  // Bumped whenever the step ends or replaces an attempt itself, so a poll already in flight cannot bring it back.
-  const attemptSeq = useRef(0);
 
   /** The repositories stored for an installation that workspaces can reach. */
   const stored = useCallback(
@@ -231,42 +222,19 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INT
     return () => clearTimeout(timer);
   }, [serverSearch, active, trimmedQuery]);
 
-  // Poll a waiting connect attempt until GitHub redirects back and the server settles it.
-  useEffect(() => {
-    if (!attempt || attempt.state !== "waiting") return;
-    const seq = attemptSeq.current;
-    let stopped = false;
-    const current = () => !stopped && mounted.current && seq === attemptSeq.current;
-    const timer = setTimeout(async () => {
-      try {
-        const next = await organizationGithubApp.attempt(attempt.attemptId);
-        if (!current()) return;
-        setAttempt(next);
-        if (next.state === "connected") {
-          setNotice(`Connected ${next.installation?.accountLogin ?? "the installation"}. Choose which repositories cloud workspaces can use.`);
-          if (next.installation) setActive(next.installation.id);
-          void load();
-        } else if (next.state === "failed") {
-          setError(attemptErrorMessage(next.errorCode));
-        } else if (ATTEMPT_END_MESSAGE[next.state]) {
-          setNotice(ATTEMPT_END_MESSAGE[next.state]!);
-        }
-      } catch (failure) {
-        if (!current()) return;
-        // A network blip keeps polling; anything else ends the attempt.
-        if (githubAppErrorCode(failure) === "github_app_request_failed") {
-          setAttempt({ ...attempt });
-        } else {
-          setAttempt(null);
-          setError(githubAppErrorMessage(failure));
-        }
+  const connectAttempt = useGithubConnectAttempt({
+    pollIntervalMs,
+    onEnd: (outcome: AttemptOutcome | null, ended) => {
+      if (!outcome) return;
+      if (outcome.kind === "error") setError(outcome.message);
+      else setNotice(outcome.message);
+      if (outcome.kind === "connected") {
+        if (ended?.installation) setActive(ended.installation.id);
+        void load();
       }
-    }, pollIntervalMs);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [attempt, load, pollIntervalMs]);
+    },
+  });
+  const { attempt, waiting } = connectAttempt;
 
   // `{ value }` on success: a command that returns nothing resolves to null, which must not read as a failure.
   const act = async <T,>(key: Exclude<Busy, null>, run: (revision: string) => Promise<T>): Promise<{ value: T } | null> => {
@@ -291,27 +259,11 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INT
 
   const connect = async () => {
     const started = await act("connect", (revision) => organizationGithubApp.connect(revision));
-    if (started) {
-      attemptSeq.current += 1;
-      setAttempt(started.value);
-    }
+    if (started) connectAttempt.start(started.value);
   };
 
-  const cancelAttempt = async () => {
-    if (!attempt) return;
-    attemptSeq.current += 1;
-    const canceled = await act("cancel", (revision) => organizationGithubApp.cancelAttempt(attempt.attemptId, revision));
-    const ended = canceled?.value;
-    // A poll can start while the cancel is in flight; its "waiting" answer must not put the attempt back.
-    attemptSeq.current += 1;
-    if (!ended) {
-      setAttempt((shown) => (shown ? { ...shown } : shown));
-    } else {
-      setAttempt(ended.state === "waiting" ? null : ended);
-      if (ended.state === "connected") void load();
-      else setNotice(ATTEMPT_END_MESSAGE.canceled!);
-    }
-  };
+  const cancelAttempt = () =>
+    connectAttempt.cancel((attemptId) => act("cancel", (revision) => organizationGithubApp.cancelAttempt(attemptId, revision)));
 
   const openOnGithub = (url: string) => {
     void organizationGithubApp.open(url).catch((failure) => {
@@ -382,9 +334,8 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = POLL_INT
   };
 
   const manageUrl = (active && (lists[active]?.live?.manageUrl ?? connected.find((installation) => installation.id === active)?.manageUrl)) || connected.find((installation) => installation.manageUrl)?.manageUrl;
-  const waiting = attempt?.state === "waiting";
 
-  const waitingPanel = waiting && (
+  const waitingPanel = waiting && attempt && (
     <div className="rounded-lg bg-well p-3 text-[12.5px]" role="status">
       <div className="flex items-start gap-2 text-muted-foreground">
         <Loader2 className="mt-0.5 size-3.5 shrink-0 animate-spin" />

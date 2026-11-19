@@ -174,7 +174,7 @@ const MAX_PENDING_LINKS: usize = 8;
 
 /// Why a link of this build's scheme cannot be followed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "reason", rename_all = "camelCase")]
+#[serde(tag = "reason", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum LinkProblem {
     /// The link names a route TerminalX has not got (`terminalx://sesion/…`).
     UnknownRoute { route: String },
@@ -191,12 +191,11 @@ pub enum LinkProblem {
 /// and one router in the webview. Auth callbacks, launch and join links are
 /// not routes: they are handled natively and never reach it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DesktopLink {
     Settings(SettingsLink),
     Tab(TabLink),
     /// `session/<id>`: show that session as it was last left.
-    #[serde(rename_all = "camelCase")]
     Session { session_id: String },
     /// `new?project=&branch=&prompt=` or `new?linear=<id>`: a new session,
     /// which the webview starts only after the person says yes. A missing

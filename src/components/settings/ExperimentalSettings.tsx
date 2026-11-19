@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { Switch } from "@/components/ui/controls";
 import { errorMessage, experimental, type ExperimentalSettings } from "@/lib/api";
 import { noteExperimentalSettings } from "@/lib/experimentalSettings";
+import { refreshModels } from "@/lib/models";
+import { refreshHarnesses } from "@/lib/sessions";
 
 export { NATIVE_CODEX_DESCRIPTION, ORCHESTRATOR_RUNS_DESCRIPTION } from "./settingsRegistry";
 
@@ -15,6 +17,7 @@ export function ExperimentalTab() {
   const [sessionCost, setSessionCost] = useState<boolean | null>(null);
   const [orchestratorRuns, setOrchestratorRuns] = useState<boolean | null>(null);
   const [localVmTasks, setLocalVmTasks] = useState<boolean | null>(null);
+  const [openCode, setOpenCode] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -27,6 +30,7 @@ export function ExperimentalTab() {
         setSessionCost(settings?.sessionCost ?? false);
         setOrchestratorRuns(settings?.orchestratorRuns ?? false);
         setLocalVmTasks(settings?.localVmTasks ?? false);
+        setOpenCode(settings?.opencode ?? false);
       })
       .catch((e: unknown) => {
         if (!live) return;
@@ -44,7 +48,8 @@ export function ExperimentalTab() {
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean; orchestratorRuns?: boolean; localVmTasks?: boolean }>("experimental_settings_changed", (event) => {
+    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean; orchestratorRuns?: boolean; localVmTasks?: boolean; opencode?: boolean }>("experimental_settings_changed", (event) => {
+      if (live && typeof event.payload?.opencode === "boolean") setOpenCode(event.payload.opencode);
       if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
       if (live && typeof event.payload?.sessionCost === "boolean") setSessionCost(event.payload.sessionCost);
       if (live && typeof event.payload?.orchestratorRuns === "boolean") setOrchestratorRuns(event.payload.orchestratorRuns);
@@ -100,6 +105,22 @@ export function ExperimentalTab() {
     }
   };
 
+  const changeOpenCode = async (on: boolean) => {
+    const before = openCode;
+    setOpenCode(on);
+    setError(null);
+    try {
+      const saved = await experimental.setOpenCode(on);
+      setOpenCode(saved.opencode ?? false);
+      noteExperimentalSettings(saved);
+      // Settings → Agents, the agent pickers and the model picker offer OpenCode, or stop offering it, at once (PRO-157).
+      await Promise.all([refreshHarnesses(), refreshModels()]);
+    } catch (e) {
+      setOpenCode(before);
+      setError(errorMessage(e));
+    }
+  };
+
   const changeSessionCost = async (on: boolean) => {
     const before = sessionCost;
     setSessionCost(on);
@@ -127,6 +148,9 @@ export function ExperimentalTab() {
       />
       <RegisteredSetting setting="experimental.localVmTasks"
         control={<Switch aria-label="Local VM tasks" checked={localVmTasks ?? false} disabled={localVmTasks === null} onCheckedChange={(on) => void changeLocalVmTasks(on)} />}
+      />
+      <RegisteredSetting setting="experimental.opencode"
+        control={<Switch aria-label="OpenCode" checked={openCode ?? false} disabled={openCode === null} onCheckedChange={(on) => void changeOpenCode(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
