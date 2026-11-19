@@ -6525,8 +6525,12 @@ pub fn set_experimental_settings(
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
     local_vm_tasks: Option<bool>,
+    opencode: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
+    if let Some(on) = opencode {
+        settings.experimental.opencode = on;
+    }
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
     }

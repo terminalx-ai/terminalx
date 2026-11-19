@@ -115,6 +115,7 @@ pub(super) static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
 
 // These object keys are user-defined, rather than settings field names.
 pub(super) static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
+    ("agents.executables", Value::String(String::new())),
     ("mergedCleanup.projects", Value::Bool(false)),
     ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "triesPerPiece": 0, "effortCeiling": "", "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
     ("preferences.shortcuts", serde_json::json!([""])),
