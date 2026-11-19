@@ -34,6 +34,7 @@ import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { LayeredConfiguration } from "./LayeredConfiguration";
 import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
+import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
 
 export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   const prefs = usePrefs();
@@ -230,6 +231,7 @@ export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
       <RegisteredSetting setting="general.useWorktree"
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />
+      <CopyAgentConfigsRow />
       <QuickChatSettings />
       <LocalRuntimeSettings />
       <RegisteredSetting setting="general.startupDiagnostics" control={<Button variant="outline" size="sm" onClick={openStartupDiagnostics}>Inspect startup</Button>} />
