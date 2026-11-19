@@ -119,8 +119,12 @@ function useExpired(key: string): Expired[] {
   );
 }
 
-/** The forwards as they now are: one seen before that went (same port, same address) has expired; one open again is no longer expired. */
-function observe(key: string, next: readonly CloudPortForward[]) {
+/**
+ * The forwards as they now are: one seen before that went (same port, same address) has expired; one open again is no longer expired.
+ * The header's chip reports them too, being drawn while the views are not: a port forwarded automatically and
+ * closed again with both hidden is otherwise never seen, and so never expired.
+ */
+export function observe(key: string, next: readonly CloudPortForward[]) {
   const before = memory.get(key) ?? { seen: [], expired: [] };
   const gone = before.seen.filter((old) => !next.some((forward) => forward.port === old.port && forward.localPort === old.localPort));
   const expired = [...before.expired.filter((entry) => !gone.some((old) => old.port === entry.port)), ...gone.map(({ port, localPort }) => ({ port, localPort }))]

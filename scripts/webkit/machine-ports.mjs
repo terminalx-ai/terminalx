@@ -316,8 +316,8 @@ for (const colorScheme of ["light", "dark"]) {
     const struck = await tab.locator('[data-port="8787"] .line-through').textContent().catch(() => null);
     failed += report(`ports tab (${colorScheme})`, {
       "its header is Ports and previews with Forwarding": /Ports and previews/.test(words) && (await tab.getByRole("switch", { name: "Forwarding" }).count()) === 1,
-      "FORWARDED has the open and the expired forward": (await tab.getByRole("region", { name: "Forwarded" }).locator('[data-testid="cloud-port"]').count()) === 2,
-      "NOT FORWARDED has the rest": (await tab.getByRole("region", { name: "Not forwarded" }).locator('[data-testid="cloud-port"]').count()) === 2,
+      "FORWARDED has the open and the expired forward": (await tab.getByRole("region", { name: "Forwarded", exact: true }).locator('[data-testid="cloud-port"]').count()) === 2,
+      "NOT FORWARDED has the rest": (await tab.getByRole("region", { name: "Not forwarded", exact: true }).locator('[data-testid="cloud-port"]').count()) === 2,
       "the expired address is struck through, with Start again": struck === "127.0.0.1:8787" && (await tab.locator('[data-port="8787"]').getByRole("button", { name: "Start again" }).count()) === 1,
       "the port field names Mac mini and keeps the number": (await tab.getByRole("textbox", { name: "Port on Mac mini" }).count()) === 1 && /Same port number on this Mac/.test(words),
       "no signed-in preview link": !/preview link|Signed-in/i.test(words),
