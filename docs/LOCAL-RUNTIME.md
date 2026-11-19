@@ -212,17 +212,14 @@ agent took it) and `shown` (the window's `drawn_at`, `answered_at` and
 
 Background duties include the automation scheduler, pipeline runtime observer,
 paired-device admission and writes, notification decisions and tray count/actions.
-Phones are served by the window while it is open. With "Let other computers
-operate this Mac" on, the runtime serves them itself while no window does: with
-the window closed, or on a headless server (PRO-359, `docs/MACHINES.md`). With
-it off, phones cannot connect while the desktop is closed, but pending provider
-questions remain in the owner. Closing the window revokes its mobile attachment
-and undelivered mobile permits. The window owns
-the direct endpoint (TCP 6768) unless "Let other computers operate this Mac"
-(`machines.allowOperating`) is on. Then the runtime owns it: it serves operating
-computers on `/machine/1` itself, with the window open or closed, and passes
-every other connection to the window over a private Unix socket the window
-registers, so phones work as before while the window is open
+Phones are served by the window while it is open. Existing phone pairings keep
+the runtime available after the window closes, including on a Mac with computer
+operation off. The runtime also serves phones on a headless server (PRO-359,
+`docs/MACHINES.md`). Closing the window revokes its mobile attachment and
+undelivered mobile permits. The runtime holds the direct endpoint (TCP 6768)
+when it hosts phones or operating computers. It serves `/machine/1` only while
+`machines.allowOperating` is on and passes phone connections to the window
+while its private Unix socket route is registered
 ([MACHINES.md](MACHINES.md), decision 4 and "How PRO-341 builds it";
 `src-tauri/src/machine_wire.rs`).
 

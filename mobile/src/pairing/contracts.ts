@@ -6,6 +6,7 @@ export const PAIRING_OFFER_VERSION = 2;
 export const RELAY_PROTOCOL_VERSION = 1;
 export const MOBILE_E2EE_VERSION = 2;
 export const ACCOUNT_PAIRING_CAPABILITY = "account-bound-host-pairing.v1";
+export const HEADLESS_PHONE_PAIRING_CAPABILITY = "headless-phone-pairing.v1";
 export const ACCOUNT_PAIRING_HPKE_ALGORITHM = "HPKE-Base-X25519-HKDF-SHA256-ChaCha20Poly1305";
 export const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
 export const RECONNECT_TRICKLE_MS = 90_000;
