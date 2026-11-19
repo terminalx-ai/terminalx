@@ -25,7 +25,8 @@ vi.mock("./relay-client", async (importOriginal) => {
       if (mocks.opening.has(path)) this.setState("handshaking");
       return new Promise<void>((resolve, reject) => { this.reject = reject; this.finish = () => { this.setState("connected"); resolve(); }; });
     }
-    close() { this.setState("disconnected"); this.reject?.(new Error("Connection refused")); }
+    closedWith?: number;
+    close(code?: number) { this.closedWith ??= code; this.setState("disconnected"); this.reject?.(new Error("Connection refused")); }
     /** The socket closed under a connected client, with what ended it. */
     drop(cause: Error) { this.setState("disconnected", cause); }
     setState(state: string, cause?: Error) { this.state = state; for (const listener of this.listeners) listener(state, cause); }
@@ -162,6 +163,8 @@ describe("host path recovery", () => {
     mocks.reachable.clear(); mocks.hang = true;
     await vi.advanceTimersByTimeAsync(30_000); await flush();
     expect(first.state).toBe("disconnected");
+    // So the Mac records a probe that went unanswered, not a phone that left (#1282).
+    expect(first.closedWith).toBe(4001);
     expect(mocks.clients.length).toBeGreaterThan(3);
   });
 });
@@ -200,6 +203,19 @@ describe("background and foreground", () => {
     const writes = mocks.writes.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000); await flush();
     expect(mocks.writes.mock.calls.length).toBeGreaterThan(writes);
+  });
+
+  it("closes a connection that does not answer on return as a probe timeout, and makes another", async () => {
+    await up();
+    const before = live()[0];
+    connection.background();
+    mocks.hang = true;
+    expect(connection.foreground()).toBe(true);
+    await flush();
+    expect(before.state).toBe("disconnected");
+    // The Mac records an unanswered probe, not a phone that left (#1282).
+    expect(before.closedWith).toBe(4001);
+    expect(mocks.clients.length).toBeGreaterThan(1);
   });
 
   it("tries nothing from the background, and reconnects once, unseen, on return", async () => {

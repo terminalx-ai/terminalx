@@ -4,6 +4,7 @@ import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
 import { PAIRING_APPROVAL_WAIT_MS, PairingNotApprovedError, RelayClient, RelayOuterError } from "./relay-client";
+import { PHONE_CLOSE } from "./phone-close";
 import { MAC_NEEDS_UPDATE } from "./refusal";
 import { encodeFragments, RELAY_MESSAGE_BYTES_LIMIT, textPlaintextLimit } from "./wire";
 
@@ -17,9 +18,11 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   onclose: ((event: { code: number; reason?: string; wasClean?: boolean }) => void) | null = null;
   sent: unknown[] = [];
+  /** The code this side closed with. */
+  closedWith?: number;
 
   send(value: unknown) { this.sent.push(value); }
-  close() { this.readyState = 3; }
+  close(code?: number) { this.readyState = 3; this.closedWith = code; }
 }
 
 describe("direct E2EE transport", () => {
@@ -45,6 +48,43 @@ describe("direct E2EE transport", () => {
 
     client.close();
     await expect(connecting).rejects.toThrow("Relay connection closed");
+    expect(socket.closedWith).toBe(PHONE_CLOSE.closed);
+  });
+});
+
+// #1282: the Mac records why a phone's session ended from the code it closed with.
+describe("the code the phone closes with", () => {
+  const open = () => {
+    const socket = new FakeSocket();
+    const client = new RelayClient({
+      transport: "direct",
+      endpoint: "ws://192.0.2.10:4040",
+      deviceToken: "device-token",
+      desktopPublicKeyB64: btoa(String.fromCharCode(...new Uint8Array(32).fill(4))),
+      createSocket: () => socket as unknown as WebSocket,
+    });
+    const connecting = client.connect().catch((error: unknown) => error);
+    socket.onopen?.();
+    return { socket, client, connecting };
+  };
+
+  it("says why it closed on purpose", async () => {
+    const { socket, client, connecting } = open();
+    client.close(PHONE_CLOSE.probeTimeout);
+    await connecting;
+    expect(socket.closedWith).toBe(4001);
+  });
+
+  it("says a failure on this side was one", async () => {
+    const { socket, connecting } = open();
+    // Not the Mac's handshake reply: the phone gives up on the connection.
+    socket.onmessage?.({ data: "not a handshake" });
+    await expect(connecting).resolves.toBeInstanceOf(Error);
+    expect(socket.closedWith).toBe(4002);
+  });
+
+  it("matches the codes the Mac reads (src-tauri/src/phone/mod.rs)", () => {
+    expect(PHONE_CLOSE).toEqual({ closed: 4000, probeTimeout: 4001, failed: 4002 });
   });
 });
 

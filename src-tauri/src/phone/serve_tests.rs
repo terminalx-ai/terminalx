@@ -6,7 +6,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::DuplexStream;
-use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use super::*;
@@ -166,10 +166,34 @@ async fn a_phone_stays_connected_to_a_busy_mac_through_a_slow_request() {
     // The connection still answers.
     phone.request("after", "status.get").await;
     while phone.read().await.expect("still connected")["id"] != "after" {}
-    phone.socket.close(None).await.unwrap();
+    phone.socket.close(Some(CloseFrame { code: 4000.into(), reason: "".into() })).await.unwrap();
     let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
-    assert_eq!(ended.reason, EndReason::PhoneClosed);
-    assert_eq!(ended.close_code, None);
+    assert_eq!(ended, Ended { reason: EndReason::PhoneClosed, close_code: Some(4000) });
+}
+
+/// #1282: a close frame says who ended the session. The phone app closes with
+/// its own code, which the relay passes through; the relay closes with its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_frame_records_who_ended_the_session() {
+    for (code, expected) in [
+        (Some(4000), EndReason::PhoneClosed),
+        (Some(1000), EndReason::PhoneClosed),
+        (Some(4001), EndReason::ProbeTimeout),
+        (Some(4002), EndReason::PhoneFailed),
+        (Some(4408), EndReason::RelayClosed),
+        (Some(4413), EndReason::RelayClosed),
+        (Some(4101), EndReason::RelayClosed),
+        (Some(1001), EndReason::Unknown),
+        (None, EndReason::Unknown),
+    ] {
+        let (mut phone, _sink, server, home) = served(Duration::ZERO).await;
+        phone.request("first", "status.get").await;
+        while phone.read().await.expect("connected")["id"] != "first" {}
+        phone.socket.close(code.map(|code| CloseFrame { code: code.into(), reason: "".into() })).await.unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended, Ended { reason: expected, close_code: code }, "close code {code:?}");
+        drop(home);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

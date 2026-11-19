@@ -1163,7 +1163,7 @@ async fn control_loop(
                             match manager.clone().handle_relay_connection(cell, host_id, generation, keypair, connection).await {
                                 Ok(ended) => {
                                     log::info!("phone session ended: {:?} close_code={:?}", ended.reason, ended.close_code);
-                                    manager.record_phone_end(Event::PhoneClosed, 0, None, Some(ended))
+                                    manager.record_phone_end(Event::PhoneEnded, 0, None, Some(ended))
                                 }
                                 Err(error) => manager.record_relay_diagnostic(Event::PhoneFailed, 0, Some(Failure::from_error(&error))),
                             }

@@ -2,6 +2,7 @@ import type { RpcCallResult, RpcErrorData } from "@terminalx/portable/rpc";
 import { plainRefusal } from "./refusal";
 import { PairingGetEndpointsResultSchema, RelayPhoneHelloSchema, type DeviceResumeConfirmed, type PairingRelay } from "../pairing/contracts";
 import { MobileE2EESession } from "./e2ee-session";
+import { PHONE_CLOSE, type PhoneCloseCode } from "./phone-close";
 import { secureRandom } from "./random";
 import { decodeTerminalFrame } from "./terminal-stream";
 import { delivery, encodeFragments, FragmentAssembler, FRAGMENTS_VERSION, isFragment, MessageTooLargeError } from "./wire";
@@ -209,8 +210,9 @@ export class RelayClient {
     return this.resumeConfirmation;
   }
 
-  close(): void {
-    this.fail(new Error("Relay connection closed"));
+  /** `code` tells the Mac why (`PHONE_CLOSE`, #1282). */
+  close(code: PhoneCloseCode = PHONE_CLOSE.closed): void {
+    this.fail(new Error("Relay connection closed"), code);
   }
 
   /** The reason of a `pairing_refused` the Mac sent on this connection. */
@@ -305,7 +307,8 @@ export class RelayClient {
     if (isEvent(value)) for (const listener of this.listeners) listener(value);
   }
 
-  private fail(cause: Error): void {
+  /** `code` is what the socket closes with, when it is still open: a failure on this side unless `close` said otherwise. */
+  private fail(cause: Error, code: PhoneCloseCode = PHONE_CLOSE.failed): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
     const error = this.refusal !== null && !(cause instanceof PairingNotApprovedError) ? new PairingNotApprovedError(this.refusal) : cause;
     this.setState("disconnected", error);
@@ -325,7 +328,7 @@ export class RelayClient {
     this.streams.clear();
     this.terminalStreams.clear();
     this.terminalSnapshots.clear();
-    socket?.close();
+    socket?.close(code);
   }
 
   private sendRequestFrame(id: string, method: string, params?: unknown): void {
