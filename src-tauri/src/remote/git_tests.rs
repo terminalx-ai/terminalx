@@ -251,7 +251,13 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     let project = f.clone(&origin, "app");
     let checkout = project.join("worktrees/topic");
     git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
-    f.clone(&origin, "other");
+    let other = f.clone(&origin, "other");
+    git(&other, &["config", "--local", "core.hooksPath", ".git/destination-hooks"]);
+    let destination_hooks = other.join(".git/destination-hooks");
+    std::fs::create_dir(&destination_hooks).unwrap();
+    let destination_hook = destination_hooks.join("commit-msg");
+    std::fs::write(&destination_hook, "#!/bin/sh\nprintf 'destination hook ran\\n' > hook-ran\n").unwrap();
+    std::fs::set_permissions(&destination_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
     let head = git(&checkout, &["rev-parse", "HEAD"]);
     git(&project, &["config", "--local", "extensions.worktreeConfig", "true"]);
@@ -260,20 +266,23 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     git(&project, &["config", "--local", "commit.cleanup", "verbatim"]);
     git(&checkout, &["config", "--worktree", "commit.cleanup", "strip"]);
 
-    let hooks = f.base.join("configured hooks");
+    let hooks = f.root.join("configured hooks");
     std::fs::create_dir(&hooks).unwrap();
-    git(&checkout, &["config", "--worktree", "core.hooksPath", hooks.to_str().unwrap()]);
+    git(&checkout, &["config", "--worktree", "core.hooksPath", "../../../configured hooks"]);
     let hook = hooks.join("pre-commit");
     std::fs::write(&hook, concat!(
         "#!/bin/sh\nset -eu\n",
         "test \"$(git config --show-scope --get-all terminalx.scopeTest)\" = ",
         "\"$(printf 'local\\tfrom-local\\nworktree\\tfrom-worktree')\"\n",
+        "test \"$(git config --show-scope --get core.hooksPath)\" = ",
+        "\"$(printf 'worktree\\t../../../configured hooks')\"\n",
         // Move to another checkout without clearing command-scope configuration.
         "unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY\n",
         "git -C ../../../other rev-parse --is-inside-work-tree >/dev/null\n",
         "status=0\n",
         "git -C ../../../other config --get-all terminalx.scopeTest || status=$?\n",
         "test \"$status\" = 1\n",
+        "git -C ../../../other -c commit.gpgsign=false commit --allow-empty -qm 'check destination hook'\n",
         "printf 'hook ran\\n' > hook-ran\n",
     )).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -289,6 +298,7 @@ fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
     assert_eq!(git(&checkout, &["rev-parse", "HEAD^"]), head);
     assert_eq!(git(&checkout, &["log", "-1", "--format=%B"]), "work");
     assert_eq!(std::fs::read_to_string(checkout.join("hook-ran")).unwrap(), "hook ran\n");
+    assert_eq!(std::fs::read_to_string(other.join("hook-ran")).unwrap(), "destination hook ran\n");
 }
 
 #[cfg(unix)]

@@ -1114,19 +1114,20 @@ impl WorkspaceGit {
         // Git assigns includes the scope of the file that loads them. Include
         // from the private repository's config files and keep relative includes
         // anchored at the original files.
-        let include_config = |file: &Path, source: &Path| {
+        let set_config = |file: &Path, key: &str, value: &Path| {
             let mut command = git_command(&repo.dir);
-            command.args(["config", "--file"]).arg(file).arg("include.path").arg(source);
+            command.args(["config", "--file"]).arg(file).arg(key).arg(value);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
                 return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
             }
             Ok(())
         };
-        include_config(&config, &common.join("config"))?;
+        set_config(&config, "include.path", &common.join("config"))?;
         let worktree_config = git_dir.join("config.worktree");
+        let private_worktree_config = scratch.path().join("config.worktree");
         if include_worktree && worktree_config.is_file() {
-            include_config(&scratch.path().join("config.worktree"), &worktree_config)?;
+            set_config(&private_worktree_config, "include.path", &worktree_config)?;
         }
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
@@ -1134,16 +1135,13 @@ impl WorkspaceGit {
             std::fs::copy(sparse_config, scratch.path().join("info/sparse-checkout")).map_err(RpcError::internal)?;
         }
 
-        let hooks = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
-        let hooks_config = format!("core.hooksPath={}", hooks.display());
-
         let run = |args: &[&str]| {
             let mut command = git_command(&repo.dir);
             command.env("GIT_DIR", scratch.path()).env_remove("GIT_COMMON_DIR")
                 .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
                 .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
                 .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email);
-            command.args(["-c", &hooks_config, "-c", "core.bare=false", "-c", "core.splitIndex=false",
+            command.args(["-c", "core.bare=false", "-c", "core.splitIndex=false",
                 "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
@@ -1151,6 +1149,16 @@ impl WorkspaceGit {
             }
             Ok(result.stdout)
         };
+        // Keep configured hooks in their original scope. If the private Git
+        // directory changes hook resolution (including the default hooks
+        // directory), pin the real path in the private repository's config.
+        let hooks_args = ["rev-parse", "--path-format=absolute", "--git-path", "hooks"];
+        let hooks = path(&hooks_args)?;
+        let private_hooks = run(&hooks_args)?;
+        if Path::new(private_hooks.strip_suffix('\n').unwrap_or(&private_hooks)) != hooks {
+            let hooks_config = if include_worktree { &private_worktree_config } else { &config };
+            set_config(hooks_config, "core.hooksPath", &hooks)?;
+        }
         run(&["add", "-A", "--", "."])?;
         if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
             return Err(RpcError::invalid("nothing to commit"));
