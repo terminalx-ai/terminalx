@@ -205,9 +205,10 @@ fn commit_and_push_refuse_a_changed_checkout_or_head() {
     assert_eq!(f.code("git.commitForPush", params.clone()), "conflict");
     assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
     git(&checkout, &["checkout", "-q", "main"]);
-    let commit = f.call("git.commitForPush", params).unwrap();
+    let commit = f.call("git.commitForPush", params.clone()).unwrap();
     assert_eq!(commit["branch"], "main");
     assert_ne!(commit["commit"], head);
+    assert_eq!(f.code("git.commitForPush", params), "conflict");
     let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
     assert_eq!(f.code("git.pushHead", push(json!(head))), "conflict");
     assert_eq!(f.code("git.pushHead", json!({ "repo": "app", "branch": "main" })), "invalid_params");
@@ -240,6 +241,96 @@ fn guarded_commit_hooks_see_the_named_branch_and_branch_specific_config() {
     assert_eq!(result["branch"], "main");
     assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
     assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_requires_checkout_path_signing_in_a_linked_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for condition in ["gitdir:./worktrees/topic", "gitdir/i:./WORKTREES/TOPIC"] {
+        let f = fixture();
+        let origin = f.remote("origin");
+        let project = f.clone(&origin, "app");
+        let checkout = project.join("worktrees/topic");
+        git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+        let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+
+        git(&project, &["config", &format!("includeIf.{condition}.path"), "signing.conf"]);
+        std::fs::write(project.join(".git/signing.conf"), "[commit]\n\tgpgSign = true\n[gpg]\n\tformat = openpgp\n").unwrap();
+        git(&project, &["config", "extensions.worktreeConfig", "true"]);
+        git(&checkout, &["config", "--worktree", "user.signingKey", "topic-key"]);
+        git(&checkout, &["config", "--worktree", "gpg.openpgp.program", "./fail-signing"]);
+        let signing = git_command(&checkout).args(["config", "--show-scope", "--get", "commit.gpgSign"]).output().unwrap();
+        assert!(signing.status.success(), "{condition}");
+        assert_eq!(signing.stdout, b"local\ttrue\n", "{condition}");
+
+        let hook = project.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, concat!(
+            "#!/bin/sh\nset -eu\n",
+            "test \"$(git config --show-scope --get commit.gpgSign)\" = 'local\ttrue'\n",
+            "test \"$(git config --show-scope --get user.signingKey)\" = 'worktree\ttopic-key'\n",
+        )).unwrap();
+        let signer = checkout.join("fail-signing");
+        std::fs::write(&signer, "#!/bin/sh\nprintf '%s\\n' \"$@\" > signing-attempt\nexit 1\n").unwrap();
+        for executable in [&hook, &signer] {
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        std::fs::write(checkout.join("staged"), "staged\n").unwrap();
+        git(&checkout, &["add", "staged"]);
+        let index = git(&checkout, &["ls-files", "--stage"]);
+        let params = json!({
+            "repo": "worktrees/topic", "message": "work", "author": me(),
+            "expectedBranch": "topic", "expectedHead": head
+        });
+        let error = runtime.handle("git.commitForPush", &params).unwrap().unwrap_err();
+        assert_eq!(error.code, "git_failed", "{condition}: {error:?}");
+        let signing = std::fs::read_to_string(checkout.join("signing-attempt")).expect("Git invoked the checkout's signer");
+        assert!(signing.lines().any(|arg| arg == "topic-key"), "{condition}: {signing}");
+        assert_eq!(git(&checkout, &["rev-parse", "refs/heads/topic"]), head);
+        assert_eq!(git(&project, &["rev-parse", "refs/heads/main"]), head);
+        assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+        assert_eq!(git(&checkout, &["symbolic-ref", "HEAD"]), "refs/heads/topic");
+        assert!(!project.join(".git/worktrees/topic/index.lock").exists());
+    }
+}
+
+#[test]
+fn guarded_commit_config_keeps_checkout_only_global_entries_conditional() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let global = f.base.join("global.conf");
+    std::fs::write(&global, concat!(
+        "[terminalx]\n\tvalue = before\n",
+        "[includeIf \"gitdir:./workspace/app/.git\"]\n\tpath = matching.conf\n",
+        "[terminalx]\n\tvalue = after\n",
+    )).unwrap();
+    std::fs::write(f.base.join("matching.conf"), "[terminalx]\n\tvalue = included\n[safe]\n\tdirectory = *\n").unwrap();
+    let scratch = f.base.join("scratch");
+    let private = scratch.join("repo");
+    std::fs::create_dir_all(&private).unwrap();
+    git(&private, &["init", "-q", "--bare"]);
+    let checkout_git = || {
+        let mut command = git_command(&checkout);
+        command.env("GIT_CONFIG_GLOBAL", &global).env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS");
+        command
+    };
+    snapshot_commit_config(checkout_git, &scratch, "sha1", false).unwrap();
+
+    let read_values = |git_dir: &Path, key: &str| {
+        let mut command = checkout_git();
+        command.env("GIT_CONFIG_GLOBAL", scratch.join("config.global"))
+            .env("GIT_DIR", git_dir).args(["config", "--show-scope", "--get-all", key]);
+        command.output().unwrap()
+    };
+    assert_eq!(read_values(&private, "terminalx.value").stdout, b"global\tbefore\nglobal\tincluded\nglobal\tafter\n");
+    let outside = scratch.join("no-repository");
+    assert_eq!(read_values(&outside, "terminalx.value").stdout, b"global\tbefore\nglobal\tafter\n");
+    assert_eq!(read_values(&outside, "safe.directory").status.code(), Some(1));
 }
 
 #[cfg(unix)]

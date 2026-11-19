@@ -73,9 +73,9 @@ struct Repo {
 }
 
 /// What one Git or `gh` process did.
-pub(super) struct Ran {
+pub(super) struct Ran<T = String> {
     pub(super) ok: bool,
-    pub(super) stdout: String,
+    pub(super) stdout: T,
     stderr: String,
     timed_out: bool,
 }
@@ -175,7 +175,11 @@ fn failure_error(what: &str, text: &str, failure: Failure) -> RpcError {
     }
 }
 
-pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> {
+pub(super) fn run_bounded(command: Command, timeout: Duration) -> std::io::Result<Ran> {
+    run_bounded_with_stdout(command, timeout, |bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn run_bounded_with_stdout<T: Default>(mut command: Command, timeout: Duration, decode: impl FnOnce(Vec<u8>) -> T) -> std::io::Result<Ran<T>> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
@@ -191,7 +195,7 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut buffer);
             }
-            let _ = sender.send(String::from_utf8_lossy(&buffer).into_owned());
+            let _ = sender.send(buffer);
         });
         receiver
     };
@@ -200,7 +204,7 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     let deadline = Instant::now() + timeout;
     // A grandchild (an SSH master, a helper's daemon) can keep the pipes open
     // after the child exits: its output is waited for only until the deadline.
-    let collect = |receiver: std::sync::mpsc::Receiver<String>| {
+    let collect = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| {
         receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(50))).unwrap_or_default()
     };
     let status = loop {
@@ -221,13 +225,144 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     match status {
         Some(status) => Ok(Ran {
             ok: status.success(),
-            stdout: collect(stdout),
-            stderr: collect(stderr),
+            stdout: decode(collect(stdout)),
+            stderr: String::from_utf8_lossy(&collect(stderr)).into_owned(),
             timed_out: false,
         }),
         // A grandchild may still hold the pipes; the readers finish on their own.
-        None => Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }),
+        None => Ok(Ran { ok: false, stdout: T::default(), stderr: String::new(), timed_out: true }),
     }
+}
+
+fn read_commit_config(mut command: Command) -> Result<Vec<u8>, RpcError> {
+    command.env_remove("GIT_CONFIG").args(["config", "--includes", "--null", "--show-scope", "--list"]);
+    let result = run_bounded_with_stdout(command, LOCAL_TIMEOUT, std::convert::identity).map_err(RpcError::internal)?;
+    if !result.ok {
+        let detail = if result.timed_out { "timed out" } else { result.stderr.trim() };
+        return Err(failure_error("read checkout config", detail, Failure::Other));
+    }
+    Ok(result.stdout)
+}
+
+type ConfigEntry<'a> = (&'a [u8], &'a [u8]);
+
+fn config_entries(listing: &[u8]) -> Result<Vec<ConfigEntry<'_>>, RpcError> {
+    let mut fields = listing.split_inclusive(|&byte| byte == 0);
+    let mut entries = Vec::new();
+    while let Some(scope) = fields.next() {
+        let entry = fields.next().and_then(|field| field.strip_suffix(b"\0"))
+            .ok_or_else(|| RpcError::internal("Invalid Git config listing"))?;
+        let key = entry.split(|&byte| byte == b'\n').next().unwrap_or_default();
+        // Apple Git reads its bundled defaults separately from GIT_CONFIG_SYSTEM.
+        if scope == b"unknown\0" {
+            continue;
+        }
+        // Git followed these directives in their original locations already.
+        if key != b"include.path" && !(key.starts_with(b"includeif.") && key.ends_with(b".path")) {
+            entries.push((scope, entry));
+        }
+    }
+    Ok(entries)
+}
+
+fn append_config_entry(config: &mut Vec<u8>, entry: &[u8]) -> Result<(), RpcError> {
+    let invalid = || RpcError::internal("Invalid Git config entry");
+    let mut parts = entry.splitn(2, |&byte| byte == b'\n');
+    let key = parts.next().ok_or_else(invalid)?;
+    let value = parts.next();
+    let first_dot = key.iter().position(|&byte| byte == b'.').ok_or_else(invalid)?;
+    let last_dot = key.iter().rposition(|&byte| byte == b'.').ok_or_else(invalid)?;
+    config.push(b'[');
+    config.extend_from_slice(&key[..first_dot]);
+    if first_dot != last_dot {
+        config.extend_from_slice(b" \"");
+        for &byte in &key[first_dot + 1..last_dot] {
+            if matches!(byte, b'"' | b'\\') {
+                config.push(b'\\');
+            }
+            config.push(byte);
+        }
+        config.push(b'"');
+    }
+    config.extend_from_slice(b"]\n\t");
+    config.extend_from_slice(&key[last_dot + 1..]);
+    if let Some(value) = value {
+        config.extend_from_slice(b" = \"");
+        for &byte in value {
+            match byte {
+                b'\n' => config.extend_from_slice(b"\\n"),
+                b'\t' => config.extend_from_slice(b"\\t"),
+                8 => config.extend_from_slice(b"\\b"),
+                b'"' | b'\\' => config.extend_from_slice(&[b'\\', byte]),
+                _ => config.push(byte),
+            }
+        }
+        config.push(b'"');
+    }
+    config.push(b'\n');
+    Ok(())
+}
+
+/// Resolve includes in the real checkout and replay each Git scope in order.
+/// Git's protected-config reader has no repository context, so entries that
+/// require one must still be conditional in the private config.
+fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, object_format: &str, include_worktree: bool) -> Result<(), RpcError> {
+    let live = read_commit_config(checkout_git())?;
+    // An explicit, absent GIT_DIR makes git config read only non-repo scopes.
+    let mut outside = checkout_git();
+    outside.env("GIT_DIR", scratch.join("no-repository")).env_remove("GIT_COMMON_DIR");
+    let outside = read_commit_config(outside)?;
+    let entries = config_entries(&live)?;
+    let mut protected = config_entries(&outside)?.into_iter()
+        .filter(|(scope, _)| matches!(*scope, b"system\0" | b"global\0" | b"command\0")).peekable();
+
+    for (scope, file, is_protected) in [
+        (b"system\0".as_slice(), "config.system", true),
+        (b"global\0", "config.global", true),
+        (b"local\0", "repo/config.local", false),
+        (b"worktree\0", "repo/config.worktree-values", false),
+        (b"command\0", "config.command", true),
+    ] {
+        let mut config = Vec::new();
+        let mut conditional = Vec::new();
+        let mut include_number = 0;
+        let mut flush_conditional = |config: &mut Vec<u8>, conditional: &mut Vec<u8>| -> Result<(), RpcError> {
+            if !conditional.is_empty() {
+                let path = format!("{file}.{}", include_number);
+                include_number += 1;
+                std::fs::write(scratch.join(&path), std::mem::take(conditional)).map_err(RpcError::internal)?;
+                config.extend_from_slice(format!("[includeIf \"gitdir:./repo\"]\n\tpath = {path}\n").as_bytes());
+            }
+            Ok(())
+        };
+        for &(_, entry) in entries.iter().filter(|&&(entry_scope, _)| entry_scope == scope) {
+            if is_protected && protected.next_if_eq(&(scope, entry)).is_none() {
+                append_config_entry(&mut conditional, entry)?;
+            } else {
+                flush_conditional(&mut config, &mut conditional)?;
+                append_config_entry(&mut config, entry)?;
+            }
+        }
+        flush_conditional(&mut config, &mut conditional)?;
+        std::fs::write(scratch.join(file), config).map_err(RpcError::internal)?;
+    }
+    if protected.next().is_some() {
+        return Err(RpcError::internal("Git configuration changed while preparing the commit"));
+    }
+
+    // Keep the private repository format independent of the live ref backend.
+    // Git reads these top-level files without includes when discovering the format.
+    let worktree_config = if include_worktree {
+        "\tworktreeConfig = true\n"
+    } else {
+        ""
+    };
+    let config = format!(
+        "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n{worktree_config}[include]\n\tpath = config.local\n"
+    );
+    std::fs::write(scratch.join("repo/config"), config).map_err(RpcError::internal)?;
+    std::fs::write(scratch.join("repo/config.worktree"), "[include]\n\tpath = config.worktree-values\n").map_err(RpcError::internal)?;
+    Ok(())
 }
 
 fn bounded_branch_output(mut command: Command, args: &[&str], deadline: Instant) -> Result<Ran, RpcError> {
@@ -1056,7 +1191,6 @@ impl WorkspaceGit {
         };
         let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
         let git_dir = path(&["rev-parse", "--absolute-git-dir"])?;
-        let common = path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
         let mut lock_path = index.as_os_str().to_owned();
@@ -1079,7 +1213,9 @@ impl WorkspaceGit {
             scratch.permissions(std::fs::Permissions::from_mode(0o700));
         }
         let scratch = scratch.tempdir().map_err(RpcError::internal)?;
-        let staged = scratch.path().join("index");
+        let private = scratch.path().join("repo");
+        std::fs::create_dir(&private).map_err(RpcError::internal)?;
+        let staged = private.join("index");
         if index.exists() {
             std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
             // Expand the split index while Git can still find its shared part.
@@ -1097,23 +1233,15 @@ impl WorkspaceGit {
             _ => return Err(RpcError::internal("Unsupported Git object format")),
         };
         let refs = self.git(repo, &["for-each-ref", "--sort=refname", "--format=%(objectname) %(refname)"])?;
-        std::fs::write(scratch.path().join("packed-refs"), refs).map_err(RpcError::internal)?;
-        let private_ref = scratch.path().join(&reference);
+        std::fs::write(private.join("packed-refs"), refs).map_err(RpcError::internal)?;
+        let private_ref = private.join(&reference);
         std::fs::create_dir_all(private_ref.parent().expect("a branch ref has a parent")).map_err(RpcError::internal)?;
         std::fs::write(private_ref, format!("{head}\n")).map_err(RpcError::internal)?;
-        std::fs::write(scratch.path().join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
-        let config = scratch.path().join("config");
-        let mut format = format!("[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = {object_format}\n");
+        std::fs::write(private.join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
         let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
             .is_ok_and(|value| value.trim() == "true");
-        if include_worktree {
-            format.push_str("\tworktreeConfig = true\n");
-        }
-        std::fs::write(&config, format).map_err(RpcError::internal)?;
+        snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format, include_worktree)?;
 
-        // Git assigns includes the scope of the file that loads them. Include
-        // from the private repository's config files and keep relative includes
-        // anchored at the original files.
         let add_config = |file: &Path, key: &str, value: &Path| {
             let mut command = git_command(&repo.dir);
             command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
@@ -1123,25 +1251,26 @@ impl WorkspaceGit {
             }
             Ok(())
         };
-        add_config(&config, "include.path", &common.join("config"))?;
-        let worktree_config = git_dir.join("config.worktree");
-        let private_worktree_config = scratch.path().join("config.worktree");
-        if include_worktree && worktree_config.is_file() {
-            add_config(&private_worktree_config, "include.path", &worktree_config)?;
-        }
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
-            std::fs::create_dir_all(scratch.path().join("info")).map_err(RpcError::internal)?;
-            std::fs::copy(sparse_config, scratch.path().join("info/sparse-checkout")).map_err(RpcError::internal)?;
+            std::fs::create_dir_all(private.join("info")).map_err(RpcError::internal)?;
+            std::fs::copy(sparse_config, private.join("info/sparse-checkout")).map_err(RpcError::internal)?;
         }
+
+        let mut command_config = std::ffi::OsString::from("include.path=");
+        command_config.push(scratch.path().join("config.command"));
 
         let run = |args: &[&str]| {
             let mut command = git_command(&repo.dir);
-            command.env("GIT_DIR", scratch.path()).env_remove("GIT_COMMON_DIR")
+            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR")
                 .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
+                .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
+                .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
+                .env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")
                 .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
-                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email);
-            command.args(["-c", "core.bare=false", "-c", "core.splitIndex=false",
+                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
+                .arg("-c").arg(&command_config)
+                .args(["-c", "core.bare=false", "-c", "core.splitIndex=false",
                 "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
@@ -1158,10 +1287,10 @@ impl WorkspaceGit {
         if Path::new(private_hooks.strip_suffix('\n').unwrap_or(&private_hooks)) != hooks {
             let hooks_config = scratch.path().join("hooks.config");
             add_config(&hooks_config, "core.hooksPath", &hooks)?;
-            let scoped_config = if include_worktree { &private_worktree_config } else { &config };
+            let scoped_config = private.join(if include_worktree { "config.worktree" } else { "config" });
             // A second include loads after the original config. Writing
-            // core.hooksPath directly could put it in the earlier [core] section.
-            add_config(scoped_config, "include.path", &hooks_config)?;
+            // core.hooksPath directly could place it before the snapshot include.
+            add_config(&scoped_config, "include.path", &hooks_config)?;
         }
         run(&["add", "-A", "--", "."])?;
         if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
