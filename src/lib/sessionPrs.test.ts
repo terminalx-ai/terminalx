@@ -194,7 +194,7 @@ it("drops a withdrawn machine link even while the checkout's branch still lists 
   invoke.mockResolvedValue([{ ...reference(b), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } }]);
   let associations = [{ url: b.url, number: b.number, head: b.head, repo: "app", linked: true }];
   const call = vi.fn(async (method: string) => method === "git.prAssociations"
-    ? { associations, withdrawn: associations.length ? [] : [b.url] }
+    ? { associations, branchPrLinks: true }
     : { prs: [b] });
   const mutate = vi.fn();
   const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null, sessionCheckout: true });
@@ -203,7 +203,8 @@ it("drops a withdrawn machine link even while the checkout's branch still lists 
   expect((await sessionPrs(source, sessionId, b.head)).rows).toMatchObject([{ pr: b, current: true }]);
   expect(invoke).not.toHaveBeenCalled();
   associations = [];
-  expect(await sessionPrs(source, sessionId, b.head, undefined, true)).toMatchObject({ rows: [], recoverable: [] });
+  expect(await sessionPrs(source, sessionId, b.head)).toMatchObject({ rows: [], branchPrLinks: true });
+  expect(invoke).not.toHaveBeenCalled();
   expect(mutate).not.toHaveBeenCalled();
 });
 

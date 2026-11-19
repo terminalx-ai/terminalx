@@ -738,73 +738,96 @@ fn machine_pr_creation_records_the_native_session_association() {
 }
 
 #[test]
-fn machine_legacy_pr_recovery_verifies_the_session_branch_and_persists_only_eligible_prs() {
+fn machine_branch_pr_links_are_verified_durable_and_removable() {
     let _home = crate::store::temp_home();
     let mut f = fixture();
     let remote = f.remote("origin");
-    let repo = f.clone(&remote, ".");
+    let root = f.clone(&remote, ".");
     f.git.project = true;
-    git(&repo, &["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
-    git(&repo, &["checkout", "-qb", "feature"]);
-    git(&repo, &["worktree", "add", "-qb", "other", "other"]);
+    git(&root, &["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
+    git(&root, &["worktree", "add", "-qb", "feature", "feature-tree"]);
+    let checkout = root.join("feature-tree");
+    let cwd = checkout.join("subdir");
+    std::fs::create_dir(&cwd).unwrap();
     let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
         "id": id, "projectPath": project, "cwd": cwd, "title": "fixture", "created": "", "modified": ""
     })).unwrap();
-    let cwd = repo.join("subdir");
-    std::fs::create_dir(&cwd).unwrap();
-    let mut native = session("native", &repo, &cwd);
-    native.set_checkout_root(repo.to_str());
-    crate::store::index::save(&[native, session("outside", &f.base, &repo)]).unwrap();
-    let url = |number| format!("https://github.com/acme/widgets/pull/{number}");
-    let save_pr = |number, state, fork| {
-        std::fs::create_dir_all(&f.state).unwrap();
+    let mut native = session("native", &root, &cwd);
+    native.set_checkout_root(checkout.to_str());
+    crate::store::index::save(&[native, session("outside", &f.base, &cwd)]).unwrap();
+
+    let public_url = "https://github.com/acme/widgets/pull/1";
+    let enterprise_url = "https://github.enterprise.test/acme/widgets/pull/2";
+    let wrong_url = "https://github.com/acme/other/pull/1";
+    std::fs::create_dir_all(&f.state).unwrap();
+    let save_pr = |number, url, state, fork| {
         std::fs::write(f.state.join(format!("pr-{number}.json")), json!({
-            "url": url(number), "number": number, "title": "Legacy PR", "headRefName": "feature",
-            "state": state, "isCrossRepository": fork,
+            "url": url, "number": number, "title": "Branch PR", "headRefName": "feature",
+            "state": state, "isCrossRepository": fork, "isDraft": true, "mergeable": "MERGEABLE",
         }).to_string()).unwrap();
     };
-    save_pr(1, "OPEN", false);
-    save_pr(2, "OPEN", false);
-    save_pr(3, "CLOSED", false);
-    save_pr(4, "OPEN", true);
-    let recover = |number| json!({"sessionId": "native", "repo": ".", "branch": "feature", "url": url(number)});
-    let read = || f.git.pr_associations(&json!({"sessionId": "native"}), true).unwrap();
-    let mut wrong_scope = recover(1);
+    save_pr(1, public_url, "OPEN", false);
+    save_pr(2, enterprise_url, "OPEN", false);
+    let closed = "https://github.com/acme/widgets/pull/3";
+    let fork = "https://github.com/acme/widgets/pull/4";
+    save_pr(3, closed, "CLOSED", false);
+    save_pr(4, fork, "OPEN", true);
+    let link = |url| json!({"sessionId": "native", "repo": "feature-tree", "branch": "feature", "url": url});
+    let read = || f.call("git.prAssociations", json!({"sessionId": "native"})).unwrap();
+    let mut wrong_scope = link(public_url);
     wrong_scope["sessionId"] = json!("outside");
-    assert_eq!(f.code("git.prRecoverLegacy", wrong_scope), "not_found");
-    let mut wrong_checkout = recover(1);
-    wrong_checkout["repo"] = json!("other");
-    assert_eq!(f.code("git.prRecoverLegacy", wrong_checkout), "invalid_params");
-    let mut wrong_branch = recover(1);
+    assert_eq!(f.code("git.prLinkBranch", wrong_scope), "not_found");
+    let mut wrong_checkout = link(public_url);
+    wrong_checkout["repo"] = json!(".");
+    assert_eq!(f.code("git.prLinkBranch", wrong_checkout), "invalid_params");
+    let mut wrong_branch = link(public_url);
     wrong_branch["branch"] = json!("main");
-    assert_eq!(f.code("git.prRecoverLegacy", wrong_branch), "invalid_params");
-    let mut wrong_url = recover(1);
-    wrong_url["url"] = json!("https://github.com/acme/another-repo/pull/1");
-    assert_eq!(f.code("git.prRecoverLegacy", wrong_url), "not_found");
-    for number in [3, 4] {
-        assert_eq!(f.code("git.prRecoverLegacy", recover(number)), "not_found");
+    assert_eq!(f.code("git.prLinkBranch", wrong_branch), "invalid_params");
+    for url in [closed, fork, wrong_url] {
+        assert_eq!(f.code("git.prLinkBranch", link(url)), "not_found");
     }
     assert_eq!(read()["associations"], json!([]));
 
-    crate::pr_associations::link("native", crate::pr_associations::Association {
-        url: url(2), number: 2, head: "feature".into(), linked: false,
-        scope: crate::pr_associations::Scope::Local { cwd: repo.to_string_lossy().into_owned() },
-    }).unwrap();
-    assert_eq!(f.code("git.prRecoverLegacy", recover(2)), "invalid_params");
-    assert_eq!(read()["associations"][0]["linked"], true);
-    crate::pr_associations::unlink("native", &url(2)).unwrap();
-    assert_eq!(f.code("git.prRecoverLegacy", recover(2)), "invalid_params");
-    assert_eq!(read()["withdrawn"], json!([url(2)]));
-    assert!(f.call("git.prAssociations", json!({"sessionId": "native"})).unwrap().get("withdrawn").is_none());
-
-    assert_eq!(f.call("git.prRecoverLegacy", recover(1)).unwrap()["sessionAssociated"], true);
+    assert_eq!(f.call("git.prLinkBranch", link(public_url)).unwrap()["sessionAssociated"], true);
     std::fs::remove_dir(cwd).unwrap();
-    assert_eq!(f.call("git.prRecoverLegacy", recover(1)).unwrap()["sessionAssociated"], true);
-    std::fs::remove_file(f.state.join("pr-1.json")).unwrap();
-    assert_eq!(read()["associations"], json!([{
-        "url": url(1), "number": 1, "head": "feature", "repo": ".", "linked": false,
-    }]));
-    assert!(!f.gh_calls().contains("\"create\""));
+    for url in [public_url, enterprise_url] {
+        assert_eq!(f.call("git.prLinkBranch", link(url)).unwrap()["sessionAssociated"], true);
+    }
+    git(&checkout, &["checkout", "-qb", "next"]);
+    let rows = read();
+    assert_eq!(rows["branchPrLinks"], true);
+    assert_eq!(rows["associations"], json!([
+        {"url": public_url, "number": 1, "head": "feature", "repo": "feature-tree", "linked": true},
+        {"url": enterprise_url, "number": 2, "head": "feature", "repo": "feature-tree", "linked": true},
+    ]));
+
+    let exact = json!({"repo": "feature-tree", "number": 2, "url": enterprise_url});
+    assert_eq!(f.call("git.prs", exact.clone()).unwrap()["prs"][0]["url"], enterprise_url);
+    assert_eq!(f.call("git.prReady", exact.clone()).unwrap()["pr"]["isDraft"], false);
+    assert_eq!(f.call("git.prMerge", exact).unwrap()["pr"]["state"], "MERGED");
+    let calls = f.gh_calls();
+    assert!(calls.contains(&format!(r#"["pr", "ready", "{enterprise_url}"]"#)));
+    assert!(calls.contains(&format!(r#"["pr", "merge", "{enterprise_url}", "--merge"]"#)));
+
+    // Same number after gh's checkout routing changes. Refuse before issuing
+    // any GitHub mutation, even if the old locator still exists.
+    save_pr(1, wrong_url, "OPEN", false);
+    let stale_target = json!({"repo": "feature-tree", "number": 1, "url": public_url});
+    for method in ["git.prs", "git.prReady", "git.prMerge"] {
+        assert_eq!(f.code(method, stale_target.clone()), "not_found");
+    }
+    assert_eq!(f.gh_calls().matches(r#"["pr", "ready","#).count(), 1);
+    assert_eq!(f.gh_calls().matches(r#"["pr", "merge","#).count(), 1);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": public_url})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(read()["associations"][0]["url"], enterprise_url);
+    save_pr(1, public_url, "OPEN", false);
+    let existing = f.call("git.prCreate", json!({
+        "repo": "feature-tree", "title": "Existing", "base": "main", "branch": "feature", "sessionId": "native",
+    })).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
 }
 
 #[test]
