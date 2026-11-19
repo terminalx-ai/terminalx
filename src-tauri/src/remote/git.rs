@@ -306,7 +306,7 @@ fn append_config_entry(config: &mut Vec<u8>, entry: &[u8]) -> Result<(), RpcErro
 /// Resolve includes in the real checkout and replay each Git scope in order.
 /// Git's protected-config reader has no repository context, so entries that
 /// require one must still be conditional in the private config.
-fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, object_format: &str) -> Result<(), RpcError> {
+fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, object_format: &str, include_worktree: bool) -> Result<(), RpcError> {
     let live = read_commit_config(checkout_git())?;
     // An explicit, absent GIT_DIR makes git config read only non-repo scopes.
     let mut outside = checkout_git();
@@ -352,7 +352,7 @@ fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, ob
 
     // Keep the private repository format independent of the live ref backend.
     // Git reads these top-level files without includes when discovering the format.
-    let worktree_config = if entries.iter().any(|&(scope, _)| scope == b"worktree\0") {
+    let worktree_config = if include_worktree {
         "\tworktreeConfig = true\n"
     } else {
         ""
@@ -1238,15 +1238,25 @@ impl WorkspaceGit {
         std::fs::create_dir_all(private_ref.parent().expect("a branch ref has a parent")).map_err(RpcError::internal)?;
         std::fs::write(private_ref, format!("{head}\n")).map_err(RpcError::internal)?;
         std::fs::write(private.join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
-        snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format)?;
+        let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true");
+        snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format, include_worktree)?;
+
+        let add_config = |file: &Path, key: &str, value: &Path| {
+            let mut command = git_command(&repo.dir);
+            command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
+            }
+            Ok(())
+        };
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
             std::fs::create_dir_all(private.join("info")).map_err(RpcError::internal)?;
             std::fs::copy(sparse_config, private.join("info/sparse-checkout")).map_err(RpcError::internal)?;
         }
 
-        let hooks = path(&["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
-        let hooks_config = format!("core.hooksPath={}", hooks.display());
         let mut command_config = std::ffi::OsString::from("include.path=");
         command_config.push(scratch.path().join("config.command"));
 
@@ -1260,7 +1270,7 @@ impl WorkspaceGit {
                 .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
                 .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
                 .arg("-c").arg(&command_config)
-                .args(["-c", &hooks_config, "-c", "core.bare=false", "-c", "core.splitIndex=false",
+                .args(["-c", "core.bare=false", "-c", "core.splitIndex=false",
                 "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")]).args(args);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
@@ -1268,6 +1278,20 @@ impl WorkspaceGit {
             }
             Ok(result.stdout)
         };
+        // Keep configured hooks in their original scope. If the private Git
+        // directory changes hook resolution (including the default hooks
+        // directory), pin the real path in the private repository's config.
+        let hooks_args = ["rev-parse", "--path-format=absolute", "--git-path", "hooks"];
+        let hooks = path(&hooks_args)?;
+        let private_hooks = run(&hooks_args)?;
+        if Path::new(private_hooks.strip_suffix('\n').unwrap_or(&private_hooks)) != hooks {
+            let hooks_config = scratch.path().join("hooks.config");
+            add_config(&hooks_config, "core.hooksPath", &hooks)?;
+            let scoped_config = private.join(if include_worktree { "config.worktree" } else { "config" });
+            // A second include loads after the original config. Writing
+            // core.hooksPath directly could place it before the snapshot include.
+            add_config(&scoped_config, "include.path", &hooks_config)?;
+        }
         run(&["add", "-A", "--", "."])?;
         if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
             return Err(RpcError::invalid("nothing to commit"));
