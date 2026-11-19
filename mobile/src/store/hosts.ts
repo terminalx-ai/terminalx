@@ -1,3 +1,4 @@
+import { endPairingInstance } from "./pairing-instance";
 import { clearTranscriptCaches } from "../data/transcript-cache";
 import { DirectEndpointsSchema } from "../pairing/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -70,6 +71,8 @@ export async function savePairedHost(host: StoredHost, credential: HostCredentia
   const before = hosts.find((item) => item.id === host.id || item.publicKeyB64 === host.publicKeyB64);
   const named = { ...validatedHost, ...(before?.customName ? { customName: before.customName } : {}), ...(validatedHost.hostName ?? before?.hostName ? { hostName: validatedHost.hostName ?? before?.hostName } : {}) };
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify([...hosts.filter((item) => item.id !== host.id && item.publicKeyB64 !== host.publicKeyB64), named]));
+  endPairingInstance(host.id);
+  if (before && before.id !== host.id) endPairingInstance(before.id);
 }
 
 export async function writeHostCredential(hostId: string, credential: HostCredential): Promise<void> {
@@ -120,6 +123,7 @@ export async function setHostNames(hostId: string, change: { hostName?: string; 
 export async function removeHost(hostId: string): Promise<void> {
   await clearTranscriptCaches(hostId);
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify((await readHosts()).filter((host) => host.id !== hostId)));
+  endPairingInstance(hostId);
   await SecureStore.deleteItemAsync(credentialKey(hostId), OPTIONS).catch(() => undefined);
 }
 
@@ -127,6 +131,7 @@ export async function removeAutomaticHosts(userId: string): Promise<void> {
   const hosts = await readHosts();
   const automatic = hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === userId);
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.filter((host) => !automatic.includes(host))));
+  automatic.forEach((host) => endPairingInstance(host.id));
   await Promise.all(automatic.map((host) => clearTranscriptCaches(host.id)));
   await Promise.all(automatic.map((host) => SecureStore.deleteItemAsync(credentialKey(host.id), OPTIONS).catch(() => undefined)));
 }

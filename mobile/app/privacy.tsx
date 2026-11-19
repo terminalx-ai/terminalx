@@ -14,6 +14,7 @@ const PRIVACY_SECTIONS: readonly { title: string; body: string }[] = [
   { title: "Only your devices can read your messages", body: "The phone reaches your Mac directly on the same network, or through the TerminalX relay. Everything is encrypted on one device and opened only on the other, so the relay cannot read it." },
   { title: "What your account knows", body: "When you sign in, your account lists your machines by name, with whether each one is online. It does not hold your projects, folders or conversations." },
   { title: "The connection log", body: "The log in Settings records when this phone connected and what went wrong. It stays on this phone, keeps only server names, not full addresses, and never holds your messages." },
+  { title: "Support reports", body: "You can review and send selected connection events to TerminalX Support. The report can include times, app versions and connection problems. Support keeps reports for 30 days." },
 ];
 
 export default function PrivacyScreen() {

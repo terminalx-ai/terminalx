@@ -127,6 +127,9 @@ function backend(command: string, args: Record<string, unknown> = {}) {
       if (defaults[harness] === id) defaults[harness] = undefined;
       return { removed: true, runningTabs: tabs, accounts: view(harness) };
     }
+    // PRO-157: each tab's Executable and settings file rows.
+    case "agent_executable": return { harness: args.harness, chosen: null, path: `/opt/homebrew/bin/${args.harness}`, system: `/opt/homebrew/bin/${args.harness}`, version: "1.0.0", problem: null };
+    case "agent_config_file": return { path: "/Users/ada/.claude/settings.json", displayPath: "~/.claude/settings.json", exists: true };
     default: void now; throw new Error(`unexpected command ${command}`);
   }
 }

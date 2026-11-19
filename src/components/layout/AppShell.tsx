@@ -1,3 +1,4 @@
+import { openSupportReport } from "@/components/SupportReportDialog";
 import { WorkspaceReassignedNotices } from "./WorkspaceReassignedNotices";
 import { SettingsLeaveBoundaryContext, useSettingsLeaveBoundary } from "@/components/settings/settingsLeaveGuard";
 import { bootDataPrivacy } from "@/lib/dataPrivacy";
@@ -305,6 +306,7 @@ export function AppShell() {
   });
   useShortcut("app.previousSession", () => { if (!canLeave()) return; setSettingsOpen(false); stepVisibleSession(-1); });
   useShortcut("app.docs", () => { void openUrl(repoFile("README.md")).catch(console.error); });
+  useShortcut("app.supportReport", openSupportReport);
   useShortcut("app.reportIssue", () => { void openUrl(`${REPO_URL}/issues/new`).catch(console.error); });
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
