@@ -117,7 +117,16 @@ pub enum ClientState {
     /// Below `connect`: nothing touches the network.
     Idle,
     Opening,
-    WaitingForRuntime,
+    /// The runtime is not reachable yet: the API says it has not answered
+    /// the attachment, or the relay turned a first dial away because the
+    /// runtime is not on it yet (still booting, or restarted while it booted).
+    /// Nothing was lost: a connection that never came up is waited for.
+    WaitingForRuntime {
+        /// The relay close code of the dial that found it not there yet, for
+        /// the desktop's own diagnostics.
+        #[serde(skip_serializing)]
+        close_code: Option<u16>,
+    },
     Suspended,
     Connecting { attempt: u32 },
     Connected {
@@ -137,6 +146,8 @@ pub enum ClientState {
         #[serde(skip_serializing_if = "Option::is_none")]
         link: Option<u64>,
     },
+    /// A connection that was up is gone, and it is being made again. Only
+    /// ever after a connection reached `Connected`.
     Reconnecting {
         attempt: u32,
         reason: String,
@@ -458,6 +469,11 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
     let mut resume: Option<(String, String)> = None;
     let mut refresh_pairing = false;
     let mut attempt = 0u32;
+    // A connection reached `Connected` since this supervisor started or last
+    // parked. Until one has, a dial the relay turns away (the runtime still
+    // booting, or restarted while it booted) is waited out as
+    // `WaitingForRuntime`, not shown as a lost connection (#1288).
+    let mut was_live = false;
     'supervise: loop {
         if *stopped.borrow() {
             break;
@@ -498,7 +514,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     attached = Some(Attached { grant: *grant, invite_used });
                 }
                 Ok(OpenOutcome::WaitingForRuntime) => {
-                    emit(ClientState::WaitingForRuntime);
+                    emit(ClientState::WaitingForRuntime { close_code: None });
                     attempt += 1;
                     if sleep_or_stop(&mut stopped, protocol::backoff(attempt, jitter()).max(Duration::from_secs(1))).await {
                         break;
@@ -506,6 +522,11 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     continue;
                 }
                 Ok(OpenOutcome::Suspended) => {
+                    // Parked: whatever was attached belonged to the runtime
+                    // that stopped, and a wake brings up a new one. Until it
+                    // is up again, nothing was live to lose.
+                    attached = None;
+                    was_live = false;
                     emit(ClientState::Suspended);
                     tokio::select! {
                         _ = activation.changed() => continue,
@@ -544,6 +565,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
         }
         let lived = dial.live(current, &credential, was_invite, Link { shared: &shared, events: &events, stopped: &mut stopped }).await;
         if lived.established {
+            was_live = true;
             if let Some(token) = lived.installed {
                 resume = Some((current.grant.attachment_id.clone(), token));
             }
@@ -587,12 +609,21 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
             CloseAction::Reconnect => {}
         }
         attempt += 1;
-        let delay = protocol::backoff(attempt, jitter());
         let reason = match closed.code {
             Some(code) => format!("{code} {}", closed.reason),
             None => closed.reason,
         };
-        emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64, close_code: closed.code });
+        let delay = if was_live {
+            let delay = protocol::backoff(attempt, jitter());
+            emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64, close_code: closed.code });
+            delay
+        } else {
+            // Never up yet: the runtime is still on its way. Waited for at
+            // the pace of the API's own waiting-for-runtime answers.
+            log::info!("cloud workspace: runtime not reachable yet (attempt {attempt}): {reason}");
+            emit(ClientState::WaitingForRuntime { close_code: closed.code });
+            protocol::backoff(attempt, jitter()).max(Duration::from_secs(1))
+        };
         if sleep_or_stop(&mut stopped, delay).await {
             break;
         }
@@ -815,12 +846,16 @@ mod tests {
 
     /// A pairing whose invite is still good, so the supervisor dials with it.
     fn live_grant() -> AttachGrant {
+        grant_with_invite(&"c".repeat(43))
+    }
+
+    fn grant_with_invite(invite: &str) -> AttachGrant {
         let code = general_purpose::URL_SAFE_NO_PAD.encode(
             json!({
                 "v": 2, "endpoint": "relay:abcdefghijklmnop", "deviceToken": "device-token-0123456789", "publicKeyB64": general_purpose::STANDARD.encode([1u8; 32]),
                 "scope": "runtime", "identityMode": "authenticate",
                 "relay": { "v": 1, "directorUrl": "https://relay.example", "cellUrl": "https://cell.example", "assignmentEpoch": 3,
-                    "relayHostId": "abcdefghijklmnop", "inviteToken": "c".repeat(43), "inviteExpiresAt": now_ms() + 600_000, "e2eeFraming": 2 }
+                    "relayHostId": "abcdefghijklmnop", "inviteToken": invite, "inviteExpiresAt": now_ms() + 600_000, "e2eeFraming": 2 }
             })
             .to_string(),
         );
@@ -907,15 +942,115 @@ mod tests {
         close.send(Closed { code: Some(4100), reason: "runtime gone".into() }).unwrap();
 
         // It finds the workspace stopped and parks. It does not wait for a runtime it resumed.
-        let after = state_where(&mut states, |state| matches!(state, ClientState::Suspended | ClientState::WaitingForRuntime)).await;
+        let after = state_where(&mut states, |state| matches!(state, ClientState::Suspended | ClientState::WaitingForRuntime { .. })).await;
         assert_eq!(after, ClientState::Suspended, "the reconnect after a stop must not resume the workspace");
         assert_eq!(workspace.resumes.load(Ordering::SeqCst), 0, "no resume");
         assert_eq!(*workspace.opens.lock().unwrap(), vec![Activation::Connect, Activation::Connect], "the reconnect opened with connect");
 
         // A wake asked for now, after the stop, is a new interactive action: it resumes, once.
         supervisor.set_activation(Activation::Wake);
-        state_where(&mut states, |state| matches!(state, ClientState::WaitingForRuntime)).await;
+        state_where(&mut states, |state| matches!(state, ClientState::WaitingForRuntime { .. })).await;
         assert_eq!(workspace.resumes.load(Ordering::SeqCst), 1);
+        supervisor.stop();
+    }
+
+    /// A relay that turns each dial away with the next scripted close code
+    /// (the runtime not on it yet, or restarted while it booted), then
+    /// connects and holds the connection until the test closes it.
+    struct BootingRelay {
+        refusals: Mutex<std::collections::VecDeque<u16>>,
+        relay: FakeRelay,
+    }
+
+    impl Dial for BootingRelay {
+        fn live<'a>(&'a self, attached: &'a Attached, credential: &'a Credential, was_invite: bool, link: Link<'a>) -> Pin<Box<dyn Future<Output = Lived> + Send + 'a>> {
+            let refusal = self.refusals.lock().unwrap().pop_front();
+            match refusal {
+                Some(code) => Box::pin(async move { Lived { closed: Closed { code: Some(code), reason: "not yet".into() }, established: false, installed: None } }),
+                None => self.relay.live(attached, credential, was_invite, link),
+            }
+        }
+    }
+
+    /// The API's `open` over a running workspace: each answer is a fresh
+    /// pairing, as the API mints one for every attachment it re-checks.
+    struct MintingWorkspace {
+        opens: Mutex<Vec<Activation>>,
+    }
+
+    impl AttachSource for MintingWorkspace {
+        fn open(&self, _refresh_pairing: bool, activation: Activation) -> Result<OpenOutcome> {
+            let mut opens = self.opens.lock().unwrap();
+            opens.push(activation);
+            let n = opens.len().to_string();
+            Ok(OpenOutcome::Ready(Box::new(grant_with_invite(&format!("{n}{}", "c".repeat(43 - n.len()))))))
+        }
+    }
+
+    /// Every state up to and including the first for which `last` holds.
+    async fn states_until(events: &mut mpsc::UnboundedReceiver<ClientEvent>, last: impl Fn(&ClientState) -> bool) -> Vec<ClientState> {
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let ClientEvent::State(state) = events.recv().await.expect("the supervisor is running") {
+                    let done = last(&state);
+                    seen.push(state);
+                    if done {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the supervisor reached the state");
+        seen
+    }
+
+    fn tag(state: &ClientState) -> String {
+        match state {
+            ClientState::WaitingForRuntime { close_code: Some(code) } => format!("waitingForRuntime({code})"),
+            ClientState::Reconnecting { close_code, .. } => format!("reconnecting({close_code:?})"),
+            other => serde_json::to_value(other).unwrap()["state"].as_str().unwrap().to_string(),
+        }
+    }
+
+    // #1288: a runtime that is still booting is waited for. The dials the
+    // relay turns away before the first connect never read as a lost
+    // connection; only one that was up and ended does.
+    #[tokio::test]
+    async fn dials_turned_away_while_the_runtime_boots_are_waited_out_and_only_a_lost_connection_reconnects() {
+        let workspace = Arc::new(MintingWorkspace { opens: Mutex::new(Vec::new()) });
+        let (close, closes) = mpsc::unbounded_channel();
+        let (events, mut states) = mpsc::unbounded_channel();
+        let relay = BootingRelay { refusals: Mutex::new([4100, 4404, 4101].into()), relay: FakeRelay { closes: tokio::sync::Mutex::new(closes) } };
+        let supervisor = Supervisor::start_with(workspace.clone(), Activation::Connect, events, Arc::new(relay));
+
+        let boot = states_until(&mut states, |state| matches!(state, ClientState::Connected { .. })).await;
+        assert_eq!(
+            boot.iter().map(tag).collect::<Vec<_>>(),
+            [
+                "opening",
+                "connecting",
+                "waitingForRuntime(4100)",
+                "opening",
+                "connecting",
+                "waitingForRuntime(4404)",
+                "opening",
+                "connecting",
+                "waitingForRuntime(4101)",
+                "opening",
+                "connecting",
+                "connected"
+            ],
+            "the boot never reads as reconnecting"
+        );
+        // Readiness was checked through `open` after each turn-away, always with `connect`.
+        assert_eq!(*workspace.opens.lock().unwrap(), vec![Activation::Connect; 4]);
+
+        // The live connection is lost: that is a reconnect.
+        close.send(Closed { code: None, reason: "relay gone".into() }).unwrap();
+        let lost = states_until(&mut states, |state| matches!(state, ClientState::Reconnecting { .. })).await;
+        assert_eq!(lost.iter().map(tag).collect::<Vec<_>>(), ["reconnecting(None)"]);
         supervisor.stop();
     }
 

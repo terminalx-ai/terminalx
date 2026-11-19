@@ -1937,8 +1937,11 @@ impl WorkspaceGit {
         let read_created = |url: &str| {
             let unresolved = || RpcError::new("outcome_unknown", format!("GitHub reported {url}, but the pull request could not be verified yet. Try again."));
             if !known_url(url) { return Err(RpcError::new("conflict", "The pull request belongs to a different repository than origin.")); }
-            let pr = self.pr_view(&repo, url).map_err(|_| unresolved())?;
-            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) || (self.project && pr.head_sha.is_empty()) { return Err(unresolved()); }
+            let target = Target::new(url).map_err(|_| unresolved())?;
+            target.require_exact_cli_host().map_err(|_| unresolved())?;
+            let pr = self.pr_view_reference(&repo, &target.url).map_err(|_| unresolved())?;
+            Self::verify_pr_url(&pr, url).map_err(|_| unresolved())?;
+            if self.project && pr.head_sha.is_empty() { return Err(unresolved()); }
             Ok(pr)
         };
         let pending = if let Some((session, checkout)) = session.zip(checkout.as_ref()) {
@@ -2098,13 +2101,17 @@ impl WorkspaceGit {
 
     fn pr_view(&self, repo: &Repo, selector: &str) -> Result<crate::github::PullRequest, RpcError> {
         let number = selector.rsplit('/').next().unwrap_or(selector);
-        let out = self.gh(repo, &["pr", "view", number, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
-        let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
-        let pr = crate::github::parse_pr(&value);
+        let pr = self.pr_view_reference(repo, number)?;
         if selector.starts_with("https://") {
             Self::verify_pr_url(&pr, selector)?;
         }
         Ok(pr)
+    }
+
+    fn pr_view_reference(&self, repo: &Repo, reference: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let out = self.gh(repo, &["pr", "view", reference, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+        let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
+        Ok(crate::github::parse_pr(&value))
     }
 
     fn verified_pr(&self, repo: &Repo, url: &str) -> Result<(Target, String, crate::github::PullRequest), RpcError> {

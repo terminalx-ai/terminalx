@@ -24,10 +24,12 @@ import { cloudWorkspaceKey } from "@/types/target";
  * - **Follows the workspace back.** A connection whose workspace stopped is
  *   parked: its supervisor waits for an interactive wake and reads nothing.
  *   When the workspace list says the machine runs again (someone else woke
- *   it, or it was resumed from another surface), a held connection is torn
- *   down and attached fresh with `connect`, never `wake`; one nobody holds is
- *   closed, so the next lease attaches fresh. A lease follows its workspace
- *   through that: `current()` and `state()` are the connection of now.
+ *   it, or it was resumed from another surface), a held connection's
+ *   supervisor is told to open again with `connect`, never `wake`: the same
+ *   connection comes up, so nothing that shows it is torn down (#1288). One
+ *   whose attach failed is attached fresh; one nobody holds is closed, so the
+ *   next lease attaches fresh. A lease follows its workspace through that:
+ *   `current()` and `state()` are the connection of now.
  */
 
 export const IDLE_CLOSE_MS = 5 * 60 * 1000;
@@ -84,6 +86,12 @@ export interface CloudConnectionInfo {
 export interface CloudWorkspaceListed {
   /** Ready, with no stop, archive or delete in flight. */
   running: boolean;
+  /**
+   * Not running yet but on its way up (provisioned, or resumed). Such a list
+   * says nothing about a connection being stale: a runtime that just came up
+   * may still read so for a moment.
+   */
+  starting?: boolean;
   /** When that list was asked for (ms): only a list asked for after a connection stopped can say it runs again. */
   at: number;
 }
@@ -323,8 +331,38 @@ function settle(entry: Entry) {
   // Never from inside a client's state callback, and never faster than the backoff.
   entry.retry = setTimeout(() => {
     entry.retry = null;
-    if (entries.get(entry.key) === entry && entry.refs > 0 && cameBack(entry)) reattach(entry);
+    if (entries.get(entry.key) === entry && entry.refs > 0 && cameBack(entry)) follow(entry);
   }, Math.max(0, entry.retryAt - clock()));
+}
+
+/**
+ * Follow a workspace that came back. A parked connection's supervisor waits
+ * for its activation to change: telling it `connect` again makes it open
+ * afresh on the same connection, which comes up without a teardown, so
+ * nothing showing it blanks (#1288). Only an entry without a connection (its
+ * attach failed) attaches anew.
+ */
+function follow(entry: Entry) {
+  const connection = entry.connection;
+  if (!connection) {
+    reattach(entry);
+    return;
+  }
+  const backoff = { delay: entry.retryDelay, at: entry.retryAt };
+  entry.retryDelay = Math.min(REATTACH_MAX_MS, Math.max(REATTACH_FIRST_MS, entry.retryDelay * 2));
+  entry.retryAt = clock() + entry.retryDelay;
+  // Opened again from now: a list asked for before this says nothing about it.
+  entry.parkedAt = clock();
+  entry.activation = "connect";
+  void Promise.resolve()
+    .then(() => connection.activate("connect"))
+    .catch(() => {
+      // The transport refused: attach anew, as before, on the backoff this try did not use.
+      if (entries.get(entry.key) !== entry || entry.connection !== connection || entry.refs === 0) return;
+      entry.retryDelay = backoff.delay;
+      entry.retryAt = backoff.at;
+      reattach(entry);
+    });
 }
 
 /**
@@ -371,7 +409,8 @@ export function noteCloudWorkspaceListed(target: CloudTarget, listed: CloudWorks
   if (before && listed.at < before.at) return;
   entry.listed = listed;
   if (!listed.running) {
-    entry.downAt = Math.max(entry.downAt ?? 0, listed.at);
+    // Only a machine stopped or on its way down makes a connection suspect; one coming up is still booting (#1288).
+    if (!listed.starting) entry.downAt = Math.max(entry.downAt ?? 0, listed.at);
     // It was running and is stopped (or stopping) now: the wake that started it is spent, the next action asks anew.
     const spent = !!before?.running;
     if (spent && entry.activation === "wake") entry.activation = "connect";
