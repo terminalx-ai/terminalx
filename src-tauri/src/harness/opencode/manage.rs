@@ -82,6 +82,8 @@ pub struct CatalogProvider {
     pub model_count: usize,
     /// Runs on this Mac and needs no key.
     pub local: bool,
+    /// The address set for it in the config file, kept while it is disconnected.
+    pub base_url: Option<String>,
 }
 
 /// A model the catalogue lists for a provider.
@@ -138,6 +140,8 @@ pub struct Overview {
     pub catalog: Vec<CatalogProvider>,
     /// Why the catalogue is missing, when it is.
     pub catalog_problem: Option<String>,
+    /// Why TerminalX will not write OpenCode's key file now.
+    pub auth_problem: Option<String>,
 }
 
 /// What checking a key with its provider said.
@@ -282,8 +286,21 @@ fn provider_entry<'a>(config: &'a mut Map<String, Value>, id: &str) -> Result<&'
     providers.entry(id.to_owned()).or_insert_with(|| json!({})).as_object_mut().ok_or_else(|| format!("The config file’s provider \"{id}\" is not an object. Fix it in an editor first."))
 }
 
-fn read_auth(paths: &Paths) -> Map<String, Value> {
-    std::fs::read_to_string(paths.auth_file()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_object().cloned()).unwrap_or_default()
+/// OpenCode's key file. Missing is empty; one that is there but can't be
+/// read as a JSON object is an error, since writing back only what could be
+/// read would delete every other provider's key or sign-in.
+fn read_auth(paths: &Paths) -> Result<Map<String, Value>, String> {
+    let file = paths.auth_file();
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) => return Err(format!("Couldn’t read {}: {error}. TerminalX won’t change it until it can.", shown(&file))),
+    };
+    if text.trim().is_empty() { return Ok(Map::new()); }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(map)) => Ok(map),
+        _ => Err(format!("{} isn’t valid JSON, so TerminalX won’t change it: saving would drop OpenCode’s other sign-ins. Run `opencode auth list` or fix the file, then try again.", shown(&file))),
+    }
 }
 
 fn mask(key: &str) -> String {
@@ -329,12 +346,13 @@ fn catalog_provider(id: &str, value: &Value) -> CatalogProvider {
         api: text(value, "api"),
         doc: text(value, "doc"),
         model_count: value.get("models").and_then(Value::as_object).map_or(0, Map::len),
+        base_url: None,
         local: false,
     }
 }
 
 fn ollama() -> CatalogProvider {
-    CatalogProvider { id: OLLAMA.into(), name: "Ollama".into(), env: Vec::new(), api: Some(OLLAMA_URL.into()), doc: Some("https://opencode.ai/docs/providers/#ollama".into()), model_count: 0, local: true }
+    CatalogProvider { id: OLLAMA.into(), name: "Ollama".into(), env: Vec::new(), api: Some(OLLAMA_URL.into()), doc: Some("https://opencode.ai/docs/providers/#ollama".into()), model_count: 0, local: true, base_url: None }
 }
 
 fn catalog_list(catalog: &Map<String, Value>) -> Vec<CatalogProvider> {
@@ -402,7 +420,7 @@ fn picker_from(connected: &[Connected], catalog: &Map<String, Value>, config: &M
 
 pub fn overview_in(paths: &Paths, fetch: bool) -> Overview {
     let config = read_config(paths);
-    let auth = read_auth(paths);
+    let (auth, auth_problem) = match read_auth(paths) { Ok(auth) => (auth, None), Err(problem) => (Map::new(), Some(problem)) };
     let (catalog, catalog_problem) = match catalog_value(paths, fetch) { Ok(catalog) => (catalog, None), Err(problem) => (Map::new(), Some(problem)) };
     let connected = connected(&config.value, &auth, &catalog);
     let models = picker_from(&connected, &catalog, &config.value);
@@ -414,8 +432,12 @@ pub fn overview_in(paths: &Paths, fetch: bool) -> Overview {
         log_dir: shown(&paths.log_dir()),
         connected,
         models,
-        catalog: catalog_list(&catalog),
+        catalog: catalog_list(&catalog).into_iter().map(|mut provider| {
+            provider.base_url = config.value.get("provider").and_then(|providers| providers.get(&provider.id)).and_then(|entry| entry.pointer("/options/baseURL")).and_then(Value::as_str).map(str::to_owned);
+            provider
+        }).collect(),
         catalog_problem,
+        auth_problem,
     }
 }
 
@@ -499,10 +521,16 @@ pub fn connect_in(paths: &Paths, id: &str, key: &str, base_url: Option<&str>) ->
     let base = base_url.map(str::trim).filter(|url| !url.is_empty());
     if let Some(url) = base { valid_url(url)?; }
     // Refuse before anything is written: a broken config or a refused key leaves both files as they were.
-    if let Some(problem) = read_config(paths).problem { return Err(problem); }
-    let check = check_key(&provider, npm.as_deref(), key, base)?;
+    let config = read_config(paths);
+    if let Some(problem) = config.problem { return Err(problem); }
+    let mut auth = read_auth(paths)?;
+    // Left unchanged (None), the key is checked where OpenCode will send it: the
+    // address already in the config, not the provider's own, which a gateway's
+    // key must never reach.
+    let configured = config.value.get("provider").and_then(|providers| providers.get(id)).and_then(|entry| entry.pointer("/options/baseURL")).and_then(Value::as_str).map(str::to_owned);
+    let check_at = if base_url.is_some() { base } else { configured.as_deref() };
+    let check = check_key(&provider, npm.as_deref(), key, check_at)?;
     if !provider.local {
-        let mut auth = read_auth(paths);
         auth.insert(id.to_owned(), json!({"type": "api", "key": key}));
         write_json(&paths.auth_file(), &Value::Object(auth), true)?;
     }
@@ -512,7 +540,7 @@ pub fn connect_in(paths: &Paths, id: &str, key: &str, base_url: Option<&str>) ->
             entry.insert("npm".into(), json!("@ai-sdk/openai-compatible"));
             entry.entry("name").or_insert_with(|| json!("Ollama (local)"));
             entry.entry("options").or_insert_with(|| json!({})).as_object_mut().ok_or("The provider’s \"options\" is not an object.")?
-                .insert("baseURL".into(), json!(base.unwrap_or(OLLAMA_URL)));
+                .insert("baseURL".into(), json!(check_at.unwrap_or(OLLAMA_URL)));
         } else if base_url.is_some() {
             let options = entry.entry("options").or_insert_with(|| json!({})).as_object_mut().ok_or("The provider’s \"options\" is not an object.")?;
             match base { Some(url) => { options.insert("baseURL".into(), json!(url)); } None => { options.remove("baseURL"); } }
@@ -523,19 +551,30 @@ pub fn connect_in(paths: &Paths, id: &str, key: &str, base_url: Option<&str>) ->
     Ok(ConnectResult { overview: overview_in(paths, false), check })
 }
 
-/// Forget `id`'s key, from auth.json and the config file. Its model list
-/// stays, for when it is connected again; Ollama's server entry goes.
+/// Forget `id`'s key, from auth.json and the config file, and a server of
+/// its own (Ollama's or one set up by hand). Its model list and a gateway
+/// address set for a catalogue provider stay, for when it is connected again.
 pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
-    let mut auth = read_auth(paths);
-    if auth.remove(id).is_some() { write_json(&paths.auth_file(), &Value::Object(auth), true)?; }
+    let mut auth = read_auth(paths)?;
     let config = read_config(paths);
     let entry = config.value.get("provider").and_then(|providers| providers.get(id));
-    let in_config = entry.is_some_and(|entry| entry.pointer("/options/apiKey").is_some() || (id == OLLAMA && entry.get("npm").is_some()));
-    if in_config {
+    let has_key = entry.is_some_and(|entry| entry.pointer("/options/apiKey").is_some());
+    // A server of its own (npm plus an address) is what makes connected() list a
+    // provider without a key, Ollama's included, so that is what Disconnect removes.
+    let own_server = entry.is_some_and(|entry| entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some());
+    // The config is checked first so a file that can't be written leaves auth.json alone too.
+    if has_key || own_server {
+        if let Some(problem) = config.problem { return Err(problem); }
+    }
+    if auth.remove(id).is_some() { write_json(&paths.auth_file(), &Value::Object(auth), true)?; }
+    if has_key || own_server {
         edit_config(paths, |config| {
             let entry = provider_entry(config, id)?;
-            if id == OLLAMA { entry.remove("npm"); if let Some(options) = entry.get_mut("options").and_then(Value::as_object_mut) { options.remove("baseURL"); } }
-            if let Some(options) = entry.get_mut("options").and_then(Value::as_object_mut) { options.remove("apiKey"); }
+            if own_server { entry.remove("npm"); }
+            if let Some(options) = entry.get_mut("options").and_then(Value::as_object_mut) {
+                options.remove("apiKey");
+                if own_server { options.remove("baseURL"); }
+            }
             Ok(())
         })?;
     }
@@ -712,7 +751,85 @@ mod tests {
         assert!(add_model_in(&paths, "anthropic", "claude-opus-4-5").unwrap_err().contains("has comments"));
         assert!(connect_in(&paths, "weird", "weird-key-0123456789", None).unwrap_err().contains("has comments"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
-        assert!(!read_auth(&paths).contains_key("weird"), "a refused connect writes no key");
+        assert!(!read_auth(&paths).unwrap().contains_key("weird"), "a refused connect writes no key");
+    }
+
+    /// A gateway on this Mac that answers one request and says what was asked.
+    fn gateway() -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" { break; }
+                request.push_str(&line);
+            }
+            let mut stream = stream;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            request
+        });
+        (url, served)
+    }
+
+    #[test]
+    fn replacing_a_key_checks_it_at_the_configured_gateway_and_keeps_it() {
+        let (_dir, paths) = paths();
+        let (url, served) = gateway();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_file(), json!({"provider": {"openrouter": {"options": {"baseURL": url}, "whitelist": []}}}).to_string()).unwrap();
+        let before = overview_in(&paths, false);
+        assert_eq!(before.catalog.iter().find(|provider| provider.id == "openrouter").unwrap().base_url.as_deref(), Some(url.as_str()), "a reconnect starts from the gateway");
+
+        let result = connect_in(&paths, "openrouter", "gateway-key-0123456789", None).unwrap();
+        assert!(matches!(result.check, KeyCheck::Accepted));
+        let request = served.join().unwrap();
+        assert!(request.starts_with("GET /v1/key "), "{request}");
+        assert!(request.contains("Bearer gateway-key-0123456789"), "the key went to the gateway, not openrouter.ai");
+        assert_eq!(result.overview.connected[0].base_url.as_deref(), Some(url.as_str()), "left unchanged, the gateway stays");
+
+        // Disconnecting a catalogue provider keeps its gateway for next time.
+        let after = disconnect_in(&paths, "openrouter").unwrap();
+        assert!(after.connected.is_empty());
+        assert_eq!(after.catalog.iter().find(|provider| provider.id == "openrouter").unwrap().base_url.as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
+    fn a_key_file_that_cannot_be_read_is_never_overwritten() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        // As a half-written refresh of a sign-in would leave it.
+        let torn = "{\"anthropic\": {\"type\": \"oauth\", \"refresh\": \"r\", \"acc";
+        std::fs::write(paths.auth_file(), torn).unwrap();
+        let overview = overview_in(&paths, false);
+        assert!(overview.auth_problem.as_deref().is_some_and(|problem| problem.contains("isn’t valid JSON")), "{:?}", overview.auth_problem);
+        assert!(connect_in(&paths, "weird", "weird-key-0123456789", None).unwrap_err().contains("won’t change it"));
+        assert!(disconnect_in(&paths, "anthropic").unwrap_err().contains("won’t change it"));
+        assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), torn);
+        assert!(!paths.config_file().exists(), "nothing else was written either");
+
+        // A missing or empty file is simply no keys yet.
+        std::fs::write(paths.auth_file(), "").unwrap();
+        assert!(overview_in(&paths, false).auth_problem.is_none());
+    }
+
+    #[test]
+    fn disconnect_removes_a_server_set_up_by_hand() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_file(), json!({"provider": {"lmstudio": {
+            "npm": "@ai-sdk/openai-compatible", "name": "LM Studio", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "whitelist": ["qwen3"], "models": {"qwen3": {}}}}}).to_string()).unwrap();
+        let before = overview_in(&paths, false);
+        assert_eq!((before.connected.len(), before.connected[0].auth.as_str()), (1, "config"));
+        let after = disconnect_in(&paths, "lmstudio").unwrap();
+        assert!(after.connected.is_empty(), "Disconnect does what it says");
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
+        let entry = &config["provider"]["lmstudio"];
+        assert!(entry.get("npm").is_none() && entry["options"].get("baseURL").is_none());
+        assert_eq!((entry["whitelist"].clone(), entry["models"].clone()), (json!(["qwen3"]), json!({"qwen3": {}})), "its models stay for a reconnect");
     }
 
     #[test]
