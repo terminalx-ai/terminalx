@@ -118,6 +118,14 @@ impl Drop for RemovalLease {
     fn drop(&mut self) { removing().lock().unwrap().remove(&self.0); }
 }
 
+const RUNNER_REQUIRED: &str = "This repository has an archive script. Open the workspace dialog on the host that owns this worktree to remove it and run the script.";
+
+/// Check before stopping sessions when the caller cannot run archive scripts.
+pub(crate) fn require_no_script(project: &Path) -> Result<()> {
+    anyhow::ensure!(configuration::archive_script(project)?.script.trim().is_empty(), RUNNER_REQUIRED);
+    Ok(())
+}
+
 /// Called inside the removal fence, before the final Git/session checks.
 pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], confirmed: Option<&str>, retry: Option<&str>, runner: Option<Runner<'_>>, started: &dyn Fn()) -> Result<bool> {
     anyhow::ensure!(confirmed.is_none() || retry.is_none(), "Choose either retrying the archive script or removing anyway.");
@@ -156,7 +164,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
             "The archive failure confirmation expired or the script changed. Run removal again.");
         if confirmed.is_some() { return Ok(true) }
     }
-    let runner = runner.context("This repository has an archive script. Remove the workspace from this computer's workspace dialog to run it first.")?;
+    let runner = runner.context(RUNNER_REQUIRED)?;
     if runner.unattended {
         anyhow::ensure!(crate::merged_cleanup::archive_attempt_matches(&project, &path, &script)?, "The workspace or script changed before its automatic archive run. Nothing was run.");
     }

@@ -36,7 +36,18 @@ const COMPUTER_LABEL: &str = "Test MacBook";
 fn runtime(world: &AgentWorld, port: u16) -> Serve {
     let mut command = world.command();
     command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string());
-    Serve::start(command, &world.data)
+    let serve = Serve::start(command, &world.data);
+    // The control socket's ready line precedes machine-host installation.
+    // Wait for the host on initial launch and after a restart.
+    wait_until("the installed machine host", || {
+        let reply = serve.try_control("runtime.machineHost.status", json!({}));
+        if reply["error"]["code"] == "unsupported" {
+            return None;
+        }
+        assert_eq!(reply["ok"], true, "machine host status failed: {reply}");
+        Some(())
+    });
+    serve
 }
 
 /// `terminalx-serve <args>` as a person on the server runs it: the same

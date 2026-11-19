@@ -216,6 +216,7 @@ function CloudPanelHost({ session, cloud, tab, checkFix }: { session: SessionEnt
       fileSource={cloud.fileSource}
       onFixErrors={checkFix && tab && !isTerminalTab(tab) ? checkFix.fix : undefined}
       fixBusy={checkFix?.busy}
+      machineWorkspace={cloud.machine ? cloud.removableWorkspace : undefined}
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
       ports={ports ? () => ports(true) : undefined}
@@ -896,7 +897,7 @@ export function SessionView({
             {/* A machine session's are the machine's, run there (PRO-403). */}
             {machine && cloud && !compact && <MachineRunMenu key={`run-menu:${session.id}`} cloud={cloud} />}
             {local && !quick && isGit && !session.worktreeRemoved && <BranchGitButton key={`branch-git:${session.id}`} session={session} tabId={activeTab?.id} />}
-            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} />}
+            {machine && !compact && <MachineBranchButton key={`machine-branch:${session.id}`} branch={machineBranch} workspace={cloud?.removableWorkspace} />}
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} />}
             {continueTab && (

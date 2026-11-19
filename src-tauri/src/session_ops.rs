@@ -1290,6 +1290,9 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if !permitted(&before, &request.confirmation) {
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
     }
+    if request.archive.is_none() && target.exists() {
+        crate::archive_script::require_no_script(&project).map_err(err)?;
+    }
     // From the stop to the end nothing starts in the workspace: a prompt to
     // one of its sessions is refused, and every other session's is admitted
     // as usual while the folder goes (#727). The fetch above was outside it.
@@ -2229,8 +2232,9 @@ mod tests {
         let terminals = Arc::new(crate::pty::Terminals::new());
         let sink: Arc<dyn EventSink> = Arc::new(sink());
         let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
-        // A caller without a runner cannot bypass a configured hook.
-        assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("archive script"));
+        // A caller without a runner cannot bypass a configured hook or stop the session.
+        let refusal = remove_workspace(&*sink, &removal, &|_| panic!("archive refusal stopped the session")).unwrap_err();
+        assert!(refusal.contains("archive script"), "{refusal}");
         removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
         let error = remove_workspace(&*sink, &removal, &|_| {}).unwrap_err();
         let failure = crate::archive_script::Failure::from_error(&error).unwrap();

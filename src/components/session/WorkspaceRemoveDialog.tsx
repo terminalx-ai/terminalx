@@ -277,7 +277,7 @@ export function WorkspaceRemoveDialog() {
           <Button variant="ghost" onClick={closeWorkspaceRemove} disabled={!!busy}>
             {settle ? "Keep as is" : "Cancel"}
           </Button>
-          {settle && keepUnavailable && (
+          {settle && keepUnavailable && host.bulkCleanupAvailable && (
             <Button variant="outline" disabled={!!busy} onClick={() => { closeWorkspaceRemove(); openWorktreeCleanup(); }}>
               Clean up worktrees…
             </Button>
