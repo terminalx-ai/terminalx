@@ -805,8 +805,14 @@ impl WorkspaceRpc {
     /// sessions sent together.
     fn session_wire_with(&self, session: &SessionEntry, ids: Option<&HashMap<String, String>>, accounts: Option<&mut super::machine_session::Accounts>) -> Value {
         let mut value = json!(session);
-        if let (Some(ids), Some(fields)) = (ids, value.as_object_mut()) {
-            fields.insert("projectId".into(), json!(ids.get(&session.project_path)));
+        if let (Scope::Machine { projects, .. }, Some(ids), Some(fields)) = (&self.scope, ids, value.as_object_mut()) {
+            let id = ids.get(&session.project_path);
+            fields.insert("projectId".into(), json!(id));
+            let checkout = id.and_then(|id| projects.get_at(id, &session.project_path).ok())
+                .and_then(|project| project.session_checkout(session));
+            let (file_root, repository) = checkout.map_or((None, None), |(root, repo)| (Some(root), repo));
+            fields.insert("fileRoot".into(), json!(file_root));
+            fields.insert("fileRepository".into(), json!(repository));
         }
         if let Some(accounts) = accounts {
             super::machine_session::account_labels(&mut value, session, accounts);

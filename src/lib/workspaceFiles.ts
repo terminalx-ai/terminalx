@@ -6,6 +6,7 @@ import {
   listRemoteDir,
   readRemoteFile,
   remoteFilePath,
+  RemotePathError,
   remotePath,
   searchRemote,
   statRemote,
@@ -225,7 +226,13 @@ export function cloudFileSource(
   /** Only a source rooted at an outside worktree names absolute paths, and only under its root. */
   const scope = { absolute };
   /** The runtime's path for one of ours. */
-  const inside = (rel: string) => (root ? (rel ? `${root}/${remotePath(rel)}` : root) : rel);
+  const inside = (rel: string) => {
+    if (!root || !rel) return root || rel;
+    if (!absolute) return `${root}/${remotePath(rel)}`;
+    if (rel.startsWith("/")) throw new RemotePathError(`${rel} is not a checkout-relative path`);
+    const suffix = rel.split("/").filter((part) => part !== ".").join("/");
+    return remoteFilePath(`${root}/${suffix}`, true);
+  };
   /** Ours for one of the runtime's; one outside the base is not ours (null). */
   const outside = (path: string) => root ? pathInFileRoot(root, path) : path;
   let disposed = false;

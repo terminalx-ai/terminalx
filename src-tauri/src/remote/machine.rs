@@ -10,6 +10,7 @@
 //!   `collab/1`, which belong to a cloud workspace's API and organisation.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -69,7 +70,8 @@ pub const WITHHELD: [&str; 3] = ["keys/1", "mirror/1", "collab/1"];
 /// exists for a cloud workspace's mailbox, API or lifecycle.
 pub const UNSERVED: [&str; 4] = ["session.nudge", "pipeline.noteMerge", "pipeline.noteTracker", "lifecycle.dispositionFacts"];
 
-/// How often a project's worktrees outside its folder are read again.
+/// How often to discover new registrations. Existing registrations are
+/// checked against disk whenever a path uses them.
 const WORKTREES_FRESH_FOR: Duration = Duration::from_secs(2);
 
 /// Whether `method` with `params` names a project rather than something the
@@ -182,7 +184,7 @@ pub fn projects() -> Result<Value, RpcError> {
 /// One project as `machine.projects` lists it, and as `machine/6` returns
 /// the one it added.
 pub fn project_row(project: &Project) -> Value {
-    let git = project.kind == ProjectKind::Git;
+    let git = owns_git_checkout(Path::new(&project.path));
     json!({
         "projectId": project_id(&project.path),
         "name": project.name,
@@ -208,22 +210,100 @@ pub fn ids_by_path() -> HashMap<String, String> {
     registered().unwrap_or_default().into_iter().map(|project| (project_id(&project.path), project.path)).map(|(id, path)| (path, id)).collect()
 }
 
-/// A project's git worktrees, canonical, other than its main checkout: those
-/// inside its folder, and those in the worktree directory Settings names
-/// when that is outside it. A worktree made somewhere else by hand is not one
-/// TerminalX serves.
-pub fn worktrees(project: &Path) -> Vec<PathBuf> {
-    let Ok(listed) = crate::git::run(project, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
-    let home = std::fs::canonicalize(crate::git::worktree_root(project)).ok();
-    let mut found: Vec<PathBuf> = listed
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|path| path != project && (path.starts_with(project) || home.as_ref().is_some_and(|home| path.starts_with(home))))
-        .collect();
-    found.sort();
-    found.dedup();
+pub(super) struct WorktreeRegistration {
+    pub path: PathBuf,
+    admin: PathBuf,
+    project_marker: Arc<Path>,
+}
+
+impl WorktreeRegistration {
+    /// Recheck the Git pointers and their repository before authorizing a
+    /// cached checkout.
+    pub fn is_current(&self) -> bool {
+        let Some(registry) = self.admin.parent() else { return false };
+        let Some(common) = registry.parent() else { return false };
+        let marker = self.path.join(".git");
+        git_link(&marker, "gitdir: ") == Some(self.admin.clone())
+            && git_link(&self.admin.join("gitdir"), "") == Some(marker)
+            && git_link(&self.admin.join("commondir"), "").as_deref() == Some(common)
+            && self.project_uses_registry(registry, common)
+    }
+
+    fn project_uses_registry(&self, registry: &Path, common: &Path) -> bool {
+        let marker = self.project_marker.as_ref();
+        let git_dir = if marker.is_dir() {
+            std::fs::canonicalize(marker).ok()
+        } else {
+            git_link(marker, "gitdir: ")
+        };
+        git_dir.is_some_and(|dir| {
+            dir == common || (dir.parent() == Some(registry)
+                && git_link(&dir.join("gitdir"), "").as_deref() == Some(marker)
+                && git_link(&dir.join("commondir"), "").as_deref() == Some(common))
+        })
+    }
+}
+
+/// Git writes these pointers in both directions, relative to the pointer
+/// file's directory or as absolute paths.
+fn git_link(file: &Path, prefix: &str) -> Option<PathBuf> {
+    std::fs::canonicalize(git_link_path(file, prefix)?).ok()
+}
+
+fn git_link_path(file: &Path, prefix: &str) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(file).ok()?;
+    if !meta.is_file() || meta.len() > 8192 {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(file).ok()?.take(8193).read_to_string(&mut text).ok()?;
+    let link = text.trim_end_matches(['\r', '\n']).strip_prefix(prefix)?;
+    if link.is_empty() || text.len() > 8192 {
+        return None;
+    }
+    Some(file.parent()?.join(link))
+}
+
+/// Linked worktrees registered in this project's Git repository. A settings
+/// change only affects where future worktrees are created.
+pub(super) fn worktrees(project: &Path) -> Vec<WorktreeRegistration> {
+    worktree_registrations(project).into_iter().filter(WorktreeRegistration::is_current).collect()
+}
+
+/// A damaged checkout can still be valuable. Its registration protects it
+/// from directory mutations while the checkout marker is missing or broken.
+pub(super) fn registered_worktree_paths(project: &Path) -> impl Iterator<Item = PathBuf> {
+    worktree_registrations(project).into_iter().map(|registration| registration.path)
+}
+
+fn worktree_registrations(project: &Path) -> Vec<WorktreeRegistration> {
+    if !owns_git_checkout(project) {
+        return Vec::new();
+    }
+    let Some(registry) = crate::git::common_dir(project).map(|common| common.join("worktrees")) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&registry) else { return Vec::new() };
+    let project_marker: Arc<Path> = Arc::from(project.join(".git"));
+    let mut found: Vec<_> = entries.filter_map(Result::ok).filter_map(|entry| {
+        let admin = entry.path();
+        if !entry.file_type().ok()?.is_dir() || std::fs::canonicalize(&admin).ok()? != admin {
+            return None;
+        }
+        let marker = git_link_path(&admin.join("gitdir"), "")?;
+        if marker.file_name()? != ".git" {
+            return None;
+        }
+        let path = std::fs::canonicalize(marker.parent()?).ok()?;
+        let registration = WorktreeRegistration { path, admin, project_marker: project_marker.clone() };
+        (registration.path != project).then_some(registration)
+    }).collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
     found
+}
+
+/// A registered folder within an enclosing repository has only its own
+/// filesystem scope. Git's upward discovery cannot give it a registry.
+pub(super) fn owns_git_checkout(project: &Path) -> bool {
+    project.join(".git").exists() && crate::git::is_own_worktree(project)
 }
 
 /// One project as the calls that name it are served: its canonical folder,
@@ -245,7 +325,7 @@ impl ServedProject {
     }
 
     fn machine(id: String, root: PathBuf) -> Self {
-        let files = Arc::new(WorkspaceFiles::new(root.clone()));
+        let files = Arc::new(WorkspaceFiles::for_machine_project(root.clone()));
         Self { id: Some(id), git: WorkspaceGit::for_project(root.clone(), files.clone()), files, root, refreshed: Mutex::new(None) }
     }
 
@@ -260,9 +340,39 @@ impl ServedProject {
         if refreshed.is_some_and(|at| at.elapsed() < WORKTREES_FRESH_FOR) {
             return;
         }
-        let outside = if crate::git::is_repo(&self.root) { worktrees(&self.root).into_iter().filter(|worktree| !worktree.starts_with(&self.root)).collect() } else { Vec::new() };
-        self.files.set_worktrees(outside);
+        self.files.set_worktrees(worktrees(&self.root));
         *refreshed = Some(Instant::now());
+    }
+
+    /// The session's authorized checkout in fs/1 and git/1 coordinates.
+    pub fn session_checkout(&self, session: &crate::store::index::SessionEntry) -> Option<(String, Option<String>)> {
+        if session.worktree_removed {
+            return None;
+        }
+        let cwd = match std::fs::canonicalize(&session.cwd) {
+            Ok(cwd) => cwd.is_dir().then_some(cwd),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => None,
+            Err(_) => return None,
+        };
+        let (path, exact) = match cwd {
+            Some(cwd) => (cwd, false),
+            None => (std::fs::canonicalize(session.checkout_root()?).ok()?, true),
+        };
+        if !path.is_dir() {
+            return None;
+        }
+        let mut checkout = self.files.containing_worktree(&path);
+        if checkout.is_none() && path != self.root && (exact || session.worktree_name.is_some() || !path.starts_with(&self.root)) {
+            // A newly created checkout can arrive before the next discovery.
+            self.files.set_worktrees(worktrees(&self.root));
+            checkout = self.files.containing_worktree(&path);
+        }
+        if let Some(checkout) = checkout.filter(|checkout| !exact || *checkout == path) {
+            let name = self.files.relative(&checkout);
+            return Some((name.clone(), Some(name)));
+        }
+        (path == self.root || (!exact && path.starts_with(&self.root)))
+            .then(|| (String::new(), self.git.project_has_git().then(|| ".".into())))
     }
 }
 
@@ -278,12 +388,17 @@ impl Projects {
     /// added or removed on the machine is served or refused at once.
     pub fn get(&self, id: &str) -> Result<Arc<ServedProject>, RpcError> {
         let project = registered()?.into_iter().find(|project| project_id(&project.path) == id);
-        let mut served = self.served.lock().unwrap();
         let Some(project) = project else {
-            served.remove(id);
+            self.served.lock().unwrap().remove(id);
             return Err(RpcError::not_found(format!("no project {id} on this machine")));
         };
-        let root = std::fs::canonicalize(&project.path).map_err(|_| RpcError::not_found(format!("the folder of project {id} is gone")))?;
+        self.get_at(id, &project.path)
+    }
+
+    /// Use a path from the registered-project snapshot used to list sessions.
+    pub fn get_at(&self, id: &str, path: &str) -> Result<Arc<ServedProject>, RpcError> {
+        let root = std::fs::canonicalize(path).map_err(|_| RpcError::not_found(format!("the folder of project {id} is gone")))?;
+        let mut served = self.served.lock().unwrap();
         if let Some(existing) = served.get(id).filter(|existing| existing.root == root) {
             let existing = existing.clone();
             drop(served);

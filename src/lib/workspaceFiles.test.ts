@@ -162,9 +162,9 @@ describe("a machine session's files, rooted at its worktree (PRO-347)", () => {
 describe("a machine session's files in a worktree outside its project (PRO-405)", () => {
   const worktree = "/Users/me/worktrees/read";
   const asked: { method: string; params: Record<string, unknown> }[] = [];
-  const source = () =>
+  const source = (base = worktree) =>
     cloudFileSource(
-      `machine:m:p/${worktree}`,
+      `machine:m:p/${base}`,
       client((method, params) => {
         asked.push({ method, params });
         // The runtime names paths in an outside worktree absolutely, as it lists the worktree.
@@ -176,7 +176,7 @@ describe("a machine session's files in a worktree outside its project (PRO-405)"
         throw { code: "method_not_found" };
       }),
       false,
-      worktree,
+      base,
     );
 
   it("asks for the worktree's absolute paths and gives back paths relative to it", async () => {
@@ -201,6 +201,17 @@ describe("a machine session's files in a worktree outside its project (PRO-405)"
     expect(found.hits.map((hit) => hit.path)).toEqual(["src/a.ts"]);
     expect(await files.changes!()).toEqual([{ path: "src/a.ts", status: "modified" }]);
     expect(asked.filter((call) => call.method === "git.status").map((call) => call.params.repo)).toEqual([worktree]);
+    files.dispose();
+  });
+
+  it("preserves literal backslashes in the absolute checkout and its file names", async () => {
+    asked.length = 0;
+    const base = "/Users/me/worktrees/team\\read";
+    const files = source(base);
+    await files.listDir("");
+    await files.readText("src/file\\name.ts");
+    expect(asked.find((call) => call.method === "fs.list")?.params.path).toBe(base);
+    expect(asked.find((call) => call.method === "fs.read")?.params.path).toBe(`${base}/src/file\\name.ts`);
     files.dispose();
   });
 });

@@ -223,8 +223,8 @@ export function hasUnpublishedWork(facts: RepositoryFacts): boolean {
 }
 
 /** The repositories of a cloud workspace. */
-export async function listRepositories(client: WorkspaceRpcClient): Promise<RemoteRepository[]> {
-  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories");
+export async function listRepositories(client: WorkspaceRpcClient, preferredRepo?: string): Promise<RemoteRepository[]> {
+  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories", preferredRepo ? { preferredRepo } : undefined);
   return listed.repositories;
 }
 
