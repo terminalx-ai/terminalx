@@ -801,6 +801,7 @@ the pull request that adds it.
 | `git.prLanded` | `git/1` | Needs a project | |
 | `git.checkout` | `git/1` | Needs a project | |
 | `git.commit` | `git/1` | Needs a project | |
+| `git.commitForPush` | `git/1` | Needs a project | |
 | `git.stage` | `git/1` | Needs a project | |
 | `git.unstage` | `git/1` | Needs a project | |
 | `git.fetch` | `git/1` | Needs a project | With the machine's git sign-in |

@@ -47,6 +47,7 @@ runtime.
 | `git.checkout` | manage | Switch, or `create` (optionally `from` a ref). |
 | `git.stage` / `git.unstage` | manage | Paths are repository-relative; `GIT_LITERAL_PATHSPECS` makes `:(top)`-style magic plain names. |
 | `git.commit` | manage | `message`, `author` (required); everything by default, `paths`, or `staged: true` for the index only. Nothing to commit is `invalid_params`. |
+| `git.commitForPush` | manage | Commits the worktree using `message` and `author` when `expectedBranch` and `expectedHead` match. Prepares the commit with Git hooks in a detached context and atomically updates only the named branch. |
 | `git.fetch` / `git.pull` | manage | `fetch --prune origin`; `pull --ff-only` (divergence is `conflict`). |
 | `git.push` | manage | `branch` (default current) to `origin`, never forced. See below. |
 | `git.prCreate` | manage | `title`, `body`, `base` (default: the default branch), `draft`. See below. |

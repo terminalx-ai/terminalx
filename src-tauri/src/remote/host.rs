@@ -56,6 +56,7 @@ const SLOW_METHODS: &[&str] = &[
     "git.pull",
     "git.fetch",
     "git.commit",
+    "git.commitForPush",
     "git.checkout",
     "git.repositories",
     "git.status",

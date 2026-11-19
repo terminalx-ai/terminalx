@@ -352,6 +352,10 @@ export class RemoteGit {
     return this.write("git.commit", { message, author, ...options });
   }
 
+  commitForPush(message: string, author: GitAuthor, expectedBranch: string, expectedHead: string): Promise<{ commit: string; branch: string }> {
+    return this.write("git.commitForPush", { message, author, expectedBranch, expectedHead });
+  }
+
   checkout(branch: string, options: { create?: boolean; from?: string } = {}): Promise<unknown> {
     return this.write("git.checkout", { branch, ...options });
   }

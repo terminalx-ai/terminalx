@@ -8,6 +8,7 @@ import type { SessionBackend } from "@/lib/sessionBackend";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -131,6 +132,24 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     expect(await screen.findByRole("button", { name: "Create PR" })).toBeTruthy();
     expect(git.branchBase).toHaveBeenCalledWith("release/2.x");
     expect(screen.queryByTestId("machine-diff-size")).toBeNull();
+  });
+
+  it("falls back to the default for a missing recorded base before a PR exists", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    render(idle, "origin/deleted/release");
+    git.branchBase.mockRejectedValue(new WorkspaceRpcError("base_not_found", "Missing branch", "git.branchBase"));
+    fireEvent.click(await screen.findByRole("button", { name: "Create PR" }));
+    expect((await screen.findByRole("dialog")).textContent).toContain("open a pull request into main");
+    expect(git.branchDiffSize).toHaveBeenCalledWith("main");
+  });
+
+  it("keeps an open PR's base even when the runtime cannot find the ref", async () => {
+    status = { ...status, upstream: "origin/feature" };
+    prs = [pr({ base: "deleted/release" })];
+    render();
+    git.branchBase.mockRejectedValue(new WorkspaceRpcError("base_not_found", "Missing branch", "git.branchBase"));
+    await screen.findByTestId("machine-diff-size");
+    expect(git.branchDiffSize.mock.calls).toEqual([["deleted/release"]]);
   });
 
   it("offers no publishing action on a fresh branch from a release base", async () => {

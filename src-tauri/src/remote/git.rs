@@ -230,7 +230,7 @@ pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::R
     }
 }
 
-fn bounded_branch_git(mut command: Command, args: &[&str], deadline: Instant) -> Result<String, RpcError> {
+fn bounded_branch_output(mut command: Command, args: &[&str], deadline: Instant) -> Result<Ran, RpcError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
@@ -240,6 +240,11 @@ fn bounded_branch_git(mut command: Command, args: &[&str], deadline: Instant) ->
     if output.timed_out || Instant::now() >= deadline {
         return Err(RpcError::new("timeout", "Reading the branch comparison took too long."));
     }
+    Ok(output)
+}
+
+fn bounded_branch_git(command: Command, args: &[&str], deadline: Instant) -> Result<String, RpcError> {
+    let output = bounded_branch_output(command, args, deadline)?;
     if !output.ok {
         return Err(failure_error("git branch comparison", &output.text(), Failure::Other));
     }
@@ -247,21 +252,25 @@ fn bounded_branch_git(mut command: Command, args: &[&str], deadline: Instant) ->
 }
 
 fn comparison_refs(cwd: &Path, base: &str, deadline: Instant) -> Result<Option<(String, String)>, RpcError> {
-    let read = |args: &[&str]| bounded_branch_git(git_command(cwd), args, deadline);
-    let head = match read(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) {
-        Ok(sha) => sha.trim().to_string(),
-        Err(error) if error.code == "git_failed" => return Ok(None),
-        Err(error) => return Err(error),
+    let resolve = |reference: &str| {
+        let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", reference];
+        let output = bounded_branch_output(git_command(cwd), &args, deadline)?;
+        if output.ok {
+            Ok(Some(output.stdout.trim().to_string()))
+        } else if output.stderr.is_empty() {
+            Ok(None)
+        } else {
+            Err(failure_error("git branch comparison", &output.text(), Failure::Other))
+        }
     };
+    let Some(head) = resolve("HEAD^{commit}")? else { return Ok(None) };
     let remote = format!("refs/remotes/origin/{base}^{{commit}}");
     let local = format!("refs/heads/{base}^{{commit}}");
-    let target = read(&["rev-parse", "--verify", "--end-of-options", &remote])
-        .or_else(|error| if error.code == "git_failed" {
-            read(&["rev-parse", "--verify", "--end-of-options", &local])
-        } else {
-            Err(error)
-        })?;
-    Ok(Some((head, target.trim().to_string())))
+    let target = match resolve(&remote)? {
+        Some(target) => target,
+        None => resolve(&local)?.ok_or_else(|| RpcError::new("base_not_found", format!("The branch {base} could not be found.")))?,
+    };
+    Ok(Some((head, target)))
 }
 
 /// Compare the worktree to the merge base using an intent-to-add index so
@@ -490,7 +499,8 @@ impl WorkspaceGit {
             "git.checkout" => self.checkout(params),
             "git.stage" => self.paths(params, &["add", "-A", "--"]),
             "git.unstage" => self.unstage(params),
-            "git.commit" => self.commit(params),
+            "git.commit" => self.commit(params, false),
+            "git.commitForPush" => self.commit(params, true),
             "git.fetch" => self.fetch(params),
             "git.push" => self.push(params),
             "git.pull" => self.pull(params),
@@ -959,21 +969,12 @@ impl WorkspaceGit {
         Ok(json!({ "repo": repo.name, "paths": paths }))
     }
 
-    fn commit(&self, params: &Value) -> Result<Value, RpcError> {
+    fn commit(&self, params: &Value, guarded: bool) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let expected = match (optional_ref(params, "expectedBranch")?, params.get("expectedHead")) {
-            (None, None) => None,
+            (None, None) if !guarded => None,
             (Some(branch), Some(Value::String(head))) if valid_object_id(head) => Some((branch, head.as_str())),
             _ => return Err(RpcError::invalid("expectedBranch and expectedHead are required together")),
-        };
-        let check_checkout = || {
-            let Some((branch, head)) = expected else { return Ok(()) };
-            let expected_ref = format!("refs/heads/{branch}");
-            let current_ref = self.git(&repo, &["symbolic-ref", "--quiet", "HEAD"]).ok();
-            if current_ref.as_deref().map(str::trim) != Some(expected_ref.as_str()) || self.local_head(&repo, branch)? != head {
-                return Err(RpcError::new("conflict", "The checkout changed before the commit. Refresh and try again."));
-            }
-            Ok(())
         };
         let message = required_str(params, "message")?;
         if message.trim().is_empty() || message.len() > 64 * 1024 {
@@ -991,7 +992,12 @@ impl WorkspaceGit {
             Some(Value::Null) | None => None,
             Some(_) => Some(Self::path_list(params)?),
         };
-        check_checkout()?;
+        if let Some((branch, head)) = expected {
+            if staged_only || paths.is_some() {
+                return Err(RpcError::invalid("A guarded branch commit includes all changes."));
+            }
+            return self.commit_to_branch(&repo, branch, head, message, name, email);
+        }
         match &paths {
             Some(paths) => {
                 let mut args = vec!["add", "-A", "--"];
@@ -1020,28 +1026,106 @@ impl WorkspaceGit {
             args.push("--");
             args.extend(paths.iter().map(String::as_str));
         }
-        check_checkout()?;
         self.git_timed(&repo, &args, LOCAL_TIMEOUT, &env)?;
         let commit = crate::git::head_commit(&repo.dir);
         let branch = crate::git::current_branch(&repo.dir);
-        if let Some((expected_branch, previous)) = expected {
-            let verified = if let Some(commit) = &commit {
-                branch.as_deref() == Some(expected_branch) && commit != previous
-                    && self.local_head(&repo, expected_branch)? == *commit
-                    && self.git(&repo, &["rev-parse", &format!("{commit}^1")])?.trim() == previous
-            } else {
-                false
-            };
-            if !verified {
-                return Err(RpcError::new("conflict", "Git committed, but the new commit could not be verified on the selected branch. Check the checkout before pushing."));
-            }
-        }
         Ok(json!({
             "repo": repo.name,
             "commit": commit,
             "branch": branch,
             "author": { "name": name, "email": email },
         }))
+    }
+
+    /// Prepare with Git's ordinary commit machinery and hooks in a private,
+    /// detached Git directory. Only the named ref can receive the new commit,
+    /// via a compare-and-swap against the head the caller confirmed.
+    fn commit_to_branch(&self, repo: &Repo, branch: &str, head: &str, message: &str, name: &str, email: &str) -> Result<Value, RpcError> {
+        let reference = format!("refs/heads/{branch}");
+        let check_checkout = || {
+            let current = self.git(repo, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+            if current.as_deref().map(str::trim) != Some(reference.as_str()) || self.local_head(repo, branch)? != head {
+                return Err(RpcError::new("conflict", "The checkout changed before the commit. Refresh and try again."));
+            }
+            if crate::git::operation_in_progress(&repo.dir).map_err(git_error)?.is_some() {
+                return Err(RpcError::new("conflict", "Finish the Git operation before committing and pushing."));
+            }
+            Ok(())
+        };
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let git_dir = path(&["rev-parse", "--absolute-git-dir"])?;
+        let common = path(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let mut lock_path = index.as_os_str().to_owned();
+        lock_path.push(".lock");
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                RpcError::new("busy", "Another Git operation is using the worktree index. Try again shortly.")
+            } else {
+                RpcError::internal(error)
+            }
+        })?;
+        let lock = tempfile::TempPath::try_from_path(lock_path).map_err(RpcError::internal)?;
+        check_checkout()?;
+
+        let mut scratch = tempfile::Builder::new();
+        scratch.prefix("terminalx-branch-commit-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            scratch.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+        let staged = scratch.path().join("index");
+        if index.exists() {
+            std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
+            // Read a split index against the real Git directory before moving
+            // to the detached context, where its shared index is absent.
+            let mut command = git_command(&repo.dir);
+            command.env("GIT_INDEX_FILE", &staged).args(["update-index", "--no-split-index"]);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare commit index", &result.text(), Failure::Other));
+            }
+        }
+        std::fs::write(scratch.path().join("HEAD"), format!("{head}\n")).map_err(RpcError::internal)?;
+        for metadata in ["config.worktree", "info/sparse-checkout"] {
+            let source = git_dir.join(metadata);
+            if source.is_file() {
+                let dest = scratch.path().join(metadata);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(RpcError::internal)?;
+                }
+                std::fs::copy(source, dest).map_err(RpcError::internal)?;
+            }
+        }
+
+        let run = |args: &[&str]| {
+            let mut command = git_command(&repo.dir);
+            command.env("GIT_DIR", scratch.path()).env("GIT_COMMON_DIR", &common)
+                .env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
+                .env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name).env("GIT_COMMITTER_EMAIL", email)
+                .args(["-c", "core.splitIndex=false", "-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")])
+                .args(args);
+            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare branch commit", &result.text(), Failure::Other));
+            }
+            Ok(result.stdout)
+        };
+        run(&["add", "-A", "--", "."])?;
+        if run(&["diff", "--cached", "--name-only", "-z", "--"])?.is_empty() {
+            return Err(RpcError::invalid("nothing to commit"));
+        }
+        run(&["commit", "--quiet", "-m", message])?;
+        let output = run(&["rev-parse", "HEAD"])?;
+        let commit = output.trim();
+        check_checkout()?;
+        std::fs::copy(&staged, &lock).map_err(RpcError::internal)?;
+        self.git(repo, &["update-ref", "--no-deref", "-m", "commit: TerminalX", &reference, commit, head])?;
+        lock.persist(&index).map_err(|error| RpcError::internal(format!("Committed on {branch}, but could not update the worktree index: {error}")))?;
+        Ok(json!({ "repo": repo.name, "commit": commit, "branch": branch, "author": { "name": name, "email": email } }))
     }
 
     // ---- the remote ------------------------------------------------------

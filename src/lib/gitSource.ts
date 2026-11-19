@@ -257,7 +257,12 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
       if (!author) throw new MissingIdentityError();
       const current = await statusOf();
       if (current.branch !== branch || current.head !== head) throw new Error("The checkout changed on the machine. Refresh and try again.");
-      const committed = await remote.commit(message, author, { expectedBranch: branch, expectedHead: head });
+      const committed = await remote.commitForPush(message, author, branch, head).catch((error: unknown) => {
+        if (error instanceof WorkspaceRpcError && error.code === "method_not_found") {
+          throw new Error("Update the machine runtime to use Commit and Push.");
+        }
+        throw error;
+      });
       if (committed.branch !== branch || !committed.commit || committed.commit === head) {
         throw new Error("The machine's commit could not be verified on the selected branch. Check the checkout before pushing.");
       }

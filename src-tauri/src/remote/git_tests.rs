@@ -202,16 +202,51 @@ fn commit_and_push_refuse_a_changed_checkout_or_head() {
         "repo": "app", "message": "work", "author": me(),
         "expectedBranch": "main", "expectedHead": head
     });
-    assert_eq!(f.code("git.commit", params.clone()), "conflict");
+    assert_eq!(f.code("git.commitForPush", params.clone()), "conflict");
     assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
     git(&checkout, &["checkout", "-q", "main"]);
-    let commit = f.call("git.commit", params).unwrap();
+    let commit = f.call("git.commitForPush", params).unwrap();
     assert_eq!(commit["branch"], "main");
     assert_ne!(commit["commit"], head);
     let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
     assert_eq!(f.code("git.push", push(json!(head))), "conflict");
     assert_eq!(f.call("git.push", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
     assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]), commit["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_the_real_head_during_commit_preparation_updates_neither_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["branch", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\n",
+        "env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git symbolic-ref HEAD refs/heads/other\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    assert_eq!(f.code("git.commitForPush", params), "conflict");
+    assert_eq!(git(&checkout, &["branch", "--show-current"]), "other");
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head);
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/other"]), head);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    assert!(!checkout.join(".git/index.lock").exists());
+}
+
+#[test]
+fn machine_base_lookup_reports_a_deleted_ref_separately_from_other_errors() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, "app");
+    assert_eq!(f.code("git.branchBase", json!({ "repo": "app", "base": "deleted/release" })), "base_not_found");
+    assert_eq!(f.call("git.branchBase", json!({ "repo": "app", "base": "main" })).unwrap()["aheadOfBase"], 0);
 }
 
 #[test]

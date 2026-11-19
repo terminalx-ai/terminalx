@@ -16,6 +16,7 @@ import type { FileSource } from "@/lib/workspaceFiles";
 import type { SessionBackend } from "@/lib/sessionBackend";
 import { agentPrompt, branchPr, composeMachineSnapshot, isAgentAction, isGithubRemote, machineBranchBase, sameBranchState, type MachineBranchSnapshot } from "@/lib/machineBranchStep";
 import type { SessionEntry } from "@/types/session";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 
 /** How often the machine's `git.status` is read while the window shows; file changes on the machine read it sooner. */
@@ -117,13 +118,20 @@ export function useMachineBranch(input: MachineBranchInput) {
         }
         const prCount = hostedState?.count ?? null;
         const pr = hostedState?.pr ?? null;
-        const base = machineBranchBase(work, pr, baseRef);
+        let selectedBaseRef = baseRef;
+        let base = machineBranchBase(work, pr, selectedBaseRef);
         const comparison = work.isRepo && work.head && base && base !== work.defaultBranch
-          ? await source.branchBase?.(base).catch(() => null)
+          ? await source.branchBase?.(base).catch((error: unknown) => {
+            if (pr?.state !== "OPEN" && error instanceof WorkspaceRpcError && error.code === "base_not_found") {
+              selectedBaseRef = null;
+              base = work.defaultBranch;
+            }
+            return null;
+          })
           : null;
         if (disposed) return null;
         const aheadOfBase = comparison ? (comparison.head === work.head ? comparison.aheadOfBase : null) : undefined;
-        const snapshot = composeMachineSnapshot({ work, remote, pr, known: prCount !== null, working: workingRef.current, baseRef, aheadOfBase });
+        const snapshot = composeMachineSnapshot({ work, remote, pr, known: prCount !== null, working: workingRef.current, baseRef: selectedBaseRef, aheadOfBase });
         const key = work.isRepo && base ? JSON.stringify([currentBranch, work.head, base]) : null;
         const sameDiff = key === diffKey;
         diffKey = key;
@@ -131,11 +139,12 @@ export function useMachineBranch(input: MachineBranchInput) {
           ...current, currentBranch, prCount, snapshot, diff: sameDiff ? current.diff : null, error: null, refreshing: false,
         }));
         if (key && base && source.branchDiffSize && !diffPending) {
+          const diffBase = base;
           diffPending = true;
-          void source.branchDiffSize(base).then((size) => {
+          void source.branchDiffSize(diffBase).then((size) => {
             if (disposed || key !== diffKey) return;
             const diff = size !== "unsupported" && size.head === work.head
-              ? { additions: size.additions, deletions: size.deletions, base } : null;
+              ? { additions: size.additions, deletions: size.deletions, base: diffBase } : null;
             setRead((current) => ({ ...current, diff, diffNeedsUpdate: size === "unsupported" }));
           }).catch(() => {
             if (!disposed && key === diffKey) setRead((current) => ({ ...current, diff: null }));

@@ -28,6 +28,18 @@ it("sends the selected branch and the machine session together when creating a P
   expect(mutate).toHaveBeenCalledWith("git.prCreate", { ...request, sessionId: "s1", repo: "topic" });
 });
 
+it("refuses to fall back to an unguarded commit on an older machine", async () => {
+  const call = vi.fn().mockResolvedValue({ branch: "topic", head: "abc" });
+  const mutate = vi.fn().mockRejectedValue(new WorkspaceRpcError("method_not_found", "Unknown method", "git.commitForPush"));
+  const remote = new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "topic");
+  const author = { name: "Ada", email: "ada@example.com" };
+  const source = cloudGitSource({ workspaceKey: "machine:m1:p1", remote, canWrite: true, author: async () => author });
+  await expect(source.commitForPush?.("Record work", "topic", "abc")).rejects.toThrow("Update the machine runtime");
+  expect(mutate.mock.calls).toEqual([["git.commitForPush", {
+    repo: "topic", message: "Record work", author, expectedBranch: "topic", expectedHead: "abc",
+  }]]);
+});
+
 describe("the runtime session a session key names in a workspace", () => {
   it("reads a machine session in its own project (PRO-347)", () => {
     expect(runtimeSessionIn("machine:m1:p1", "machine:m1:p1:s1")).toBe("s1");

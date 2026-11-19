@@ -247,6 +247,7 @@ pub const METHODS: &[Method] = &[
     method("git.checkout", "git/1", Manage, true),
     // The author comes from the client; credentials never do.
     method("git.commit", "git/1", Manage, true),
+    method("git.commitForPush", "git/1", Manage, true),
     method("git.stage", "git/1", Manage, true),
     method("git.unstage", "git/1", Manage, true),
     method("git.fetch", "git/1", Manage, true),
