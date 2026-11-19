@@ -658,6 +658,7 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
         ("git.fetch", json!({})),
         ("git.push", json!({})),
         ("git.prCreate", json!({ "title": "t" })),
+        ("git.prCreateForSession", json!({ "title": "t" })),
         ("git.prLinkBranch", json!({})),
         ("git.prUnlink", json!({})),
         ("git.prMerge", json!({ "number": 1 })),

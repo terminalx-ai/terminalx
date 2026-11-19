@@ -346,34 +346,40 @@ impl ServedProject {
 
     /// The session's authorized checkout in fs/1 and git/1 coordinates.
     pub fn session_checkout(&self, session: &crate::store::index::SessionEntry) -> Option<(String, Option<String>)> {
-        if session.worktree_removed {
-            return None;
-        }
-        let cwd = match std::fs::canonicalize(&session.cwd) {
-            Ok(cwd) => cwd.is_dir().then_some(cwd),
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => None,
-            Err(_) => return None,
-        };
-        let (path, exact) = match cwd {
-            Some(cwd) => (cwd, false),
-            None => (std::fs::canonicalize(session.checkout_root()?).ok()?, true),
-        };
-        if !path.is_dir() {
-            return None;
-        }
-        let mut checkout = self.files.containing_worktree(&path);
-        if checkout.is_none() && path != self.root && (exact || session.worktree_name.is_some() || !path.starts_with(&self.root)) {
-            // A newly created checkout can arrive before the next discovery.
-            self.files.set_worktrees(worktrees(&self.root));
-            checkout = self.files.containing_worktree(&path);
-        }
-        if let Some(checkout) = checkout.filter(|checkout| !exact || *checkout == path) {
-            let name = self.files.relative(&checkout);
-            return Some((name.clone(), Some(name)));
-        }
-        (path == self.root || (!exact && path.starts_with(&self.root)))
-            .then(|| (String::new(), self.git.project_has_git().then(|| ".".into())))
+        session_checkout(&self.root, &self.files, session, || self.git.project_has_git())
     }
+}
+
+pub(super) fn session_checkout(
+    root: &Path, files: &WorkspaceFiles, session: &crate::store::index::SessionEntry, project_has_git: impl FnOnce() -> bool,
+) -> Option<(String, Option<String>)> {
+    if session.worktree_removed {
+        return None;
+    }
+    let cwd = match std::fs::canonicalize(&session.cwd) {
+        Ok(cwd) => cwd.is_dir().then_some(cwd),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => None,
+        Err(_) => return None,
+    };
+    let (path, exact) = match cwd {
+        Some(cwd) => (cwd, false),
+        None => (std::fs::canonicalize(session.checkout_root()?).ok()?, true),
+    };
+    if !path.is_dir() {
+        return None;
+    }
+    let mut checkout = files.containing_worktree(&path);
+    if checkout.is_none() && path != root && (exact || session.worktree_name.is_some() || !path.starts_with(root)) {
+        // A newly created checkout can arrive before the next discovery.
+        files.set_worktrees(worktrees(root));
+        checkout = files.containing_worktree(&path);
+    }
+    if let Some(checkout) = checkout.filter(|checkout| !exact || *checkout == path) {
+        let name = files.relative(&checkout);
+        return Some((name.clone(), Some(name)));
+    }
+    (path == root || (!exact && path.starts_with(root)))
+        .then(|| (String::new(), project_has_git().then(|| ".".into())))
 }
 
 /// A machine's projects as served, made when first named and kept while
