@@ -11,24 +11,23 @@ Words used here:
 - **This Mac**: the Mac you are sitting at.
 - **Machine**: the other computer, the one being operated.
 
-Settings → Machines is where everything below starts. With no machine added,
-it shows the three steps in short, and a link to this guide.
+Open Settings → Machines to get started. TerminalX 0.2.35 makes this page
+available by default.
 
 ## What you need
 
 - TerminalX on both computers. A machine can be a Mac with the app, a Mac with
   only the runtime, or a Linux server (x64 or arm64).
-- A way for this Mac to reach the machine:
-  - the same network, or
-  - [Tailscale](https://tailscale.com) on both, or
-  - both signed in to the same TerminalX account, so TerminalX Relay can carry
-    the connection when no direct path works.
+- For first pairing, both a pairing code and the account list require a
+  direct connection from this Mac to TCP port 6768 on the machine, on the
+  same network or through [Tailscale](https://tailscale.com). Pairing by code
+  works signed out.
+- For account pairing with another desktop Mac or for TerminalX Relay, sign
+  both computers in to the same TerminalX account. The relay can carry a
+  paired connection when a direct route is unavailable.
 
 Every path is end-to-end encrypted. The relay only passes sealed messages: it
 cannot read your prompts, terminals or files.
-
-On the same network or over Tailscale, this Mac connects to TCP port 6768 on
-the machine. A firewall between the two must let that port through.
 
 ## Add a Mac
 
@@ -70,9 +69,17 @@ A Linux server, or any computer you reach only through a terminal.
    terminalx-serve pair
    ```
 
+   If asked whether other computers can operate the server, answer `y`.
+
 3. On this Mac, choose **Add a machine** → **Headless server**, and paste
-   the code. Compare the fingerprint the server printed with the one on this
-   Mac, and answer `y` on the server if they match.
+   the code. Choose **Continue**, compare the fingerprint the server prints
+   with the one on this Mac, and answer `y` on the server if they match.
+   For later relay access, run `terminalx-serve login` on the server and sign
+   this Mac in to the same account. Once the server registers with the relay,
+   quit TerminalX on this Mac with **⌘Q** and reopen it while the direct route
+   is still available. TerminalX requests a relay credential when it makes
+   the new direct connection.
+   [Server relay setup](HEADLESS-SERVER.md#how-your-computer-reaches-the-server)
 4. Give the server something to work on. Either add a project from this Mac
    (open the server in Settings → Machines, then **Add a project** under
    Projects), or on the server:
@@ -102,9 +109,9 @@ In a session on a machine you have the chat, approvals, Changes, Checks, Files,
 pull requests, forwarded ports and terminals, all on that machine. Its
 terminals are named after it.
 
-Some things stay on the computer you sit at, and are not offered for a machine:
-the built-in browser, computer use, dictation, Local VM, and orchestration
-runs.
+The built-in browser, computer use, dictation, Local VM, and orchestration
+runs stay on the computer you sit at. Dictation on this Mac can fill a
+machine session’s composer. Forwarded port previews open on this Mac.
 
 Agents in this Mac's sessions can work on your machines too, with the
 `terminalx` command line (`terminalx machines list`, `terminalx sessions create

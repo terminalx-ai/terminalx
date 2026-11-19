@@ -87,8 +87,8 @@ server then appears under Machines on your computer, with its projects.
   computer connects to the server directly (TCP port 6768), so that port must
   be reachable from your computer: on the same network, over Tailscale, or
   through your firewall.
-- **From anywhere, with no inbound port:** through the TerminalX relay, once
-  the server is signed in to your TerminalX account:
+- **Relay after pairing:** once the server is paired, sign it in to the same
+  TerminalX account as your Mac to reconnect without an inbound port:
 
   ```sh
   terminalx-serve login
@@ -96,15 +96,21 @@ server then appears under Machines on your computer, with its projects.
 
   It prints a link. Open it on any device where you are signed in to
   TerminalX, check that it shows the same code as the server's terminal, and
-  approve. `terminalx-serve logout` signs the server out again. The server
-  keeps its session in `~/.terminalx/data/account/session.json`, readable by
-  you only. The relay carries end-to-end encrypted traffic only, and pairing
-  still needs the code and `Allow? [y/N]` on the server.
+  approve. Keep the direct route available until the server's service log
+  (`~/.terminalx/logs/runtime.log`) says `machine host: registered with the relay`.
+  With the direct route still available, quit TerminalX on your Mac with
+  **⌘Q** and reopen it. Wait for the server to show **Direct** in the sidebar.
+  TerminalX requests a relay credential in the background on this new
+  connection. Before relying on relay access, try connecting from a network
+  with internet access where the Mac has no direct route to the server.
+  The server should show **Relay** in the sidebar. If it goes **Offline**,
+  confirm that the Mac is signed in, restore the direct route, and wait
+  for **Direct** before trying the relay again.
 
-  Relay access comes with PRO-368, which registers a signed-in server with
-  the relay using this session. Until then, signing in does not make the
-  server reachable through the relay: reach it on the same network or over
-  Tailscale.
+  The server keeps its sign-in session in
+  `~/.terminalx/data/account/session.json`, readable by you only.
+  `terminalx-serve logout` signs the server out again. The relay carries
+  end-to-end encrypted traffic.
 
 ## Add a project
 

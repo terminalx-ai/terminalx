@@ -60,6 +60,10 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
 - **Projects and workspaces**: a projects rail with colours and logos, and
   every checkout — including worktrees made outside the app — listed with its
   sessions.
+- **Machines**: pair with another Mac or a headless Linux server in Settings →
+  Machines. Its projects and sessions appear in your sidebar. Chat, approvals,
+  terminals, files and git run on that computer. See
+  [the Machines guide](docs/MACHINES-GUIDE.md).
 - **A first-party command line interface**: `terminalx` (or `tnx`) drives
   projects, sessions, tabs, transcripts, permission cards, worktrees, issues
   and issue pipelines through the running app's authenticated control socket.
