@@ -98,11 +98,14 @@ server then appears under Machines on your computer, with its projects.
   TerminalX, check that it shows the same code as the server's terminal, and
   approve. Keep the direct route available until the server's service log
   (`~/.terminalx/logs/runtime.log`) says `machine host: registered with the relay`.
-  On your Mac, select the server in the sidebar and open the connection
-  status in its header. Choose **Disconnect**, then reopen the status and
-  choose **Try again**. During this direct reconnect, the Mac requests its
-  relay credential. You can then reach the server over the relay when the
-  direct route is unavailable.
+  With the direct route still available, quit TerminalX on your Mac with
+  **⌘Q** and reopen it. Wait for the server to show **Direct** in the sidebar.
+  TerminalX requests a relay credential in the background on this new
+  connection. Before relying on relay access, try connecting from a network
+  with internet access where the Mac has no direct route to the server.
+  The server should show **Relay** in the sidebar. If it goes **Offline**,
+  confirm that the Mac is signed in, restore the direct route, and wait
+  for **Direct** before trying the relay again.
 
   The server keeps its sign-in session in
   `~/.terminalx/data/account/session.json`, readable by you only.

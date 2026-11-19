@@ -76,9 +76,9 @@ A Linux server, or any computer you reach only through a terminal.
    with the one on this Mac, and answer `y` on the server if they match.
    For later relay access, run `terminalx-serve login` on the server and sign
    this Mac in to the same account. Once the server registers with the relay,
-   open its connection status in TerminalX on this Mac, choose **Disconnect**,
-   then **Try again** while the direct route is still available. This direct
-   reconnect gives this Mac its relay credential.
+   quit TerminalX on this Mac with **⌘Q** and reopen it while the direct route
+   is still available. TerminalX requests a relay credential when it makes
+   the new direct connection.
    [Server relay setup](HEADLESS-SERVER.md#how-your-computer-reaches-the-server)
 4. Give the server something to work on. Either add a project from this Mac
    (open the server in Settings → Machines, then **Add a project** under
