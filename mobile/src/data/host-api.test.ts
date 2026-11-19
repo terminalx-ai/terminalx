@@ -7,8 +7,8 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
   default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() },
 }));
 
-function hostApi(request: ReturnType<typeof vi.fn>) {
-  return new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
+function hostApi(request: ReturnType<typeof vi.fn>, fitted = false) {
+  return new HostApi({ request, onEvent: () => () => {}, reassemblesFragments: async () => fitted } as unknown as HostConnection);
 }
 
 describe("mobile transcript pages", () => {
@@ -40,6 +40,73 @@ describe("mobile transcript pages", () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
     await expect(hostApi(request).tail("session", "tab", 12)).resolves.toEqual({ events: [], hasMore: false });
     expect(request).toHaveBeenCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 12, limit: 1 });
+  });
+});
+
+describe("phone caching and sending ahead (#1283)", () => {
+  const syncEvent = (seq: number) => ({ id: `event-${seq}`, sessionId: "session", tabId: "tab", harness: "codex", seq, ts: "2026-11-19T00:00:00Z", payload: { type: "user_message", text: `turn ${seq}` } });
+  const cursor = (offset: number) => ({ offset, digest: String(offset % 10).repeat(64) });
+
+  it("asks a Mac that bounds its pages for several earlier turns at a time", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
+    await hostApi(request, true).tail("session", "tab", 40);
+    expect(request).toHaveBeenLastCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 40, limit: 10 });
+  });
+
+  it("sends a session list version kept from an earlier launch, and shows that list when it did not change", async () => {
+    const sessions = [{ id: "kept" }];
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: true, value: { conditionalLists: 1 } }
+      : { ok: true, value: { notModified: true, version: "v-launch" } });
+    const api = hostApi(request);
+    api.rememberList("sessions.summaries", {}, "v-launch", { sessions });
+    expect(api.listVersion("sessions.summaries")).toBe("v-launch");
+    expect(await (api as unknown as { list(method: string): Promise<unknown> }).list("sessions.summaries")).toEqual({ sessions, version: "v-launch" });
+    expect(request).toHaveBeenLastCalledWith("sessions.summaries", { version: "v-launch" });
+  });
+
+  it("does not let a kept list replace one already read on this connection", async () => {
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: true, value: { conditionalLists: 1 } }
+      : { ok: true, value: { sessions: [], version: "v-now" } });
+    const api = hostApi(request);
+    await api.summaries();
+    api.rememberList("sessions.summaries", {}, "v-old", { sessions: [] });
+    expect(api.listVersion("sessions.summaries")).toBe("v-now");
+  });
+
+  it("asks for a prefetch only from a Mac that names it, and stops it the same way", async () => {
+    const older = vi.fn().mockResolvedValue({ ok: true, value: { transcript: 1 } });
+    expect(await hostApi(older).prefetch(true, [])).toBe(false);
+    expect(older).toHaveBeenCalledTimes(1);
+    const request = vi.fn(async (method: string, params?: { enabled?: boolean }) => method === "sync.capabilities"
+      ? { ok: true, value: { transcript: 1, prefetch: 1 } }
+      : { ok: true, value: { enabled: params?.enabled } });
+    const api = hostApi(request);
+    const known = [{ sessionId: "session", tabId: "tab", cursor: cursor(20) }];
+    expect(await api.prefetch(true, known)).toBe(true);
+    expect(request).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known });
+    expect(await api.prefetch(false)).toBe(false);
+    expect(request).toHaveBeenLastCalledWith("sync.prefetch", { enabled: false });
+  });
+
+  it("passes on only prefetched pages that are contiguous with the checkpoint they continue", () => {
+    let emit: (event: { method: string; params?: unknown }) => void = () => {};
+    const api = new HostApi({ request: vi.fn(), onEvent: (listener: typeof emit) => { emit = listener; return () => {}; } } as unknown as HostConnection);
+    const seen: unknown[] = [];
+    api.onPrefetched((prefetched) => seen.push(prefetched));
+    const page = { events: [syncEvent(21)], cursor: cursor(21), reset: false, hasMore: false, hasEarlier: true };
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: cursor(20), page } });
+    // Not contiguous, another conversation's events, and no checkpoint for a forward page: all dropped.
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: cursor(19), page } });
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "other", after: cursor(20), page } });
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: null, page } });
+    const reset = { ...page, reset: true };
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: null, page: reset } });
+    expect(seen).toEqual([
+      { sessionId: "session", tabId: "tab", after: cursor(20), page },
+      { sessionId: "session", tabId: "tab", after: undefined, page: reset },
+    ]);
   });
 });
 

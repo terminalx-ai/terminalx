@@ -14,6 +14,7 @@ pub(crate) mod registry;
 pub(crate) mod rpc;
 pub(crate) mod send_ids;
 pub(crate) mod sink;
+mod sync_cache;
 pub(crate) mod wire;
 
 use std::sync::{Arc, Mutex, OnceLock};

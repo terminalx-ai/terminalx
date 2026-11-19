@@ -43,6 +43,9 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: vi.fn(async (key: string) => mocks.storage.get(key) ?? null),
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
+  multiGet: vi.fn(async (keys: string[]) => keys.map((key) => [key, mocks.storage.get(key) ?? null])),
+  multiSet: vi.fn(async (pairs: [string, string][]) => { for (const [key, value] of pairs) mocks.storage.set(key, value); }),
+  multiRemove: vi.fn(async (keys: string[]) => { for (const key of keys) mocks.storage.delete(key); }),
 } }));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
