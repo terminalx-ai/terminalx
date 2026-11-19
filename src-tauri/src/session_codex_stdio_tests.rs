@@ -1973,6 +1973,14 @@ fn privacy_review3_revoked_approval_codex_stays_answerable() {
 }
 
 #[test]
+fn a_revoked_phone_cannot_deliver_a_queued_codex_approval() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+        .env(CASE, "native3-approval-phone").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn privacy_native3_codex_followup_delivery() {
     native3_delivery_cases("followup");
 }
@@ -2092,15 +2100,24 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         let request = rt.lock().unwrap().pending.keys().next().unwrap().clone();
         let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
         *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(8)).unwrap(); }));
-        // Same remote admission used by relay permission RPC; the physical
-        // writer is a different thread and must retain this original ticket.
-        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
-          manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap(); }
+        let phone = case.ends_with("-phone").then(|| crate::local_runtime::mobile::ApprovalPhone::register(manager));
+        if let Some(phone) = &phone {
+            phone.answer(manager, "stdio-owner", "tab", &request, "allow");
+        } else {
+            let ticket = crate::data_privacy::Ticket::default();
+            let _scope = ticket.scope().unwrap();
+            manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap();
+        }
         arrived.recv_timeout(WAIT).unwrap();
         assert!(rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(manager.respond_permission("stdio-owner", "tab", &request, "deny").unwrap_err().to_string().contains("still being delivered"));
         assert!(!events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
-        policy(true); if case.ends_with("cycle") { policy(false); }
+        if let Some(phone) = phone {
+            phone.revoke(manager);
+        } else {
+            policy(true);
+            if case.ends_with("cycle") { policy(false); }
+        }
         release.send(()).unwrap();
         // A writer fence proves the rejected answer was processed, without
         // inventing a provider response or sleeping to guess queue progress.

@@ -6,6 +6,14 @@ use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc
 const CASE: &str = "TERMINALX_TEST_OPENCODE_PRIVACY";
 
 #[test]
+fn a_revoked_phone_cannot_deliver_a_queued_opencode_approval() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::watch_tests::prompts::privacy::opencode_privacy::opening_child", "--nocapture"])
+        .env(CASE, "approval-phone").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn privacy_opencode_denied_opening_preserves_local_followups() {
     for kind in ["personal-on", "personal-cycle", "managed-on", "managed-cycle"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -150,13 +158,24 @@ server.serve_forever()
         *BEFORE_OPENCODE_HTTP.lock().unwrap() = Some(Box::new(move || {
             entered.send(()).unwrap(); released.recv_timeout(WAIT).unwrap();
         }));
-        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
-          rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap(); }
+        let phone = (kind == "approval-phone").then(|| crate::local_runtime::mobile::ApprovalPhone::register(&rig.manager));
+        if let Some(phone) = &phone {
+            phone.answer(&rig.manager, SESSION, TAB, &request, "once");
+        } else {
+            let ticket = crate::data_privacy::Ticket::default();
+            let _scope = ticket.scope().unwrap();
+            rig.manager.respond_permission(SESSION, TAB, &request, "once").unwrap();
+        }
         arrived.recv_timeout(WAIT).unwrap();
         assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(rig.manager.respond_permission(SESSION, TAB, &request, "reject").unwrap_err().to_string().contains("still being delivered"));
         assert!(!rig.events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
-        policy(true); if cycle { policy(false); }
+        if let Some(phone) = phone {
+            phone.revoke(&rig.manager);
+        } else {
+            policy(true);
+            if cycle { policy(false); }
+        }
         release.send(()).unwrap();
         wait_for("revoked HTTP answer restored for local reply", || rig.manager.respond_permission(SESSION, TAB, &request, "reject").is_ok());
         wait_for("local HTTP answer settled", || rig.rt.lock().unwrap().pending.is_empty());

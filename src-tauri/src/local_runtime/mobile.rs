@@ -620,6 +620,45 @@ pub fn actor(params: &Value) -> Result<Actor> {
     serde_json::from_value(params["actor"].clone()).context("Invalid paired-device owner identity.")
 }
 
+#[cfg(test)]
+pub(crate) struct ApprovalPhone {
+    lifetime: Arc<Lifetime>,
+    actor: Actor,
+}
+
+#[cfg(test)]
+impl ApprovalPhone {
+    pub(crate) fn register(manager: &crate::session::SessionManager) -> Self {
+        use serde_json::json;
+        let root = crate::store::root().unwrap();
+        crate::store::write_json(&root.join("devices.json"), &json!({"devices":[{
+            "id":"approval-phone","label":"Phone","platform":"test","token":"fixture-hash",
+            "scope":"driver","provenance":"explicit","bindingGeneration":0,"createdAt":crate::store::index::now()
+        }]})).unwrap();
+        let lifetime = Lifetime::new(std::time::Duration::from_secs(60));
+        let actor = Actor {
+            epoch: lifetime.epoch().into(), lease: lifetime.hold().unwrap(), generation: 0, user_id: None,
+        };
+        execute(manager, &lifetime, "register", json!({
+            "actor": actor, "connection": "approval-connection", "deviceId": "approval-phone",
+        })).unwrap();
+        Self { lifetime, actor }
+    }
+
+    pub(crate) fn answer(&self, manager: &crate::session::SessionManager, session: &str, tab: &str,
+        request: &str, option: &str) {
+        execute(manager, &self.lifetime, "permission", serde_json::json!({
+            "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
+            "requestId": request, "optionId": option,
+        })).unwrap();
+    }
+
+    pub(crate) fn revoke(&self, manager: &crate::session::SessionManager) {
+        crate::phone::registry::DeviceRegistry.revoke("approval-phone").unwrap();
+        manager.mobile.retire_device("approval-phone");
+    }
+}
+
 
 /// The phone features this runtime's owner operations serve, each at the
 /// level it is served (#730). The desktop names a feature to a phone only
@@ -758,6 +797,13 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
     if let Some(result) = controls(manager, &actor, &grant, method, &params) {
         return result;
     }
+    if method == "permission" {
+        let (session, tab) = (string("sessionId")?, string("tabId")?);
+        let permit = manager.mobile.permit(&actor, string("connection")?, session, tab)?;
+        let _admitted = permit.enter()?;
+        manager.respond_permission_from_phone(session, tab, string("requestId")?, string("optionId")?, &permit)?;
+        return Ok(serde_json::json!({"status":"answered"}));
+    }
     let _admitted = grant.enter()?;
     match method {
         "check" => Ok(Value::Null),
@@ -788,17 +834,12 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         }
         "unobserve" => Ok(serde_json::json!({"removed":grant.observations.unsubscribe(string("subscriptionId")?)})),
         "output" => grant.observations.poll(),
-        "reconcile" | "permission" | "questions" | "terminalRead" => {
+        "reconcile" | "questions" | "terminalRead" => {
             let session = string("sessionId")?;
             let tab = string("tabId")?;
             let entry = crate::store::index::get(session)?;
             if entry.tab(tab).is_none() { bail!("The tab does not belong to this session."); }
             match method {
-                "permission" => {
-                    grant.driver()?;
-                    manager.respond_permission(session, tab, string("requestId")?, string("optionId")?)?;
-                    Ok(serde_json::json!({"status":"answered"}))
-                }
                 // The desktop's own answer (`answer_questions`): the same
                 // format, the same refusal once the question is closed.
                 "questions" => {

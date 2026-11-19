@@ -797,7 +797,18 @@ mod phase2_opencode_collaboration;
 /// the event pump waits for the server. It used to be the answer, and the
 /// first message of every tab failed with it (found by the live test, #427).
 pub fn perform(tag: &str, method: &str, url: &str, body: Option<Value>) -> String {
-    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).build();
+    perform_with_timeout(tag, method, url, body, std::time::Duration::from_secs(600), STARTUP_WAIT)
+}
+
+pub(crate) fn perform_phone_approval(tag: &str, method: &str, url: &str, body: Option<Value>) -> String {
+    // The mobile grant stays held for the HTTP request. Keep its wait bounded
+    // and let the original ask become answerable again on transport failure.
+    perform_with_timeout(tag, method, url, body, std::time::Duration::from_secs(5), std::time::Duration::ZERO)
+}
+
+fn perform_with_timeout(tag: &str, method: &str, url: &str, body: Option<Value>,
+    timeout: std::time::Duration, retry_for: std::time::Duration) -> String {
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
     let started = std::time::Instant::now();
     let (status, body) = loop {
         let req = agent.request(method, url);
@@ -815,7 +826,7 @@ pub fn perform(tag: &str, method: &str, url: &str, body: Option<Value>) -> Strin
                 let text = r.into_string().unwrap_or_default();
                 break (code as u64, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)));
             }
-            Err(ureq::Error::Transport(e)) if e.kind() == ureq::ErrorKind::ConnectionFailed && started.elapsed() < STARTUP_WAIT => {
+            Err(ureq::Error::Transport(e)) if e.kind() == ureq::ErrorKind::ConnectionFailed && started.elapsed() < retry_for => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             Err(e) => break (0, Value::String(e.to_string())),

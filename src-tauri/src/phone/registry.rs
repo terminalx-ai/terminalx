@@ -60,8 +60,32 @@ fn rewrite_in<T>(root: &Path, change: impl FnOnce(&mut DeviceFile) -> Result<(T,
 }
 
 impl DeviceRegistry {
+    pub(crate) fn check_credential(&self, device: &DeviceEntry) -> Result<()> {
+        anyhow::ensure!(self.list()?.iter().any(|entry| entry.id == device.id && entry.token == device.token),
+            "The paired-device credential was revoked.");
+        Ok(())
+    }
+
+    /// A revocation takes the exclusive side of this same lock before
+    /// replacing the credential. Hold the read side through the socket flush.
+    pub(crate) fn output_permit(&self, device: &DeviceEntry) -> Result<std::fs::File> {
+        let permit = crate::store::transaction::read_lock(&root()?.join(LOCK), LOCK_WAIT)?;
+        self.check_credential(device)?;
+        Ok(permit)
+    }
+
     pub fn list(&self) -> Result<Vec<DeviceEntry>> {
         list_in(&root()?)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn automatic_binding_devices(&self, account: &AccountMirror) -> Result<Vec<DeviceEntry>> {
+        // An unacknowledged revocation can outlive the last active phone.
+        Ok(read_in(&root()?)?.devices.into_iter().filter(|device| {
+            device.provenance == DeviceProvenance::Automatic
+                && device.bound_user_id.as_deref() == Some(account.user_id.as_str())
+                && device.binding_generation == account.binding_generation
+        }).collect())
     }
 
     pub fn add(&self, mut entry: DeviceEntry) -> Result<()> {

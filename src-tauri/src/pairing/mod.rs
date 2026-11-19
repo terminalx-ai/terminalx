@@ -1249,8 +1249,8 @@ impl PairingManager {
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
-        mobile_connection.check_off_runtime(&self.phone).await?;
-        crate::phone::send_authenticated(&mut socket, &mut session).await?;
+        crate::phone::send_with_grant(&self.phone, &mobile_connection,
+            crate::phone::send_authenticated(&mut socket, &mut session)).await?;
         mark_logged_in();
         crate::phone::serve_connection(&mut socket, &mut session, &self.phone, &mobile_connection, outbound_rx, signal_rx, |request| {
             let (connection, device, mobile_connection) = (&connection, &device, &mobile_connection);

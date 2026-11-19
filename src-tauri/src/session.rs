@@ -3995,6 +3995,11 @@ impl SessionManager {
     }
 
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
+        self.apply_actions_with_approval(rt, actions, None);
+    }
+
+    fn apply_actions_with_approval(&self, rt: &mut TabRuntime, actions: Vec<Action>,
+        approval: Option<&crate::local_runtime::mobile::WritePermit>) {
         for a in actions {
             if self.carried_opencode(rt) && matches!(&a, Action::Http { .. } | Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }) {
                 // Only the exact original ProviderAction may reach NativeHttp.
@@ -4052,6 +4057,7 @@ impl SessionManager {
                     let manager = self.clone();
                     let me = rt.me.clone();
                     let privacy = crate::data_privacy::remote_ticket();
+                    let approval = approval.cloned();
                     let child = rt.child.clone();
                     std::thread::spawn(move || {
                         #[cfg(test)] {
@@ -4059,6 +4065,7 @@ impl SessionManager {
                             if let Some(hook) = hook { hook(); }
                         }
                         let admitted = crate::data_privacy::delivery_scope(privacy.as_ref());
+                        let mobile = approval.as_ref().map(|permit| permit.enter()).transpose();
                         let Some(runtime) = me.upgrade() else { return };
                         let current = |rt: &TabRuntime| !rt.stopping
                             && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
@@ -4066,7 +4073,7 @@ impl SessionManager {
                         {
                             let mut rt = runtime.lock().unwrap();
                             if !current(&rt) { return; }
-                            if admitted.is_err() {
+                            if admitted.is_err() || mobile.is_err() {
                                 let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
                                 manager.apply_actions(&mut rt, actions);
                                 return;
@@ -4074,7 +4081,12 @@ impl SessionManager {
                         }
                         // The original ticket and turn generation survive the whole
                         // request, fallback opening, and subsequent physical prompt.
-                        let line = opencode::perform(&tag, &method, &url, body);
+                        let line = if approval.is_some() {
+                            opencode::perform_phone_approval(&tag, &method, &url, body)
+                        } else {
+                            opencode::perform(&tag, &method, &url, body)
+                        };
+                        drop(mobile);
                         let mut rt = runtime.lock().unwrap();
                         if !current(&rt) { return; }
                         let (actions, answer) = if let Engine::OpenCode(o) = &mut rt.engine {
@@ -4850,6 +4862,16 @@ impl SessionManager {
     }
 
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, None)
+    }
+
+    pub(crate) fn respond_permission_from_phone(&self, session_id: &str, tab_id: &str, request_id: &str,
+        option_id: &str, permit: &crate::local_runtime::mobile::WritePermit) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, Some(permit))
+    }
+
+    fn respond_permission_with(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str,
+        mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
@@ -4873,7 +4895,7 @@ impl SessionManager {
             let binding = self.provider_binding(&rt).context("OpenCode approval association missing")?;
             let provider_request = request_id.strip_prefix("oc:").context("OpenCode ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             self.answer_opencode_carried(&mut rt, request_id, option_id, context)?;
             return Ok(());
@@ -4885,7 +4907,7 @@ impl SessionManager {
             // ask registry; the original ID is preserved, never guessed by tag.
             let provider_request = request_id.strip_prefix("acp:").context("ACP ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
             let envelope = a.answer_carried(request_id, option_id, context)?;
@@ -4915,6 +4937,7 @@ impl SessionManager {
                 (allow, label)
             }
             Engine::Acp(a) => {
+                anyhow::ensure!(mobile.is_none() || a.writing.is_none(), "The agent is still receiving input. Retry the approval shortly.");
                 let allow = a.answer_choice(request_id, option_id).ok_or_else(|| anyhow!("that option has no unambiguous outcome"))?;
                 let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
                 self.apply_actions(&mut rt, actions);
@@ -4923,13 +4946,13 @@ impl SessionManager {
             Engine::OpenCode(o) => {
                 anyhow::ensure!(!o.answer_pending(request_id), "An answer to this request is still being delivered; try again when it settles");
                 let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                self.apply_actions(&mut rt, actions);
+                self.apply_actions_with_approval(&mut rt, actions, mobile);
                 // The card remains open until the HTTP response confirms delivery.
                 return Ok(());
             }
             Engine::CodexStdio(engine) => {
                 let actions = engine.answer(request_id, option_id)?;
-                self.apply_codex_actions(&mut rt, actions)?;
+                self.apply_codex_actions_with_approval(&mut rt, actions, mobile)?;
                 // Enqueueing is not delivery. A revoked unsent reply is retryable.
                 return Ok(());
             }

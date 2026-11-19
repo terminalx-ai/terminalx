@@ -3,7 +3,7 @@
 //! start another transaction; reads are allowed and see the last committed file.
 
 use std::cell::Cell;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,16 @@ pub(crate) fn run<T>(path: &Path, timeout: Duration, update: impl FnOnce() -> Re
     struct Active;
     impl Drop for Active { fn drop(&mut self) { ACTIVE.with(|active| active.set(false)); } }
     let _active = Active;
+    let _lock = lock(path, timeout, false)?;
+    update()
+}
+
+/// Hold a read of a credential through a bounded delivery in another process.
+pub(crate) fn read_lock(path: &Path, timeout: Duration) -> Result<File> {
+    lock(path, timeout, true)
+}
+
+fn lock(path: &Path, timeout: Duration, shared: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -38,7 +48,8 @@ pub(crate) fn run<T>(path: &Path, timeout: Duration, update: impl FnOnce() -> Re
     }
     let deadline = Instant::now() + timeout;
     loop {
-        match lock.try_lock() {
+        let acquired = if shared { lock.try_lock_shared() } else { lock.try_lock() };
+        match acquired {
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
@@ -49,12 +60,22 @@ pub(crate) fn run<T>(path: &Path, timeout: Duration, update: impl FnOnce() -> Re
     }
     // File drop releases the OS lock on success, error and unwinding; the OS
     // releases it on process death. Keep the sidecar itself forever.
-    update()
+    Ok(lock)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_reader_keeps_an_exclusive_update_waiting() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("devices.lock");
+        let output = read_lock(&path, Duration::ZERO).unwrap();
+        assert!(run::<()>(&path, Duration::ZERO, || panic!("update ran during output")).is_err());
+        drop(output);
+        run(&path, Duration::from_secs(10), || Ok(())).unwrap();
+    }
 
     #[test]
     fn unwinding_releases_both_the_file_lock_and_reentrancy_guard() {

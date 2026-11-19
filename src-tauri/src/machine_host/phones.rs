@@ -876,8 +876,8 @@ impl Phones {
                 }
             }
             let connection = Arc::new(connection);
-            connection.check_off_runtime(&self.host).await?;
-            phone::send_authenticated(&mut socket, &mut session).await?;
+            phone::send_with_grant(&self.host, &connection,
+                phone::send_authenticated(&mut socket, &mut session)).await?;
             log::info!("machine host: phone {} connected through {}", device.id, context.transport_name());
             phone::serve_connection(&mut socket, &mut session, &self.host, &connection, inbound, signals, |request| {
                 let (phones, device, connection, context, revoke_relay_on_close) = (self.clone(), &device, &connection, &context, &_tracked.revoke_relay_on_close);

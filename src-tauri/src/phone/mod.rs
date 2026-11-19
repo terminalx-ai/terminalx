@@ -188,6 +188,16 @@ where
     send_encrypted_text(socket, session, &reply.to_string()).await
 }
 
+/// Bound a slow client's write so revocation can drain output already admitted.
+pub(crate) async fn send_with_grant(
+    host: &Arc<PhoneHost>,
+    connection: &Arc<rpc::MobileConnection>,
+    send: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    let _permit = connection.output_permit(host).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), send).await?
+}
+
 pub(crate) fn pairing_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(64 * 1024)
@@ -273,9 +283,12 @@ where
 {
     let mut reassembly = wire::Reassembly::default();
     let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(1));
+    grant_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
+            _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
             signal = signals.recv() => {
                 if signal == Some(ConnectionSignal::Disconnect) {
                     let _ = send_message(socket, session, &disconnected_notification(), connection.wire()).await;
@@ -289,8 +302,7 @@ where
                     connection.close();
                     return Ok(());
                 };
-                connection.check_off_runtime(host).await?;
-                send_message(socket, session, &outgoing, connection.wire()).await?;
+                send_with_grant(host, connection, send_message(socket, session, &outgoing, connection.wire())).await?;
             }
             incoming = socket.next() => {
                 let Some(incoming) = incoming else {
@@ -331,8 +343,12 @@ where
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
                 // its acknowledgement contains no session data.
-                if !(forget && response["ok"] == true) { connection.check_off_runtime(host).await?; }
-                send_message(socket, session, &response, connection.wire()).await?;
+                let send = send_message(socket, session, &response, connection.wire());
+                if forget && response["ok"] == true {
+                    send.await?;
+                } else {
+                    send_with_grant(host, connection, send).await?;
+                }
             }
         }
     }

@@ -561,6 +561,7 @@ impl MobileRuntime {
 
 pub(crate) struct MobileConnection {
     id: String,
+    device: DeviceEntry,
     owner: Arc<dyn super::Owner>,
     actor: crate::local_runtime::mobile::Actor,
     runtime: Arc<MobileRuntime>,
@@ -598,7 +599,7 @@ impl MobileConnection {
         let notification_filter = ConnectionFilter::default();
         runtime.register_client(&id, outbound.clone(), overflowed.clone(), notification_filter.clone());
         Ok(Self {
-            id, owner, actor, overflowed, notification_filter,
+            id, device: device.clone(), owner, actor, overflowed, notification_filter,
             runtime,
             outbound,
             wire: Wire::new(transport),
@@ -642,6 +643,15 @@ impl MobileConnection {
         self.check_current(manager)?;
         let connection = self.clone();
         off_runtime_within(move || connection.call("check", json!({})).map(drop)).await
+    }
+
+    pub(crate) async fn output_permit(self: &Arc<Self>, manager: &PhoneHost) -> Result<std::fs::File> {
+        self.check_current(manager)?;
+        let connection = self.clone();
+        off_runtime_within(move || {
+            connection.call("check", json!({}))?;
+            super::registry::DeviceRegistry.output_permit(&connection.device)
+        }).await
     }
 
     fn check_current(&self, manager: &PhoneHost) -> Result<()> {

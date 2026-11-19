@@ -672,7 +672,7 @@ impl SessionManager {
                 // Mobile/share barriers retain their existing first-byte semantics.
                 // Collaboration is independently checked at EVERY physical
                 // attempt, including after a partial frame and capacity wait.
-                let sender = if offset == 0 { sender.as_ref() } else { None };
+                let sender = if offset == 0 || frame.approval().is_some() { sender.as_ref() } else { None };
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match sender {
@@ -705,8 +705,9 @@ impl SessionManager {
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {
+                        if offset > 0 { return Err(error).context("Codex authority changed during a partial frame"); }
                         engine.withdraw(&frame);
-                        log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
+                        log::warn!("[{}] withdrew a Codex frame before delivery: {error:#}", rt.key());
                         if frame.delivers_prompt() { self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq))?; }
                         return Ok(());
                     }
@@ -788,6 +789,11 @@ impl SessionManager {
     }
 
     pub(super) fn apply_codex_actions(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>) -> Result<()> {
+        self.apply_codex_actions_with_approval(rt, actions, None)
+    }
+
+    pub(super) fn apply_codex_actions_with_approval(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>,
+        approval: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         // Approval cancellation can apply nested actions while a completion
         // is still settling. Only the outer boundary may start the next turn.
         let boundary = actions.iter().any(|action| matches!(action,
@@ -798,7 +804,16 @@ impl SessionManager {
                     anyhow::ensure!(!rt.stopping && matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
                     // The frame carries its sender, so the writer can check
                     // the sender's permits without holding this runtime.
-                    let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
+                    let sender = if line.delivers_prompt() {
+                        rt.stdio_authority.take()
+                    } else if line.approval().is_some() {
+                        approval.map(|permit| Authority {
+                            session: rt.session_id.clone(), tab: rt.tab_id.clone(), seq: None,
+                            privacy: None, collaboration: None, mobile: Some(permit.clone()), shared: None,
+                        })
+                    } else {
+                        None
+                    };
                     // A prompt owns its original sender, even when a different
                     // caller's completion dispatches a queued local prompt.
                     let collaboration = if line.delivers_prompt() {

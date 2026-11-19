@@ -349,7 +349,7 @@ async fn refuse<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut tokio_tungstenit
 }
 
 /// Pass a phone to the window, from the first byte it sent.
-async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, mut stream: S, peer: SocketAddr) -> Result<()> {
+async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S, peer: SocketAddr) -> Result<()> {
     #[cfg(unix)]
     {
         // No window takes phones: the runtime serves the phone itself (PRO-359).
@@ -363,8 +363,13 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
         // back: the phone reconnects to the window's own listener.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
         let Some(tracked) = host.track_phone(cancel_tx) else { bail!("the machine host is off") };
+        let (mut phone_read, mut phone_write) = tokio::io::split(stream);
+        let (mut window_read, mut window_write) = window.into_split();
+        // A WebSocket is done when either peer closes. In particular, an
+        // idle revoked phone need not close its own half of the TCP socket.
         let result = tokio::select! {
-            copied = tokio::io::copy_bidirectional(&mut stream, &mut window) => copied.map(drop).map_err(anyhow::Error::from),
+            copied = tokio::io::copy(&mut phone_read, &mut window_write) => copied.map(drop).map_err(anyhow::Error::from),
+            copied = tokio::io::copy(&mut window_read, &mut phone_write) => copied.map(drop).map_err(anyhow::Error::from),
             _ = cancel.recv() => Ok(()),
         };
         host.untrack_phone(tracked);

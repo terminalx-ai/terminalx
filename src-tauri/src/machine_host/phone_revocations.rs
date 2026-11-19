@@ -21,9 +21,17 @@ struct Verified {
     checked_at: Instant,
 }
 
+#[derive(PartialEq, Eq)]
+struct RetiredBinding {
+    user_id: String,
+    generation: u64,
+    devices: Vec<String>,
+}
+
 #[derive(Default)]
 pub(super) struct Authority {
     verified: Mutex<Option<Verified>>,
+    settled: Mutex<Option<RetiredBinding>>,
     wake: Notify,
 }
 
@@ -63,8 +71,9 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
                 AccountLink::new(host.data_dir.clone(), *key.secret(), host.account_window());
             let host_id = key.host_id();
             drop(host);
+            let polling = authority.clone();
             let checked =
-                tokio::task::spawn_blocking(move || poll(&phones, &api, &link, &host_id)).await;
+                tokio::task::spawn_blocking(move || poll(&phones, &polling, &api, &link, &host_id)).await;
             let verified = match checked {
                 Ok(Ok(verified)) => verified,
                 Ok(Err(error)) => {
@@ -93,20 +102,31 @@ pub(super) async fn watch(machine: Weak<MachineHost>, authority: Arc<Authority>,
     }
 }
 
-fn poll(phones: &Phones, api: &Api, link: &AccountLink, host_id: &str) -> Result<Option<Verified>> {
+fn poll(phones: &Phones, authority: &Authority, api: &Api, link: &AccountLink, host_id: &str) -> Result<Option<Verified>> {
     let registry = DeviceRegistry;
     let Some(account) = load_account_mirror()? else {
         return Ok(None);
     };
-    if !registry.list()?.iter().any(|device| {
-        device.provenance == DeviceProvenance::Automatic
-            && device.bound_user_id.as_deref() == Some(account.user_id.as_str())
-            && device.binding_generation == account.binding_generation
-    }) {
+    let devices = registry.automatic_binding_devices(&account)?;
+    if devices.is_empty() {
+        return Ok(None);
+    }
+    // On startup or after a failed acknowledgement, check retired records
+    // too. Once this set is settled, avoid polling it until the devices change.
+    let retired = devices.iter().all(|device| device.revoked_at.is_some()).then(|| RetiredBinding {
+        user_id: account.user_id.clone(),
+        generation: account.binding_generation,
+        devices: devices.into_iter().map(|device| device.id).collect(),
+    });
+    if retired.is_some() && *authority.settled.lock().unwrap() == retired {
         return Ok(None);
     }
     let session = link.fresh_session()?;
-    apply(phones, api, &session, host_id, account).map(Some)
+    let (verified, all_acknowledged) = apply(phones, api, &session, host_id, account)?;
+    if all_acknowledged {
+        *authority.settled.lock().unwrap() = retired;
+    }
+    Ok(Some(verified))
 }
 
 fn apply(
@@ -115,7 +135,7 @@ fn apply(
     session: &Session,
     host_id: &str,
     account: AccountMirror,
-) -> Result<Verified> {
+) -> Result<(Verified, bool)> {
     ensure!(
         session.cloud.user_id == account.user_id,
         "phone binding and runtime session belong to different accounts"
@@ -153,14 +173,16 @@ fn apply(
         }
         applied.push(revocation.revocation_id);
     }
+    let mut all_acknowledged = true;
     for id in applied {
         if let Err(error) = api.acknowledge_phone_revocation(session, host_id, generation, &id) {
             log::warn!("machine host: could not acknowledge a revoked phone: {error:#}");
+            all_acknowledged = false;
         }
     }
-    Ok(Verified {
+    Ok((Verified {
         user_id: account.user_id,
         generation,
         checked_at,
-    })
+    }, all_acknowledged))
 }
