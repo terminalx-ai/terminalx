@@ -262,7 +262,22 @@ const measure = (page) =>
     const texts = [...document.querySelectorAll("body *")].filter(
       (element) => shown(element) && !element.closest(".xterm, [data-terminal], script, style") && [...element.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()),
     );
-    const small = texts.filter((element) => parseFloat(getComputedStyle(element).fontSize) < 12).map((element) => `${element.tagName.toLowerCase()}: ${element.textContent.trim().slice(0, 30)} (${getComputedStyle(element).fontSize})`);
+    // The 12 px floor does not cover the small labels the designs use on purpose (PRO-384, PRO-385, PRO-346,
+    // PRO-349), none under 10 px: keycaps; uppercase section, column and menu headings; a sidebar row's age and
+    // PR tag; a machine's state badge and the header's chips; a changed file's status letter; the status bar.
+    // A label only a screen reader gets is not drawn at all. Everything else is 12 px or larger.
+    const DESIGNED_SMALL = [
+      "kbd",
+      '[data-testid="new-session-create"] span.border',
+      '[data-testid="machine-session-row"] span.tabular-nums',
+      '[data-testid="paired-machine"] span.rounded.h-5',
+      '[data-testid="session-branch"]',
+      '[data-testid="session-location"]',
+      "[data-status]",
+      "[data-status-bar]",
+    ].join(", ");
+    const designedSmall = (element) => parseFloat(getComputedStyle(element).fontSize) >= 10 && (getComputedStyle(element).textTransform === "uppercase" || !!element.closest(DESIGNED_SMALL));
+    const small = texts.filter((element) => parseFloat(getComputedStyle(element).fontSize) < 12 && !element.closest(".sr-only") && !designedSmall(element)).map((element) => `${element.tagName.toLowerCase()}: ${element.textContent.trim().slice(0, 30)} (${getComputedStyle(element).fontSize})`);
     const list = document.querySelector('[data-testid="conversation-list"]');
     return {
       text: document.body.innerText,
@@ -272,7 +287,7 @@ const measure = (page) =>
     };
   });
 
-/** The checks every screen has: its machines are named, nothing scrolls sideways, no text under 12 px. */
+/** The checks every screen has: its machines are named, nothing scrolls sideways, no text under 12 px but the designed small labels (`measure`). */
 const common = (m, names) => ({
   ...Object.fromEntries(names.map((name) => [`${name} appears`, (name instanceof RegExp ? name : new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).test(m.text)])),
   "nothing scrolls sideways": !m.page && !m.sidebar,
