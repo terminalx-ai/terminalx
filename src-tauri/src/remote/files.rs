@@ -144,7 +144,7 @@ impl WorkspaceFiles {
         });
         let contains_checkout = std::iter::once(self.root.clone())
             .chain(project_roots.filter(|root| root != &self.root))
-            .any(|root| root.starts_with(path) || super::machine::worktrees(&root).iter().any(|worktree| worktree.path.starts_with(path)));
+            .any(|root| root.starts_with(path) || super::machine::registered_worktree_paths(&root).any(|worktree| worktree.starts_with(path)));
         if contains_checkout {
             return Err(RpcError::new("path_forbidden", "the directory contains a protected project or worktree"));
         }

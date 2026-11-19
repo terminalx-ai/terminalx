@@ -247,6 +247,10 @@ impl WorktreeRegistration {
 /// Git writes these pointers in both directions, relative to the pointer
 /// file's directory or as absolute paths.
 fn git_link(file: &Path, prefix: &str) -> Option<PathBuf> {
+    std::fs::canonicalize(git_link_path(file, prefix)?).ok()
+}
+
+fn git_link_path(file: &Path, prefix: &str) -> Option<PathBuf> {
     let meta = std::fs::symlink_metadata(file).ok()?;
     if !meta.is_file() || meta.len() > 8192 {
         return None;
@@ -257,12 +261,22 @@ fn git_link(file: &Path, prefix: &str) -> Option<PathBuf> {
     if link.is_empty() || text.len() > 8192 {
         return None;
     }
-    std::fs::canonicalize(file.parent()?.join(link)).ok()
+    Some(file.parent()?.join(link))
 }
 
 /// Linked worktrees registered in this project's Git repository. A settings
 /// change only affects where future worktrees are created.
 pub(super) fn worktrees(project: &Path) -> Vec<WorktreeRegistration> {
+    worktree_registrations(project).into_iter().filter(WorktreeRegistration::is_current).collect()
+}
+
+/// A damaged checkout can still be valuable. Its registration protects it
+/// from directory mutations while the checkout marker is missing or broken.
+pub(super) fn registered_worktree_paths(project: &Path) -> impl Iterator<Item = PathBuf> {
+    worktree_registrations(project).into_iter().map(|registration| registration.path)
+}
+
+fn worktree_registrations(project: &Path) -> Vec<WorktreeRegistration> {
     if !owns_git_checkout(project) {
         return Vec::new();
     }
@@ -274,13 +288,13 @@ pub(super) fn worktrees(project: &Path) -> Vec<WorktreeRegistration> {
         if !entry.file_type().ok()?.is_dir() || std::fs::canonicalize(&admin).ok()? != admin {
             return None;
         }
-        let marker = git_link(&admin.join("gitdir"), "")?;
+        let marker = git_link_path(&admin.join("gitdir"), "")?;
         if marker.file_name()? != ".git" {
             return None;
         }
-        let path = marker.parent()?.to_path_buf();
+        let path = std::fs::canonicalize(marker.parent()?).ok()?;
         let registration = WorktreeRegistration { path, admin, project_marker: project_marker.clone() };
-        (registration.path != project && registration.is_current()).then_some(registration)
+        (registration.path != project).then_some(registration)
     }).collect();
     found.sort_by(|a, b| a.path.cmp(&b.path));
     found
@@ -335,12 +349,14 @@ impl ServedProject {
         if session.worktree_removed {
             return None;
         }
-        let (path, exact) = match std::fs::canonicalize(&session.cwd) {
-            Ok(cwd) => (cwd, false),
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
-                (std::fs::canonicalize(session.checkout_root()?).ok()?, true)
-            }
+        let cwd = match std::fs::canonicalize(&session.cwd) {
+            Ok(cwd) => cwd.is_dir().then_some(cwd),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => None,
             Err(_) => return None,
+        };
+        let (path, exact) = match cwd {
+            Some(cwd) => (cwd, false),
+            None => (std::fs::canonicalize(session.checkout_root()?).ok()?, true),
         };
         if !path.is_dir() {
             return None;

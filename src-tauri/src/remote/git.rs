@@ -405,7 +405,7 @@ impl WorkspaceGit {
     /// beside an older blank root. Symlinks, hidden and build directories are skipped.
     pub fn repositories(&self) -> (Vec<String>, bool) {
         if self.project {
-            return Self::limit_project_repositories(self.project_repositories(), None);
+            return self.listed_project_repositories(None);
         }
         // The root itself, or a directory inside a checkout (a package of a
         // monorepo as the target directory, development runtimes).
@@ -469,9 +469,21 @@ impl WorkspaceGit {
         (found, truncated)
     }
 
+    /// Git configuration can redirect a registered worktree's working
+    /// directory. Verify the effective checkout before using it for Git.
+    fn verified_machine_repo(&self, name: &str) -> bool {
+        !self.project || crate::git::is_own_worktree(&self.dir(name))
+    }
+
+    fn listed_project_repositories(&self, preferred: Option<&str>) -> (Vec<String>, bool) {
+        let (mut names, truncated) = Self::limit_project_repositories(self.project_repositories(), preferred);
+        names.retain(|name| self.verified_machine_repo(name));
+        (names, truncated)
+    }
+
     fn list(&self, params: &Value) -> Value {
         let (names, truncated) = if self.project {
-            Self::limit_project_repositories(self.project_repositories(), params["preferredRepo"].as_str())
+            self.listed_project_repositories(params["preferredRepo"].as_str())
         } else {
             self.repositories()
         };
@@ -523,7 +535,7 @@ impl WorkspaceGit {
                 let name = if name.is_empty() { "." } else { name.trim_end_matches('/') };
                 names
                     .iter()
-                    .find(|known| known.as_str() == name)
+                    .find(|known| known.as_str() == name && self.verified_machine_repo(known))
                     .map(|known| Repo { dir: self.dir(known), name: known.clone() })
                     .ok_or_else(|| RpcError::not_found(format!("{name} is not a repository in this workspace")))
             }

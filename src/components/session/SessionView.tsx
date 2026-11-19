@@ -548,9 +548,9 @@ export function SessionView({
     session,
     machineName: machine?.name ?? "",
     backend,
-    gitSource: machine && !cloud?.locked ? cloud?.gitSource : undefined,
+    gitSource: machine && !cloud?.locked ? machine.checkoutGitSource : undefined,
     fileSource: machine ? cloud?.fileSource : undefined,
-    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === cloud.repository)?.remote) || null,
+    remote: (machine && cloud?.repositories?.find((repo) => repo.repo === machine.checkoutRepository)?.remote) || null,
     connected: !!machine && !!cloud?.connected,
     tabId: activeTab?.id,
   });

@@ -136,7 +136,9 @@ export function remotePath(path: string): string {
  */
 export function remoteFilePath(path: string, absolute = false): string {
   if (!absolute || !path.startsWith("/")) return remotePath(path);
-  if (path.includes("\0") || path.includes("\\")) throw new RemotePathError(`${path} is not a path on the machine`);
+  // An absolute machine path uses Unix separators. A backslash is a
+  // literal character in a checkout or file name.
+  if (path.includes("\0")) throw new RemotePathError(`${path} is not a path on the machine`);
   const parts = path.split("/").filter(Boolean);
   if (!parts.length) throw new RemotePathError(`${path} is not a worktree`);
   if (parts.some((part) => part === "." || part === "..")) throw new RemotePathError(`${path} leaves the worktree`);

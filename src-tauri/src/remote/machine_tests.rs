@@ -351,6 +351,12 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     // Warm the authorization cache again after restoring the checkout.
     assert!(call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.is_ok());
     assert!(files.read(&request).is_ok());
+    git(&api, &["config", "extensions.worktreeConfig", "true"]);
+    git(&api_one, &["config", "--worktree", "core.worktree", web.to_str().unwrap()]);
+    assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await), "not_found");
+    let repositories = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.unwrap();
+    assert!(repositories["repositories"].as_array().unwrap().iter().all(|repo| repo["repo"] != json!(api_one)));
+    git(&api_one, &["config", "--worktree", "--unset", "core.worktree"]);
     std::fs::rename(&api_one, shared.join("saved-api-one")).unwrap();
     std::fs::create_dir(&api_one).unwrap();
     std::fs::write(&api_worktree, "replacement").unwrap();
@@ -425,6 +431,19 @@ async fn directory_mutations_preserve_contained_checkouts_and_projects() {
     assert!(inner.join(".git").is_file());
     assert!(registered.is_dir());
 
+    let marker = inner.join(".git");
+    let git_link = std::fs::read(&marker).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    let refused = call(&m.rpc, &peer, "fs.delete", json!({
+        "projectId": id, "path": container, "recursive": true, "clientRequestId": "delete-damaged-checkout"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    let refused = call(&m.rpc, &peer, "fs.rename", json!({
+        "projectId": id, "from": container, "to": outer.join("moved"), "clientRequestId": "move-damaged-checkout"
+    })).await;
+    assert_eq!(code(refused), "path_forbidden");
+    std::fs::write(&marker, git_link).unwrap();
+
     let linked = crate::store::projects::add(inner.to_str().unwrap()).unwrap();
     let linked_id = machine::project_id(&linked.path);
     call(&m.rpc, &peer, "fs.list", json!({ "projectId": linked_id, "path": outer })).await.unwrap();
@@ -463,6 +482,11 @@ async fn a_missing_start_directory_keeps_its_saved_checkout() {
     assert_eq!(session["session"]["cwd"], json!(cwd));
     assert_eq!(session["session"]["fileRoot"], json!(checkout));
     assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    std::fs::write(&cwd, "a file at the previous starting directory").unwrap();
+    let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
+    assert_eq!(session["session"]["fileRoot"], json!(checkout));
+    assert_eq!(session["session"]["fileRepository"], json!(checkout));
+    std::fs::remove_file(&cwd).unwrap();
     git(&api, &["worktree", "remove", checkout.to_str().unwrap()]);
     let session = call(&m.rpc, &peer, "session.get", json!({ "sessionId": session_id })).await.unwrap();
     assert!(session["session"]["fileRoot"].is_null());

@@ -136,7 +136,7 @@ it("uses the runtime's checkout for Fix errors even when repository discovery om
   expect(request).toHaveBeenCalledWith("git.status", { projectId: "project", repo: firstPath });
 });
 
-it("withholds Fix errors when a session's worktree is missing, even if the panel falls back to the project", async () => {
+it("leaves the default Files and Git sources unavailable for an unresolved legacy worktree", async () => {
   const { mini } = machines();
   const call = mini.client.call.bind(mini.client);
   const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
@@ -145,8 +145,10 @@ it("withholds Fix errors when a session's worktree is missing, even if the panel
   });
   mini.runtime.connect();
   const { result, rerender } = renderHook(useMachineSession, { initialProps: firstKey });
-  await waitFor(() => expect(result.current?.repository).toBe("."));
-  expect(result.current?.gitSource).toBeDefined();
+  await waitFor(() => expect(result.current?.repositories).toEqual([{ repo: "." }]));
+  expect(result.current?.repository).toBeNull();
+  expect(result.current?.gitSource).toBeUndefined();
+  expect(result.current?.fileSource).toBeUndefined();
   expect(result.current?.machine?.checkoutGitSource).toBeUndefined();
   rerender("machine:mini:project:second");
   expect(result.current?.machine?.checkoutGitSource).toBeUndefined();

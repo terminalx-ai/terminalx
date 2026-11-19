@@ -253,6 +253,7 @@ export interface MachineSessionPlace {
   name: string;
   /** Git for the session's checkout, independent of the side panel's repository picker. */
   checkoutGitSource: GitSource | undefined;
+  checkoutRepository: string | null;
   /** How the machine is reached now (21.09): direct, relay, reconnecting, offline… */
   state: MachineConnectionState;
 }

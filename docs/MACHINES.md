@@ -706,9 +706,12 @@ As built (PRO-340):
   relative path. Other absolute paths are `path_forbidden`.
 - A machine project's `git.repositories` is its checkout (`.`) and its
   linked worktrees, up to 100 rows. `preferredRepo` keeps a known checkout in
-  that response. An explicit `repo` can name any verified checkout.
+  that response. An explicit `repo` can name any verified checkout. Git
+  operations require the repository's effective top-level directory to
+  match the authorized checkout.
 - File rename and delete refuse directories that contain a registered
-  project or linked checkout.
+  project or linked checkout, including a checkout with a damaged marker
+  whose registration still names the directory.
 - `cleanup/1` and `workspace/2` on a machine use the local runtime's own
   clean-up host: every open project, archived ones protected, as Settings →
   Storage does (`local_runtime::workspaces::host`).
@@ -2137,8 +2140,8 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
   against the project and its live worktrees before being sent. Files, the
   editor, search and the default Changes view use this checkout, including
   for sessions in a subdirectory and checkouts beyond the repository list
-  limit. When a saved starting subdirectory is missing, the runtime can
-  recover the checkout from the session's verified saved root. The panel
+  limit. When a saved starting subdirectory is missing or has become a
+  file, the runtime can recover the checkout from the session's verified saved root. The panel
   reports when the checkout is unavailable.
 - **Live commands.** The machine's agent scope (no organization) sends
   `session.send/steer/stop/decide` with a `clientRequestId` when

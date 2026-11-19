@@ -68,11 +68,8 @@ export function worktreeInProject(projectPath: string | null | undefined, cwd: s
 
 /** The closest repository containing the session folder, or the default before a session is known. */
 export function sessionRepository(repositories: readonly RemoteRepository[] | null, project: MachineProject | null, session: RuntimeSession | null): string | null {
-  if (session?.fileRepository !== undefined) return session.fileRepository;
+  if (session) return sessionCheckoutRepository(repositories, project, session);
   if (!repositories) return null;
-  const checkout = sessionCheckoutRepository(repositories, project, session);
-  const wanted = sessionFilePath(project, session);
-  if (checkout || wanted === null || (wanted.startsWith("/") && !session?.worktreeName)) return checkout;
   return repositories.find((repo) => repo.repo === ".")?.repo ?? repositories[0]?.repo ?? null;
 }
 
@@ -83,7 +80,8 @@ function sessionCheckoutRepository(repositories: readonly RemoteRepository[] | n
   if (!repositories) return null;
   const path = sessionFilePath(project, session);
   const checkout = containingRepository(repositories, path === "" ? "." : path);
-  return checkout === "." && session.worktreeName ? null : checkout;
+  if (session.worktreeName) return checkout === "." ? null : checkout;
+  return checkout ?? (path !== null && !path.startsWith("/") && repositories.some(({ repo }) => repo === ".") ? "." : null);
 }
 
 function sessionFilePath(project: MachineProject | null, session: RuntimeSession | null): string | null {
@@ -113,10 +111,9 @@ export function sessionFilesBase(repositories: readonly RemoteRepository[] | nul
   if (session.fileRepository !== undefined || path === null) return path;
   // Older runtimes reported cwd coordinates. Once Git identifies the
   // enclosing checkout, use its root for the file source as well.
-  const repo = repositories && containingRepository(repositories, path);
-  if (repo) return repo;
-  if (!path.startsWith("/") && repositories?.some(({ repo }) => repo === ".")) return "";
-  return path.startsWith("/") ? null : path;
+  const repo = sessionCheckoutRepository(repositories, project, session);
+  if (repo !== null) return repo === "." ? "" : repo;
+  return path.startsWith("/") || (repositories && session.worktreeName) ? null : path;
 }
 
 /** The header's connection word for a machine: what its chip says (21.09). */
@@ -460,7 +457,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     gitSource,
     fileSource,
     removableWorkspace,
-    machine: { machineId, projectId, record: machine, name, state: machineState, checkoutGitSource },
+    machine: { machineId, projectId, record: machine, name, state: machineState, checkoutGitSource, checkoutRepository },
     // Offered while connected with `ports/1`, and through a reconnect after such a connection: its forwards wait for it.
     ports: { offered: machinePortsOffered(machineId, state) && !!connection, state, connectionId: connection?.connectionId?.() ?? null },
     error,
