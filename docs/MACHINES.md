@@ -806,7 +806,7 @@ the pull request that adds it.
 | `git.pushHead` | `git/1` | Needs a project | Pushes the confirmed commit with the machine's git sign-in |
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh` |
-| `git.prCreateWithPush` | `git/1` | Needs a project | Verifies the session checkout, publishes the confirmed branch and commit, then opens a PR with the machine's `gh` |
+| `git.prCreateForSession` | `git/1` | Needs a project | Verifies the session checkout, optionally publishes the confirmed commit, and opens the PR with the machine's `gh` |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |
 | `git.prMerge` | `git/1` | Needs a project | With the machine's `gh` |
 | `cleanup.scan` | `cleanup/1` | Served | Every project of the machine, as Settings → Storage scans every local project; each row names its project |

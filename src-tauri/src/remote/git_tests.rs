@@ -731,14 +731,14 @@ fn machine_pr_creation_records_the_native_session_association() {
     let head = git(&checkout, &["rev-parse", "HEAD"]);
     let publish = |repo: &str, branch: &str, head: &str| {
         let mut request = create(repo, "native", branch);
-        request["head"] = json!(head);
+        request["pushHead"] = json!(head);
         request
     };
     git(&f.root, &["checkout", "-qb", "picker"]);
     assert_eq!(f.code("git.prCreate", create(repo, "outside", "feature/pr")), "not_found");
-    assert_eq!(f.code("git.prCreateWithPush", publish(".", "picker", &head)), "conflict");
-    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "develop", &head)), "conflict");
-    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "feature/pr", &"0".repeat(40))), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(".", "picker", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "develop", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "feature/pr", &"0".repeat(40))), "conflict");
     assert!(f.gh_calls().is_empty());
     assert_eq!(rows("native")["associations"], json!([]));
     assert!(git(&remote, &["branch", "--list", "picker", "feature/pr"]).is_empty());
@@ -748,12 +748,12 @@ fn machine_pr_creation_records_the_native_session_association() {
     let shim = f.git.gh.as_ref().unwrap();
     let original = std::fs::read_to_string(shim).unwrap();
     std::fs::write(shim, original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1)).unwrap();
-    assert_eq!(f.code("git.prCreateWithPush", publish(repo, "feature/pr", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "feature/pr", &head)), "conflict");
     assert!(git(&remote, &["branch", "--list", "feature/pr"]).is_empty());
     std::fs::write(shim, original).unwrap();
     git(&checkout, &["checkout", "-q", "feature/pr"]);
 
-    let created = f.call("git.prCreateWithPush", publish(repo, "feature/pr", &head)).unwrap();
+    let created = f.call("git.prCreateForSession", publish(repo, "feature/pr", &head)).unwrap();
     assert_eq!(created["sessionAssociated"], true);
     assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), head);
     // Switching the picker cannot attach even an already open PR whose head
@@ -772,12 +772,82 @@ fn machine_pr_creation_records_the_native_session_association() {
 
     git(&checkout, &["checkout", "-q", "--detach"]);
     git(&f.root, &["checkout", "-q", "feature/pr"]);
-    let reused = f.call("git.prCreate", create(".", "other", "feature/pr")).unwrap();
+    git(&f.root, &["commit", "-qm", "Advance the open PR", "--allow-empty"]);
+    let next = git(&f.root, &["rev-parse", "HEAD"]);
+    let mut publish_existing = create(".", "other", "feature/pr");
+    publish_existing["pushHead"] = json!(next);
+    let reused = f.call("git.prCreateForSession", publish_existing).unwrap();
     assert_eq!(reused["existing"], true);
     assert_eq!(reused["pr"]["url"], created["pr"]["url"]);
     assert_eq!(reused["sessionAssociated"], false);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), next);
     assert_eq!(rows("other")["associations"], json!([]));
     assert_eq!(rows("native"), owned);
+}
+
+#[test]
+fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f);
+    f.fault("view-offline");
+    assert_eq!(f.code("git.prCreateForSession", request.clone()), "outcome_unknown");
+    let associations = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(associations()["associations"], json!([]));
+
+    let mut other: Value = serde_json::from_slice(&std::fs::read(f.state.join("pr-1.json")).unwrap()).unwrap();
+    other["number"] = 2.into();
+    other["baseRefName"] = "develop".into();
+    other["url"] = "https://github.test/octo/repo/pull/2".into();
+    std::fs::write(f.state.join("pr-2.json"), serde_json::to_vec(&other).unwrap()).unwrap();
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+
+    let retried = f.call("git.prCreateForSession", request).unwrap();
+    assert_eq!(retried["pr"]["number"], 1);
+    assert_eq!(retried["sessionAssociated"], true);
+    assert_eq!(retried["reconciled"], true);
+    assert_eq!(associations()["associations"][0]["url"], retried["pr"]["url"]);
+    let calls = f.gh_calls();
+    assert_eq!(calls.matches("\"https://github.test/octo/repo/pull/1\"").count(), 2);
+    assert_eq!(calls.matches("\"list\"").count(), 1);
+    assert_eq!(calls.matches("\"create\"").count(), 1);
+}
+
+fn machine_pr_request(f: &Fixture) -> Value {
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "native", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    git(&f.root, &["checkout", "-qb", "feature/pr"]);
+    f.call("git.push", json!({ "repo": "." })).unwrap();
+    git(&f.root, &["commit", "-qm", "Advance feature", "--allow-empty"]);
+    json!({ "repo": ".", "sessionId": "native", "branch": "feature/pr", "pushHead": git(&f.root, &["rev-parse", "HEAD"]), "title": "Add pr", "base": "main" })
+}
+
+#[test]
+fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    let separate = f.remote("push");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f);
+    let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+    git(&f.root, &["remote", "set-url", "--push", "origin", separate.to_str().unwrap()]);
+    assert_eq!(f.code("git.prCreateForSession", request.clone()), "unpushed");
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+    assert_eq!(git(&separate, &["rev-parse", "refs/heads/feature/pr"]), request["pushHead"].as_str().unwrap());
+    assert!(!f.gh_calls().contains("\"create\""));
+
+    git(&f.root, &["remote", "set-url", "--push", "origin", origin.to_str().unwrap()]);
+    std::fs::write(f.state.join("pr-head"), earlier).unwrap();
+    assert_eq!(f.code("git.prCreateForSession", request.clone()), "conflict");
+    assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
+    assert_eq!(f.call("git.prCreateForSession", request).unwrap()["sessionAssociated"], false);
 }
 
 #[test]

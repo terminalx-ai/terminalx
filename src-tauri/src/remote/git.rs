@@ -30,7 +30,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::files::WorkspaceFiles;
@@ -72,12 +72,34 @@ struct Repo {
     dir: PathBuf,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 struct CheckoutIdentity {
     path: PathBuf,
     git_dir: PathBuf,
     directory: DirectoryIdentity,
     admin: DirectoryIdentity,
+}
+
+/// A successful create's URL, held until GitHub confirms its branch and commit.
+/// Unverified entries never participate in session PR discovery.
+#[derive(Clone, Deserialize, Serialize)]
+struct PendingPrCreation {
+    session: String,
+    checkout: CheckoutIdentity,
+    branch: String,
+    base: String,
+    head: String,
+    url: String,
+}
+
+fn pending_pr_creations<T>(change: impl FnOnce(&mut Vec<PendingPrCreation>) -> (T, bool)) -> Result<T, RpcError> {
+    let path = crate::store::root().map_err(RpcError::internal)?.join("pending-machine-pr-creations.json");
+    crate::store::transaction::run(&path.with_extension("lock"), Duration::from_secs(30), || {
+        let mut pending = crate::store::read_json(&path)?.unwrap_or_default();
+        let (result, changed) = change(&mut pending);
+        if changed { crate::store::write_json(&path, &pending)?; }
+        Ok(result)
+    }).map_err(RpcError::internal)
 }
 
 #[cfg(unix)]
@@ -669,7 +691,7 @@ impl WorkspaceGit {
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
             "git.prAssociations" => self.pr_associations(params),
             "git.prLanded" => self.pr_landed(params),
-            "git.prCreate" | "git.prCreateWithPush" => self.pr_create(params, method == "git.prCreateWithPush"),
+            "git.prCreate" | "git.prCreateForSession" => self.pr_create(params, method == "git.prCreateForSession"),
             "git.prReady" => self.pr_ready(params),
             "git.prMerge" => self.pr_merge(params),
             _ => return None,
@@ -1605,27 +1627,27 @@ impl WorkspaceGit {
         Ok(json!({ "repo": repo.name, "branch": branch, "prs": prs }))
     }
 
-    fn pr_create(&self, params: &Value, publish: bool) -> Result<Value, RpcError> {
-        if publish && !self.project {
-            return Err(RpcError::invalid("Publishing with pull request creation requires a machine session"));
+    fn pr_create(&self, params: &Value, for_session: bool) -> Result<Value, RpcError> {
+        if for_session && !self.project {
+            return Err(RpcError::invalid("This pull request operation requires a machine session"));
         }
         let repo = self.repo(params)?;
-        let session = if publish || (self.project && params.get("sessionId").is_some()) {
+        let session = if for_session || (self.project && params.get("sessionId").is_some()) {
             Some(required_str(params, "sessionId")?)
         } else {
             None
         };
-        let branch = if publish {
+        let pinned_head = if for_session && params.get("pushHead").is_some() {
+            let head = required_str(params, "pushHead")?;
+            if !valid_object_id(head) { return Err(RpcError::invalid("pushHead is a commit id")); }
+            Some(head)
+        } else { None };
+        let branch = if pinned_head.is_some() {
             optional_ref(params, "branch")?.ok_or_else(|| RpcError::invalid("branch is required"))?.to_owned()
         } else {
             self.branch_param(&repo, params)?
         };
         let checkout = session.map(|session| self.pr_creation_checkout(session, &repo, &branch)).transpose()?;
-        let pinned_head = if publish {
-            let head = required_str(params, "head")?;
-            if !valid_object_id(head) { return Err(RpcError::invalid("head is a commit id")); }
-            Some(head)
-        } else { None };
         let verify_checkout = || {
             if let Some((session, expected)) = session.zip(checkout.as_ref()) {
                 if self.pr_creation_checkout(session, &repo, &branch)? != *expected {
@@ -1660,14 +1682,11 @@ impl WorkspaceGit {
         }
         let draft = params.get("draft").and_then(Value::as_bool).unwrap_or(false);
         let open = |prs: Vec<crate::github::PullRequest>| prs.into_iter().find(|pr| pr.state == "OPEN");
-        let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool, created_url: Option<String>| {
+        let answer = |pr: crate::github::PullRequest, existing: bool, reconciled: bool| {
             let mut value = json!({ "repo": repo.name, "pr": pr, "created": !existing, "existing": existing });
             if let Some(session) = session {
                 let store_error = |error| RpcError::internal(format!("Pull request #{} is open, but its session ownership could not be checked: {error}", pr.number));
                 let identity = crate::pr_associations::identity(&pr.url).map_err(store_error)?;
-                if created_url.as_ref() == Some(&identity) && pr.head == branch && verify_checkout().is_ok() {
-                    crate::pr_associations::record_local(session, &repo.dir, &pr.url, &pr.head).map_err(store_error)?;
-                }
                 let associations = crate::pr_associations::for_session(session, vec![]).map_err(store_error)?;
                 value["sessionAssociated"] = json!(associations.iter().any(|entry| entry.url == identity && !entry.linked));
             }
@@ -1677,32 +1696,98 @@ impl WorkspaceGit {
             Ok(value)
         };
         verify_publish()?;
-        // A branch match can locate a PR, but only a successful create URL or
-        // existing session evidence establishes ownership.
-        if let Some(existing) = open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?) {
-            return answer(existing, true, false, None);
-        }
+        let read_created = |url: &str| {
+            let unresolved = || RpcError::new("outcome_unknown", format!("GitHub reported {url}, but the pull request could not be verified yet. Try again."));
+            let pr = self.pr_view(&repo, url).map_err(|_| unresolved())?;
+            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) { return Err(unresolved()); }
+            Ok(pr)
+        };
+        let pending = if let Some((session, checkout)) = session.zip(checkout.as_ref()) {
+            pending_pr_creations(|entries| (entries.iter().rev().find(|entry|
+                entry.session == session && entry.checkout == *checkout && entry.branch == branch && entry.base == base
+            ).cloned(), false))?
+        } else { None };
+        let existing = if pending.is_none() {
+            open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT)?)
+        } else { None };
         if let Some(head) = pinned_head {
             self.push_branch(&repo, &branch, head, |repo, branch, head| self.push_ref(repo, branch, head), verify_publish)?;
+            // `git push` can use a separate URL. Confirm the source GitHub
+            // reads through origin before relying on the successful push.
+            self.verify_pr_remote_head(&repo, &branch, head)?;
+        }
+        if let Some(evidence) = pending {
+            let pr = read_created(&evidence.url)?;
+            Self::finish_pr_creation(&evidence, &pr, verify_checkout)?;
+            return answer(pr, false, true);
+        }
+        // A branch match can locate a PR, but only a successful create URL or
+        // existing session evidence establishes ownership.
+        if let Some(existing) = existing {
+            return answer(existing, true, false);
+        }
+        let local = if let Some(head) = pinned_head {
+            head.to_owned()
         } else {
             let local = self.local_head(&repo, &branch)?;
-            if self.remote_head(&repo, &branch, NETWORK_TIMEOUT)?.as_deref() != Some(local.as_str()) {
-                return Err(RpcError::new("unpushed", format!("push {branch} first: the remote does not have its latest commit")));
-            }
-        }
+            self.verify_pr_remote_head(&repo, &branch, &local)?;
+            local
+        };
         let mut args = vec!["pr", "create", "--title", title, "--body", body, "--base", &base, "--head", &branch];
         if draft {
             args.push("--draft");
         }
         verify_publish()?;
-        let created = self.gh(&repo, &args, NETWORK_TIMEOUT);
-        // Created or not, what GitHub now has is the answer.
-        match (created, self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open)) {
-            (Ok(url), Ok(Some(pr))) => answer(pr, false, false, crate::pr_associations::identity(url.trim()).ok()),
-            (Err(_), Ok(Some(pr))) => answer(pr, false, true, None),
-            (Ok(url), _) => Err(RpcError::new("outcome_unknown", format!("GitHub reported {} but it could not be read back yet", url.trim()))),
-            (Err(error), _) => Err(error),
+        let reported = match self.gh(&repo, &args, NETWORK_TIMEOUT) {
+            Ok(url) => url,
+            Err(error) => return match self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT).map(open) {
+                Ok(Some(pr)) => answer(pr, false, true),
+                _ => Err(error),
+            },
+        };
+        let url = crate::pr_associations::identity(reported.trim())
+            .map_err(|_| RpcError::new("outcome_unknown", "GitHub did not return a valid URL for the new pull request."))?;
+        let evidence = session.zip(checkout.as_ref()).filter(|_| verify_checkout().is_ok()).map(|(session, checkout)| PendingPrCreation {
+            session: session.into(), checkout: checkout.clone(), branch: branch.clone(), base, head: local, url: url.clone(),
+        });
+        if let Some(evidence) = &evidence {
+            pending_pr_creations(|entries| {
+                entries.retain(|entry| entry.session != evidence.session || entry.url != evidence.url);
+                entries.push(evidence.clone());
+                ((), true)
+            })?;
         }
+        let pr = read_created(&url)?;
+        if let Some(evidence) = &evidence {
+            Self::finish_pr_creation(evidence, &pr, verify_checkout)?;
+        }
+        answer(pr, false, false)
+    }
+
+    fn verify_pr_remote_head(&self, repo: &Repo, branch: &str, head: &str) -> Result<(), RpcError> {
+        if self.remote_head(repo, branch, NETWORK_TIMEOUT)?.as_deref() != Some(head) {
+            return Err(RpcError::new("unpushed", format!("push {branch} first: the remote does not have its latest commit")));
+        }
+        Ok(())
+    }
+
+    fn finish_pr_creation(evidence: &PendingPrCreation, pr: &crate::github::PullRequest, verify_checkout: impl Fn() -> Result<(), RpcError>) -> Result<(), RpcError> {
+        let PendingPrCreation { session, checkout, url, branch, base, head } = evidence;
+        let matches = pr.head == *branch && pr.base == *base && pr.head_sha == *head;
+        if matches {
+            if verify_checkout().is_err() { return Ok(()); }
+            crate::pr_associations::record_local(session, &checkout.path, url, branch)
+                .map_err(|error| RpcError::internal(format!("Pull request #{} is open, but could not be saved to the session: {error}", pr.number)))?;
+        }
+        pending_pr_creations(|entries| {
+            let count = entries.len();
+            entries.retain(|entry| &entry.session != session || &entry.url != url);
+            ((), entries.len() != count)
+        })?;
+        if !matches {
+            return Err(RpcError::new("conflict", format!("GitHub opened {url} with a different head, base, or commit.")));
+        }
+        Ok(())
     }
 
     fn pr_number(params: &Value) -> Result<String, RpcError> {
@@ -1714,8 +1799,8 @@ impl WorkspaceGit {
             .ok_or_else(|| RpcError::invalid("number is required"))
     }
 
-    fn pr_view(&self, repo: &Repo, number: &str) -> Result<crate::github::PullRequest, RpcError> {
-        let out = self.gh(repo, &["pr", "view", number, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+    fn pr_view(&self, repo: &Repo, target: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let out = self.gh(repo, &["pr", "view", target, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
         let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
         Ok(crate::github::parse_pr(&value))
     }

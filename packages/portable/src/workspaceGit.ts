@@ -382,10 +382,14 @@ export class RemoteGit {
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: RemotePrCreateInput, head?: string): Promise<RemotePrCreateResult> {
+  createPr(input: RemotePrCreateInput): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
-    const params = base ? { ...rest, base } : rest;
-    return head === undefined ? this.write("git.prCreate", params) : this.write("git.prCreateWithPush", { ...params, head });
+    return this.write("git.prCreate", base ? { ...rest, base } : rest);
+  }
+
+  createSessionPr(input: RemotePrCreateInput & { sessionId: string }, pushHead?: string): Promise<RemotePrCreateResult> {
+    const { base, ...rest } = input;
+    return this.write("git.prCreateForSession", { ...rest, ...(base ? { base } : {}), ...(pushHead === undefined ? {} : { pushHead }) });
   }
 
   readyPr(number: number): Promise<unknown> {

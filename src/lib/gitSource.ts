@@ -201,12 +201,14 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
   const createPr = async ({ title, body, base, draft, sessionId, branch }: RemotePrCreateInput, head?: string) => {
     const runtimeId = fromMachine && sessionId ? runtimeSessionIn(input.workspaceKey, sessionId) : null;
     if (fromMachine && sessionId && !runtimeId) throw new Error("This session belongs to a different workspace.");
-    const result = await remote.createPr({ title, body, base, draft, ...(branch ? { branch } : {}), ...(runtimeId ? { sessionId: runtimeId } : {}) }, head).catch((error: unknown) => {
-      if (head !== undefined && error instanceof WorkspaceRpcError && error.code === "method_not_found") {
-        throw new WorkspaceRpcError("method_not_found", "Update the machine runtime to push from the pull request form.", "git.prCreateWithPush");
+    if (head !== undefined && !runtimeId) throw new Error("Publishing from the pull request form requires a machine session.");
+    const request = { title, body, base, draft, ...(branch ? { branch } : {}) };
+    const result = runtimeId ? await remote.createSessionPr({ ...request, sessionId: runtimeId }, head).catch((error: unknown) => {
+      if (error instanceof WorkspaceRpcError && error.code === "method_not_found") {
+        throw new WorkspaceRpcError("method_not_found", "Update the machine runtime to create a pull request for this session.", "git.prCreateForSession");
       }
       throw error;
-    });
+    }) : await remote.createPr(request);
     if (runtimeId && !result.sessionAssociated) {
       const open = `Pull request #${result.pr.number} is open on GitHub.`;
       return `${open} The machine could not verify that it belongs to this session.`;

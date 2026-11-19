@@ -312,7 +312,7 @@ it("pins inline publishing to the selected checkout and fixes checks through the
     throw Error(method);
   });
   const mutate = vi.fn(async (method: string, params: { repo: string }) => {
-    if (method !== "git.prCreateWithPush") throw Error(`Unexpected mutation ${method}`);
+    if (method !== "git.prCreateForSession") throw Error(`Unexpected mutation ${method}`);
     if (params.repo !== ".") throw new WorkspaceRpcError("conflict", "Select this session's checkout before creating a pull request.", method);
     created = true;
     return { pr: own, created: true, existing: false, sessionAssociated: true };
@@ -341,13 +341,13 @@ it("pins inline publishing to the selected checkout and fixes checks through the
   showChecks();
   await submit();
   await screen.findByText("Select this session's checkout before creating a pull request.");
-  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateWithPush", expect.objectContaining({ repo: otherRepo, sessionId: "session", branch: other.head, head: "b".repeat(40) }));
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateForSession", expect.objectContaining({ repo: otherRepo, sessionId: "session", branch: other.head, pushHead: "b".repeat(40) }));
 
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "." } });
   showChecks();
   await submit();
   await screen.findByRole("button", { name: "Fix errors" });
-  expect(mutate).toHaveBeenLastCalledWith("git.prCreateWithPush", expect.objectContaining({ repo: ".", sessionId: "session", branch: own.head, head: "a".repeat(40) }));
+  expect(mutate).toHaveBeenLastCalledWith("git.prCreateForSession", expect.objectContaining({ repo: ".", sessionId: "session", branch: own.head, pushHead: "a".repeat(40) }));
   expect(mutate).toHaveBeenCalledTimes(2);
 
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: otherRepo } });

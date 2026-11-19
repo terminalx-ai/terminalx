@@ -658,7 +658,7 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
         ("git.fetch", json!({})),
         ("git.push", json!({})),
         ("git.prCreate", json!({ "title": "t" })),
-        ("git.prCreateWithPush", json!({ "title": "t" })),
+        ("git.prCreateForSession", json!({ "title": "t" })),
         ("git.prMerge", json!({ "number": 1 })),
     ] {
         let mut params = params;
