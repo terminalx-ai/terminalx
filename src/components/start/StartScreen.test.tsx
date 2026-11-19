@@ -9,7 +9,7 @@ const { dragDropListener, invoke, openDialog, openUrl, store, account, sessions,
   openDialog: vi.fn(),
   openUrl: vi.fn(),
   signIn: vi.fn(),
-  store: { harnesses: [] as unknown[] },
+  store: { harnesses: [] as unknown[], projects: [] as Project[], sessions: [] as { projectPath: string; modified: string }[] },
   account: { ready: true, busy: false, status: { state: "signed-out" as string, identity: null as { name: string | null; email: string } | null } },
   sessions: { addProject: vi.fn(), startSessionIn: vi.fn(), refreshHarnesses: vi.fn(async () => {}) },
   prefs: { projectsDir: null, lastMode: "manual", lastAgent: "claude", bypassConfirmed: false },
@@ -50,6 +50,8 @@ beforeEach(() => {
   forgetReadiness();
   dragDropListener.mockResolvedValue(vi.fn());
   store.harnesses = [claude];
+  store.projects = [];
+  store.sessions = [];
   account.status = { state: "signed-out", identity: null };
   Object.assign(prefs, { lastMode: "manual", bypassConfirmed: false });
   sessions.addProject.mockImplementation(async (path: string) => ({ path, name: path.split("/").pop() }) as Project);
@@ -355,14 +357,16 @@ describe("the start screen", () => {
     expect(probed()).toEqual(["claude"]);
   });
 
-  it("says an account is optional and who is signed in, beside the guide and the way to Settings › Agents", async () => {
+  it("says an account is optional and who is signed in, beside the docs, the shortcuts and the way to Settings › Agents", async () => {
     const onOpenSettings = vi.fn();
     const { unmount } = render(<StartScreen onOpenSettings={onOpenSettings} />);
 
     await screen.findByRole("heading", { name: "Agents ready" });
     expect(screen.getByText("A TerminalX account is optional for local work.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Read the guide" }));
-    expect(openUrl).toHaveBeenCalledWith(expect.stringContaining("github.com"));
+    fireEvent.click(screen.getByRole("button", { name: "Read the docs" }));
+    expect(openUrl).toHaveBeenCalledWith(expect.stringMatching(/github\.com.*README\.md$/));
+    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    expect(onOpenSettings).toHaveBeenCalledWith("shortcuts");
     fireEvent.click(screen.getByRole("button", { name: "Manage in Settings › Agents" }));
     expect(onOpenSettings).toHaveBeenCalledWith("agents");
 
@@ -543,5 +547,65 @@ describe("the start screen", () => {
       expect(screen.getByRole("button", { name: "Permissions: Ask every time" })).toBeTruthy();
       unmount();
     }
+  });
+});
+
+describe("recent projects (PRO-130)", () => {
+  const project = (name: string, lastOpened: string | null, extra: Partial<Project> = {}) => ({ kind: "git", path: `/code/${name}`, name, lastOpened, ...extra }) as Project;
+
+  it("says none yet, and where they will show, before any project is opened", async () => {
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Agents ready" });
+    const recent = screen.getByTestId("recent-projects");
+    expect(recent.textContent).toContain("Recent projects");
+    expect(recent.textContent).toContain("none yet, projects you open show here");
+    expect(recent.textContent).toContain("Or drop a folder anywhere on this window");
+    expect(within(recent).queryByRole("list")).toBeNull();
+  });
+
+  it("lists the five opened or worked in most lately, newest first, with path and when", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-19T12:00:00Z"));
+    try {
+      store.projects = [
+        project("alpha", "2026-11-19T11:00:00Z"),
+        project("beta", "2026-11-10T12:00:00Z"),
+        project("gamma", "2026-11-18T12:00:00Z"),
+        project("delta", "2026-11-17T12:00:00Z"),
+        project("epsilon", null),
+        project("zeta", "2026-11-16T12:00:00Z"),
+        project("archived", "2026-11-19T11:59:00Z", { archived: true }),
+      ];
+      // A session worked in a minute ago makes its project the most recent, whenever it was opened.
+      store.sessions = [{ projectPath: "/code/beta", modified: "2026-11-19T11:59:00Z" }];
+      render(<StartScreen onOpenSettings={vi.fn()} />);
+      const list = await screen.findByRole("list", { name: "Recent projects" });
+      const rows = within(list).getAllByRole("button");
+      expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual(["Open beta", "Open alpha", "Open gamma", "Open delta", "Open zeta"]);
+      expect(rows[0].textContent).toContain("/code/beta");
+      expect(rows[0].textContent).toContain("1m ago");
+      expect(rows[1].textContent).toContain("1h ago");
+      expect(screen.getByTestId("recent-projects").textContent).not.toContain("none yet");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens one with one click on its new-session view", async () => {
+    store.projects = [project("alpha", "2026-11-19T11:00:00Z")];
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open alpha" }));
+    await waitFor(() => expect(sessions.startSessionIn).toHaveBeenCalledWith("/code/alpha", null));
+    expect(sessions.addProject).toHaveBeenCalledWith("/code/alpha");
+    expect(setPrefs).toHaveBeenCalledWith({ lastProject: "/code/alpha" });
+  });
+
+  it("says why when a recent project's folder has gone", async () => {
+    store.projects = [project("alpha", "2026-11-19T11:00:00Z")];
+    sessions.addProject.mockRejectedValue(new Error("Not a directory: /code/alpha"));
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open alpha" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Not a directory: /code/alpha");
+    expect(sessions.startSessionIn).not.toHaveBeenCalled();
   });
 });

@@ -37,8 +37,11 @@ export interface ErrorToast {
    * the plain look, and no Copy error.
    */
   tone?: "error" | "warning" | "success";
-  /** Its mark in place of the failure's cross: a branch, for a branch action; a target, for a Codex goal (PRO-380). */
-  icon?: "branch" | "target";
+  /**
+   * Its mark in place of the failure's cross: a branch, for a branch action; a target, for a Codex goal (PRO-380);
+   * a broken link or a locked globe, for a `terminalx://` link that can't be followed (PRO-130, 06.16).
+   */
+  icon?: "branch" | "target" | "link-off" | "globe-lock";
   /** `cause` is one line of a tool's output (a git error): set apart, in a box of its own. */
   detail?: "line";
   /** False when there is nothing to report: a toast that only explains has no Copy error. */
@@ -53,7 +56,7 @@ export interface ErrorToast {
  */
 export interface ErrorToastAction {
   label: string;
-  icon?: "retry" | "branch" | "branch-plus" | "external" | "bot";
+  icon?: "retry" | "branch" | "branch-plus" | "external" | "bot" | "copy";
   /** The one thing to do next, filled in: "Create a branch here". */
   primary?: boolean;
   run: () => unknown;
