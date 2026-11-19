@@ -491,6 +491,14 @@ pub(crate) mod tests {
     /// A loopback account service answering each request with the next of
     /// `answers` (status, body), recording what it was sent.
     pub(crate) fn service(answers: Vec<(u16, Value)>) -> (String, Seen, std::thread::JoinHandle<()>) {
+        service_with_hook(answers, |_| {})
+    }
+
+    pub(crate) fn service_with_hook(
+        answers: Vec<(u16, Value)>,
+        before_reply: impl FnMut(&str) + Send + 'static,
+    ) -> (String, Seen, std::thread::JoinHandle<()>) {
+        let mut before_reply = before_reply;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -520,7 +528,8 @@ pub(crate) mod tests {
                 let path = head.split_whitespace().nth(1).unwrap().to_string();
                 let bearer = head.lines().find_map(|line| line.to_ascii_lowercase().starts_with("authorization:").then(|| line[14..].trim().to_string()));
                 let request_body = if length == 0 { Value::Null } else { serde_json::from_slice(&request[head_end..]).unwrap() };
-                record.lock().unwrap().push((path, request_body, bearer));
+                record.lock().unwrap().push((path.clone(), request_body, bearer));
+                before_reply(&path);
                 let text = body.to_string();
                 let reason = if status == 200 { "OK" } else { "Bad Request" };
                 write!(stream, "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}", text.len()).unwrap();

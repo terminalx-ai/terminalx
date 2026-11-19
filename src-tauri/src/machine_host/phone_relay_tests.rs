@@ -12,6 +12,8 @@ type Socket = WebSocketStream<tokio::net::TcpStream>;
 struct Rig {
     host: Arc<MachineHost>,
     phones: Arc<phones::Phones>,
+    #[cfg(feature = "desktop")]
+    sessions: crate::session::SessionManager,
     relay: Arc<crate::remote::host::RelayHost>,
     commands: mpsc::UnboundedReceiver<Value>,
     cell: tokio::net::TcpListener,
@@ -61,7 +63,7 @@ impl Rig {
             host.state.lock().unwrap().enabled = true;
             host
         };
-        let phones = phones::Phones::new(sessions, sink.clone(), lifetime.clone(), || {}).unwrap();
+        let phones = phones::Phones::new(sessions.clone(), sink.clone(), lifetime.clone(), || {}).unwrap();
         host.phones.set(phones.clone()).ok().unwrap();
         let cell = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (relay, commands) = crate::remote::host::RelayHost::phone_test_registration(
@@ -74,6 +76,8 @@ impl Rig {
         Self {
             host,
             phones,
+            #[cfg(feature = "desktop")]
+            sessions,
             relay,
             commands,
             cell,
@@ -233,6 +237,162 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
     assert_eq!(seen[2], (format!("{root}/revoke-1/acknowledge"), json!({"bindingGeneration": 5}), Some("Bearer access-1".into())));
 }
 
+#[cfg(feature = "desktop")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledging() {
+    use crate::keychain::{testing::MemorySecrets, SecretStore};
+    use crate::local_runtime::{client::{AttachmentIdentity, Build}, mobile::{self, Actor}};
+    use crate::machine_account::{self, tests::{service_with_hook, session_body}, Api};
+    use crate::phone::Owner;
+
+    // Use the real session owner's mobile registry for the window lease.
+    struct WindowOwner {
+        sessions: crate::session::SessionManager,
+        lifetime: Arc<crate::local_runtime::Lifetime>,
+        identity: AttachmentIdentity,
+        build: Build,
+        connection: Mutex<Option<(Actor, String)>>,
+    }
+    impl Owner for WindowOwner {
+        fn attachment(&self) -> Result<AttachmentIdentity> { Ok(self.identity.clone()) }
+        fn build(&self) -> &Build { &self.build }
+        fn disconnect(&self) { self.lifetime.release(&self.identity.lease); }
+        fn mobile(&self, actor: &Actor, method: &str, mut params: Value) -> Result<Value> {
+            params["actor"] = serde_json::to_value(actor)?;
+            let result = mobile::execute(&self.sessions, &self.lifetime, method, params.clone())?;
+            if method == "register" {
+                *self.connection.lock().unwrap() = Some((actor.clone(), params["connection"].as_str().unwrap().into()));
+            }
+            Ok(result)
+        }
+    }
+
+    let rig = Rig::new().await;
+    let host_id = rig.key.host_id();
+    save_account_mirror(&AccountMirror {
+        user_id: "owner".into(), email: "owner@example.com".into(), display_name: "Owner".into(),
+        host_display_name: None, binding_generation: 5,
+    }).unwrap();
+    rig.pair("phone", "token", true, true);
+    let mut session = session_body();
+    session["cloud"]["userId"] = json!("owner");
+    machine_account::save(&rig.host.data_dir, &serde_json::from_value(session).unwrap()).unwrap();
+    let entry = serde_json::from_value(json!({
+        "id": "takeover", "projectPath": "/repo", "cwd": "/repo", "title": "Review",
+        "created": "2026-01-01", "modified": "2026-01-01",
+        "tabs": [{"id": "tab", "harness": "claude", "permissionMode": "manual", "created": "2026-01-01"}],
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
+    rig.host.state.lock().unwrap().listening = Some(listener);
+    let connect = || async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
+        let handshake = E2eeClientHandshake::with_secret([7; 32], &rig.key.public_key_b64(), "direct", None).unwrap();
+        Phone::authenticate(socket, handshake, "token").await
+    };
+
+    let (poll_started, polling) = tokio::sync::oneshot::channel();
+    let (reply_to_poll, poll_reply) = std::sync::mpsc::channel();
+    let (ack_started, acknowledging) = tokio::sync::oneshot::channel();
+    let (reply_to_ack, ack_reply) = std::sync::mpsc::channel();
+    let (fence_check, check_at_ack) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+    let (mut poll_started, mut ack_started) = (Some(poll_started), Some(ack_started));
+    let (base, seen, service) = service_with_hook(vec![
+        (200, json!({"revocations": [{
+            "revocationId": "revoke-1", "userId": "owner", "hostId": host_id,
+            "clientInstallationId": "installation", "grantRequestId": "grant",
+            "bindingGeneration": 5,
+        }]})),
+        (200, json!({})),
+    ], move |path| {
+        if path.ends_with("/acknowledge") {
+            check_at_ack.recv_timeout(Duration::from_secs(5)).unwrap()();
+            ack_started.take().unwrap().send(()).unwrap();
+            ack_reply.recv_timeout(Duration::from_secs(5)).unwrap();
+        } else {
+            poll_started.take().unwrap().send(()).unwrap();
+            poll_reply.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    });
+    let authority = rig.phones.watch_account_revocations();
+    let poller = tokio::spawn(phone_revocations::watch(Arc::downgrade(&rig.host), authority, Arc::new(Api::new(&base))));
+    tokio::time::timeout(Duration::from_secs(5), polling).await.unwrap().unwrap();
+
+    let owner = Arc::new(WindowOwner {
+        sessions: rig.sessions.clone(),
+        lifetime: rig.lifetime.clone(),
+        identity: AttachmentIdentity { epoch: rig.lifetime.epoch().into(), lease: rig.lifetime.hold().unwrap() },
+        build: Build { version: None, mobile: Default::default(), handover: None },
+        connection: Mutex::new(None),
+    });
+    let route_path = rig._data.path().join("takeover.sock");
+    let route = tokio::net::UnixListener::bind(&route_path).unwrap();
+    rig.host.register_phone_route(PhoneRoute {
+        attachment: rig.lifetime.attachment(&owner.identity.epoch, &owner.identity.lease).unwrap(),
+        lease: owner.identity.lease.clone(), socket: route_path,
+    }).unwrap();
+    let secrets = Arc::new(MemorySecrets::default());
+    secrets.set("test.revocation-takeover.pairing", "host-e2ee-key", rig.key.secret()).unwrap();
+    let window = crate::pairing::PairingManager::with_secrets_for_test("test.revocation-takeover", secrets);
+    window.set_phone_owner_for_test(owner.clone());
+    let (route_finished, mut finished) = mpsc::unbounded_channel();
+    let route_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = route.accept().await.unwrap();
+            let window = window.clone();
+            let route_finished = route_finished.clone();
+            tokio::spawn(async move {
+                let _ = route_finished.send(window.routed_phone(stream).await);
+            });
+        }
+    });
+    let mut phone = connect().await;
+    phone.authenticated().await;
+    assert_eq!(phone.call("sessions.summaries", json!({})).await["result"]["sessions"][0]["id"], "takeover");
+    let (actor, connection) = owner.connection.lock().unwrap().clone().unwrap();
+    let permit = rig.sessions.mobile.permit(&actor, &connection, "takeover", "tab").unwrap();
+    assert!(permit.valid());
+    let approval = json!({
+        "connection": connection, "sessionId": "takeover", "tabId": "tab",
+        "requestId": "test-approval", "optionId": "allow",
+    });
+    assert!(owner.mobile(&actor, "permission", approval.clone()).unwrap_err().to_string().contains("request lapsed"));
+    fence_check.send(Box::new(move || {
+        assert!(DeviceRegistry.find_by_token("token", Some(5)).unwrap().is_none());
+        assert!(!permit.valid(), "work queued by the window grant must lose its permit");
+        for method in ["check", "permission"] {
+            let error = owner.mobile(&actor, method, approval.clone()).unwrap_err();
+            assert!(error.to_string().contains("revoked"), "{method}: {error:#}");
+        }
+    })).ok().unwrap();
+    reply_to_poll.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), acknowledging).await.unwrap().unwrap();
+
+    // Observe the window refusing each request. The forwarding socket can
+    // still await the client's half of the close after the window has returned.
+    let reconnect = connect().await;
+    let error = tokio::time::timeout(Duration::from_secs(5), finished.recv())
+        .await.unwrap().unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("paired-device credential was refused"));
+    drop(reconnect);
+    phone.send("sessions.summaries", json!({})).await;
+    let error = tokio::time::timeout(Duration::from_secs(5), finished.recv())
+        .await.unwrap().unwrap().unwrap_err();
+    assert!(format!("{error:#}").contains("revoked"), "{error:#}");
+    reply_to_ack.send(()).unwrap();
+    service.join().unwrap();
+    assert_eq!(seen.lock().unwrap()[1].0, format!("/v1/desktop/host-account-bindings/{host_id}/revocations/revoke-1/acknowledge"));
+    poller.abort();
+    route_task.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refusing_a_relay_invite_still_creates_a_nearby_phone_code() {
     let rig = Rig::new().await;
@@ -321,6 +481,15 @@ impl Phone {
         assert_eq!(self.read().await.unwrap()["type"], "e2ee_authenticated");
     }
     async fn call(&mut self, method: &str, params: Value) -> Value {
+        self.send(method, params).await;
+        loop {
+            let reply = self.read().await.unwrap();
+            if reply["id"] == "req" {
+                return reply;
+            }
+        }
+    }
+    async fn send(&mut self, method: &str, params: Value) {
         let request = json!({"id":"req", "method":method, "params":params});
         self.socket
             .send(Message::Text(
@@ -334,12 +503,6 @@ impl Phone {
             ))
             .await
             .unwrap();
-        loop {
-            let reply = self.read().await.unwrap();
-            if reply["id"] == "req" {
-                return reply;
-            }
-        }
     }
 }
 

@@ -489,6 +489,11 @@ impl Registry {
         }
         let mut state = self.0.lock().unwrap();
         if state.revoked.contains(&(actor.lease.clone(),device_id.into())) { bail!("This device was revoked from the attachment."); }
+        // A durable revocation snapshots this same registry after updating
+        // devices.json. Either it sees this grant or admission sees the removal.
+        anyhow::ensure!(crate::phone::registry::DeviceRegistry.list()?.iter().any(|current| {
+            current.id == device_id && current.token == device.token
+        }), "The device is no longer paired.");
         // A different attachment can register concurrently, so check again at
         // insertion. Same-lease mutations are serialized by _attached.
         if state.connections.contains_key(connection) { bail!("The paired-device connection cannot be rebound."); }
@@ -588,6 +593,14 @@ impl Registry {
         Ok(())
     }
 
+    /// Retire a device whose persisted credential was already revoked.
+    /// Both the runtime and window leases can hold grants during takeover.
+    pub(crate) fn retire_device(&self, device: &str) {
+        let grants: Vec<_> = self.0.lock().unwrap().connections.values()
+            .filter(|grant| grant.device.id == device).cloned().collect();
+        for grant in grants { grant.revoke(); }
+    }
+
     pub fn clear(&self, actor: &Actor) -> Result<()> {
         let attachment = self.owner_attachment(actor)?;
         let _attached = attachment.enter()?;
@@ -660,7 +673,17 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
         }
         "register" => { manager.mobile.register(lifetime, actor, string("connection")?, string("deviceId")?)?; return Ok(Value::Null); }
         "clear" => { manager.mobile.fence_owner(lifetime, &actor)?; manager.mobile.clear(&actor)?; return Ok(Value::Null); }
-        "revoke" => { manager.mobile.fence_owner(lifetime, &actor)?; manager.mobile.revoke_device(&actor, string("deviceId")?)?; return Ok(Value::Null); }
+        "revoke" => {
+            let device = string("deviceId")?;
+            manager.mobile.fence_owner(lifetime, &actor)?;
+            manager.mobile.revoke_device(&actor, device)?;
+            if params["persisted"] == true {
+                anyhow::ensure!(!crate::phone::registry::DeviceRegistry.list()?.iter().any(|entry| entry.id == device),
+                    "The paired-device credential is still active.");
+                manager.mobile.retire_device(device);
+            }
+            return Ok(Value::Null);
+        }
         "close" => { manager.mobile.close(&actor, string("connection")?)?; return Ok(Value::Null); }
         _ => {}
     }

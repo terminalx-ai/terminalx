@@ -693,7 +693,7 @@ impl Phones {
     pub(crate) fn revoke(&self, device_id: &str) -> Result<bool> {
         self.queue_revocation(device_id)?;
         let revoked = self.registry.revoke(device_id)?.is_some();
-        self.end_grants(device_id);
+        self.sessions.mobile.retire_device(device_id);
         self.close(device_id, ConnectionSignal::Cancel);
         self.revoke_relay(device_id);
         Ok(revoked)

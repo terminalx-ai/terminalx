@@ -140,14 +140,15 @@ fn apply(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
             "invalid phone revocation ID"
         );
-        let device = registry.automatic_for_grant(
+        let devices = registry.automatic_for_grant(
             &account.user_id,
+            generation,
             &revocation.client_installation_id,
             &revocation.grant_request_id,
         )?;
-        if let Some(device) = device.filter(|device| device.binding_generation == generation) {
-            // Persist the revocation and terminate existing sockets and grants
-            // before telling the account service it has been applied.
+        for device in devices {
+            // A window may have taken over during the fetch. The durable
+            // revocation fences admission and retires grants on every lease.
             phones.revoke(&device.id)?;
         }
         applied.push(revocation.revocation_id);

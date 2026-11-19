@@ -1241,8 +1241,6 @@ impl PairingManager {
                 inner.active_pairing = None;
             }
         }
-        crate::phone::send_authenticated(&mut socket, &mut session).await?;
-        mark_logged_in();
         // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
         let (_tracked, signal_rx) = self.track_connection(&device.id, transport);
         let (outbound_tx, outbound_rx) = mpsc::channel(8);
@@ -1251,6 +1249,9 @@ impl PairingManager {
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
+        mobile_connection.check_off_runtime(&self.phone).await?;
+        crate::phone::send_authenticated(&mut socket, &mut session).await?;
+        mark_logged_in();
         crate::phone::serve_connection(&mut socket, &mut session, &self.phone, &mobile_connection, outbound_rx, signal_rx, |request| {
             let (connection, device, mobile_connection) = (&connection, &device, &mobile_connection);
             async move { self.rpc_response(&request, device, connection, mobile_connection).await }

@@ -179,20 +179,16 @@ impl DeviceRegistry {
         })
     }
 
-    pub fn automatic_for_grant(&self, user_id: &str, installation_id: &str, request_id: &str) -> Result<Option<DeviceEntry>> {
-        Ok(self.list()?.into_iter().find(|device| {
+    /// Include retired records so a retry can finish fencing in-memory grants
+    /// after another poller has already removed the credential.
+    pub fn automatic_for_grant(&self, user_id: &str, generation: u64, installation_id: &str, request_id: &str) -> Result<Vec<DeviceEntry>> {
+        Ok(read_in(&root()?)?.devices.into_iter().filter(|device| {
             device.provenance == DeviceProvenance::Automatic
                 && device.bound_user_id.as_deref() == Some(user_id)
+                && device.binding_generation == generation
                 && device.installation_id.as_deref() == Some(installation_id)
                 && device.created_request_id.as_deref() == Some(request_id)
-        }))
-    }
-
-    pub fn revoke_automatic_grant(&self, user_id: &str, installation_id: &str, request_id: &str) -> Result<Option<DeviceEntry>> {
-        match self.automatic_for_grant(user_id, installation_id, request_id)? {
-            Some(device) => self.revoke(&device.id),
-            None => Ok(None),
-        }
+        }).collect())
     }
 }
 
