@@ -267,9 +267,20 @@ struct RecordedClose {
 /// only: it is gone when the app quits and leaves only in an export. A 4101
 /// is either the relay's close or the client's own check of the runtime
 /// generation in `rpc.hello`; both mean the attachment was stale.
-#[derive(Default)]
 pub struct ConnectionCloseLog {
     entries: Mutex<VecDeque<RecordedClose>>,
+    started_at: i64,
+}
+
+impl Default for ConnectionCloseLog {
+    fn default() -> Self {
+        Self { entries: Mutex::new(VecDeque::new()), started_at: chrono::Utc::now().timestamp_millis() }
+    }
+}
+
+pub(crate) struct SupportCloseSnapshot {
+    pub events: Vec<(i64, &'static str)>,
+    pub retained_since: i64,
 }
 
 impl ConnectionCloseLog {
@@ -302,14 +313,21 @@ impl ConnectionCloseLog {
         self.entries.lock().unwrap().iter().map(|entry| &entry.close).filter(|close| close.organization_id.as_deref() == Some(organization_id)).cloned().collect()
     }
 
-    pub(crate) fn support_events(&self, scope: &crate::account::CloudScope, from: i64, to: i64) -> Vec<(i64, &'static str)> {
-        self.entries.lock().unwrap().iter().filter_map(|entry| {
+    pub(crate) fn support_events(&self, scope: &crate::account::CloudScope, from: i64, to: i64) -> SupportCloseSnapshot {
+        let entries = self.entries.lock().unwrap();
+        let retained_since = if entries.len() == CLOSE_LOG_CAPACITY {
+            self.started_at.max(entries[0].close.at.saturating_add(1))
+        } else {
+            self.started_at
+        };
+        let events = entries.iter().filter_map(|entry| {
             let (user, profile) = entry.owner.as_ref()?;
             let close = &entry.close;
             let organization = close.organization_id.as_deref()?;
             (user == &scope.user_id && profile == &scope.profile_id && scope.allows(organization)
                 && (from..=to).contains(&close.at)).then_some((close.at, close.name))
-        }).collect()
+        }).collect();
+        SupportCloseSnapshot { events, retained_since }
     }
 
     #[cfg(test)]
@@ -739,7 +757,7 @@ mod tests {
             multi_org: true,
             members: ["org_1".to_string()].into_iter().collect(),
         };
-        assert_eq!(log.support_events(&scope, 100, 150), vec![(100, "stale_generation")]);
+        assert_eq!(log.support_events(&scope, 100, 150).events, vec![(100, "stale_generation")]);
     }
 
     #[test]

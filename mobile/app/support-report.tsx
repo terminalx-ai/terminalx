@@ -1,17 +1,27 @@
 import { useRef, useState } from "react";
 import { Linking, Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
-import { useRouter } from "expo-router";
+import { usePreventRemove, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import {
-  features, localReportSource, prepareReport, reportExport, reportWindows, sourceLabels, supportConsole, supportError, supportReference, symptoms,
+  canSubmitReport, coverageLabel, features, localReportSource, prepareReport, reportExport, reportWindows, sourceLabels, supportConsole, supportError, supportReference, symptoms,
   type PreparedReport, type Problem, type ReportHours,
 } from "@terminalx/portable/supportReports";
 import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
 import { supportApi } from "@mobile/support/api";
-import { scopedConnectionEvents, supportConnectionClassifications, supportConnectionStages } from "@mobile/transport/connection";
+import { connectionLogRetainedSince, scopedConnectionEvents, supportConnectionClassifications, supportConnectionStages } from "@mobile/transport/connection";
 import { Button, Card, Screen } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+
+// Retain the exact attempted submission and its receipt across navigation.
+let pendingReport: {
+  owner: string;
+  preview: PreparedReport;
+  problem: Problem;
+  attach: boolean;
+  reference: string;
+  receipt?: string;
+} | undefined;
 
 export default function SupportReportScreen() {
   const app = useApp();
@@ -23,19 +33,21 @@ function ReportForm() {
   const app = useApp();
   const { palette } = useTheme();
   const owner = app.session?.user.userId;
-  const [problem, setProblem] = useState<Problem>({ feature: "connection", symptom: "failed" });
+  const [previous] = useState(() => pendingReport?.owner === owner ? pendingReport : undefined);
+  const [problem, setProblem] = useState<Problem>(previous?.problem ?? { feature: "connection", symptom: "failed" });
   const [hours, setHours] = useState<ReportHours>(24);
-  const [attach, setAttach] = useState(false);
-  const [reference, setReference] = useState("");
+  const [attach, setAttach] = useState(previous?.attach ?? false);
+  const [reference, setReference] = useState(previous?.reference ?? "");
   const [local, setLocal] = useState(false);
   const [server, setServer] = useState(false);
-  const [preview, setPreview] = useState<PreparedReport>();
-  const [receipt, setReceipt] = useState<string>();
+  const [preview, setPreview] = useState<PreparedReport | undefined>(previous?.preview);
+  const [receipt, setReceipt] = useState<string | undefined>(previous?.receipt);
   const [message, setMessage] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const [attempted, setAttempted] = useState(false);
+  const [attempted, setAttempted] = useState(Boolean(previous));
   const [detail, setDetail] = useState(false);
   const active = useRef(false);
+  usePreventRemove(busy);
 
   async function run(action: () => Promise<void>, context: "preview" | "submit" | "copy" = "submit") {
     if (active.current) return;
@@ -45,6 +57,7 @@ function ReportForm() {
     try { await action(); }
     catch (cause) {
       if (cause instanceof Error && cause.message === "support_preview_expired") {
+        if (pendingReport?.owner === owner) pendingReport = undefined;
         setPreview(undefined);
         setAttempted(false);
       }
@@ -55,21 +68,26 @@ function ReportForm() {
 
   const prepare = () => run(async () => {
     const input = attach ? { reference: reference.trim().toLowerCase(), server: false as const } : { to: Date.now(), hours, server };
+    const metadata = { appVersion: appVersion(), platform: Platform.OS };
     const prepared = await prepareReport(input, (request) => supportApi.preview(owner, request),
-      (window) => localReportSource({ appVersion: appVersion(), platform: Platform.OS }, window, supportConnectionStages,
-        !local ? "omitted" : owner ? scopedConnectionEvents(app.logs, owner, app.hosts) : "unavailable", supportConnectionClassifications));
+      (window) => localReportSource(metadata, window, supportConnectionStages,
+        !local ? "omitted" : owner ? scopedConnectionEvents(app.logs, owner, app.hosts) : "unavailable", supportConnectionClassifications, connectionLogRetainedSince(app.logs)), metadata);
     setPreview(prepared);
     setMessage(prepared.error);
   }, "preview");
 
   const submit = () => run(async () => {
-    if (!preview?.key || !owner) return;
+    if (!preview?.key || !owner || !canSubmitReport(preview, attach)) return;
+    const pending = { owner, preview, problem, attach, reference, receipt: undefined as string | undefined };
+    pendingReport = pending;
     setAttempted(true);
     const result = await supportApi.submit(owner, { v: 1, key: preview.key, problem: attach ? undefined : problem, local: preview.local });
     if (!supportReference.test(result.reference)) throw new Error("unavailable");
+    pending.receipt = result.reference;
     setReceipt(result.reference);
   });
 
+  const coverage = preview && coverageLabel(preview.local, preview);
   const label = (value: string) => <Text style={{ color: palette.ink }}>{value}</Text>;
 
   return <Screen>
@@ -83,7 +101,7 @@ function ReportForm() {
           void Linking.openURL(supportConsole).catch(() => setMessage("Open Support reports at console.terminalx.ai to manage this report."));
         }} />
         {message && <Text accessibilityRole="alert" style={{ color: palette.ink }}>{message}</Text>}
-        <Button label="Done" onPress={() => router.back()} />
+        <Button label="Done" onPress={() => { if (pendingReport?.owner === owner) pendingReport = undefined; router.back(); }} />
       </> : <>
         {!preview && <>
           <Option label="Add to a report" value={attach} onChange={setAttach} disabled={busy} />
@@ -101,6 +119,8 @@ function ReportForm() {
           {label(`${new Date(preview.from).toISOString()} to ${new Date(preview.to).toISOString()}`)}
           {!attach && label(`Problem: ${problem.feature} · ${problem.symptom}`)}
           {label(`Phone: ${sourceLabels[preview.local.status]}${preview.local.truncated ? " (limited to newest events)" : ""}`)}
+          {coverage && label(coverage)}
+          {attach && !canSubmitReport(preview, attach) && label("This attachment needs device events. Edit the draft to select this phone’s connection events.")}
           {!attach && label("Desktop: Add from the other device after sending")}
           {label(`Account server events: ${attach ? "Unchanged from the original report" : sourceLabels[preview.server.status]}${preview.server.truncated ? " (limited to newest events)" : ""}`)}
           {label("Phone events cover this running app. Organization and relay service events are unavailable.")}
@@ -111,7 +131,7 @@ function ReportForm() {
             if (!await Clipboard.setStringAsync(reportExport("mobile", preview, attach ? undefined : problem, preview.local))) throw new Error("unavailable");
             setMessage("Reviewed local report copied. Share it only with the intended recipient.");
           }, "copy")} />
-          <Button label={attempted ? "Retry same report" : "Send to TerminalX Support"} disabled={busy || !preview.key} onPress={() => void submit()} />
+          <Button label={attempted ? "Retry same report" : "Send to TerminalX Support"} disabled={busy || !canSubmitReport(preview, attach)} onPress={() => void submit()} />
         </>}
         {message && <Text accessibilityRole="alert" style={{ color: palette.ink }}>{message}</Text>}
         <Button label={attempted ? "Close" : "Cancel"} kind="secondary" disabled={busy} onPress={() => router.back()} />

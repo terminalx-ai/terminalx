@@ -16,6 +16,7 @@ export type LocalSource = {
   appVersion: string;
   capturedAt: number;
   truncated: boolean;
+  coverage: ReportWindow | null;
   events: ReportEvent[];
 };
 export type ServerSource = Pick<LocalSource, "status" | "capturedAt" | "truncated" | "events"> & { version?: string };
@@ -36,16 +37,21 @@ export function localReportSource(
   allowedKinds: readonly string[],
   observed: readonly ReportEvent[] | SourceStatus,
   classifications: readonly string[] = [],
+  retainedSince?: number,
 ): LocalSource {
   const matching = typeof observed === "string" ? [] : observed
     .filter(({ at, kind }) => Number.isSafeInteger(at) && at >= window.from && at <= window.to && allowedKinds.includes(kind))
     .sort((a, b) => b.at - a.at);
+  const capturedAt = Date.now();
+  const from = Math.max(window.from, retainedSince ?? Infinity, matching[100] ? matching[100].at + 1 : 0);
+  const to = Math.min(window.to, capturedAt);
   return {
     platform: metadata.platform,
     appVersion: versionPattern.test(metadata.appVersion) ? metadata.appVersion : "unknown",
-    capturedAt: Date.now(),
+    capturedAt,
     status: typeof observed === "string" ? observed : matching.length ? "included" : "empty",
     truncated: matching.length > 100,
+    coverage: Array.isArray(observed) && from <= to ? { from, to } : null,
     events: matching.slice(0, 100).map(({ at, kind, classification }) => ({
       at, kind, ...(classification !== undefined && classifications.includes(classification) && { classification }),
     })),
@@ -60,6 +66,8 @@ const messages: Record<string, string> = {
   support_report_rate_limited: "Too many reports were prepared. Try again later or copy the reviewed report.",
   support_report_too_large: "The report is too large. Shorten the time window or copy the reviewed report.",
   support_reports_unavailable: "Support reporting is unavailable on this server. You can copy the reviewed local report.",
+  support_scope_changed: "Desktop account or organization access changed. Prepare a new preview before copying or sending.",
+  support_attachment_empty: "Choose a device source with events in the original report window.",
   privacy: "Data privacy mode blocks sending. You can copy the reviewed local report.",
 };
 
@@ -77,7 +85,8 @@ export function reportExport(
   problem: Problem | undefined,
   local: LocalSource,
 ) {
-  return JSON.stringify({ v: 1, ...window, problem, [device]: local }, null, 2);
+  const { from, to } = window;
+  return JSON.stringify({ v: 1, from, to, problem, [device]: local }, null, 2);
 }
 
 export type PreparedReport = ReportWindow & {
@@ -91,7 +100,12 @@ export async function prepareReport(
   input: PreviewRequest,
   fetchPreview: (input: PreviewRequest) => Promise<ServerPreview>,
   collectLocal: (window: ReportWindow) => LocalSource | Promise<LocalSource>,
+  metadata: Pick<LocalSource, "platform" | "appVersion">,
 ): Promise<PreparedReport> {
+  async function local(window: ReportWindow) {
+    try { return await collectLocal(window); }
+    catch { return localReportSource(metadata, window, [], "failed"); }
+  }
   let preview: ServerPreview;
   try {
     preview = await fetchPreview(input);
@@ -102,17 +116,29 @@ export async function prepareReport(
       ...window,
       key: null,
       server: { status: input.server ? "unavailable" : "omitted", capturedAt: Date.now(), events: [], truncated: false },
-      local: await collectLocal(window),
+      local: await local(window),
       error: supportError(cause, "preview"),
     };
   }
-  return { ...preview, local: await collectLocal(preview) };
+  return { ...preview, local: await local({ from: preview.from, to: preview.to }) };
 }
 
 export const sourceLabels: Record<SourceStatus, string> = {
   included: "Included",
-  empty: "No events in this window",
+  empty: "No retained events",
   omitted: "Omitted",
   unavailable: "Unavailable",
   failed: "Collection failed",
 };
+
+export function coverageLabel(source: LocalSource, window: ReportWindow): string | null {
+  if (source.status !== "included" && source.status !== "empty") return null;
+  const coverage = source.coverage;
+  if (!coverage) return "Device history does not cover any of this window.";
+  if (coverage.from === window.from && coverage.to === window.to) return null;
+  return `Device history covers only ${new Date(coverage.from).toISOString()} to ${new Date(coverage.to).toISOString()}.`;
+}
+
+export function canSubmitReport(preview: PreparedReport, attach: boolean): boolean {
+  return Boolean(preview.key) && (!attach || preview.local.status === "included");
+}

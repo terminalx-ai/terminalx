@@ -30,6 +30,17 @@ export interface ConnectionLogEntry { id: string; at: number; level: "info" | "s
 
 // Typed annotations on existing connection-log entries. Ownership and report
 // fields never enter the persisted display log or outlive its in-memory entry.
+export const CONNECTION_LOG_CAPACITY = 200;
+const logStartedAt = Date.now();
+
+export function connectionLogRetainedSince(logs: readonly ConnectionLogEntry[]): number {
+  // A full rolling buffer may have evicted an entry with the same millisecond
+  // as its oldest remaining entry. Exclude that boundary from full coverage.
+  return logs.length >= CONNECTION_LOG_CAPACITY
+    ? Math.max(logStartedAt, logs[0]!.at + 1)
+    : logStartedAt;
+}
+
 const reportFields = new WeakMap<ConnectionLogEntry, ReportFields & { owner: string; hostId: string }>();
 
 export function scopedConnectionEvents(logs: readonly ConnectionLogEntry[], owner: string, hosts: readonly StoredHost[]): ReportEvent[] | "unavailable" {

@@ -10,14 +10,14 @@ import SupportReportScreen from "../app/support-report";
 import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
-const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn() }));
+const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), preventRemove: vi.fn() }));
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
 vi.mock("@mobile/support/api", () => ({ supportApi: support }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: support.copy }));
-vi.mock("@mobile/transport/connection", () => ({ scopedConnectionEvents: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
+vi.mock("@mobile/transport/connection", () => ({ connectionLogRetainedSince: () => Date.now() - 2000, scopedConnectionEvents: support.events, supportConnectionStages: ["connected"], supportConnectionClassifications: ["relay"] }));
+vi.mock("expo-router", () => ({ usePreventRemove: support.preventRemove, useRouter: () => ({ push: mocks.push, back: mocks.back }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.2.32", ios: { buildNumber: "118" } } } }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@mobile/notifications/store", () => ({ useNotificationSettings: () => mocks.notifications }));
@@ -52,6 +52,7 @@ beforeEach(() => {
   support.submit.mockReset();
   support.copy.mockReset();
   support.events.mockReset();
+  support.preventRemove.mockReset();
   mocks.back.mockReset();
   mocks.setName.mockReset();
   mocks.alert.mockReset();
@@ -209,8 +210,12 @@ it("previews scoped mobile events and retries the reviewed submission before con
   expect(support.events).toHaveBeenCalledWith(mocks.app.logs, "my-account", mocks.app.hosts);
   await tap("Send to TerminalX Support");
   expect(container.textContent).not.toContain("Report delivered");
+  expect(support.preventRemove).toHaveBeenCalledWith(true);
+  await show(<SettingsScreen />);
+  await show(<SupportReportScreen />);
   await tap("Retry same report");
   expect(container.textContent).toContain(supportReceipt);
   expect(support.submit.mock.calls[0]).toEqual(support.submit.mock.calls[1]);
   expect(JSON.stringify(support.submit.mock.calls)).not.toContain("ghp_CANARY");
+  await tap("Done");
 });

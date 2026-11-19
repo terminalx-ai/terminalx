@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAccount } from "@/lib/account";
 import {
-  features, prepareReport, reportExport, reportWindows, sourceLabels, supportConsole, supportError, supportReference, symptoms,
+  canSubmitReport, coverageLabel, features, prepareReport, reportWindows, sourceLabels, supportConsole, supportError, supportReference, symptoms,
   type LocalSource, type PreparedReport, type Problem, type ReportHours, type ServerPreview,
 } from "@terminalx/portable/supportReports";
 
@@ -35,7 +36,7 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
   const [reference, setReference] = useState("");
   const [local, setLocal] = useState(false);
   const [server, setServer] = useState(false);
-  const [preview, setPreview] = useState<PreparedReport>();
+  const [preview, setPreview] = useState<PreparedReport & { proof?: string }>();
   const [receipt, setReceipt] = useState<string>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -49,7 +50,7 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
     setError(undefined);
     try { await action(); }
     catch (cause) {
-      if (cause === "support_preview_expired") { setPreview(undefined); setAttempted(false); }
+      if (cause === "support_preview_expired" || cause === "support_scope_changed") { setPreview(undefined); setAttempted(false); }
       setError(supportError(cause, context));
     }
     finally { active.current = false; setBusy(false); }
@@ -57,24 +58,32 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
 
   const prepare = () => run(async () => {
     const input = attach ? { reference: reference.trim().toLowerCase(), server: false as const } : { to: Date.now(), hours, server };
+    let proof: string | undefined;
     const result = await prepareReport(input,
       (request) => invoke<ServerPreview>("support_report_preview", { revision: revision ?? "", request }),
-      ({ from, to }) => invoke<LocalSource>("support_report_local", { revision: revision ?? null, from, to, selected: local }),
+      async ({ from, to }) => {
+        const source = await invoke<{ local: LocalSource; proof?: string }>("support_report_local", { revision: revision ?? null, from, to, selected: local });
+        proof = source.proof;
+        return source.local;
+      }, { platform: "unknown", appVersion: await getVersion().catch(() => "unknown") },
     );
-    setPreview(result);
+    setPreview({ ...result, proof });
     setError(result.error);
   }, "preview");
 
   const submit = () => run(async () => {
-    if (!preview?.key || !revision) return;
+    if (!preview?.key || !revision || !canSubmitReport(preview, attach)) return;
     setAttempted(true);
     const result = await invoke<{ reference: string }>("support_report_submit", {
       revision,
+      proof: preview.proof,
       request: { v: 1, key: preview.key, problem: attach ? undefined : problem, local: preview.local },
     });
     if (!supportReference.test(result.reference)) throw new Error("unavailable");
     setReceipt(result.reference);
   });
+
+  const coverage = preview && coverageLabel(preview.local, preview);
 
   return <DialogContent className="max-h-[85vh] overflow-y-auto" onEscapeKeyDown={(event) => { event.preventDefault(); if (!busy) close(); }}
     onPointerDownOutside={(event) => event.preventDefault()} showClose={false}>
@@ -106,6 +115,8 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
         <p>{new Date(preview.from).toISOString()} to {new Date(preview.to).toISOString()}</p>
         {!attach && <p>Problem: {problem.feature} · {problem.symptom}</p>}
         <p>Desktop connections: {sourceLabels[preview.local.status]}{preview.local.truncated ? " (limited to newest events)" : ""}</p>
+        {coverage && <p>{coverage}</p>}
+        {attach && !canSubmitReport(preview, attach) && <p>This attachment needs device events. Edit the draft to select this desktop’s runtime connections.</p>}
         <p>Desktop connection events cover this app run. Desktop startup history is unavailable.</p>
         {!attach && <p>Mobile: Add from the other device after sending</p>}
         <p>Account server events: {attach ? "Unchanged from the original report" : sourceLabels[preview.server.status]}{preview.server.truncated ? " (limited to newest events)" : ""}</p>
@@ -118,10 +129,15 @@ function ReportForm({ revision, close }: { revision?: string; close: () => void 
         {preview ? <>
           {!attempted && <Button variant="outline" disabled={busy} onClick={() => { setPreview(undefined); setError(undefined); }}>Edit draft</Button>}
           <Button variant="outline" disabled={busy} onClick={() => void run(async () => {
-            await navigator.clipboard.writeText(reportExport("desktop", preview, attach ? undefined : problem, preview.local));
+            const { from, to, local, proof } = preview;
+            await invoke("support_report_copy", {
+              revision,
+              proof,
+              draft: { from, to, local, problem: attach ? undefined : problem },
+            });
             setError("Reviewed local report copied. Share it only with the intended recipient.");
           }, "copy")}>Copy local report</Button>
-          <Button disabled={busy || !preview.key} onClick={() => void submit()}>{attempted ? "Retry same report" : "Send to TerminalX Support"}</Button>
+          <Button disabled={busy || !canSubmitReport(preview, attach)} onClick={() => void submit()}>{attempted ? "Retry same report" : "Send to TerminalX Support"}</Button>
         </> : <Button disabled={busy || (attach && !supportReference.test(reference.trim().toLowerCase()))} onClick={() => void prepare()}>Prepare preview</Button>}
       </div>
     </>}

@@ -3,11 +3,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openSupportReport, SupportReportDialog } from "./SupportReportDialog";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: async () => "0.2.40" }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/lib/account", () => ({ useAccount: () => ({ status: { state: "signed-in", context: { revision: "session-revision" } } }) }));
 
 const reference = "de94bbc7-3533-493a-81c8-19facc031340";
-const local = { status: "included", platform: "macos", appVersion: "0.2.40", capturedAt: 2000, truncated: false, events: [{ at: 1500, kind: "relay-closed" }] };
+const local = { status: "included", platform: "macos", appVersion: "0.2.40", capturedAt: 2000, truncated: false, coverage: { from: 1000, to: 2000 }, events: [{ at: 1500, kind: "relay-closed" }] };
 const calls = (name: string) => invoke.mock.calls.filter(([command]) => command === name);
 
 beforeEach(() => {
@@ -16,7 +17,7 @@ beforeEach(() => {
     if (name === "support_report_preview") return {
       key: reference, from: 1000, to: 2000, server: { status: "empty", capturedAt: 2000, truncated: false, events: [] },
     };
-    if (name === "support_report_local") return local;
+    if (name === "support_report_local") return { local, proof: "native-proof" };
     throw "unavailable";
   });
 });
@@ -55,7 +56,7 @@ it("retries the same reviewed snapshot and waits for a confirmed reference", asy
 
 it("offers a local preview and no Send when the service is offline", async () => {
   invoke.mockImplementation(async (name) => {
-    if (name === "support_report_local") return local;
+    if (name === "support_report_local") return { local, proof: "native-proof" };
     throw "unavailable";
   });
   open();
@@ -64,4 +65,22 @@ it("offers a local preview and no Send when the service is offline", async () =>
   await screen.findByText("Account server events: Unavailable");
   expect(screen.getByText("Copy local report")).toBeTruthy();
   await waitFor(() => expect((screen.getByText("Send to TerminalX Support") as HTMLButtonElement).disabled).toBe(true));
+});
+
+it("discards a desktop preview when native copy rejects its organization scope", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (name, args) => {
+    if (name === "support_report_copy") throw "support_scope_changed";
+    return original(name, args);
+  });
+  open();
+  fireEvent.click(screen.getByLabelText(/runtime connections/));
+  fireEvent.click(screen.getByText("Prepare preview"));
+  fireEvent.click(await screen.findByText("Copy local report"));
+  await screen.findByText(/organization access changed/);
+  expect(calls("support_report_copy")[0]?.[1]).toEqual({
+    revision: "session-revision", proof: "native-proof",
+    draft: { from: 1000, to: 2000, local, problem: { feature: "connection", symptom: "failed" } },
+  });
+  expect(screen.queryByText("Send to TerminalX Support")).toBeNull();
 });
