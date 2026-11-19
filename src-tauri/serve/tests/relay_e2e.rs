@@ -749,7 +749,7 @@ async fn cloud_terminals_keep_identity_order_and_ownership_through_the_relay() {
     let second = desk.ok("pty.create", json!({ "clientRequestId": "e2e-term-create-2" })).await;
     let second_id = second["ptyId"].as_str().unwrap().to_string();
     drop(runtime);
-    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime { .. })).await;
     runtime = Runtime::start(&root, &data, &link);
     runtime.wait_for_relay("registered");
     let ClientState::Connected { runtime_epoch: restarted, .. } = desk.connected().await else { unreachable!() };
@@ -1074,7 +1074,7 @@ async fn cloud_agent_tabs_run_through_the_mailbox_and_survive_disconnects_and_re
     desk.until_tab(&mut feeds, &b_tab, "the unacked reply", |f| has(f, "before the restart")).await;
     tokio::task::block_in_place(|| common::agent::wait_until("the lost ack", || mailbox.acks_for(&unacked).iter().any(|(_, s)| *s == 503).then_some(())));
     runtime.kill();
-    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime { .. })).await;
     mailbox.state.lock().unwrap().fail_acks.clear();
     mailbox.expire_leases();
     let incarnations = mailbox.state.lock().unwrap().incarnations.len();
@@ -2017,7 +2017,7 @@ async fn a_paired_computer_operates_a_machine_through_the_relay() {
     desk.ok("rpc.hello", want.clone()).await;
     assert_eq!(desk.ok("machine.describe", json!({})).await["machineId"], json!(relay_host_id));
     drop(serve);
-    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime { .. })).await;
 
     // Now only the machine's registry knows it: the link lists no attachment
     // and the relay host's own device list is gone.
@@ -2043,7 +2043,7 @@ async fn a_paired_computer_operates_a_machine_through_the_relay() {
     // Losing the relay control connection closes the computer's data leg too,
     // as it does every attached device's; it resumes once the host is back.
     harness.post("/restart-cell", json!({}));
-    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime)).await;
+    desk.state(|state| matches!(state, ClientState::Reconnecting { .. } | ClientState::WaitingForRuntime { .. })).await;
     desk.connected().await;
     let again = desk.ok("rpc.hello", want.clone()).await;
     assert!(again["capabilities"].as_array().is_some_and(|granted| granted.iter().any(|name| name == "machine/1")), "{again}");

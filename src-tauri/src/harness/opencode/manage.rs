@@ -146,7 +146,7 @@ pub struct Overview {
 
 /// What checking a key with its provider said.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase", tag = "result")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "result")]
 pub enum KeyCheck {
     Accepted,
     /// The provider could not be asked, or has no way to ask; saved anyway.

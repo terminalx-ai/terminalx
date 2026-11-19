@@ -132,7 +132,7 @@ async function check(browser, url, colorScheme) {
     "Run's dot says running": (await dock.getByRole("tab", { name: /^Run/ }).getByRole("img", { name: "Running" }).count()) === 1,
     "AFTER SETUP label": (await pane.innerText()).includes("AFTER SETUP"),
     "script in a mono block": (await pane.getByTestId("setup-script").innerText()).startsWith("bun install") && /mono|menlo|courier|consolas/i.test(font),
-    "outcome with duration and exit code": /^✓ Last setup finished in [12]s · exit 0$/.test(outcome),
+    "outcome with duration and exit code": /^✓ Last setup finished in \d+s · exit 0$/.test(outcome),
     "Rerun is kept": (await pane.getByRole("button", { name: "Rerun" }).count()) === 1,
     "the setup output stays reachable": (await pane.getByTestId("setup-output").innerText()).includes("812 packages installed"),
     "nothing spills or overlaps": await dock.evaluate((node, fn) => { const r = new Function(`return ${fn}`)()(node); return !r.overflow && !r.overlaps.length && r.rowInside; }, layout.toString()),

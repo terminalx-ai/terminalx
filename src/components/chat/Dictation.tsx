@@ -360,16 +360,18 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
   return (
     <>
       {state.error && state.target === null && state.settings === "microphone" && (
-        // A narrow composer puts the actions under the words rather than squeezing them into a column.
+        // A narrow composer puts the actions under the words rather than squeezing them into a column. Neither asks for
+        // more than the row has: in a composer under about 200px (760px window at 150% zoom) the words take the row's
+        // width and the button's label shortens, where a fixed minimum pushed both through the row's edge.
         <div role="alert" data-dictation-error className="mb-2 flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-lg border border-destructive/35 bg-destructive/[0.07] px-3 py-2.5">
           <MicOff className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <div className="min-w-48 flex-1">
+          <div className="min-w-[min(12rem,100%)] flex-1">
             <div className="text-[12.5px] font-medium">Microphone access is off for TerminalX</div>
             <div className="mt-0.5 text-xs text-muted-foreground">{message}</div>
           </div>
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button size="sm" onClick={() => void openUrl(PRIVACY_SETTINGS_URLS.microphone)}>Open System Settings</Button>
-            <button type="button" aria-label="Dismiss" className="rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground" onClick={clearDictationError}>
+          <div className="ml-auto flex max-w-full min-w-0 items-center gap-2">
+            <Button size="sm" className="min-w-0 shrink" onClick={() => void openUrl(PRIVACY_SETTINGS_URLS.microphone)}><span className="truncate">Open System Settings</span></Button>
+            <button type="button" aria-label="Dismiss" className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground" onClick={clearDictationError}>
               <X className="size-3.5" />
             </button>
           </div>
