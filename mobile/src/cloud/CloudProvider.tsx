@@ -44,7 +44,7 @@ async function installationId(): Promise<string> {
 }
 
 const APP_VERSION: string = packageJson.version;
-const EMPTY: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
+const EMPTY: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false };
 const CloudContext = createContext<CloudCatalog | null>(null);
 
 export function CloudProvider({ children }: PropsWithChildren) {

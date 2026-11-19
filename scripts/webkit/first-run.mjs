@@ -115,7 +115,7 @@ try {
         })(),
         "the project step offers its two buttons": (await start.locator("button[data-start-card]").allTextContents()).join("|") === "Open folder|Clone from GitHub",
         "the permission choice is offered": (await start.getByRole("button", { name: "Permissions: Ask every time" }).count()) === 1,
-        "the footer says an account is optional, and links the guide": (await start.locator("footer").textContent()).includes("A TerminalX account is optional for local work.") && (await start.getByRole("button", { name: "Read the guide" }).count()) === 1,
+        "the footer says an account is optional, and links the docs": (await start.locator("footer").textContent()).includes("A TerminalX account is optional for local work.") && (await start.getByRole("button", { name: "Read the docs" }).count()) === 1,
         "no text under 12px": (await small(start)).length === 0,
         "no sideways scroll": await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
       }, { title, icon, step, install, name, tile, colors, small: await small(start) });

@@ -23,6 +23,7 @@ impl SessionManager {
                 Default::default(),
             )),
             echoed: Default::default(),
+            lapsed: Default::default(),
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,

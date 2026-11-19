@@ -58,6 +58,8 @@ export interface CatalogSnapshot {
   saved: boolean;
   /** Generated titles this phone learned, by `titleKey`. */
   titles: Readonly<Record<string, string>>;
+  /** The server takes this phone's request to delete an organization (read with the organizations). */
+  deletesOrganizations: boolean;
 }
 
 /** Where a workspace's generated title is found in `CatalogSnapshot.titles`. */
@@ -111,14 +113,17 @@ const blobPrefixes = (orgId: string, workspaceId: string) => [`terminalx:cloud-c
 
 export class CloudCatalog {
   private organizations: CatalogOrganization[] = [];
+  /** Organizations this phone deleted: a list read that started before the deletion does not bring one back. */
+  private readonly removed = new Set<string>();
   private loading = false;
   private error: string | null = null;
   private refreshedAt: number | null = null;
   private saved = false;
+  private deletesOrganizations = false;
   private titles: Record<string, string> = {};
   /** Organizations whose workspaces came from a successful read, in this run or the saved one: what is shown for them is a list, not a guess. */
   private everRead = new Set<string>();
-  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
+  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
   private readonly retained = new Map<string, number>();
@@ -208,6 +213,24 @@ export class CloudCatalog {
       // Also after a read that failed: the next one is still due (#500).
       this.followChanges();
     }));
+  }
+
+  /**
+   * Delete an organization this person owns (#1292); `confirmationName` is
+   * its name as listed. On success it leaves the list at once, and the read
+   * that follows removes what the phone kept for its workspaces. A refusal,
+   * or an answer that does not confirm it, throws and changes nothing here.
+   */
+  async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
+    await this.options.api.deleteOrganization(orgId, confirmationName);
+    this.removed.add(orgId);
+    if (this.closed) return;
+    this.organizations = this.organizations.filter((entry) => entry.organization.orgId !== orgId);
+    this.publish();
+    void this.saveList();
+    // A read that started before the deletion may have listed it: let it finish, then read again.
+    if (this.flight) await this.flight;
+    await this.refresh();
   }
 
   /** The session for a listed workspace, started on first use. */
@@ -393,7 +416,7 @@ export class CloudCatalog {
     this.publish();
     let organizations: CloudOrganization[];
     try {
-      organizations = await this.options.api.organizations();
+      organizations = (await this.options.api.organizations()).filter((organization) => !this.removed.has(organization.orgId));
     } catch (error) {
       if (this.closed) return;
       this.error = error instanceof CloudApiError ? error.code : "cloud_workspace_unavailable";
@@ -422,6 +445,7 @@ export class CloudCatalog {
     this.error = null;
     this.loading = false;
     this.saved = false;
+    this.deletesOrganizations = this.options.api.deletesOrganizations?.() === true;
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
     this.noteResumes();
@@ -575,7 +599,7 @@ export class CloudCatalog {
   }
 
   private publish(): void {
-    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles };
+    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles, deletesOrganizations: this.deletesOrganizations };
     for (const listener of [...this.listeners]) listener();
   }
 }

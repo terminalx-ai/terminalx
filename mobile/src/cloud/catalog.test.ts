@@ -149,6 +149,55 @@ describe("the phone's cloud catalog", () => {
     expect(h.kept().some((name) => name.includes("ws-x"))).toBe(false);
   });
 
+  it("deletes an organization: it leaves the list at once and what the phone kept for it goes (#1292)", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.keep("org-2", "ws-x");
+    const deleteOrganization = vi.fn(async () => { h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]); });
+    Object.assign(h.api, { deleteOrganization });
+    await h.catalog.deleteOrganization("org-2", "Beta");
+    expect(deleteOrganization).toHaveBeenCalledExactlyOnceWith("org-2", "Beta");
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]);
+    expect(h.keys()).toEqual([]);
+    expect(h.kept().some((name) => name.includes("ws-x"))).toBe(false);
+  });
+
+  it("does not bring a deleted organization back from a list read that started before the deletion", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    let answer!: (value: { orgId: string; name: string; role: string }[]) => void;
+    // A read in flight that will still list it, as the server answered before the deletion.
+    h.api.organizations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const stale = h.catalog.refresh();
+    Object.assign(h.api, { deleteOrganization: vi.fn(async () => {}) });
+    h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]);
+    const deleting = h.catalog.deleteOrganization("org-2", "Beta");
+    await vi.waitFor(() => expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]));
+    answer([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "owner" }]);
+    await stale;
+    await deleting;
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]);
+  });
+
+  it("says whether the server takes deletion from this phone, as read with the organizations", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(false);
+    Object.assign(h.api, { deletesOrganizations: () => true });
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(true);
+  });
+
+  it("changes nothing when the server refuses the deletion", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.keep("org-2", "ws-x");
+    Object.assign(h.api, { deleteOrganization: vi.fn(async () => { throw new CloudApiError("organization_delete_blocked", 409, null, ["cloud_cleanup_required"]); }) });
+    await expect(h.catalog.deleteOrganization("org-2", "Beta")).rejects.toMatchObject({ code: "organization_delete_blocked" });
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1", "org-2"]);
+    expect(h.keys()).not.toEqual([]);
+  });
+
   it("leaves nothing on the phone after sign-out", async () => {
     const h = harness();
     await h.catalog.refresh();

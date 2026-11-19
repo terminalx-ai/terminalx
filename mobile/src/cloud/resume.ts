@@ -48,7 +48,7 @@ const RESUME_TEXT: Record<string, { text: string; retry: boolean }> = {
  */
 export class ResumeUnconfirmed extends CloudApiError {
   constructor(from: CloudApiError, readonly listChecked: boolean) {
-    super(from.code, from.status, from.reason);
+    super(from.code, from.status, from.reason, from.blockers);
     this.name = "ResumeUnconfirmed";
   }
 }
