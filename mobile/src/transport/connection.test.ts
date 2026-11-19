@@ -43,7 +43,7 @@ vi.mock("./relay-client", async (importOriginal) => {
       return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, scopedConnectionSnapshot, type ConnectionLogEntry } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, RESUME_REQUEST_WAIT_MS, scopedConnectionSnapshot, type ConnectionLogEntry } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -489,6 +489,41 @@ describe("a lost connection", () => {
     sockets = mocks.clients.length;
     connection.retryNow(); await flush();
     expect(mocks.clients).toHaveLength(sockets);
+  });
+
+  it("lets a resume wait for a reconnect under way, and says at once when no connection is coming (#1290)", async () => {
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    expect(await connection.awaitConnected(0)).toBe(true);
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    // Reconnecting: the wait ends as soon as the connection is back, well before its limit.
+    const waited = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    let done: boolean | null = null;
+    void waited.then((value) => (done = value));
+    await flush();
+    expect(done).toBeNull();
+    mocks.reachable.add(lan);
+    connection.retryNow(); await flush();
+    expect(await waited).toBe(true);
+    // Still reconnecting when the limit passes: false, and the caller says so instead of sending.
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    const late = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    await vi.advanceTimersByTimeAsync(RESUME_REQUEST_WAIT_MS);
+    expect(await late).toBe(false);
+    // No Mac chosen: nothing to wait for.
+    connection.stop();
+    expect(await connection.awaitConnected(RESUME_REQUEST_WAIT_MS)).toBe(false);
+  });
+
+  it("writes an entry from elsewhere in the app to the log, redacted like its own (#1290)", () => {
+    const logs: any[] = []; connection.onLog((entry) => logs.push(entry));
+    connection.note("warning", "Session resume not confirmed", `Continue here · step send · code no-answer · ${"a".repeat(40)}`);
+    expect(logs).toEqual([expect.objectContaining({ level: "warning", message: "Session resume not confirmed", detail: "Continue here · step send · code no-answer · [redacted]" })]);
   });
 
   it("does not reconnect from the background on retryNow", async () => {

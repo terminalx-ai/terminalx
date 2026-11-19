@@ -19,13 +19,13 @@ import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloud
 import { CloudWorkspaceAttention, takeAttentionSessionRequest, useAttentionSessionRequest } from "./CloudWorkspaceAttention";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
-import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { archiving, deletion, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { useCloudAgentRan } from "@/lib/cloudSessions";
 import { detachCloudTerminals, errorCode } from "@/lib/cloudTerminals";
-import { selectSession } from "@/lib/sessions";
+import { selectCloudSession, selectSession } from "@/lib/sessions";
 import { useAccount } from "@/lib/account";
 import { computerColorCss, computerNameOf } from "@/lib/computerIdentity";
-import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
+import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 
@@ -37,12 +37,11 @@ function openable(item: CloudWorkspaceListItem): boolean {
 
 /**
  * A cloud workspace in the main slot, with the sidebar kept (PRO-23 CS-5).
- * `workspaceKey` may also be a session key (`cloud:<org>:<workspace>:<session>`):
- * until the shared SessionView renders cloud sessions, a selected session
- * shows its workspace here. The connection is a lease from the connection
- * manager, so the sidebar's session list follows it live.
+ * The connection is a lease from the connection manager, so the sidebar's
+ * session list follows it live. Its agent sessions open in the same
+ * SessionView as a local session (#1289), never in a chat of this view's own.
  *
- * The workspace view (terminals, agent, files, git). Selecting only looks: it connects with `connect`,
+ * The workspace view (terminals, agent sessions, files, git). Selecting only looks: it connects with `connect`,
  * never `wake`, so a stopped workspace shows its saved agent conversations
  * and stays stopped until Resume is pressed.
  */
@@ -94,12 +93,9 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const [resuming, setResuming] = useState(false);
   // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
   const listState = item?.workspace.state ?? null;
-  // A resume is under way while this window's request is out, or while the list shows one running.
-  // A refused one (the running limit) ends both, and the chips read stopped again.
-  const waking = resuming || (!!item?.latestOperation && isOpen(item.latestOperation) && item.latestOperation.action === "resume");
   const opened = useMemo<OpenedWorkspace | null>(
-    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking } : null),
-    [held, connection, listState, waking],
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState } : null),
+    [held, connection, listState],
   );
   // A retried delete the server refuses because work is still running: the delete dialog says what would be lost and asks.
   const [forcing, setForcing] = useState(false);
@@ -261,7 +257,14 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
       ) : !canOpen ? (
         <Centered>{attention ? <CloudWorkspaceAttention item={item} input={{ agentRan, connection: state.state }} onOpenSession={inspect} /> : describeWorkspace(item)}</Centered>
       ) : opened ? (
-        <WorkspaceView key={workspaceTargetKey(opened.connection.target)} opened={opened} state={state} agentRequest={agentRequest.key === workspaceKey ? agentRequest.revision : 0} initialAgent={!!attention} />
+        <WorkspaceView
+          key={workspaceTargetKey(opened.connection.target)}
+          opened={opened}
+          state={state}
+          agentRequest={agentRequest.key === workspaceKey ? agentRequest.revision : 0}
+          initialAgent={!!attention}
+          onOpenSession={(sessionId) => parsed && selectCloudSession(cloudSessionKey(parsed.orgId, parsed.workspaceId, sessionId))}
+        />
       ) : (
         !error && (
           <Centered>

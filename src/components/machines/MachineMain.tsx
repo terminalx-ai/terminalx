@@ -7,8 +7,8 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { WorkspaceView } from "@/components/cloud/CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { machineConnection, reconnectMachine, useMachineConnections } from "@/lib/machineConnections";
-import { machineSessionTab, useMachineProjects } from "@/lib/machineCatalog";
-import type { AgentFocus, AgentProjects } from "@/components/cloud/CloudAgents";
+import { useMachineProjects } from "@/lib/machineCatalog";
+import type { AgentProjects } from "@/components/cloud/CloudAgents";
 import { selectCloudSession } from "@/lib/sessions";
 import { takeMachineNewSession, useMachineNewSession } from "./machineNewSession";
 import { machineVersionView, useThisVersion } from "@/lib/machineUpdate";
@@ -27,12 +27,8 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
   const parsed = parseMachineKey(machineKey);
   const machineId = parsed?.machineId ?? "";
   const store = useMachineConnections();
-  // A session key (`machine:<m>:<p>:<s>`) opens the machine's view on that session's agent tab (PRO-346).
+  // A machine session opens in the shared SessionView (PRO-347, #1289); this view only lists them.
   const { sessions, projects } = useMachineProjects(machineId);
-  const row = parsed?.sessionId ? (sessions.find((session) => session.key === machineKey) ?? null) : null;
-  const focusSession = parsed?.sessionId ?? null;
-  const focusTab = row ? machineSessionTab(row) : null;
-  const focusAgent = useMemo<AgentFocus | null>(() => (focusSession ? { sessionId: focusSession, tabId: focusTab } : null), [focusSession, focusTab]);
   // A new agent tab on a machine is created in one of its projects (`session.create` needs one): the
   // sidebar's + chooses it, else the form starts on the focused session's project.
   const request = useMachineNewSession(machineId);
@@ -69,9 +65,12 @@ export function MachineMain({ machineKey, sidebarOpen, onToggleSidebar }: { mach
         key={workspaceTargetKey(connection.target)}
         opened={{ connection, name, provider: null, workspaceState: null, machine: { record: machine, status: machineViewStatus(state, name), label: machineViewLabel(state) } }}
         state={clientState}
-        initialAgent={!!focusAgent || !!request}
-        focusAgent={focusAgent}
+        initialAgent={!!request}
         agentProjects={agentProjects}
+        onOpenSession={(sessionId) => {
+          const row = sessions.find((session) => session.sessionId === sessionId);
+          if (row) selectCloudSession(row.key);
+        }}
       />
     );
   } else {

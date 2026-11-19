@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, SUPPORTED_PROVIDERS } from "./api";
-import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle } from "./catalog";
+import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle, type CloudLog } from "./catalog";
 import { keyItemName } from "./keys";
+import { resumeFailure, ResumeUnconfirmed } from "./resume";
 import { cloudSections, emptyOrganizationsLabel } from "./list";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
@@ -10,7 +11,7 @@ const HELD = "terminalx.cloud.held.v1";
 const TITLES = "terminalx.cloud.titles.v1";
 
 /** A phone's storage, kept across runs of the app when passed to the next harness. */
-function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, string> } = {}) {
+function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, string>; log?: CloudLog } = {}) {
   const secrets = phone.secrets ?? new Map<string, string>();
   const blobs = phone.blobs ?? new Map<string, string>();
   const api = {
@@ -31,6 +32,7 @@ function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, str
     clientInstallationId: "mobile-1",
     appVersion: "0.1.0",
     now: () => 42,
+    ...(phone.log ? { log: phone.log } : {}),
   });
   /** As if this phone had connected to the workspace before. */
   const keep = (orgId: string, workspaceId: string) => {
@@ -190,7 +192,7 @@ describe("the phone's cloud catalog", () => {
     const h = harness();
     await h.catalog.refresh();
     h.keep("org-2", "ws-x");
-    Object.assign(h.api, { deleteOrganization: vi.fn(async () => { throw new CloudApiError("organization_delete_blocked", 409, ["cloud_cleanup_required"]); }) });
+    Object.assign(h.api, { deleteOrganization: vi.fn(async () => { throw new CloudApiError("organization_delete_blocked", 409, null, ["cloud_cleanup_required"]); }) });
     await expect(h.catalog.deleteOrganization("org-2", "Beta")).rejects.toMatchObject({ code: "organization_delete_blocked" });
     expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1", "org-2"]);
     expect(h.keys()).not.toEqual([]);
@@ -695,3 +697,80 @@ describe("starting a stopped workspace from the phone (#988)", () => {
     expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("suspended");
   });
 });
+
+describe("a resume that fails or gets no answer (#1290)", () => {
+  const listing = (h: ReturnType<typeof harness>, fields: Record<string, unknown>, operation: Record<string, unknown> | null = null) =>
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [{ ...item("ws-new", fields), latestOperation: operation as never }, item("ws-old")] : [], tombstones: [] }));
+
+  it("shows a resume that timed out as under way when the list shows it starting, and logs it as unconfirmed", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    listing(h, { state: "resuming" }, { id: "op-9", state: "running", action: "resume" });
+    await expect(h.catalog.start("org-1", "ws-new")).resolves.toBe("in-progress");
+    expect(h.api.resume).toHaveBeenCalledTimes(1);
+    expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("resuming");
+    expect(log).toHaveBeenCalledWith("warning", "Cloud workspace resume not confirmed, but under way", "workspace ws-new · stage request · code timeout");
+  });
+
+  it("takes 'another action is running' as under way when the list says the resume runs", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_operation_in_progress", 409));
+    listing(h, { state: "suspended" }, { id: "op-9", state: "queued", action: "resume" });
+    await expect(h.catalog.start("org-1", "ws-new")).resolves.toBe("in-progress");
+  });
+
+  it("fails a timed-out resume the list does not show starting, logs its stage and code, and reads the list again", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ reason: "timeout", listChecked: true });
+    expect(log).toHaveBeenCalledWith("error", "Cloud workspace resume failed", "workspace ws-new · stage request · code timeout");
+  });
+
+  it("says a timed-out resume was not checked against the list when the list could not be read either", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    h.api.organizations.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "network"));
+    const error = await h.catalog.start("org-1", "ws-new").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ResumeUnconfirmed);
+    expect(error).toMatchObject({ code: "cloud_workspace_unavailable", reason: "timeout", listChecked: false });
+    expect(resumeFailure(error).text).toMatch(/list could not be read to check/);
+  });
+
+  it("leaves a refusal as the service's own error: nothing was asked of the list", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const refusal = new CloudApiError("cloud_workspace_forbidden", 403);
+    h.api.resume.mockRejectedValueOnce(refusal);
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toBe(refusal);
+  });
+
+  it("logs a refusal at once, without asking the list whether it is starting", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.workspaces.mockClear();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_manager_required", 403));
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ code: "cloud_workspace_manager_required" });
+    expect(log).toHaveBeenCalledWith("error", "Cloud workspace resume failed", "workspace ws-new · stage request · code cloud_workspace_manager_required · HTTP 403");
+  });
+
+  it("logs a resume this phone asked for once the list shows it failed on the service, with its code", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    await h.catalog.start("org-1", "ws-new");
+    listing(h, { state: "attention-required" }, { id: "op-1", state: "failed", action: "resume", errorCode: "cloud_provider_state_conflict" });
+    await h.catalog.refresh();
+    await h.catalog.refresh();
+    expect(log.mock.calls.filter(([, message]) => message === "Cloud workspace resume failed")).toEqual([
+      ["error", "Cloud workspace resume failed", "workspace ws-new · stage operation · code cloud_provider_state_conflict"],
+    ]);
+  });
+});
+

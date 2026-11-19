@@ -875,6 +875,16 @@ describe("the session header's location and connection chips", () => {
     fireEvent.click(element, { button: 0 });
   };
 
+  it("has Run, Git and Share where a local session has them: Run off with why, Git opening Changes, Share the workspace's people (#1289)", async () => {
+    await openConnected();
+    const run = screen.getByTestId("cloud-run-menu-unavailable");
+    expect(run.getAttribute("title")).toContain("Saved actions and previews run on this computer");
+    expect((within(run).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("cloud-git-button")).toBeDefined();
+    fireEvent.click(screen.getByTestId("cloud-share-button"));
+    expect(await screen.findByTestId("cloud-share-dialog")).toBeDefined();
+  });
+
   it("the location chip holds the workspace's Stop, Archive and Delete", async () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
@@ -954,6 +964,33 @@ describe("the session header's location and connection chips", () => {
     await act(async () => runtime.connect("manage"));
     seen.push(screen.getByTestId("session-connection").textContent ?? "");
     expect(seen).toEqual(["Resuming…", "Connecting…", "Connecting…", "Connecting…", "Live"]);
+  });
+
+  it("#1291: a message to a stopped workspace is a Queued card at once, its line follows the wake, and it becomes the delivered message once", async () => {
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "earlier question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(await screen.findByText("earlier question")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "wake up and fix it" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    const card = await screen.findByTestId("queued-message");
+    expect(card.textContent).toContain("wake up and fix it");
+    expect(card.textContent).toContain("Queued");
+    const line = () => within(screen.getByTestId("queued-message")).getByTestId("queued-status").textContent;
+    await waitFor(() => expect(line()).toBe("Resuming the workspace…"));
+    // Never also a row above the transcript.
+    expect(screen.queryByTestId("cloud-agent-outbox")).toBeNull();
+    await act(async () => runtime.emit({ state: "connecting", attempt: 1 }));
+    expect(line()).toBe("Connecting…");
+    runtime.tabs = [tabInfo()];
+    await act(async () => runtime.connect("manage"));
+    expect(line()).toBe("Delivering to the agent…");
+    // The agent takes it: the card goes and the message is drawn once, by the conversation.
+    await act(async () => runtime.stream(ev({ type: "user_message", text: "wake up and fix it", queued: false })));
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(screen.getAllByText("wake up and fix it")).toHaveLength(1);
   });
 
   it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {

@@ -16,6 +16,7 @@ pub(crate) mod send_ids;
 #[cfg(test)]
 mod serve_tests;
 pub(crate) mod sink;
+mod sync_cache;
 pub(crate) mod wire;
 
 use std::sync::{Arc, Mutex, OnceLock};

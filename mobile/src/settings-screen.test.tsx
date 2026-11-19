@@ -12,7 +12,11 @@ import { defaultSettings } from "./notifications/model";
 
 // #987: Settings in plain words. Machines are managed on the Machines tab only.
 const support = vi.hoisted(() => ({ preview: vi.fn(), submit: vi.fn(), copy: vi.fn(), events: vi.fn(), hosts: vi.fn(), preventRemove: vi.fn() }));
-const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, organizations: [] as any[] }));
+const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), back: vi.fn(), setName: vi.fn(), alert: vi.fn(), notifications: null as any, storage: new Map<string, string>(), organizations: [] as any[] }));
+vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
+  getItem: async (key: string) => mocks.storage.get(key) ?? null,
+  setItem: async (key: string, value: string) => { mocks.storage.set(key, value); },
+} }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: mocks.organizations.map((organization) => ({ organization })) }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { accent: "#e7806d", border: "#333" }, name: "Ember", setName: mocks.setName }) }));
@@ -88,8 +92,20 @@ it("lists no machines and has no one-tap delete", async () => {
 it("puts the machine's own options under its name, with one line on what they do", async () => {
   await show(<SettingsScreen />);
   const headings = [...container.querySelectorAll("h2")].map((h) => h.textContent);
-  expect(headings).toEqual(["Notifications", "Appearance", "Studio MacBook", "Privacy and help"]);
+  expect(headings).toEqual(["Notifications", "Appearance", "Data", "Studio MacBook", "Privacy and help"]);
   expect(container.textContent).toContain("Native CodexExperimental. A more reliable chat for new Codex sessions.");
+});
+
+it("keeps sending recent sessions ahead of time off until the person turns it on, on this phone (#1283)", async () => {
+  await show(<SettingsScreen />);
+  const toggle = () => container.querySelector("[aria-label='Send recent sessions ahead of time']") as HTMLInputElement;
+  expect(toggle().checked).toBe(false);
+  expect(container.textContent).toContain("Uses more data while the app is open.");
+  await act(async () => { toggle().click(); });
+  expect(toggle().checked).toBe(true);
+  expect(mocks.storage.get("terminalx:prefetch:v1")).toBe("on");
+  await act(async () => { toggle().click(); });
+  expect(mocks.storage.get("terminalx:prefetch:v1")).toBe("off");
 });
 
 it("clears the previous machine settings while reconnecting and loads them again", async () => {

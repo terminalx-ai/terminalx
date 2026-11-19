@@ -81,6 +81,15 @@ interface TurnProps {
   onRetry?: (seq: number) => void;
   /** Take a failed turn's prompt to a new chat. */
   onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Why an action this session cannot take here is off (#1289): shown as a
+   * disabled control with that reason where the action would be, instead of
+   * leaving it out. Each is ignored while its handler is given.
+   */
+  forkUnavailable?: string;
+  resetUnavailable?: string;
+  secondOpinionUnavailable?: string;
+  retryInNewChatUnavailable?: string;
 }
 
 function TurnBody({
@@ -104,6 +113,10 @@ function TurnBody({
   workingSince,
   onRetry,
   onRetryInNewChat,
+  forkUnavailable,
+  resetUnavailable,
+  secondOpinionUnavailable,
+  retryInNewChatUnavailable,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
@@ -182,11 +195,12 @@ function TurnBody({
         </div>
       )}
 
-      {failure && <FailureCard turn={turn} failure={failure} linkContext={linkContext} onRetry={onRetry} onRetryInNewChat={onRetryInNewChat} />}
+      {failure && <FailureCard turn={turn} failure={failure} linkContext={linkContext} onRetry={onRetry} onRetryInNewChat={onRetryInNewChat} retryInNewChatUnavailable={retryInNewChatUnavailable} />}
 
       {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet} />}
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
+        unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}
     </div>
   );
 }
@@ -237,7 +251,7 @@ function failureOf(turn: Turn): Failure | null {
  * A failed turn's error, once: what went wrong and when, then Retry (the same prompt, sent again) and Retry in a new
  * chat. Its time in view, in the tab in front, is told to the tab's recovery incidents (#815), as the error row was.
  */
-function FailureCard({ turn, failure, linkContext, onRetry, onRetryInNewChat }: { turn: Turn; failure: Failure; linkContext?: { sessionId: string; cwd: string }; onRetry?: (seq: number) => void; onRetryInNewChat?: (turn: Turn) => void }) {
+function FailureCard({ turn, failure, linkContext, onRetry, onRetryInNewChat, retryInNewChatUnavailable }: { turn: Turn; failure: Failure; linkContext?: { sessionId: string; cwd: string }; onRetry?: (seq: number) => void; onRetryInNewChat?: (turn: Turn) => void; retryInNewChatUnavailable?: string }) {
   const section = useSearchSection("failure");
   const reporter = useRecoveryReporter();
   const ref = useRef<HTMLDivElement>(null);
@@ -247,6 +261,8 @@ function FailureCard({ turn, failure, linkContext, onRetry, onRetryInNewChat }: 
   const seq = turn.prompt?.seq;
   const retry = onRetry && seq != null && !turn.prompt?.withdrawn ? () => onRetry(seq) : undefined;
   const fresh = onRetryInNewChat && turn.prompt ? () => onRetryInNewChat(turn) : undefined;
+  // Not offered here: the control stays, off, with why (#1289).
+  const freshOff = !fresh && turn.prompt ? (retryInNewChatUnavailable ?? null) : null;
   return (
     <div ref={ref} role="alert" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-[13px]" data-testid="turn-failure">
       <div className="flex items-start gap-2">
@@ -257,10 +273,16 @@ function FailureCard({ turn, failure, linkContext, onRetry, onRetryInNewChat }: 
         </div>
         {time && <time dateTime={time.iso} title={time.full} className="shrink-0 text-xs tabular-nums text-faint">{time.short}</time>}
       </div>
-      {(retry || fresh) && (
+      {(retry || fresh || freshOff) && (
         <div className="mt-2 flex flex-wrap items-center gap-2 pl-6">
           {retry && <Button size="xs" variant="secondary" onClick={retry}><RotateCcw /> Retry</Button>}
           {fresh && <Button size="xs" variant="outline" onClick={fresh}>Retry in a new chat</Button>}
+          {freshOff && (
+            // A disabled button takes no hover, so the reason is on a wrapper that does.
+            <span title={freshOff} data-testid="retry-in-new-chat-unavailable">
+              <Button size="xs" variant="outline" disabled aria-label={`Retry in a new chat: ${freshOff}`}>Retry in a new chat</Button>
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -315,7 +337,7 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
  * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
  * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet }: {
+function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
   turn: Turn;
   sessionId: string;
   tabId?: string;
@@ -326,6 +348,8 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
   onReset?: (endSeq: number) => void;
   onFork?: (endSeq: number, into: "tab" | "session") => void;
   onSaveSnippet?: (text: string) => void;
+  /** Why each action this session cannot take is off, shown as a disabled item with that reason (#1289). */
+  unavailable?: { fork?: string; reset?: string; secondOpinion?: string };
 }) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
@@ -345,7 +369,12 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
   const fork = endSeq != null ? onFork : undefined;
   const reset = endSeq != null ? onReset : undefined;
   const snippet = prompt ? onSaveSnippet : undefined;
-  const hasMenu = !!(fork || reset || text || snippet || onSecondOpinion);
+  // Off with a reason only where the action would have been offered.
+  const forkOff = !fork && endSeq != null ? unavailable?.fork : undefined;
+  const resetOff = !reset && endSeq != null ? unavailable?.reset : undefined;
+  const opinionOff = !onSecondOpinion ? unavailable?.secondOpinion : undefined;
+  const branching = !!(fork || reset || forkOff || resetOff);
+  const hasMenu = !!(branching || text || snippet || onSecondOpinion || opinionOff);
   const ended = messageTime(turn.completed?.ts ?? ts);
   const stats = turnStats(turn);
   if (!messageTime(ts) && !outcome && !text && !turn.completed && !onSecondOpinion && !onReset) return null;
@@ -388,15 +417,19 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
               <TurnMenuItem icon={<GitFork />} label="Fork to new tab" hint="Same worktree · knows the chat up to here" onSelect={() => fork(endSeq!, "tab")} />
               <TurnMenuItem icon={<FolderGit2 />} label="Fork to new session" hint="New worktree with this turn's files" onSelect={() => fork(endSeq!, "session")} />
             </>}
-            {reset && <>
-              {fork && <DropdownMenuSeparator />}
-              <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint="Removes later turns; can reset files too" onSelect={() => reset(endSeq!)} />
+            {forkOff && <TurnMenuItem icon={<GitFork />} label="Fork" hint={forkOff} disabled />}
+            {(reset || resetOff) && <>
+              {(fork || forkOff) && <DropdownMenuSeparator />}
+              {reset
+                ? <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint="Removes later turns; can reset files too" onSelect={() => reset(endSeq!)} />
+                : <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint={resetOff} disabled />}
             </>}
-            {(fork || reset) && (text || snippet || onSecondOpinion) && <DropdownMenuSeparator />}
+            {branching && (text || snippet || onSecondOpinion || opinionOff) && <DropdownMenuSeparator />}
             {text && <TurnMenuItem icon={<FileText />} label="Copy answer as Markdown" onSelect={() => void copyText(text).then(() => setCopied(true))} />}
             {snippet && <TurnMenuItem icon={<Bookmark />} label="Save the prompt as a snippet…" onSelect={() => snippet(prompt!)} />}
             {onSecondOpinion && <TurnMenuItem icon={<ArrowLeftRight />} label={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : "Second opinion"}
               hint={`Opens ${secondOpinionAgent ? `a ${secondOpinionAgent}` : "another agent's"} tab with this turn's diff`} onSelect={() => onSecondOpinion(turn)} />}
+            {opinionOff && <TurnMenuItem icon={<ArrowLeftRight />} label="Second opinion" hint={opinionOff} disabled />}
           </DropdownMenuContent>
         </DropdownMenu>
       )}
@@ -411,9 +444,10 @@ function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion
   );
 }
 
-function TurnMenuItem({ icon, label, hint, onSelect }: { icon: ReactNode; label: string; hint?: string; onSelect: () => void }) {
+/** A turn action; `disabled`, its hint says why it cannot be taken here. */
+function TurnMenuItem({ icon, label, hint, onSelect, disabled = false }: { icon: ReactNode; label: string; hint?: string; onSelect?: () => void; disabled?: boolean }) {
   return (
-    <DropdownMenuItem onSelect={onSelect} className={cn(hint && "items-start whitespace-normal")}>
+    <DropdownMenuItem onSelect={onSelect} disabled={disabled} className={cn(hint && "items-start whitespace-normal")}>
       <span className={cn(hint && "mt-0.5")}>{icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block">{label}</span>
@@ -468,24 +502,19 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
       return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
       return (
-        <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
-          <div className="flex flex-wrap items-center gap-2">
-            <Clock className="size-3.5 shrink-0" />
-            {!item.withdrawn && <span className="text-xs">Queued</span>}
-            {item.author && <span className="min-w-0 wrap-anywhere" data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
-              <WithTooltip label="Interrupt the agent and send this now">
-                <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
-                  <Send /> Send now
-                </Button>
-              </WithTooltip>
-            )}
-          </div>
-          {item.files?.length ? <div className="mt-1.5"><MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /></div> : null}
-          <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
+        <QueuedCard
+          label={item.withdrawn ? null : "Queued"}
+          author={item.author}
+          text={item.text}
+          section={section}
+          linkContext={linkContext}
+          time={<MessageTime ts={item.messageTs} />}
+          files={item.files?.length ? <MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /> : null}
+          onSendNow={onSendQueuedNow && !item.inputOccupied && !item.withdrawn ? () => onSendQueuedNow(item.seq) : undefined}
+        >
           {item.inputOccupied && <InputOccupiedNote />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
-        </div>
+        </QueuedCard>
       );
     case "status":
       return (
@@ -552,6 +581,57 @@ function InitiatingPrompt({ name, text, linkContext }: { name: string; text: str
       <summary className="cursor-pointer rounded focus-visible:outline focus-visible:outline-2">Initiating prompt</summary>
       <div className="mt-2 whitespace-pre-wrap break-words select-text"><LinkedText text={text} context={linkContext} /></div>
     </details>
+  );
+}
+
+/**
+ * A message the agent has not taken yet: queued behind the running turn in a
+ * local session, or on its way to a cloud workspace (#1291). One card for
+ * both; what is under it (`children`) says why it waits.
+ */
+export function QueuedCard({
+  label,
+  author,
+  text,
+  section,
+  linkContext,
+  time,
+  files,
+  onSendNow,
+  children,
+  ...data
+}: {
+  /** "Queued", or what else it is ("Steer"); null for none (a message withdrawn). */
+  label: string | null;
+  author?: { userId: string; displayName: string } | null;
+  text: string;
+  section?: ReturnType<typeof useSearchSection>;
+  linkContext?: { sessionId: string; cwd: string };
+  time?: ReactNode;
+  files?: ReactNode;
+  /** Interrupt the agent's turn so this goes now; absent where it cannot. */
+  onSendNow?: () => void;
+  children?: ReactNode;
+  [key: `data-${string}`]: string | undefined;
+}) {
+  return (
+    <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message" {...data}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Clock className="size-3.5 shrink-0" />
+        {label && <span className="text-xs">{label}</span>}
+        {author && <span className="min-w-0 wrap-anywhere" data-user-id={author.userId}>{author.displayName}:</span>}
+        {onSendNow && (
+          <WithTooltip label="Interrupt the agent and send this now">
+            <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={onSendNow}>
+              <Send /> Send now
+            </Button>
+          </WithTooltip>
+        )}
+      </div>
+      {files ? <div className="mt-1.5">{files}</div> : null}
+      <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={text} context={linkContext} /></span>{time}</div>
+      {children}
+    </div>
   );
 }
 

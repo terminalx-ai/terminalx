@@ -11,6 +11,8 @@ const fake = vi.hoisted(() => ({
   connected: null as null | (() => void),
   describeHost: vi.fn(),
   summaries: vi.fn(),
+  listVersion: vi.fn(),
+  rememberList: vi.fn(),
   forgetPairing: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
@@ -78,6 +80,8 @@ vi.mock("../data/host-api", () => ({
     describeHost = fake.describeHost;
     forgetPairing = fake.forgetPairing;
     summaries = fake.summaries;
+    listVersion = fake.listVersion;
+    rememberList = fake.rememberList;
   },
 }));
 
@@ -105,7 +109,7 @@ beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   fake.storage.clear();
   fake.credentialRead = null;
-  for (const mock of [fake.summaries, fake.describeHost, fake.forgetPairing, fake.start, fake.stop, fake.restart, fake.reportError, fake.retryNow]) mock.mockReset();
+  for (const mock of [fake.summaries, fake.listVersion, fake.rememberList, fake.describeHost, fake.forgetPairing, fake.start, fake.stop, fake.restart, fake.reportError, fake.retryNow]) mock.mockReset();
   fake.describeHost.mockResolvedValue(null);
   fake.summaries.mockResolvedValue([]);
   fake.forgetPairing.mockResolvedValue(true);
@@ -505,6 +509,32 @@ describe("the connection state's facts (#983)", () => {
     await settle();
     expect(app.activeHost?.id).toBe(HOST.id);
     expect(app.sessions).toEqual([summary("kept")]);
+  });
+
+  it("asks for the saved list again by the version it was read at, so an unchanged one is not sent again (#1283)", async () => {
+    fake.summaries.mockResolvedValue([summary("kept")]);
+    fake.listVersion.mockReturnValue("v-kept");
+    await connected();
+    await act(async () => fake.connected!());
+    await settle();
+    await act(async () => root.unmount());
+    root = createRoot(document.createElement("div"));
+    await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
+    await settle();
+    expect(fake.rememberList).toHaveBeenCalledWith("sessions.summaries", {}, "v-kept", { sessions: [summary("kept")] });
+  });
+
+  it("keeps no version for a list it was not read with", async () => {
+    fake.summaries.mockResolvedValue([summary("kept")]);
+    fake.listVersion.mockReturnValue(null);
+    await connected();
+    await act(async () => fake.connected!());
+    await settle();
+    await act(async () => root.unmount());
+    root = createRoot(document.createElement("div"));
+    await act(async () => root.render(<AppProvider><Probe /></AppProvider>));
+    await settle();
+    expect(fake.rememberList).not.toHaveBeenCalled();
   });
 });
 
