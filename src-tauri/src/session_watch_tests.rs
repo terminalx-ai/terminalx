@@ -3882,17 +3882,16 @@ while True:
     keys = os.read(0, 16)
     if keys in (b"\x1b[A", b"\x1bOA"): at = max(0, at - 1); draw()
     elif keys in (b"\x1b[B", b"\x1bOB"): at = min(len(options) - 1, at + 1); draw()
+    elif keys == b"q": sys.exit(0)
     elif keys in (b"\r", b"\x1b"):
         open(chosen, "w").write("esc" if keys == b"\x1b" else options[at])
         rule = "─" * 80
         os.write(1, ("\x1b[2J\x1b[1;1H● Done.\r\n\x1b[20;1H" + rule + "\r\n❯ \r\n" + rule).encode())
 "#;
 
-#[test]
-fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat() {
-    if crate::binpath::resolve("python3").is_none() {
-        return;
-    }
+/// A tab whose pane runs the offer's stand-in, ready, with the offer drawn.
+fn offer_rig() -> Option<(Rig, tempfile::TempDir, std::path::PathBuf)> {
+    crate::binpath::resolve("python3")?;
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("offer.py");
     let chosen = dir.path().join("chosen");
@@ -3906,16 +3905,25 @@ fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat()
         assert!(Instant::now() < deadline, "the stand-in never drew its offer");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let shown = |rig: &Rig| rig.events().iter().filter_map(|e| match &e.payload { Payload::TerminalPrompt { prompt } => Some(prompt.clone()), _ => None }).next_back();
+    Some((rig, dir, chosen))
+}
+
+fn prompt_told(rig: &Rig) -> Option<Option<tui::ScreenPrompt>> {
+    rig.events().iter().filter_map(|e| match &e.payload { Payload::TerminalPrompt { prompt } => Some(prompt.clone()), _ => None }).next_back()
+}
+
+#[test]
+fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat() {
+    let Some((rig, _dir, chosen)) = offer_rig() else { return };
 
     // Still being drawn a moment ago: not yet.
     rig.pane_draws();
     rig.tick();
-    assert_eq!((shown(&rig), rig.status()), (None, TabStatus::Idle));
+    assert_eq!((prompt_told(&rig), rig.status()), (None, TabStatus::Idle));
 
     rig.advance(Duration::from_secs(1));
     rig.tick();
-    let prompt = shown(&rig).flatten().expect("the chat is told of the offer");
+    let prompt = prompt_told(&rig).flatten().expect("the chat is told of the offer");
     assert_eq!(prompt.title.as_deref(), Some("We recommend compacting earlier"));
     assert_eq!(prompt.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]);
     assert_eq!(rig.status(), TabStatus::Waiting, "the tab needs the reader");
@@ -3929,6 +3937,55 @@ fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat()
 
     rig.manager.answer_terminal_prompt(SESSION, TAB, &prompt.id, Some(1)).unwrap();
     assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "Keep auto (1m tokens)", "Down, then Enter");
-    assert_eq!(shown(&rig), Some(None), "the card is taken down with the dialog");
+    assert_eq!(prompt_told(&rig), Some(None), "the card is taken down with the dialog");
     assert_eq!(rig.status(), TabStatus::Idle, "back to what it was");
+}
+
+/// A CLI that keeps redrawing something around the dialog (a timer) never
+/// goes quiet: the same question read on two passes is shown all the same.
+#[test]
+fn a_question_read_the_same_on_two_passes_is_shown_while_the_pane_keeps_drawing() {
+    let Some((rig, _dir, _chosen)) = offer_rig() else { return };
+    rig.pane_draws();
+    rig.tick();
+    assert_eq!(prompt_told(&rig), None);
+    rig.advance(Duration::from_secs(5));
+    rig.pane_draws();
+    rig.tick();
+    assert!(prompt_told(&rig).flatten().is_some(), "steady on screen, if not quiet");
+    assert_eq!(rig.status(), TabStatus::Waiting);
+}
+
+/// The CLI goes while its question is up (Stop, Ctrl+C, a restart): the card
+/// goes with it, and a hook's request in the meantime is answered on its own.
+#[test]
+fn a_question_goes_with_the_cli_and_waits_behind_a_hooks_request() {
+    let Some((rig, _dir, chosen)) = offer_rig() else { return };
+    rig.pane_draws();
+    rig.advance(Duration::from_secs(1));
+    rig.tick();
+    let prompt = prompt_told(&rig).flatten().expect("shown");
+
+    rig.rt.lock().unwrap().pending.insert("ask-1".into(), PendingAsk { tool_use_id: "tool-1".into(), tool_name: "Bash".into(), input: json!({}), suggestions: Vec::new() });
+    let refused = rig.manager.answer_terminal_prompt(SESSION, TAB, &prompt.id, Some(1)).unwrap_err().to_string();
+    assert!(refused.contains("asking something else first"), "{refused}");
+    assert!(!chosen.exists(), "no key went in");
+    rig.rt.lock().unwrap().pending.clear();
+
+    // A CLI started again on the tab is built afresh and knows nothing of what
+    // its log told: the card still goes once that CLI is no longer asking.
+    if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+        p.input = InputBox::default();
+    }
+    rig.manager.terminals.write(&rig.pane, b"q").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline, "the stand-in never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rig.tick();
+    assert_eq!(prompt_told(&rig), Some(None), "taken down with the CLI");
+    // Said once.
+    rig.tick();
+    assert_eq!(rig.kinds().iter().filter(|k| *k == "terminal_prompt").count(), 2);
 }

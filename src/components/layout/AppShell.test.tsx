@@ -107,8 +107,11 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeycaps: () => () => [],
 }));
 // PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
-const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
-vi.mock("@/lib/experimentalSettings", () => ({ getExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }), useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, bots: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ getExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }), useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }) }));
+// PRO-466: the bots' store is booted only while Settings → Experimental → Bots is on.
+const botStore = vi.hoisted(() => ({ bootBots: vi.fn(async () => {}), shutBots: vi.fn() }));
+vi.mock("@/lib/bots", () => botStore);
 // PRO-345, PRO-360: every paired machine stays attached while the window is open.
 const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
@@ -506,6 +509,30 @@ describe("automation navigation", () => {
     render(<AppShell />);
 
     expect(screen.getByTestId("automations").getAttribute("data-automation-id")).toBe("automation-99");
+  });
+});
+
+describe("the bots' store (PRO-466)", () => {
+  afterEach(() => {
+    runShortcut.bots = false;
+  });
+
+  it("is not booted while Settings → Experimental → Bots is off", () => {
+    botStore.bootBots.mockClear();
+    render(<AppShell />);
+    expect(botStore.bootBots).not.toHaveBeenCalled();
+  });
+
+  it("is booted when the switch is on, and shut when it goes off", () => {
+    botStore.bootBots.mockClear();
+    runShortcut.bots = true;
+    const { rerender } = render(<AppShell />);
+    expect(botStore.bootBots).toHaveBeenCalledTimes(1);
+    botStore.shutBots.mockClear();
+    runShortcut.bots = false;
+    rerender(<AppShell />);
+    expect(botStore.shutBots).toHaveBeenCalledTimes(1);
+    expect(botStore.bootBots).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -71,6 +71,10 @@
     "experimental": {
       "additionalProperties": false,
       "properties": {
+        "bots": {
+          "description": "AI employees with standing roles: each has a name, a role, its own memory and a home folder. Also turns on the terminalx bots commands.",
+          "type": "boolean"
+        },
         "localVmTasks": {
           "description": "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.",
           "type": "boolean"

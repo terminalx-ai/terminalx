@@ -351,6 +351,9 @@ pub(crate) struct ScreenPromptState {
     /// Watcher passes in a row the box was missing with nothing readable in
     /// its place.
     unread_passes: u8,
+    /// A question read while the pane was still drawing: shown if the next
+    /// pass reads it the same.
+    candidate: Option<tui::ScreenPrompt>,
 }
 
 /// How the wait for a pane's CLI to listen ended.
@@ -1516,6 +1519,10 @@ pub struct SessionManager {
     first_starts: Arc<FirstStarts>,
     /// What automatic account switching remembers between decisions (#981).
     account_switch: Arc<Mutex<crate::agent_accounts::auto_switch::Memory>>,
+    /// Tabs whose log last told of a question in the CLI's own screen
+    /// (PRO-460), by `key_of`: kept apart from the CLI, so a stop, an exit or
+    /// a restart that drops the CLI still takes the card down.
+    screen_prompts: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Native tab-lifetime sidecar; weak runtime ownership avoids retaining tabs.
@@ -2019,6 +2026,7 @@ impl SessionManager {
             stopping_ptys: Arc::default(),
             follow: Arc::default(),
             first_starts: Arc::default(),
+            screen_prompts: Arc::default(),
             account_switch: Arc::default(),
         };
         let mut watcher = manager.clone();
@@ -2152,23 +2160,33 @@ impl SessionManager {
     /// that no hook reported (PRO-460), and tell the chat when one comes or
     /// goes. `quiet`: how long the pane has gone without drawing.
     ///
-    /// One it can read is shown with its choices. Its input box gone for two
-    /// looks in a row, with nothing readable in its place, is a question
-    /// too, one the chat can only send the reader to the terminal for. Either
-    /// has the tab waiting on the reader, and its going puts the tab back.
-    /// A question a hook asked has its own card, and is left to it.
+    /// One it can read is shown with its choices once it has stood still:
+    /// the pane quiet for a moment, or the same question read on two passes
+    /// in a row (a CLI that keeps redrawing a timer around it). Its input box
+    /// gone for two looks in a row, with nothing readable in its place, is a
+    /// question too, one the chat can only send the reader to the terminal
+    /// for. Either has the tab waiting on the reader, and its going puts the
+    /// tab back. A question a hook asked has its own card, and is left to it.
+    /// A CLI that is no longer there to ask (stopped, exited, left the
+    /// terminal, starting again) asks nothing: a question shown is taken down.
     fn watch_screen_prompt(&self, rt: &mut TabRuntime, quiet: Option<Duration>) {
-        let Engine::Cli(p) = &rt.engine else { return };
-        if p.harness != CliKind::Claude || p.by_hand.is_some() || !p.ready.marked() || !rt.pending.is_empty() {
+        let pane = match &rt.engine {
+            Engine::Cli(p) if p.harness == CliKind::Claude && p.by_hand.is_none() => Some(p.pane_id.clone()),
+            _ => None,
+        };
+        let live = pane.as_ref().is_some_and(|pane| self.terminals.is_running(pane))
+            && self.left_the_terminal(rt).is_none()
+            && matches!(&rt.engine, Engine::Cli(p) if p.ready.marked());
+        let (Some(pane), true) = (pane, live) else {
+            self.screen_prompt_is(rt, None);
+            return;
+        };
+        if !rt.pending.is_empty() {
             return;
         }
-        let pane = p.pane_id.clone();
         // A prompt being typed in is not something the CLI is asking.
         let writer = self.writers.lock().unwrap().get(&pane).cloned();
         let Ok(_typing) = writer.as_ref().map_or(Ok(None), |writer| writer.try_lock().map(Some)) else { return };
-        if !self.terminals.is_running(&pane) || self.left_the_terminal(rt).is_some() {
-            return;
-        }
         let Some((read, composer)) = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), claude::pty::composer(screen))) else { return };
         let quiet = quiet.unwrap_or_default();
         let Engine::Cli(p) = &mut rt.engine else { return };
@@ -2177,10 +2195,14 @@ impl SessionManager {
             state.box_seen = true;
         }
         let found = match read {
-            // Still being drawn: looked at again on the next pass.
-            Some(_) if quiet < SCREEN_PROMPT_QUIET => return,
             Some(prompt) => {
                 state.unread_passes = 0;
+                let steady = quiet >= SCREEN_PROMPT_QUIET || state.candidate.as_ref() == Some(&prompt) || state.shown.as_ref() == Some(&prompt);
+                if !steady {
+                    // Still being drawn, or drawn around: looked at again on the next pass.
+                    state.candidate = Some(prompt);
+                    return;
+                }
                 Some(prompt)
             }
             None if composer == tui::Composer::Unseen && state.box_seen && quiet >= SCREEN_PROMPT_UNREAD_QUIET => {
@@ -2195,21 +2217,37 @@ impl SessionManager {
                 None
             }
         };
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.input.prompt.candidate = None;
+        }
         self.screen_prompt_is(rt, found);
     }
 
     /// The question the CLI's screen shows now, if any: told to the chat when
-    /// it changed, and the tab's status kept in step with it.
+    /// it changed, and the tab's status kept in step with it. A tab whose CLI
+    /// has gone keeps nothing of it but the record here of what its log said.
     fn screen_prompt_is(&self, rt: &mut TabRuntime, found: Option<tui::ScreenPrompt>) {
-        let Engine::Cli(p) = &mut rt.engine else { return };
-        let state = &mut p.input.prompt;
-        let changed = state.shown != found;
-        let gone = found.is_none() && state.shown.is_some();
-        let was = state.was;
-        state.shown = found.clone();
-        let made_waiting = p.input.made_waiting;
-        if changed {
+        let key = rt.key();
+        let logged = self.screen_prompts.lock().unwrap().contains(&key);
+        let (shown, was, made_waiting) = match &mut rt.engine {
+            Engine::Cli(p) => {
+                let state = &mut p.input.prompt;
+                let shown = std::mem::replace(&mut state.shown, found.clone());
+                if found.is_none() {
+                    state.candidate = None;
+                    state.unread_passes = 0;
+                }
+                (shown, state.was, p.input.made_waiting)
+            }
+            _ => (None, None, false),
+        };
+        let gone = found.is_none() && (shown.is_some() || logged);
+        if shown != found || gone {
             self.publish(rt, Payload::TerminalPrompt { prompt: found.clone() }, None);
+        }
+        {
+            let mut prompts = self.screen_prompts.lock().unwrap();
+            if found.is_some() { prompts.insert(key); } else { prompts.remove(&key); }
         }
         if found.is_some() {
             // Again if something since (a Stop hook) said otherwise while it stayed up.
@@ -2257,6 +2295,11 @@ impl SessionManager {
             if self.left_the_terminal(&rt).is_some() || !self.terminals.is_running(&p.pane_id) {
                 bail!("The agent is no longer running.");
             }
+            // A dialog a hook is waiting on is answered on its own card, so the
+            // hook's request and the terminal stay in step.
+            if !rt.pending.is_empty() {
+                bail!("The agent is asking something else first. Answer that request, then this question.");
+            }
             (p.pane_id.clone(), self.writers.lock().unwrap().get(&p.pane_id).cloned())
         };
         let still_up = |what: &str| -> Result<(tui::ScreenPrompt, bool)> {
@@ -2281,6 +2324,9 @@ impl SessionManager {
                     if prompt.dismiss.is_none() {
                         bail!("This question cannot be dismissed. Choose one of its options.");
                     }
+                    // Looked at once more right before the key: an Escape that
+                    // lands after the dialog has gone stops a turn instead.
+                    still_up("answering")?;
                     self.terminals.write(&pane, tui::ESCAPE).context("Could not reach the agent's terminal")?;
                 }
                 Some(choice) => {
@@ -2297,10 +2343,12 @@ impl SessionManager {
                     if moves > 0 {
                         // Claude Code refuses an Enter right after an arrow as a stray key.
                         std::thread::sleep(SCREEN_PROMPT_CONFIRM_GAP);
-                        let (moved, _) = still_up("answering")?;
-                        if moved.selected != Some(choice) {
-                            bail!("The agent's terminal did not move to that option. Open the terminal to answer there.");
-                        }
+                    }
+                    // Looked at once more right before the Enter, which would
+                    // send the input box if the dialog had gone.
+                    let (moved, _) = still_up("answering")?;
+                    if moved.selected != Some(choice) {
+                        bail!("The agent's terminal did not move to that option. Open the terminal to answer there.");
                     }
                     self.terminals.write(&pane, tui::SUBMIT).context("Could not reach the agent's terminal")?;
                 }

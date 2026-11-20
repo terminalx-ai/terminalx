@@ -44,6 +44,7 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, PrecheckTrial, PrecheckTryInput } from "@/types/automations";
+import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
@@ -2137,6 +2138,26 @@ export const automationsApi = {
   tryPrecheck: (input: PrecheckTryInput) => invoke<PrecheckTrial>("automation_precheck_try", { input }),
 };
 
+/** Bots (PRO-466). Every one of these is refused while Settings → Experimental → Bots is off. */
+export const botsApi = {
+  /** Every bot, with the revision they were read at (as `bots_changed` carries it). */
+  list: () => invoke<BotList>("bot_list"),
+  get: (id: string) => invoke<Bot>("bot_get", { id }),
+  templates: () => invoke<BotRoleTemplate[]>("bot_templates"),
+  /** Hire a bot: a role and a name, everything else on its default. */
+  create: (roleTemplateId: string, name: string) => invoke<Bot>("bot_create", { roleTemplateId, name }),
+  update: (id: string, patch: BotPatch) => invoke<Bot>("bot_update", { id, patch }),
+  /** The bot's home folder goes to the app's trash. */
+  remove: (id: string) => invoke<void>("bot_delete", { id }),
+  pause: (id: string) => invoke<Bot>("bot_pause", { id }),
+  resume: (id: string) => invoke<Bot>("bot_resume", { id }),
+  pauseAll: () => invoke<BotList>("bots_pause_all"),
+  resumeAll: () => invoke<BotList>("bots_resume_all"),
+  /** The bot's standing instructions, its `ROLE.md`. */
+  roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
+  roleWrite: (id: string, text: string) => invoke<Bot>("bot_role_write", { id, text }),
+};
+
 export function errorMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
@@ -3360,6 +3381,8 @@ export interface ExperimentalSettings {
   localVmTasks?: boolean;
   /** Offer OpenCode: Settings → Agents with its providers and models, the agent pickers and the model picker (PRO-157). */
   opencode?: boolean;
+  /** Bots, AI employees with standing roles (PRO-459). Off, the app shows nothing of them and `terminalx bots` says so. */
+  bots?: boolean;
 }
 
 /** Read when a tab is made: a change applies to new sessions, not to existing ones. */
@@ -3370,6 +3393,7 @@ export const experimental = {
   setOrchestratorRuns: (orchestratorRuns: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { orchestratorRuns }),
   setLocalVmTasks: (localVmTasks: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { localVmTasks }),
   setOpenCode: (opencode: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { opencode }),
+  setBots: (bots: boolean) => invoke<ExperimentalSettings>("set_experimental_settings", { bots }),
   /** Whether a new `agent` tab in a cloud workspace should ask its runtime for native Codex: never when the setting cannot be read. */
   nativeCodexFor: async (agent: string): Promise<boolean> => {
     if (agent !== "codex") return false;

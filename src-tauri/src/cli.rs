@@ -167,6 +167,11 @@ Usage:
   terminalx runs widen PIECE [--own PATH]... [--run RUN] [--json]
   terminalx runs note PIECE --text TEXT|--text-file FILE|- [--run RUN] [--json]
   terminalx runs cleanup [RUN] --yes [--json]
+  terminalx bots list [--json]
+  terminalx bots create --role ROLE --name NAME [--json]
+  terminalx bots show|pause|resume|delete BOT [--json]
+  terminalx bots rename BOT --name NAME [--json]
+  terminalx bots pause-all|resume-all [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -621,6 +626,7 @@ fn parse_with_stdin(
         "review" => parse_review(&mut tokens),
         "pipelines" => parse_pipelines(&mut tokens),
         "runs" => parse_runs(&mut tokens, stdin),
+        "bots" => parse_bots(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "vm" => {
             let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
@@ -1572,6 +1578,40 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
     }
 }
 
+/// Bots (PRO-466): hire, list, rename, pause and delete them. BOT is a bot's
+/// slug, id or name. The app answers `bots_off` while Settings → Experimental
+/// → Bots is off.
+fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all or resume-all";
+    let command = tokens.required_front(&format!("bots command ({COMMANDS})"))?;
+    let said = |tokens: &mut Tokens, option: &str, what: &str| -> Result<String, ControlError> {
+        match tokens.option(option)? {
+            Some(value) if !value.trim().is_empty() => Ok(value),
+            _ => Err(invalid(format!("bots {command} needs {option} {what}."))),
+        }
+    };
+    match command.as_str() {
+        "list" => rpc("bots.list", json!({}), tokens),
+        "pause-all" => rpc("bots.pauseAll", json!({}), tokens),
+        "resume-all" => rpc("bots.resumeAll", json!({}), tokens),
+        "create" => {
+            let role = said(tokens, "--role", "ROLE (cto, chief-of-staff, ux-designer, qa-engineer, release-manager, docs-writer, security-auditor or watcher)")?;
+            let name = said(tokens, "--name", "NAME")?;
+            rpc("bots.create", json!({"role": role, "name": name}), tokens)
+        }
+        "rename" => {
+            let name = said(tokens, "--name", "NAME")?;
+            let bot = tokens.required_front("bot")?;
+            rpc("bots.rename", json!({"bot": bot, "name": name}), tokens)
+        }
+        "show" | "pause" | "resume" | "delete" => {
+            let bot = tokens.required_front("bot")?;
+            rpc(&format!("bots.{command}"), json!({"bot": bot}), tokens)
+        }
+        other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
+    }
+}
+
 /// Orchestration runs: a lead's plan of pieces, and the workers started for
 /// them. Approving a run is not here: a person does that in the app.
 fn parse_runs(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
@@ -2009,6 +2049,35 @@ mod tests {
             assert!(help_text().contains(said), "{said}");
         }
         for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "#### How a result is checked", "`verifying`", "no verifier session at all", "`reviewDiffLines`", "`verifierTokens`", "does not return each time a\nworker's turn ends", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |", "#### Merging the accepted pieces", "terminalx runs merge --json", "**that merge alone is undone**", "`integrationCheck`", "`lead_checkout_dirty`", "`lead_on_shared_branch`", "`merge_in_progress`", "terminalx runs send-back <piece> --json", "terminalx runs merge --skip <piece> --json", "terminalx runs cleanup --yes --json", "Branches are always kept"] {
+            assert!(GUIDE.contains(said), "the guide does not say {said:?}");
+        }
+    }
+
+    #[test]
+    fn bots_commands_name_a_role_a_name_or_a_bot() {
+        let short = Duration::from_secs(30);
+        assert_eq!(rpc_of(&["bots", "list", "--json"]), ("bots.list".into(), json!({}), short));
+        assert_eq!(rpc_of(&["bots", "create", "--role", "cto", "--name", "Atlas"]), ("bots.create".into(), json!({"role": "cto", "name": "Atlas"}), short));
+        assert_eq!(rpc_of(&["bots", "create", "--name", "Iris Prime", "--role", "UX designer", "--json"]).1, json!({"role": "UX designer", "name": "Iris Prime"}));
+        for (word, command) in [("show", "bots.show"), ("pause", "bots.pause"), ("resume", "bots.resume"), ("delete", "bots.delete")] {
+            assert_eq!(rpc_of(&["bots", word, "atlas"]), (command.into(), json!({"bot": "atlas"}), short));
+        }
+        assert_eq!(rpc_of(&["bots", "rename", "atlas", "--name", "Kestrel", "--json"]), ("bots.rename".into(), json!({"bot": "atlas", "name": "Kestrel"}), short));
+        assert_eq!(rpc_of(&["bots", "pause-all"]), ("bots.pauseAll".into(), json!({}), short));
+        assert_eq!(rpc_of(&["bots", "resume-all", "--json"]), ("bots.resumeAll".into(), json!({}), short));
+        for refused in [
+            &["bots"][..], &["bots", "hire"], &["bots", "list", "atlas"], &["bots", "show"], &["bots", "show", "atlas", "iris"], &["bots", "pause-all", "atlas"],
+            &["bots", "create"], &["bots", "create", "--role", "cto"], &["bots", "create", "--name", "Atlas"], &["bots", "create", "--role", "cto", "--name", "  "],
+            &["bots", "create", "--role", "cto", "--name", "Atlas", "extra"], &["bots", "rename", "atlas"], &["bots", "rename", "--name", "Kestrel"], &["bots", "delete"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        assert!(parse(&args(&["bots", "create", "--name", "Atlas"])).unwrap_err().message.contains("bots create needs --role ROLE (cto, chief-of-staff"));
+        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all or resume-all"));
+        for said in ["terminalx bots list [--json]", "terminalx bots create --role ROLE --name NAME", "terminalx bots show|pause|resume|delete BOT", "terminalx bots rename BOT --name NAME", "terminalx bots pause-all|resume-all"] {
+            assert!(help_text().contains(said), "{said}");
+        }
+        for said in ["### Bots", "terminalx bots create --role <role> --name <name>", "`bots_off`", "trash/bots/<id>/", "`ROLE.md`"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }
