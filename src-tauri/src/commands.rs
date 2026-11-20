@@ -6170,10 +6170,11 @@ pub async fn set_experimental_settings(
         settings.experimental.local_vm_tasks = on;
     }
     store::settings::save(&settings).map_err(err)?;
-    // Bots switched off: the runtime stops the bots' running chats (PRO-468).
-    if bots == Some(false) {
+    // Bots switched off: the runtime stops the bots' running chats. Switched
+    // on again: their sessions are held to their bots' access once more (PRO-468).
+    if let Some(on) = bots {
         if let Err(error) = bots_call::<serde_json::Value>(state, "reconcile", serde_json::json!({})).await {
-            log::warn!("stop the bots' chats after Bots was switched off: {error}");
+            log::warn!("hold the bots' sessions after Bots was switched {}: {error}", if on { "on" } else { "off" });
         }
     }
     Ok(settings.experimental)

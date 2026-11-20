@@ -513,7 +513,7 @@ impl ControlService {
             refuse_limited_machine_caller(action, &params)?;
         }
         // A session working for a bot is held to it, whatever it says it is (PRO-468).
-        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume") || command.starts_with("machine.") {
+        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume") || command.starts_with("machine.") {
             Caller::of(&self.manager, &params).gate(command, &params)?;
         }
         #[cfg(unix)]
@@ -571,6 +571,15 @@ impl ControlService {
                         crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal));
                 }
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
+                    // A process in a bot's session reads here and changes nothing:
+                    // its writes go through the commands that hold it to its bot (PRO-468).
+                    // The window is in no session.
+                    if !runtime_read(command, &params) {
+                        let caller = Caller::of_process(&self.manager, &json!({}), crate::hooks::caller_pid());
+                        if caller.bot.is_some() {
+                            return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
+                        }
+                    }
                     // Bots (PRO-468): what gives a bot more than it has comes from the window, a person, only.
                     #[cfg(unix)]
                     let params = {
@@ -996,19 +1005,19 @@ impl ControlService {
         // is recorded as the bot's only when the tab's launch secret proves it.
         let caller = Caller::of(&self.manager, &params);
         let by = caller.verified_bot().unwrap_or_else(|| bots::OWNER.into());
-        let from_bot = |what: &str| ControlError::new(
-            "forbidden",
-            format!("A bot, and a session a bot started, does not {what}. Only your owner does, in TerminalX."),
-            Some("Tell your owner what you need and why; do not try another way.".into()),
-        );
         let waiting = "Waiting for you to confirm in TerminalX: a resume asked for from the command line is applied only when you press Resume in the app.";
+        // Where no window can confirm a resume, none is asked for.
+        let confirmable = resume_confirmable();
+        let unconfirmable = || ControlError::new(
+            "person_required",
+            "Resuming a bot needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none, so nothing can confirm it here.",
+            Some("Resume it in TerminalX on a Mac.".into()),
+        );
         let answer = match command {
             "bots.list" => json!(bots::listing().map_err(failed)?),
             "bots.show" => shown(&named()?),
             "bots.create" => {
-                if caller.bot.is_some() {
-                    return Err(from_bot("hire bots"));
-                }
+                caller.person_only("hire bots")?;
                 shown(&bots::chat::hire(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)
             }
             "bots.rename" => {
@@ -1018,17 +1027,16 @@ impl ControlService {
             "bots.pause" => json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?}),
             // Never applied from here: the owner answers in the app.
             "bots.resume" => {
-                if caller.bot.is_some() {
-                    return Err(from_bot("resume bots"));
+                caller.person_only("resume bots")?;
+                if !confirmable {
+                    return Err(unconfirmable());
                 }
                 let bot = bots::request_resume(sink, &named()?.id, "cli").map_err(failed)?;
                 let asked = bot.paused.is_some();
                 json!({"bot": bot, "waiting": asked, "message": if asked { waiting } else { "Not paused: nothing to resume." }})
             }
             "bots.delete" => {
-                if caller.bot.is_some() {
-                    return Err(from_bot("delete bots"));
-                }
+                caller.person_only("delete bots")?;
                 let bot = named()?;
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
@@ -1037,8 +1045,9 @@ impl ControlService {
             }
             "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
             _ => {
-                if caller.bot.is_some() {
-                    return Err(from_bot("resume bots"));
+                caller.person_only("resume bots")?;
+                if !confirmable {
+                    return Err(unconfirmable());
                 }
                 let paused: Vec<String> = bots::listing().map_err(failed)?.bots.into_iter().filter(|bot| bot.paused.is_some()).map(|bot| bot.id).collect();
                 for id in &paused {
@@ -1065,8 +1074,10 @@ impl ControlService {
     fn runs(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::orchestration::{engine, host::ManagerHost, plan::Plan, store};
         let host = ManagerHost::new(self.sink.clone(), self.manager.clone());
-        // The session the command runs in, when it runs in one the app knows.
-        let caller = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        // The session the command runs in, when it runs in one the app knows:
+        // where the kernel places the caller, else the one it names (PRO-468).
+        let placement = Caller::of(&self.manager, &params);
+        let caller = placement.session(&params);
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
         if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
             return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge, steer or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
@@ -1077,7 +1088,7 @@ impl ControlService {
                 None => caller.clone().ok_or_else(|| ControlError::new("lead_required", "A run needs a lead session, and this command did not run inside one.", Some("Run it in the lead's session, or name the lead with --lead SESSION.".into())))?,
             };
             // The tab is the caller's own: `--lead` naming another session says nothing of which of its tabs leads.
-            let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| params["caller"]["tab"].as_str()).filter(|tab| lead.tab(tab).is_some()).map(str::to_owned);
+            let tab = caller.filter(|caller| caller.id == lead.id).and_then(|_| placement.tab(&params)).filter(|tab| lead.tab(tab).is_some());
             let plan: Plan = crate::orchestration::plan::parse(&params["plan"]).map_err(|error| ControlError::of_run(error.into()))?;
             let run = engine::create(&host, &plan, &lead.id, tab).map_err(ControlError::of_run)?;
             // Said where the lead reads it: a piece whose tier has no installed model, and what it runs on instead.
@@ -1111,6 +1122,10 @@ impl ControlService {
             // Inside the lead's session the run need not be named: it leads one at a time.
             None => caller.and_then(|caller| store::for_lead(&caller.id).ok().flatten()).ok_or_else(|| ControlError::invalid("Name the run: this command did not run inside a session that leads one. `terminalx runs list --all --json` lists them."))?,
         };
+        // A bot's session steers only the runs led for the same bot.
+        if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
+            placement.may_steer(&run)?;
+        }
         match command {
             "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
             "runs.start" => {
@@ -1512,7 +1527,13 @@ impl ControlService {
         // leave a session or a worktree behind. A bot's session is the parent
         // the kernel names, whatever the caller said.
         let parent = match bot_caller.session.as_deref() {
-            Some(session) => Some(index::ParentRef { session_id: session.to_owned(), tab_id: p.caller["tab"].as_str().filter(|_| p.caller["session"].as_str() == Some(session)).map(str::to_owned) }),
+            Some(session) => Some(index::ParentRef {
+                session_id: session.to_owned(),
+                tab_id: match &bot_caller.placed {
+                    Some((placed, tab)) => (placed == session).then(|| tab.clone()),
+                    None => p.caller["tab"].as_str().filter(|_| p.caller["session"].as_str() == Some(session)).map(str::to_owned),
+                },
+            }),
             None => parent_of_new_session(p.parent.as_deref(), p.no_parent, &p.caller)?,
         };
         let available = crate::harness::offered()
@@ -2627,35 +2648,122 @@ pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, Con
 /// that is only what the command's environment says, which is enough for a
 /// record that grants nothing, and a session the app does not know (the
 /// environment of one since deleted) is simply not recorded.
+/// The `runtime.session.*` and `runtime.pty.*` calls that only read, which
+/// a process in a bot's session may make (PRO-468).
+fn runtime_read(command: &str, params: &Value) -> bool {
+    if let Some(method) = command.strip_prefix("runtime.session.") {
+        return match method {
+            "bots" => matches!(params["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead")),
+            "list" | "log" | "automations" | "automationRuns" | "automationIssues" | "paneAgents" | "resourceOverview" | "resourceSample" | "usage"
+            | "activity" | "events" | "eventsOpen" | "eventsChunk" | "eventsClose" | "status" | "pane" | "queued" | "heldQueue" | "questions" | "accountSupport" => true,
+            _ => false,
+        };
+    }
+    matches!(
+        command.strip_prefix("runtime.pty."),
+        Some("environmentReady" | "mobileDrivers" | "shells" | "stats" | "visibleShells" | "agentSetupRunning" | "agentLoginTabs")
+    )
+}
+
 /// A bots operation of the runtime that gives a bot more than it has
 /// (`bots::enforce::needs_person`) is applied only with the window's proof
 /// that a person sent it, as pairing is (`serve_cli::consent`): the control
 /// token alone is in every agent tab's environment. Without a window, only a
-/// person's own terminal may.
+/// person's own terminal may. An `update` is judged under the store's lock
+/// (`bots::update_as`): here it is only told whether a person was shown to
+/// have asked, and a proof that fails is said at once when the update looks
+/// like it gives more, so the window can repair what it can.
 #[cfg(unix)]
 fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli::consent::Window) -> Result<(), ControlError> {
+    use crate::serve_cli::consent;
     let operation = params["operation"].as_str().unwrap_or_default().to_owned();
-    if !crate::bots::enforce::needs_person(&operation, &params["params"]) {
-        // A witness the window sent for an update that turned out to need none goes unused.
-        if let Some(object) = params.as_object_mut() {
-            object.remove(crate::serve_cli::consent::PARAM);
+    let witnessed = params.get(consent::PARAM).is_some();
+    if operation == "update" {
+        let proof = witnessed.then(|| consent::verify_for(run, params, window));
+        let proved = matches!(proof, Some(Ok(())));
+        if let Some(Err(error)) = proof {
+            if crate::bots::enforce::needs_person(&operation, &params["params"]) {
+                return Err(bots_refusal(&operation, error, window));
+            }
+        }
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
         }
         return Ok(());
     }
-    crate::serve_cli::consent::verify_for(run, params, window).map_err(|mut error| {
-        error.recovery = Some("Only a person resumes, hires or deletes a bot, or gives it more access, in TerminalX itself. An agent cannot; tell the person what you need.".into());
-        error
-    })
+    if !crate::bots::enforce::needs_person(&operation, &params["params"]) {
+        if let Some(object) = params.as_object_mut() {
+            object.remove(consent::PARAM);
+        }
+        return Ok(());
+    }
+    consent::verify_for(run, params, window).map_err(|error| bots_refusal(&operation, error, window))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests run with no window; they say whether one could confirm.
+    static TEST_WINDOW_CONFIRMS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether a window here can confirm a resume asked for from the command line.
+fn resume_confirmable() -> bool {
+    #[cfg(test)]
+    return TEST_WINDOW_CONFIRMS.with(|confirms| confirms.get()) && cfg!(target_os = "macos");
+    #[cfg(all(not(test), unix))]
+    return window_can_confirm(&crate::serve_cli::consent::Window::current());
+    #[cfg(all(not(test), not(unix)))]
+    false
+}
+
+/// What a Bots action is called where it is refused.
+#[cfg(unix)]
+fn bots_action(operation: &str) -> &'static str {
+    match operation {
+        "resume" => "resume a bot",
+        "resumeAll" => "resume every bot",
+        "dismissResume" => "keep a bot paused",
+        "create" => "hire a bot",
+        "delete" => "delete a bot",
+        _ => "give a bot more access or change who it reports to",
+    }
+}
+
+/// Whether a person can confirm a Bots action here at all: only the TerminalX
+/// window on a Mac signs for one (`serve_cli::consent`).
+#[cfg(unix)]
+fn window_can_confirm(window: &crate::serve_cli::consent::Window) -> bool {
+    cfg!(target_os = "macos") && !matches!(window, crate::serve_cli::consent::Window::Headless)
+}
+
+/// A refusal of a Bots action, said as one: the code a window repairs by
+/// (`window_consent::unverifiable`) is kept, the words are of the action.
+#[cfg(unix)]
+fn bots_refusal(operation: &str, mut error: ControlError, window: &crate::serve_cli::consent::Window) -> ControlError {
+    let action = bots_action(operation);
+    if !window_can_confirm(window) {
+        error.message = format!("To {action} needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none that can.");
+        error.recovery = Some("Use TerminalX on a Mac for this.".into());
+    } else if error.code == "pairing_unavailable" {
+        error.message = format!("TerminalX could not confirm that you asked to {action}: the runtime running now was not started by this window.");
+        error.recovery = Some("Restart the runtime (Settings → Machines → Restart runtime), then try again.".into());
+    } else {
+        // `window_consent::unverifiable` reads the refusal's own words: they stay, after ours.
+        error.message = format!("Only you may {action}, in the TerminalX window: {}", error.message);
+        error.recovery = Some("An agent cannot do this; tell the person what you need.".into());
+    }
+    error
 }
 
 /// Who a `terminalx` command runs for (PRO-468), worked out on this side:
-/// first from the process that sent it (the kernel says which, and its
-/// ancestry leads to the tab whose agent or terminal started it,
-/// `SessionManager::session_of_process`), then from the session it names,
-/// proved by the tab's launch secret or not. Naming a session can only take
-/// rights away: a caller the kernel places in a bot's session is that bot's
-/// whatever it says. A process that detached itself from every tab, and
-/// names none, cannot be told from the owner's own terminal.
+/// first from the process that sent it (the kernel says which, and
+/// `SessionManager::session_of_process` places it in the tab whose agent or
+/// terminal it runs under), then from the session it names, proved by the
+/// tab's launch secret or not. Naming a session can only take rights away: a
+/// caller placed in a bot's session is that bot's whatever it says. A caller
+/// that cannot be placed is the owner only from a terminal of its own; with
+/// none (a process that left its tab behind), it does nothing only a person
+/// does, and starts nothing while any bot is paused.
 struct Caller {
     /// The bot's id, its name when it can be read, and whether it is paused
     /// (a bot that cannot be read now counts as paused).
@@ -2665,6 +2773,12 @@ struct Caller {
     verified: bool,
     /// The session that works for the bot the caller runs in.
     session: Option<String>,
+    /// The session and tab the kernel places the caller in, whatever it works for.
+    placed: Option<(String, String)>,
+    /// For a caller the kernel names but no tab holds: whether it has a
+    /// terminal of its own, not one of the runtime's. `None` for one placed,
+    /// or a call the kernel says nothing about (in-process, off unix).
+    unplaced_terminal: Option<bool>,
 }
 
 impl Caller {
@@ -2673,20 +2787,26 @@ impl Caller {
     }
 
     fn of_process(manager: &SessionManager, params: &Value, peer: Option<i32>) -> Self {
-        let nobody = Self { bot: None, name: String::new(), paused: false, verified: false, session: None };
+        #[cfg(unix)]
+        let placed = peer.and_then(|pid| manager.session_of_process(pid));
+        #[cfg(not(unix))]
+        let placed: Option<(String, String)> = None;
+        #[cfg(unix)]
+        let unplaced_terminal = peer.filter(|_| placed.is_none()).map(person_terminal);
+        #[cfg(not(unix))]
+        let unplaced_terminal: Option<bool> = { let _ = peer; None };
+        let nobody = Self { bot: None, name: String::new(), paused: false, verified: false, session: None, placed: placed.clone(), unplaced_terminal };
         if !crate::bots::enabled() {
             return nobody;
         }
-        #[cfg(unix)]
-        let placed = peer.and_then(|pid| manager.session_of_process(pid)).and_then(|(session, _)| index::get(&session).ok());
-        #[cfg(not(unix))]
-        let placed: Option<index::SessionEntry> = { let _ = peer; None };
-        let claimed = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        let placed_entry = placed.as_ref().and_then(|(session, _)| index::get(session).ok());
+        // A placed caller's claim is not read: it is where it is.
+        let claimed = if placed.is_some() { None } else { params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()) };
         let proved = || match (claimed.as_ref(), params["caller"]["tab"].as_str()) {
             (Some(session), Some(tab)) => manager.authenticates_cli(&session.id, tab, params["hookToken"].as_str().unwrap_or_default()),
             _ => false,
         };
-        let (id, verified, session) = match placed.as_ref().and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone()))) {
+        let (id, verified, session) = match placed_entry.as_ref().and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone()))) {
             Some((id, session)) => (id, true, session),
             None => match claimed.as_ref().and_then(|entry| crate::bots::chat::acting_bot(entry).map(|id| (id, entry.id.clone()))) {
                 Some((id, session)) => (id, proved(), session),
@@ -2699,7 +2819,43 @@ impl Caller {
             Ok(None) => return nobody,
             Err(_) => ("Its bot".to_owned(), true),
         };
-        Self { bot: Some(id), name, paused, verified, session: Some(session) }
+        Self { bot: Some(id), name, paused, verified, session: Some(session), placed, unplaced_terminal }
+    }
+
+    /// The session the command runs in: where the kernel places it, else the one it names.
+    fn session(&self, params: &Value) -> Option<index::SessionEntry> {
+        match &self.placed {
+            Some((session, _)) => index::get(session).ok(),
+            None => params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()),
+        }
+    }
+
+    /// The caller's tab in [`Self::session`].
+    fn tab(&self, params: &Value) -> Option<String> {
+        match &self.placed {
+            Some((_, tab)) => Some(tab.clone()),
+            None => params["caller"]["tab"].as_str().map(str::to_owned),
+        }
+    }
+
+    /// Refused unless only a person could have sent it from here: not a
+    /// bot's session, and not a process with no tab and no terminal.
+    fn person_only(&self, what: &str) -> Result<(), ControlError> {
+        if self.bot.is_some() {
+            return Err(ControlError::new(
+                "forbidden",
+                format!("A bot, and a session a bot started, does not {what}. Only your owner does, in TerminalX."),
+                Some("Tell your owner what you need and why; do not try another way.".into()),
+            ));
+        }
+        if self.unplaced_terminal == Some(false) {
+            return Err(ControlError::new(
+                "person_required",
+                format!("Only a person may {what}, and this command came from a process with no terminal that no TerminalX tab started."),
+                Some("Run it in a terminal of your own, or use TerminalX itself.".into()),
+            ));
+        }
+        Ok(())
     }
 
     fn verified_bot(&self) -> Option<String> {
@@ -2732,10 +2888,10 @@ impl Caller {
     /// workspace, an issue pipeline), approve a permission, or prompt a
     /// session that does not work for the same bot.
     fn gate(&self, command: &str, params: &Value) -> Result<(), ControlError> {
-        let Some(bot) = self.bot.as_deref() else { return Ok(()) };
+        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command) };
         match command {
             "sessions.create" => self.refuse_while_paused("start sessions"),
-            "runs.create" | "runs.start" => {
+            "runs.create" => {
                 self.refuse_while_paused("start runs")?;
                 // Its runs' workers work for it, through their lead: the lead is the caller's own session.
                 match optional_string(params, "lead") {
@@ -2743,6 +2899,8 @@ impl Caller {
                     _ => Ok(()),
                 }
             }
+            // Which run is settled in `runs`, where the run is found.
+            "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" => self.refuse_while_paused("start or steer runs"),
             "pipelines.start" => Err(self.forbidden("start an issue pipeline: its sessions could not be held to the bot's access")),
             "cloud.sessions.create" | "cloud.send" | "cloud.resume" => Err(self.forbidden("start work in a cloud workspace: it could not be held to the bot's access")),
             "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
@@ -2763,6 +2921,44 @@ impl Caller {
             },
         }
     }
+
+    /// A caller no tab holds and with no terminal starts nothing while any
+    /// bot is paused: it may be a bot's process that left its tab behind.
+    fn gate_unplaced(&self, command: &str) -> Result<(), ControlError> {
+        if self.unplaced_terminal != Some(false) || !crate::bots::enabled() || (command.starts_with("runs.") && !matches!(command, "runs.create" | "runs.start")) {
+            return Ok(());
+        }
+        let paused = crate::store::bots::snapshot().map(|snapshot| snapshot.bots.iter().any(|bot| bot.paused.is_some())).unwrap_or(true);
+        if !paused {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            "bot_paused",
+            "A bot is paused, and this command came from a process with no terminal that no TerminalX tab started, so it may be the bot's: it is refused until the bots are resumed.",
+            Some("Run it in a terminal of your own, or in a TerminalX tab.".into()),
+        ))
+    }
+
+    /// A run steered by a bot's session is one its lead works for the same bot.
+    fn may_steer(&self, run: &crate::orchestration::Run) -> Result<(), ControlError> {
+        let Some(bot) = self.bot.as_deref() else { return Ok(()) };
+        let lead = index::get(&run.lead.session_id).ok();
+        if lead.as_ref().and_then(crate::bots::chat::acting_bot).as_deref() == Some(bot) {
+            Ok(())
+        } else {
+            Err(self.forbidden("steer a run whose lead does not work for the same bot"))
+        }
+    }
+}
+
+/// Whether `pid` has a controlling terminal of its own: one, and not one of
+/// the runtime's, nor in a session one of its shells leads (`consent::judge`).
+#[cfg(unix)]
+fn person_terminal(pid: i32) -> bool {
+    use crate::serve_cli::consent;
+    // SAFETY: getpid has no preconditions.
+    let runtime = unsafe { libc::getpid() };
+    consent::controlling_terminal(pid).is_some() && consent::judge(pid, runtime, &consent::runtime_terminals(runtime)).is_none()
 }
 
 fn parent_of_new_session(parent: Option<&str>, no_parent: bool, caller: &Value) -> Result<Option<index::ParentRef>, ControlError> {

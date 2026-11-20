@@ -3184,8 +3184,12 @@ impl SessionManager {
     }
 
     /// The session and tab whose agent or terminal started process `pid`, or
-    /// is it: its pane's process, or a native agent's child, found up its
-    /// ancestry (PRO-468). A process that detached itself is no one's.
+    /// is it (PRO-468), placed as `serve_cli::consent::judge` places a
+    /// runtime's own: up its ancestry to a pane's process or a native agent's
+    /// child; else by its session's leader, which a process reparented to
+    /// launchd still keeps; else by its controlling terminal, a pane's pty. A
+    /// process that made itself a new session with a terminal of its own
+    /// (`script`, an existing tmux server) is no one's.
     #[cfg(unix)]
     pub(crate) fn session_of_process(&self, pid: i32) -> Option<(String, String)> {
         let mut roots: HashMap<i32, (String, String)> = HashMap::new();
@@ -3212,17 +3216,28 @@ impl SessionManager {
                 roots.insert(child as i32, (rt.session_id.clone(), rt.tab_id.clone()));
             }
         }
-        let mut current = pid;
-        for _ in 0..4096 {
-            if let Some(found) = roots.get(&current) {
-                return Some(found.clone());
+        use crate::serve_cli::consent;
+        let up = |start: i32| {
+            let mut current = start;
+            for _ in 0..4096 {
+                if let Some(found) = roots.get(&current) {
+                    return Some(found.clone());
+                }
+                match consent::parent_of(current) {
+                    Some(parent) if parent > 1 && parent != current => current = parent,
+                    _ => return None,
+                }
             }
-            match crate::serve_cli::consent::parent_of(current) {
-                Some(parent) if parent > 1 && parent != current => current = parent,
-                _ => return None,
-            }
+            None
+        };
+        if let Some(found) = up(pid) {
+            return Some(found);
         }
-        None
+        if let Some(found) = consent::session_of(pid).filter(|leader| *leader != pid && *leader > 1).and_then(up) {
+            return Some(found);
+        }
+        let tty = consent::controlling_terminal(pid)?;
+        roots.iter().find(|(root, _)| consent::controlling_terminal(**root) == Some(tty)).map(|(_, found)| found.clone())
     }
 
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
@@ -5900,6 +5915,15 @@ impl SessionManager {
             if carried { s.retain_provider_request("mode", policy.as_ref(), original_privacy.clone()); }
         })?;
         Self::remember_configuration(&mut rt, &after, "mode", policy.as_ref());
+        // A mode set now is the tab's own: a bot's resume no longer gives it an earlier one (PRO-468).
+        if entry.tab(tab_id).is_some_and(|tab| tab.unknown.contains_key(crate::bots::chat::HELD_FROM_KEY)) {
+            if let Err(error) = index::update_tab(session_id, tab_id, |tab| {
+                tab.unknown.remove(crate::bots::chat::HELD_FROM_KEY);
+                Ok(())
+            }) {
+                log::warn!("forget the mode {session_id}/{tab_id} had before its bot's limit: {error:#}");
+            }
+        }
         if self.carried_opencode(&rt) {
             let context = self.capture_acp_setting(&mut rt, &after, "mode", policy.as_ref())?;
             self.stage_opencode_setting(&mut rt, context);

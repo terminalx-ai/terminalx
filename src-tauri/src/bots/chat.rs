@@ -358,7 +358,10 @@ fn fenced(tag: &str, text: &str) -> String {
 /// its role, its memory (framed as its own notes, never instructions), then
 /// the fixed rules, which come last so nothing before them overrides them.
 /// `first_run` adds the home chat's first-conversation instruction.
-pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: &Read, first_run: bool) -> String {
+/// `in_plan`: the tab this is for is held to plan mode, where nothing can be
+/// written, memory included (its bot's access, a pause, or native Codex,
+/// which cannot ask before each action).
+pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: &Read, first_run: bool, in_plan: bool) -> String {
     let mut text = format!("# Your role ({})\n\nYour owner wrote this; it is your standing instruction.\n\n", bot_store::ROLE_FILE);
     match role {
         Read::Text(role, cut) if !role.trim().is_empty() => {
@@ -383,7 +386,7 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: &Read, first_run
         Read::Text(..) | Read::Missing => text.push_str("(empty: nothing written yet)"),
         Read::Unreadable(why) => text.push_str(&format!("({} could not be read: {why}. Do not write over it; tell your owner.)", bot_store::MEMORY_FILE)),
     }
-    let writes_nothing = bot.paused.is_some() || matches!(bot.access.effective(), BotAccess::ReadReport | BotAccess::Other(_));
+    let writes_nothing = in_plan || bot.paused.is_some() || matches!(bot.access.effective(), BotAccess::ReadReport | BotAccess::Other(_));
     let mut rules = vec![
         format!("You are {}, a bot with the role {} that your owner hired in TerminalX. You work for them, in this conversation and in the sessions and runs you start.", bot.name, bot.role_title),
         format!("Your home folder is `{home}`, and it is your working directory. `{}` there holds your standing instructions; only your owner changes it, so suggest a change to it in the chat rather than editing it.", bot_store::ROLE_FILE),
@@ -434,7 +437,8 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
     let home = super::home(&bot).map(|home| home.to_string_lossy().into_owned()).unwrap_or_else(|| entry.cwd.clone());
     // The home chat's first conversation: a fresh tab, not one carried on from another.
     let first_run = reference.home && tab.provider_session_id.is_none() && tab.fork_from.is_none() && tab.continuation.is_none() && entry.tabs.first().is_some_and(|first| first.id == tab.id);
-    Some(instructions(&bot, &home, &role, &memory, first_run))
+    let in_plan = tab_limit(entry, tab).is_some_and(|limit| limit.mode == "plan");
+    Some(instructions(&bot, &home, &role, &memory, first_run, in_plan))
 }
 
 /// `notes` joined as one appended prompt takes them: empty ones dropped, a blank line between.

@@ -325,7 +325,9 @@ fn memory_text() -> String {
 fn change_listed<T>(sink: &dyn EventSink, f: impl FnOnce(&mut Vec<Bot>) -> Result<T>) -> Result<(T, BotList)> {
     let mut saved = None;
     let out = bot_store::change(f, |snapshot| {
-        let list = BotList::from(snapshot);
+        let mut list = BotList::from(snapshot);
+        let now = chrono::Utc::now();
+        list.bots.iter_mut().for_each(|bot| forget_stale_request(bot, now));
         sink.emit("bots_changed", &list);
         saved = Some(list);
     })?;
@@ -459,10 +461,39 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
 }
 
 pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
+    update_as(sink, id, patch, true)
+}
+
+/// The field of an `update`'s parameters that says a person was shown to have
+/// asked; the runtime's control route sets it, after removing any sent.
+pub const BY_PERSON: &str = "byPerson";
+
+/// What an update [`PERSON_REQUIRED`] for names: a raise in access, or another reporting line.
+pub const PERSON_REQUIRED: &str = "Giving a bot more access, or changing who it reports to, needs you to confirm it in the TerminalX window.";
+
+/// How much an access level lets a bot do; a level this build does not know is the least.
+pub fn access_rank(access: &BotAccess) -> u8 {
+    match access.effective() {
+        BotAccess::Full => 2,
+        BotAccess::AskOutward => 1,
+        BotAccess::ReadReport | BotAccess::Other(_) => 0,
+    }
+}
+
+/// [`update`], where `by_person` says whether a person was shown to have
+/// asked. Without that, an update that gives the bot more access or another
+/// reporting line is refused, judged against the record under the store's
+/// lock (PRO-468).
+pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: bool) -> Result<Bot> {
     require_enabled()?;
     change(sink, |bots| {
         let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
         let mut bot = bots[index].clone();
+        if !by_person {
+            let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
+            let reports_elsewhere = patch.reports_to.as_ref().is_some_and(|reports_to| *reports_to != bot.reports_to);
+            refuse_unless!(!raises && !reports_elsewhere, "{PERSON_REQUIRED}");
+        }
         if let Some(name) = &patch.name {
             let name = clean_name(name)?;
             if name != bot.name {
@@ -683,7 +714,9 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "create" => serde_json::to_value(chat::hire(sink, string("roleTemplateId")?, string("name")?)?)?,
         "update" => {
             let patch: BotPatch = serde_json::from_value(params["patch"].clone()).map_err(|error| refused(format!("Invalid change: {error}")))?;
-            serde_json::to_value(update(sink, string("id")?, patch)?)?
+            // Set by the runtime's control route, which alone takes requests from outside this process.
+            let by_person = params[BY_PERSON].as_bool().unwrap_or(true);
+            serde_json::to_value(update_as(sink, string("id")?, patch, by_person)?)?
         }
         "delete" => {
             delete(sink, string("id")?)?;
