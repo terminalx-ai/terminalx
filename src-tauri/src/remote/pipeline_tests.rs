@@ -442,10 +442,20 @@ async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_
     let session_id = source["sessionId"].as_str().unwrap().to_string();
     let source_tab = source["tabId"].as_str().unwrap().to_string();
 
-    // The context a handoff carries is read here, where the new tab's agent runs.
-    let context = call(&f.rpc, &desktop, "session.handoffContext", json!({ "sessionId": session_id, "tabId": source_tab })).await.unwrap();
+    // A conversation with nothing saved yet has nothing to hand on: refused, saying what to do.
+    let read = json!({ "sessionId": session_id, "tabId": source_tab });
+    let (refusal, why) = call(&f.rpc, &desktop, "session.handoffContext", read.clone()).await.unwrap_err();
+    assert_eq!(refusal, "refused");
+    assert!(why.contains("Send a message in the source conversation first"), "{why}");
+    // Once it has talked, the context a handoff carries is read here, where the new tab's agent runs.
+    let log = crate::store::log_path(&session_id, &source_tab).unwrap();
+    for (seq, payload) in [(1, json!({"type":"user_message","queued":false,"text":"Make the build pass"})), (2, json!({"type":"assistant_text","text":"Fixed two tests"}))] {
+        crate::store::append_line(&log, &json!({"id":format!("h{seq}"),"sessionId":session_id,"tabId":source_tab,"harness":"claude","seq":seq,"ts":"2026-11-20T10:00:00Z","payload":payload}).to_string()).unwrap();
+    }
+    let context = call(&f.rpc, &desktop, "session.handoffContext", read).await.unwrap();
     assert_eq!((context["sessionId"].as_str(), context["tabId"].as_str()), (Some(session_id.as_str()), Some(source_tab.as_str())));
-    assert!(context["transcriptPath"].is_null() && context["fullUnavailableReason"].is_string(), "a tab that never ran has no transcript: {context}");
+    assert_eq!(context["lastPrompt"], "Make the build pass");
+    assert!(context["transcriptPath"].is_null() && context["fullUnavailableReason"].is_string(), "no provider transcript was saved: {context}");
     assert_eq!(code(call(&f.rpc, &desktop, "session.handoffContext", json!({ "sessionId": session_id, "tabId": "missing" })).await), "not_found");
 
     let params = json!({ "clientRequestId": "handoff-1", "sessionId": session_id, "agent": "claude", "mode": "plan", "prompt": "Give a second opinion on this turn" });

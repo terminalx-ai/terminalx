@@ -155,8 +155,10 @@ export interface HandoffActions {
    * Add a tab running `agent` with these settings, sent `prompt` as its first
    * message, and show it. `startError`: the tab was opened and its prompt
    * could not be sent; its chat says why, and it is never opened twice.
+   * `requestId`: one id for every try of one handoff, so a try after an
+   * unknown outcome gets the tab the first try made instead of a second.
    */
-  open(params: { agent: string; model?: string; effort?: string | null; mode?: string; prompt: string }): Promise<{ tabId: string; startError: string | null }>;
+  open(params: { agent: string; model?: string; effort?: string | null; mode?: string; prompt: string; requestId?: string }): Promise<{ tabId: string; startError: string | null }>;
   /** What `tabId`'s conversation hands on, read on the runtime with its own transcript path. */
   context(tabId: string): Promise<ContinuationContext>;
 }
@@ -659,10 +661,10 @@ function cloudTurnActions(ctx: CloudSessionContext, client: WorkspaceRpcClient):
 /** A remote session's handoffs (#1327): the runtime adds the tab and sends its first prompt, and it is shown at once. */
 function cloudHandoff(ctx: CloudSessionContext, client: WorkspaceRpcClient): HandoffActions {
   return {
-    open: async ({ prompt, ...settings }) => {
+    open: async ({ prompt, requestId, ...settings }) => {
       // The desktop's Native Codex setting, as a tab added from the "+" menu takes it.
       const nativeCodex = (await experimental.nativeCodexFor(settings.agent)) || undefined;
-      const made = await client.handoffAgentTab(ctx.sessionId, { ...settings, nativeCodex, prompt });
+      const made = await client.handoffAgentTab(ctx.sessionId, { ...settings, nativeCodex, prompt }, requestId);
       if (made.tab) applyLiveTab(ctx.scope, made.tab);
       selectSessionTab(ctx.key, { kind: "agent", id: made.tabId });
       return { tabId: made.tabId, startError: made.startError };

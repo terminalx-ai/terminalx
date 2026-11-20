@@ -267,8 +267,9 @@ describe("a second opinion, Retry in a new chat and the agent handoff on a remot
     const made = client(["session/1", "handoff/1"]);
     const remote = backend(made);
     expect(remote.unavailable).not.toHaveProperty("secondOpinion");
-    await expect(remote.handoff!.open({ agent: "codex", model: "gpt-5.5", mode: "plan", prompt: "Give a second opinion" })).resolves.toEqual({ tabId: "t-review", startError: null });
-    expect(made.calls).toEqual([["handoff", ["s-cloud", { agent: "codex", model: "gpt-5.5", mode: "plan", nativeCodex: undefined, prompt: "Give a second opinion" }]]]);
+    await expect(remote.handoff!.open({ agent: "codex", model: "gpt-5.5", mode: "plan", prompt: "Give a second opinion", requestId: "handoff-1" })).resolves.toEqual({ tabId: "t-review", startError: null });
+    // The dialog's one request id, so a try after a lost reply is answered with the same tab.
+    expect(made.calls).toEqual([["handoff", ["s-cloud", { agent: "codex", model: "gpt-5.5", mode: "plan", nativeCodex: undefined, prompt: "Give a second opinion" }, "handoff-1"]]]);
     expect(getTerminalState().selected["cloud:org-1:ws-1:s-cloud"]).toEqual({ kind: "agent", id: "t-review" });
     await expect(remote.handoff!.context("t-cloud")).resolves.toMatchObject({ transcriptPath: "/home/vm/.claude/projects/w/c.jsonl" });
     expect(made.calls.at(-1)).toEqual(["context", ["s-cloud", "t-cloud"]]);

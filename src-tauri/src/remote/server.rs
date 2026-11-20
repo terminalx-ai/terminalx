@@ -5055,11 +5055,12 @@ impl WorkspaceRpc {
     /// `handoff/1`: what a tab's conversation hands on to another agent, as
     /// `prepare_continuation` reads it on a desktop: its recent status, last
     /// prompt and the path of its transcript here, where the new tab's agent
-    /// runs and can read it.
+    /// runs and can read it. A conversation with nothing saved to hand on yet
+    /// (one that never sent a message) is refused with what to do about it.
     fn session_handoff_context(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let tab = self.visible_tab(peer, &params)?;
         let tracked = self.manager().ok().and_then(|manager| manager.tracked_transcript(&tab.session_id, &tab.tab_id));
-        let context = crate::continuation::prepare(&tab.session_id, &tab.tab_id, tracked, false).map_err(RpcError::internal)?;
+        let context = crate::continuation::prepare(&tab.session_id, &tab.tab_id, tracked, false).map_err(|error| RpcError::new("refused", format!("{error:#}")))?;
         Ok(json!(context))
     }
 

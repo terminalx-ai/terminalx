@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContinuationContext } from "@/lib/continuation";
 import type { HandoffActions } from "@/lib/sessionBackend";
 import type { TabEntry } from "@/types/session";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 
 const calls = vi.hoisted(() => ({ launch: [] as unknown[], models: { reading: null as unknown } }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => null) }));
@@ -67,7 +68,7 @@ describe("a handoff on a remote session (#1327)", () => {
     view.rerender(<RemoteHandoffDialog handoff={handoff} source={source} agent="codex" modelClient={client} purpose={{ kind: "review", prompt: "Give a second opinion" }} where="the workspace" onClose={onClose} />);
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     // Another agent's model is its own default; the review only reads.
-    expect(handoff.open).toHaveBeenCalledExactlyOnceWith({ agent: "codex", model: undefined, effort: null, mode: "plan", prompt: "Give a second opinion" });
+    expect(handoff.open).toHaveBeenCalledExactlyOnceWith({ agent: "codex", model: undefined, effort: null, mode: "plan", prompt: "Give a second opinion", requestId: expect.stringMatching(/^handoff-/) });
   });
 
   it("a retry keeps the tab's own agent and mode; a prompt the runtime could not send leaves the one tab open and says why", async () => {
@@ -75,7 +76,7 @@ describe("a handoff on a remote session (#1327)", () => {
     const onClose = vi.fn();
     render(<RemoteHandoffDialog handoff={handoff} source={source} agent="claude" modelClient={client} purpose={{ kind: "retry", prompt: "Run the tests" }} where="the machine" onClose={onClose} />);
     expect((await screen.findByRole("alert")).textContent).toContain("no login");
-    expect(handoff.open).toHaveBeenCalledExactlyOnceWith({ agent: "claude", model: "opus", effort: "high", mode: "acceptEdits", prompt: "Run the tests" });
+    expect(handoff.open).toHaveBeenCalledExactlyOnceWith({ agent: "claude", model: "opus", effort: "high", mode: "acceptEdits", prompt: "Run the tests", requestId: expect.stringMatching(/^handoff-/) });
     expect(screen.getByText("The new tab is open; its chat says what went wrong.")).toBeTruthy();
     // Nothing offers to make it again.
     expect(screen.queryByRole("button", { name: "Try Again" })).toBeNull();
@@ -84,19 +85,26 @@ describe("a handoff on a remote session (#1327)", () => {
     expect(handoff.open).toHaveBeenCalledOnce();
   });
 
-  it("a refused handoff can be tried again by the reader", async () => {
-    let refuse = true;
+  it.each([
+    { failure: "a dropped connection", error: new Error("Workspace connection dropped"), same: true },
+    { failure: "an unknown outcome", error: new WorkspaceRpcError("outcome_unknown", "The workspace connection changed.", "session.handoff"), same: true },
+    { failure: "a refusal", error: new WorkspaceRpcError("invalid_params", "agent codex is not offered", "session.handoff"), same: false },
+  ])("Try Again after $failure is the same request only while the first may have made a tab", async ({ error, same }) => {
+    let fail = true;
     const handoff = actions(async () => {
-      if (refuse) throw new Error("agent codex is not offered");
+      if (fail) throw error;
       return { tabId: "tab-2", startError: null };
     });
     const onClose = vi.fn();
     render(<RemoteHandoffDialog handoff={handoff} source={source} agent="codex" modelClient={client} purpose={{ kind: "review", prompt: "Review" }} where="the workspace" onClose={onClose} />);
-    expect((await screen.findByRole("alert")).textContent).toBe("agent codex is not offered");
-    refuse = false;
+    expect((await screen.findByRole("alert")).textContent).toBe(error.message);
+    fail = false;
     fireEvent.click(screen.getByRole("button", { name: "Try Again" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(handoff.open).toHaveBeenCalledTimes(2);
+    const ids = handoff.open.mock.calls.map(([params]) => (params as { requestId: string }).requestId);
+    expect(ids).toHaveLength(2);
+    // The runtime answers a repeated id from its cache: the tab a lost reply made, never a second one.
+    expect(ids[0] === ids[1]).toBe(same);
   });
 
   it("the composer's handoff reads the conversation on the runtime and hands it on when the reader continues", async () => {

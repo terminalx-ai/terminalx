@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { LoaderCircle } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -81,6 +81,9 @@ export function RemoteHandoffDialog({ handoff, source, agent, modelClient, purpo
   // The tab the handoff opened: it is never made twice.
   const [made, setMade] = useState<string | null>(null);
   const startingRef = useRef(false);
+  // One request for this handoff while its outcome is unknown (a timeout, a dropped connection): trying
+  // again is answered from the runtime's cache with the tab it may already have made, never a second.
+  const requestId = useRef(newHandoffRequest());
   const autoStarted = useRef(false);
   const active = useRef(true);
   useEffect(() => {
@@ -114,13 +117,15 @@ export function RemoteHandoffDialog({ handoff, source, agent, modelClient, purpo
     setError(null);
     try {
       const prompt = purpose.kind === "continue" ? continuationPrompt(context!, mode) : purpose.prompt;
-      const opened = await handoff.open({ agent: selection.harness.id, model: selection.modelId || undefined, effort: selection.effort, mode: selection.mode, prompt });
+      const opened = await handoff.open({ agent: selection.harness.id, model: selection.modelId || undefined, effort: selection.effort, mode: selection.mode, prompt, requestId: requestId.current });
       if (!active.current) return;
       if (opened.startError) {
         setMade(opened.tabId);
         setError(opened.startError);
       } else close();
     } catch (e) {
+      // The runtime answered and made nothing (the cache would replay that refusal): the next try is a new request.
+      if (e instanceof WorkspaceRpcError && e.code !== "outcome_unknown") requestId.current = newHandoffRequest();
       if (active.current) setError(errorMessage(e));
     } finally {
       startingRef.current = false;
@@ -201,6 +206,10 @@ export function RemoteHandoffDialog({ handoff, source, agent, modelClient, purpo
       </DialogContent>
     </Dialog>
   );
+}
+
+function newHandoffRequest(): string {
+  return `handoff-${crypto.randomUUID()}`;
 }
 
 function Choice({ checked, disabled, onChange, label }: { checked: boolean; disabled?: boolean; onChange: () => void; label: string }) {

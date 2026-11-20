@@ -1644,14 +1644,17 @@ export class WorkspaceRpcClient {
    * Another agent's tab in a session, sent its first prompt in the same call
    * (`handoff/1`, #1327): a resend is answered from the runtime's cache, so
    * it never makes a second tab. `startError`: the tab was opened and its
-   * prompt could not be sent; its chat says why.
+   * prompt could not be sent; its chat says why. `requestId`: the same id for
+   * every try of one handoff, so a try after an unknown outcome is answered
+   * with the tab the first one made, never a second.
    */
   async handoffAgentTab(
     sessionId: string,
     params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean; prompt: string },
+    requestId?: string,
   ): Promise<{ sessionId: string; tabId: string; tab: AgentTabInfo | null; startError: string | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
-    const result = await this.mutate<{ sessionId: string; tabId: string; tab?: AgentTabInfo | null; startError?: string | null }>("session.handoff", { sessionId, ...defined });
+    const result = await this.mutate<{ sessionId: string; tabId: string; tab?: AgentTabInfo | null; startError?: string | null }>("session.handoff", { sessionId, ...defined }, requestId);
     return { sessionId: result.sessionId, tabId: result.tabId, tab: result.tab ?? null, startError: result.startError ?? null };
   }
 
