@@ -65,3 +65,31 @@ it("words the notice for one file and for a reset saved by an older version", ()
   expect(resetNotice({ ...tab, resetTurn: 4, resetFilesRestored: 0 } as TabEntry)).toBe("Reset to turn 4 · 0 files restored");
   expect(resetNotice(tab)).toBe("Chat reset");
 });
+
+it("a remote session's Undo reset goes to its runtime, not this computer (#1326)", async () => {
+  const { localSessionBackend } = await import("@/lib/sessionBackend");
+  const reset = vi.fn(async () => null);
+  const id = `reset-${Math.random().toString(36).slice(2)}`;
+  session = { id, projectPath: "/workspace", cwd: "/workspace", title: "Reset", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
+    tabs: [{ id: `${id}-tab`, harness: "claude", model: "default", permissionMode: "default", status: "idle", created: "", modified: "", resetLogId: "generation-2", resetBackupId: "generation-2", resetTurn: 2 } as TabEntry] };
+  const local = localSessionBackend(id);
+  const backend = { ...local, kind: "cloud" as const, key: `cloud:o:w:${id}`, caps: { ...local.caps, local: false, recovery: false },
+    turns: { checkpoints: local.turns!.checkpoints, reset, fork: vi.fn() } };
+  render(<TooltipProvider><TabView session={session} tab={session.tabs[0]} active backend={backend} /></TooltipProvider>);
+  fireEvent.click(within((await screen.findByText("Reset to turn 2")).parentElement!).getByRole("button", { name: "Undo reset" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Undo reset" }));
+  await waitFor(() => expect(reset).toHaveBeenCalledWith(session.tabs[0].id, null, false, null));
+  expect(mocks.invoke).not.toHaveBeenCalledWith("reset_chat", expect.anything());
+});
+
+it("a remote session that cannot reset shows no Undo (#1326)", async () => {
+  const { localSessionBackend } = await import("@/lib/sessionBackend");
+  const id = `reset-${Math.random().toString(36).slice(2)}`;
+  session = { id, projectPath: "/workspace", cwd: "/workspace", title: "Reset", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
+    tabs: [{ id: `${id}-tab`, harness: "claude", model: "default", permissionMode: "default", status: "idle", created: "", modified: "", resetBackupId: "generation-2", resetTurn: 2 } as TabEntry] };
+  const local = localSessionBackend(id);
+  const backend = { ...local, kind: "cloud" as const, key: `cloud:o:w:${id}`, caps: { ...local.caps, local: false, recovery: false }, turns: undefined };
+  render(<TooltipProvider><TabView session={session} tab={session.tabs[0]} active backend={backend} /></TooltipProvider>);
+  await screen.findByRole("textbox");
+  expect(screen.queryByText("Reset to turn 2")).toBeNull();
+});

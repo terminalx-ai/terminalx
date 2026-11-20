@@ -60,6 +60,8 @@ impl AgentOps for FakeOps {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: true,
+            history: None,
+            reset: None,
         }];
         if *self.second_tab.lock().unwrap() {
             let mut second = tabs[0].clone();

@@ -66,7 +66,6 @@ pub(crate) fn destination(harness: &str, cwd: &str, id: &str) -> Result<PathBuf>
 /// log's events up to that turn. Read-only: [`write_forked_conversation`]
 /// puts the transcript where the agent looks for it once the fork's
 /// directory is known. Nothing of the source tab changes.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) fn fork_conversation(entry: &index::SessionEntry, tab: &TabEntry, end_seq: u64, provider: &str) -> Result<(String, Vec<AgentEvent>)> {
     anyhow::ensure!(matches!(tab.harness.as_str(), "claude" | "codex") && !tab.by_hand() && !tab.is_terminal()
         && tab.follow.history.is_empty() && tab.follow.conversation.is_none(),
@@ -86,7 +85,6 @@ pub(crate) fn fork_conversation(entry: &index::SessionEntry, tab: &TabEntry, end
 }
 
 /// Write a [`fork_conversation`] transcript where the agent finds it from `cwd`.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) fn write_forked_conversation(harness: &str, cwd: &str, provider: &str, native: &str) -> Result<()> {
     let path = destination(harness, cwd, provider)?;
     store::ensure_dir(path.parent().context("No transcript directory.")?.to_path_buf())?;

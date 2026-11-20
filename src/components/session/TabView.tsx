@@ -49,7 +49,6 @@ import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
 import { SaveSnippetDialog } from "@/components/chat/SaveSnippetDialog";
-import { forkTurn } from "@/lib/sessions";
 import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
@@ -329,9 +328,11 @@ export function TabView({
 
   useTabRead(active, backend.key, tab, backend.markRead);
 
-  // Nothing is running in a conversation that is only being read.
-  const canReset = local && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
-    && (tab.harness === "claude" || tab.harness === "codex") && !session.worktreeRemoved;
+  // Nothing is running in a conversation that is only being read. A remote session offers it
+  // through its runtime (#1326) when that keeps the turns' checkpoints; `unavailable` says why not.
+  const turnActions = backend.turns;
+  const canReset = !!turnActions && !readOnly && !byHand && !tab.transport && !tab.history?.length && !tab.conversation
+    && (tab.harness === "claude" || tab.harness === "codex") && !(local && session.worktreeRemoved);
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
   // Fork from a turn (PRO-379): what a reset can cut, a fork can copy.
   const canFork = canReset;
@@ -901,7 +902,8 @@ export function TabView({
     <Chat
       sessionId={backend.logSessionId}
       tabId={tab.id}
-      checkpointTabId={local && !readOnly ? tab.id : undefined}
+      checkpointTabId={(turnActions || backend.checkpoints) && !readOnly ? tab.id : undefined}
+      checkpoints={turnActions?.checkpoints ?? backend.checkpoints}
       transcript={asksInChat ? transcript : { ...transcript, pendingAsks: [] }}
       active={active}
       takesKeys={focused && active && !continuationOpen && !terminalMode}
@@ -936,7 +938,7 @@ export function TabView({
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
       onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
       secondOpinionAgent={counterpart?.name}
-      onFork={canFork ? (endSeq, into) => void forkTurn(session.id, tab.id, endSeq, into).then(
+      onFork={canFork && turnActions ? (endSeq, into) => void turnActions.fork(tab.id, endSeq, into).then(
         (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
         (e) => showError("Couldn't fork the conversation", e)) : undefined}
       onSaveSnippet={setSnippetPrompt}
@@ -1213,7 +1215,7 @@ export function TabView({
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
     {snippetPrompt !== null && <SaveSnippetDialog prompt={snippetPrompt} onClose={() => setSnippetPrompt(null)} />}
-    {resetTarget && <ResetChatDialog sessionId={session.id} tabId={tab.id} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
+    {resetTarget && turnActions && <ResetChatDialog reset={(endSeq, resetFiles, confirm) => turnActions.reset(tab.id, endSeq, resetFiles, confirm)} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}
       onDelivered={(to) => {

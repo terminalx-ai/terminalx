@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 
 import {
+  applyLiveTab,
   applyLiveTabs,
   settledStatus,
   attachCloudAgentTab,
@@ -406,6 +407,63 @@ describe("cloud agent tabs store", () => {
     onCursor("8:3");
     expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 3]);
     expect(getCloudAgents(scope).tabs[0]!.cursor).toBe("8:3");
+  });
+
+  it("drops the turns a reset cut off and replays the tab's new history from its first event (#1326)", async () => {
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 })]);
+    const client = fakeClient();
+    const stopped: number[] = [];
+    client.subscribeSession.mockImplementation(async () => {
+      const n = client.subscribeSession.mock.calls.length;
+      return () => void stopped.push(n);
+    });
+    await attachCloudAgentTab(scope, "t-1", client);
+    const first = client.subscribeSession.mock.calls[0]!;
+    for (const seq of [1, 2, 3, 4, 5]) first[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    (first[3] as { onCursor: (cursor?: string) => void }).onCursor("8:5");
+    // Another tab of the session says nothing new: nothing is dropped.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 }), tabInfo({ tabId: "t-2", sessionId: "s-1" })]);
+    expect(getTabLog("s-1", "t-1").events).toHaveLength(5);
+    expect(client.subscribeSession).toHaveBeenCalledOnce();
+    // Reset to the turn that ended at seq 2: the runtime names a new history.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 2, history: "generation-2", reset: { turn: 1, undoable: true } }), tabInfo({ tabId: "t-2", sessionId: "s-1" })]);
+    expect(getTabLog("s-1", "t-1").events).toEqual([]);
+    const tab = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === "t-1")!;
+    expect(tab.cursor).toBeNull();
+    expect(tab.info.history).toBe("generation-2");
+    expect(tab.info.reset).toEqual({ turn: 1, undoable: true });
+    // The old feed ends and a new one replays from the start, with no cursor.
+    expect(stopped).toEqual([1]);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(2));
+    expect((client.subscribeSession.mock.calls[1]![3] as { sinceCursor?: string }).sinceCursor).toBeUndefined();
+    const second = client.subscribeSession.mock.calls[1]!;
+    for (const seq of [1, 2]) second[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    second[2](ev(6, { type: "user_message", text: "after the reset", queued: false }));
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 6]);
+    // Told again of the same history (the reset's own answer, then `session.tabs`): nothing more is dropped.
+    applyLiveTab(scope, tabInfo({ lastSeq: 6, history: "generation-2", reset: { turn: 1, undoable: true } }));
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 6]);
+    expect(client.subscribeSession).toHaveBeenCalledTimes(2);
+    // One tab described alone removes no other tab.
+    expect(getCloudAgents(scope).tabs.map((candidate) => candidate.tabId).sort()).toEqual(["t-1", "t-2"]);
+  });
+
+  it("a newer checkpoint of a rewritten history replaces what a stopped workspace's reader kept (#1326)", async () => {
+    backend.metas = [{ tabId: "t-1", epoch: 1, version: 1 }];
+    const old = [1, 2, 3, 4].map((seq) => ev(seq, { type: "assistant_text", text: `old ${seq}` }));
+    backend.checkpoints["t-1"] = { epoch: 1, version: 1, projection: { ...tabInfo({ lastSeq: 4 }), v: 1, events: old, truncated: false, followUps: [], updatedAt: 10 } };
+    await loadCloudAgents(scope);
+    expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
+    backend.checkpoints["t-1"] = { epoch: 1, version: 2, projection: {
+      ...tabInfo({ lastSeq: 2 }), v: 1, events: old.slice(0, 2), truncated: false, followUps: [], updatedAt: 20,
+      history: "generation-2", reset: { turn: 1, filesRestored: 3, undoable: true },
+    } };
+    expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2]);
+    const tab = getCloudAgents(scope).tabs[0]!;
+    expect(tab.info.history).toBe("generation-2");
+    expect(tab.info.reset).toEqual({ turn: 1, filesRestored: 3, undoable: true });
   });
 
   it("treats the runtime's tab list as authoritative and marks a finished tab unread", () => {

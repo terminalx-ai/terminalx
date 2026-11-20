@@ -1,3 +1,4 @@
+import type { TurnCheckpointApi } from "@/lib/turnCheckpoints";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -90,6 +91,7 @@ export function Chat({
   sessionId,
   tabId,
   checkpointTabId,
+  checkpoints,
   transcript,
   active = true,
   stream,
@@ -126,6 +128,8 @@ export function Chat({
   sessionId: string;
   tabId?: string;
   checkpointTabId?: string;
+  /** Where turn cards read and review their checkpoints: the runtime's for a remote tab (#1326); this computer's when absent. */
+  checkpoints?: TurnCheckpointApi;
   transcript: Transcript;
   /** A kept chat can be hidden behind another workspace view. */
   active?: boolean;
@@ -514,6 +518,7 @@ export function Chat({
                 sessionId={sessionId}
                 tabId={tabId}
                 checkpointTabId={checkpointTabId}
+                checkpoints={checkpoints}
                 stream={isLast && live ? stream : NO_STREAM}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}

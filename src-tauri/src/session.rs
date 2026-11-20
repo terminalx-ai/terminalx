@@ -62,7 +62,6 @@ pub(crate) mod row_status;
 pub mod held;
 #[path = "session_reset.rs"]
 mod reset;
-#[cfg(feature = "desktop")]
 pub(crate) use reset::{destination as fork_conversation_destination, fork_conversation, write_forked_conversation};
 #[path = "session_unsent.rs"]
 mod unsent;

@@ -350,6 +350,11 @@ export function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
     modified: info.modified,
     // A stopped workspace is read only from what was saved; nothing more is on its way.
     loadingHistory: !tab.historyRead && !asleep,
+    // The last reset (#1326), as a local tab keeps it: the notice over the chat, and Undo while the runtime can.
+    ...(info.history ? { resetLogId: info.history } : {}),
+    ...(info.reset?.undoable && info.history ? { resetBackupId: info.history } : {}),
+    ...(info.reset?.turn != null ? { resetTurn: info.reset.turn } : {}),
+    ...(info.reset?.filesRestored != null ? { resetFilesRestored: info.reset.filesRestored } : {}),
   };
 }
 

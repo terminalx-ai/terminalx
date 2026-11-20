@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentEvent } from "@/types/events";
-import type { AgentProcessState, AgentTabInfo, AgentTabStatus } from "@terminalx/portable/workspace";
+import type { AgentProcessState, AgentTabInfo, AgentTabReset, AgentTabStatus } from "@terminalx/portable/workspace";
 
 export type { AgentProcessState, AgentTabInfo, AgentTabStatus };
 
@@ -96,6 +96,10 @@ export interface Projection {
   truncated: boolean;
   followUps: { clientCommandId: string; text: string }[];
   updatedAt: number;
+  /** Which history `events` are of, after a reset rewrote it (#1326); absent before the tab's first. */
+  history?: string | null;
+  /** What the tab's last reset did (#1326). */
+  reset?: AgentTabReset | null;
   /** The tab's session, from runtimes with CS-12; sealed with the rest of the projection. */
   session?: { title: string; branch: string | null };
 }

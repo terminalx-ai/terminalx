@@ -72,7 +72,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -128,6 +128,12 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.delete": "session/2",
   "session.interrupt": "session/3",
   "session.toTerminal": "session/3",
+  "session.turnCheckpoint": "checkpoints/1",
+  "session.keepTurn": "checkpoints/1",
+  "session.undoTurn": "checkpoints/1",
+  "session.restoreUndo": "checkpoints/1",
+  "session.reset": "checkpoints/1",
+  "session.fork": "checkpoints/1",
   "runtime.agents": "agents/1",
   "environment.report": "environment/1",
   "environment.cancel": "environment/1",
@@ -180,6 +186,11 @@ export const MUTATING_METHODS = new Set([
   "session.addTab",
   "session.delete",
   "session.toTerminal",
+  "session.keepTurn",
+  "session.undoTurn",
+  "session.restoreUndo",
+  "session.reset",
+  "session.fork",
   "cleanup.remove",
   "workspace.remove",
   "workspace.sweepMerged",
@@ -411,6 +422,42 @@ export interface AgentTabInfo {
   /** Latest verified user/assistant message time; absent for unverified history. */
   lastMessageAt?: string | null;
   hasMessages?: boolean;
+  /**
+   * Which history the tab's events are (`checkpoints/1`, #1326): a reset
+   * rewrites it and names a new one, and what was kept of the old one is
+   * dropped before reading on. Absent until the tab's first reset.
+   */
+  history?: string | null;
+  /** What the tab's last reset did, for the notice over its chat and its one Undo. */
+  reset?: AgentTabReset | null;
+}
+
+/** The last reset of an agent tab (#1326): "Reset to turn 2 · 3 files restored". */
+export interface AgentTabReset {
+  /** The turn the chat was reset to; absent after an Undo. */
+  turn?: number;
+  filesRestored?: number;
+  /** The conversation before it is kept: `resetAgentTab` with `endSeq: null` brings it back. */
+  undoable: boolean;
+}
+
+/** What a finished turn changed, from the runtime's checkpoint of it (`checkpoints/1`). */
+export interface RemoteTurnCheckpoint {
+  number: number;
+  reviewed: boolean;
+  undone: boolean;
+  files: { path: string; oldPath?: string; status: "added" | "modified" | "deleted" | "renamed"; additions: number; deletions: number }[];
+  restored?: boolean;
+  backupRef?: string | null;
+  unavailableReason?: string | null;
+}
+
+/** An undo or restore of a turn: refused with what it would overwrite, and the token that confirms it. */
+export interface RemoteTurnUndo {
+  overlap: string[];
+  token: string;
+  undone: boolean;
+  backupRef?: string | null;
 }
 
 /** An agent tab as the runtime's session index stores it. */
@@ -1537,6 +1584,52 @@ export class WorkspaceRpcClient {
    */
   moveAgentTabToTerminal(sessionId: string, tabId: string, options: { transitionId?: string; deferUntilIdle?: boolean } = {}): Promise<{ sessionId: string; tabId: string; waitingForTurn?: boolean }> {
     return this.mutate("session.toTerminal", { sessionId, tabId, ...options });
+  }
+
+  /** What the finished turn at `seq` changed (`checkpoints/1`, #1326); null when the runtime kept no checkpoint of it. */
+  async turnCheckpoint(sessionId: string, tabId: string, seq: number): Promise<RemoteTurnCheckpoint | null> {
+    const result = await this.call<{ checkpoint?: RemoteTurnCheckpoint | null }>("session.turnCheckpoint", { sessionId, tabId, seq });
+    return result.checkpoint ?? null;
+  }
+
+  /** Keep a turn's changes (`checkpoints/1`). */
+  async keepTurn(sessionId: string, tabId: string, seq: number): Promise<void> {
+    await this.mutate("session.keepTurn", { sessionId, tabId, seq });
+  }
+
+  /**
+   * Undo a turn's changes, or put back what an undo removed (`checkpoints/1`).
+   * One that would overwrite other changes comes back `undone: false` with
+   * them and a token; sent again with that token as `confirmed`, it goes ahead.
+   */
+  undoTurn(sessionId: string, tabId: string, seq: number, confirmed: string | null = null): Promise<RemoteTurnUndo> {
+    return this.mutate("session.undoTurn", { sessionId, tabId, seq, confirmed });
+  }
+
+  restoreUndo(sessionId: string, tabId: string, seq: number, confirmed: string | null = null): Promise<RemoteTurnUndo> {
+    return this.mutate("session.restoreUndo", { sessionId, tabId, seq, confirmed });
+  }
+
+  /**
+   * Reset a tab's chat to the end of the turn `endSeq`, or with `endSeq` null
+   * undo its last reset (`checkpoints/1`). `resetFiles` also puts the
+   * checkout's files back; a reset that would overwrite other changes is
+   * refused with a message listing them and a token to pass as `confirm`.
+   * `warning`: the chat was reset, and something after it went wrong.
+   */
+  async resetAgentTab(params: { sessionId: string; tabId: string; endSeq: number | null; resetFiles: boolean; confirm?: string | null }): Promise<{ warning: string | null; tab: AgentTabInfo | null }> {
+    const result = await this.mutate<{ warning?: string | null; tab?: AgentTabInfo | null }>("session.reset", { ...params, confirm: params.confirm ?? null });
+    return { warning: result.warning ?? null, tab: result.tab ?? null };
+  }
+
+  /**
+   * Fork a tab's conversation as it stood at the end of the turn `endSeq`
+   * (`checkpoints/1`, PRO-379): into a new tab beside it, or a new session.
+   * `note` says when the fork's files are not the turn's.
+   */
+  async forkAgentTab(params: { sessionId: string; tabId: string; endSeq: number; into: "tab" | "session" }): Promise<{ sessionId: string; tabId: string; note: string | null; tab: AgentTabInfo | null }> {
+    const result = await this.mutate<{ sessionId: string; tabId: string; note?: string | null; tab?: AgentTabInfo | null }>("session.fork", params);
+    return { sessionId: result.sessionId, tabId: result.tabId, note: result.note ?? null, tab: result.tab ?? null };
   }
 
   /** A machine's projects (`machine/1`). */

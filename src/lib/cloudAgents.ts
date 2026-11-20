@@ -630,6 +630,8 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   const p = checkpoint.projection;
   if (p.tabId !== tabId) return false;
   current.checkpoint = { epoch: checkpoint.epoch, version: checkpoint.version };
+  // A newer checkpoint of a history rewritten by a reset (#1326): the old one's turns go first.
+  if (followHistory(s, current, p.history)) current.info = { ...current.info, reset: p.reset ?? null };
   // Its status is taken only when it is at least as far as what this desktop
   // knows of the tab: a checkpoint from before that, or one with no events to
   // tell by, says nothing newer about the turn. A placeholder knows nothing yet.
@@ -651,6 +653,8 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
       status: p.status,
       process: p.process,
       followUps: p.followUps ?? [],
+      history: p.history ?? null,
+      reset: p.reset ?? null,
       lastSeq: upTo ?? current.info.lastSeq,
       modified: new Date(p.updatedAt || 0).toISOString(),
     };
@@ -686,6 +690,57 @@ export function settledStatus(info: Pick<AgentTabInfo, "signIn">, status: AgentT
   return info.signIn && status === "in_progress" ? "idle" : status;
 }
 
+/** The live feeds of each tab, by store and tab: started again from the first event after a reset (#1326). */
+const restarts = new Map<string, Set<() => void>>();
+
+function feedKey(s: Store, tabId: string): string {
+  return `${cloudAgentsKey(s.scope)}/${tabId}`;
+}
+
+/**
+ * A reset on the runtime rewrote the tab's history (#1326): what this
+ * desktop kept of the old one is dropped, so the turns cut off leave the
+ * chat, and the new one is read from its first event. A live feed starts
+ * again; otherwise the next checkpoint or attach brings it. The caller then
+ * takes the new `info`. Returns whether the history changed.
+ */
+function followHistory(s: Store, tab: CloudAgentTab, history: string | null | undefined): boolean {
+  if ((tab.info.history ?? null) === (history ?? null)) return false;
+  if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
+  tab.cursor = null;
+  tab.historyRead = false;
+  tab.info = { ...tab.info, history: history ?? null, lastSeq: 0 };
+  for (const restart of [...(restarts.get(feedKey(s, tab.tabId)) ?? [])]) restart();
+  return true;
+}
+
+/**
+ * One tab as the runtime just described it, in answer to something done
+ * here (a reset, a fork, #1326): taken at once, before `session.tabs` says
+ * it to everyone. Unlike the whole list, it removes no other tab.
+ */
+export function applyLiveTab(scope: CloudAgentScope, reported: AgentTabInfo) {
+  if (cloudAgentsAccessDenied(scope)) return;
+  const s = store(scope);
+  const info = { ...reported, status: settledStatus(reported, reported.status) };
+  const existing = s.tabs.get(info.tabId);
+  if (!existing) {
+    s.tabs.set(info.tabId, newTab(info, "live"));
+  } else {
+    followHistory(s, existing, info.history);
+    noteStatus(existing, info.status);
+    existing.info = withPending({ ...keepMessageTime(info, existing.info),
+      sessionLastMessageAt: newestMessageTime(info.sessionLastMessageAt, existing.info.sessionLastMessageAt),
+      sessionHasMessages: info.sessionHasMessages || existing.info.sessionHasMessages,
+    }, existing.pendingConfig);
+    existing.source = "live";
+    existing.placeholder = false;
+    if (!info.lastSeq) existing.historyRead = true;
+  }
+  scheduleSave(s, info.tabId);
+  publish(s);
+}
+
 /** The runtime's own tab list is authoritative: tabs it no longer has are gone. */
 export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
   if (cloudAgentsAccessDenied(scope)) return;
@@ -698,6 +753,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
     if (!existing) {
       s.tabs.set(info.tabId, newTab(info, "live"));
     } else {
+      followHistory(s, existing, info.history);
       noteStatus(existing, info.status);
       // Settings chosen here and not sent yet stay shown as chosen.
       existing.info = withPending({ ...keepMessageTime(info, existing.info),
@@ -849,9 +905,9 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     scheduleSave(s, tabId);
   };
   let stop: (() => void) | null = null;
-  try {
-    stop = await client.subscribeSession(sessionId, tabId, onEvent, {
-      sinceCursor: tab.cursor ?? undefined,
+  const subscribe = (sinceCursor: string | undefined) =>
+    client.subscribeSession(sessionId, tabId, onEvent, {
+      sinceCursor,
       onCursor: (cursor) => {
         if (stores.get(cloudAgentsKey(scope)) !== s) return;
         const current = s.tabs.get(tabId);
@@ -871,6 +927,8 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
       },
       onReplayed: () => { if (stores.get(cloudAgentsKey(scope)) === s) caught(client.connection.state === "connected"); },
     });
+  try {
+    stop = await subscribe(tab.cursor ?? undefined);
   } catch (error) {
     end();
     const current = s.tabs.get(tabId);
@@ -885,7 +943,35 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     replayed.historyRead = true;
     publish(s);
   }
+  // A reset rewrote the history (#1326): the feed of the old one ends, and
+  // the new one is replayed from its first event into the emptied log.
+  let restarting = 0;
+  const restart = () => {
+    const previous = stop;
+    stop = null;
+    previous?.();
+    caught(false);
+    const attempt = ++restarting;
+    void subscribe(undefined).then(
+      (next) => {
+        if (ended || attempt !== restarting || stores.get(cloudAgentsKey(scope)) !== s) return next();
+        stop = next;
+        const current = s.tabs.get(tabId);
+        if (current && !current.historyRead) {
+          current.historyRead = true;
+          publish(s);
+        }
+      },
+      // The connection went meanwhile: the next attach replays from the emptied cursor.
+      () => undefined,
+    );
+  };
+  const feeds = restarts.get(feedKey(s, tabId)) ?? new Set<() => void>();
+  feeds.add(restart);
+  restarts.set(feedKey(s, tabId), feeds);
   return () => {
+    feeds.delete(restart);
+    if (!feeds.size && restarts.get(feedKey(s, tabId)) === feeds) restarts.delete(feedKey(s, tabId));
     stop?.();
     end();
     const current = s.tabs.get(tabId);

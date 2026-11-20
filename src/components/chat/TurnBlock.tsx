@@ -1,3 +1,4 @@
+import type { TurnCheckpointApi } from "@/lib/turnCheckpoints";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { TurnDetailsPopover, turnStats, type TurnFallback } from "./UsagePopovers";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -55,6 +56,8 @@ interface TurnProps {
   sessionId: string;
   tabId?: string;
   checkpointTabId?: string;
+  /** Where the turn card reads its checkpoint: the runtime's for a remote tab (#1326); this computer's when absent. */
+  checkpoints?: TurnCheckpointApi;
   cwd?: string;
   stream: StreamBlock[];
   working: boolean;
@@ -98,6 +101,7 @@ function TurnBody({
   sessionId,
   tabId,
   checkpointTabId,
+  checkpoints,
   cwd,
   stream,
   working,
@@ -197,7 +201,7 @@ function TurnBody({
 
       {failure && <FailureCard turn={turn} failure={failure} linkContext={linkContext} onRetry={onRetry} onRetryInNewChat={onRetryInNewChat} retryInNewChatUnavailable={retryInNewChatUnavailable} />}
 
-      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
+      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq, api: checkpoints } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
 
       {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
         unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}

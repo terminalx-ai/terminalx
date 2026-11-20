@@ -1816,6 +1816,10 @@ impl WorkspaceRpc {
                 self.session_interrupt(peer, params)
             },
             "session.toTerminal" => self.session_to_terminal(peer, params),
+            "session.turnCheckpoint" => self.session_turn_checkpoint(peer, params),
+            "session.keepTurn" | "session.undoTurn" | "session.restoreUndo" => self.session_review_turn(peer, method, params),
+            "session.reset" => self.session_reset(peer, params),
+            "session.fork" => self.session_fork(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
@@ -4891,6 +4895,102 @@ impl WorkspaceRpc {
         Ok(json!({ "tab": agents.tab(&tab.tab_id) }))
     }
 
+    /// What a finished turn changed, from the checkpoint this runtime kept of
+    /// it (`checkpoints/1`, #1326), as a local tab's turn card reads it: null
+    /// for a turn with no checkpoint (not a Git checkout, or still running).
+    fn session_turn_checkpoint(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let seq = required_seq(&params, "seq")?;
+        let Some(turn) = crate::checkpoints::get(&tab.session_id, &tab.tab_id, seq).map_err(RpcError::internal)? else { return Ok(json!({ "checkpoint": null })) };
+        let saved = serde_json::to_value(&turn).map_err(RpcError::internal)?;
+        // Only what the card shows: the checkpoint's trees and paths stay on the runtime.
+        let mut checkpoint = serde_json::Map::new();
+        for key in ["number", "reviewed", "undone", "files", "restored", "backupRef", "unavailableReason"] {
+            if let Some(value) = saved.get(key) {
+                checkpoint.insert(key.into(), value.clone());
+            }
+        }
+        Ok(json!({ "checkpoint": checkpoint }))
+    }
+
+    /// Keep a turn's changes, undo them, or put back what an undo removed
+    /// (`checkpoints/1`), as a local tab's turn card does. An undo or restore
+    /// that would overwrite other changes is answered with them and a token
+    /// (`undone: false`); sent again with that token as `confirmed`, it goes ahead.
+    fn session_review_turn(&self, peer: &Peer, method: &str, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let seq = required_seq(&params, "seq")?;
+        let confirmed = params.get("confirmed").and_then(Value::as_str);
+        let refused = |error: anyhow::Error| RpcError::new("refused", format!("{error:#}"));
+        let result = match method {
+            "session.keepTurn" => {
+                crate::checkpoints::keep(&tab.session_id, &tab.tab_id, seq).map_err(refused)?;
+                return Ok(json!({}));
+            }
+            "session.undoTurn" => crate::checkpoints::undo(&tab.session_id, &tab.tab_id, seq, confirmed),
+            _ => crate::checkpoints::restore_undo(&tab.session_id, &tab.tab_id, seq, confirmed),
+        };
+        serde_json::to_value(result.map_err(refused)?).map_err(RpcError::internal)
+    }
+
+    /// Reset a tab's chat to the end of the turn `endSeq`, or with `endSeq`
+    /// null undo the last reset (`checkpoints/1`), through the same
+    /// `SessionManager::reset_chat` a local tab's reset takes. `resetFiles`
+    /// also puts the checkout back to that turn; one that would overwrite
+    /// other changes is refused with them and a token (`session_reset::OVERLAP`),
+    /// and goes ahead when sent again with that token as `confirm`. The tab's
+    /// `history` changes, so every reader drops the turns that went.
+    fn session_reset(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let end_seq = match params.get("endSeq") {
+            None | Some(Value::Null) => None,
+            Some(seq) => Some(seq.as_u64().ok_or_else(|| RpcError::invalid("endSeq is a sequence number, or null to undo the last reset"))?),
+        };
+        let reset_files = params.get("resetFiles").and_then(Value::as_bool).unwrap_or(false);
+        let confirm = params.get("confirm").and_then(Value::as_str);
+        let warning = self
+            .manager()?
+            .reset_chat(&tab.session_id, &tab.tab_id, end_seq, reset_files, confirm)
+            .map_err(|error| RpcError::new("refused", format!("{error:#}")))?;
+        if let Ok(session) = index::get(&tab.session_id) {
+            self.sink.emit("session_updated", &session);
+        }
+        let agents = self.agents()?;
+        agents.changed(Some(&tab.tab_id), true);
+        Ok(json!({ "warning": warning, "tab": agents.tab(&tab.tab_id) }))
+    }
+
+    /// Fork a tab's conversation as it stood at the end of the turn `endSeq`
+    /// (`checkpoints/1`, PRO-379): `into: "tab"` beside it in the same
+    /// checkout, `into: "session"` as a new session on a worktree of its own
+    /// with that turn's files where they were kept. The same `session_fork`
+    /// a local fork takes; `note` says when the files are not the turn's.
+    fn session_fork(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let end_seq = required_seq(&params, "endSeq")?;
+        let into: crate::session_fork::ForkInto =
+            serde_json::from_value(params.get("into").cloned().unwrap_or(Value::Null)).map_err(|_| RpcError::invalid("into is \"tab\" or \"session\""))?;
+        let agents = self.agents()?;
+        let (session_id, tab_id, note) = match into {
+            crate::session_fork::ForkInto::Tab => {
+                let (session, new_tab) = crate::session_fork::fork_into_tab_contents(&tab.session_id, &tab.tab_id, end_seq).map_err(|error| RpcError::new("refused", error))?;
+                self.sink.emit("session_updated", &session);
+                (session.id, new_tab, None)
+            }
+            crate::session_fork::ForkInto::Session => {
+                let (entry, note) = crate::session_fork::fork_session_contents(&tab.session_id, &tab.tab_id, Some(end_seq)).map_err(|error| RpcError::new("refused", error))?;
+                self.sink.emit("session_created", &entry);
+                // A worktree made for the fork runs the project's setup, as a new session's does.
+                if entry.worktree_name.is_some() {
+                    self.sink.emit(crate::workspace_setup::CREATED_EVENT, &entry);
+                }
+                (entry.id.clone(), entry.active_tab.clone().unwrap_or_default(), note)
+            }
+        };
+        agents.changed(Some(&tab_id), true);
+        Ok(json!({ "sessionId": session_id, "tabId": tab_id, "note": note, "tab": agents.tab(&tab_id) }))
+    }
+
     fn session_mark_read(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let tab = self.visible_tab(peer, &params)?;
         self.manager()?.mark_read(&tab.session_id, &tab.tab_id).map_err(RpcError::internal)?;
@@ -5005,6 +5105,11 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
 
 fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params.get(name).and_then(Value::as_str).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
+}
+
+/// An event's sequence number in a tab's log.
+fn required_seq(params: &Value, name: &str) -> Result<u64, RpcError> {
+    params.get(name).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
 }
 
 /// The most pipelines `pipeline.list` sends, and the bytes they may take: well
