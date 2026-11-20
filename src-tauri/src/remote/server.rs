@@ -4217,11 +4217,23 @@ impl WorkspaceRpc {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let fetch = params.get("fetch").and_then(Value::as_bool).unwrap_or(false);
         let project = Path::new(&session.project_path);
+        Self::require_no_pending_pr_creation(project, Path::new(&session.cwd))?;
         let disposition = crate::session_ops::workspace_disposition(project, Path::new(&session.cwd), fetch).map_err(RpcError::internal)?;
         if disposition.exists && !disposition.is_main {
             crate::archive_script::require_no_script(project).map_err(RpcError::internal)?;
         }
         Ok(json!({ "disposition": disposition }))
+    }
+
+    /// A create whose pull request was never verified blocks reading and
+    /// removing its checkout. Named with its URL, so the client can offer
+    /// `git.prReconcileCreation` instead of only the original Create form.
+    fn require_no_pending_pr_creation(project: &Path, cwd: &Path) -> Result<(), RpcError> {
+        match crate::session_ops::pending_pr_creation_for(project, cwd).map_err(RpcError::internal)? {
+            Some(url) => Err(RpcError::new("pending_pr_creation", format!("Verify the pull request at {url} before removing this workspace."))
+                .with_data(json!({ "url": url }))),
+            None => Ok(()),
+        }
     }
 
     /// `workspace/1`: remove the worktree a session runs in, with every
@@ -4246,6 +4258,7 @@ impl WorkspaceRpc {
         if session.worktree_name.is_none() || session.worktree_removed {
             return Err(RpcError::invalid("this session does not run in a worktree"));
         }
+        Self::require_no_pending_pr_creation(Path::new(&session.project_path), Path::new(&session.cwd))?;
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &session.project_path,
             path: &session.cwd,

@@ -116,6 +116,8 @@ it.each([false, true])("once merged shows the merged card and summaries, not the
   expect(mocks.invoke.mock.calls.filter(([command]) => command === "pr_list").length).toBeGreaterThan(1);
 });
 
+const pendingUrl = "https://github.com/acme/app/pull/77";
+
 function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>, pendingCreation = false) {
   const projectKey = "machine:mini:project";
   const sessionId = `${projectKey}:session`;
@@ -127,17 +129,26 @@ function machinePrPanel(disposition: () => Promise<WorkspaceDisposition>, pendin
   const call = vi.fn(async (method: string) => {
     if (method === "git.status") return workStatus(mergedPr.head, 0);
     if (method === "git.prs") return { prs: [pr] };
-    if (method === "git.prAssociations") return { pendingCreation, associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }] };
+    if (method === "git.prAssociations") return {
+      ...(pendingCreation ? { pendingCreation, pendingCreationUrls: [pendingUrl] } : {}),
+      associations: [{ url: mergedPr.url, number: mergedPr.number, head: mergedPr.head, repo: "app" }],
+    };
     if (method === "git.prConversation") return { ...pr, reviewers: [], activity: [] };
     throw Error(method);
   });
-  const source = cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+  const mutate = vi.fn(async (method: string, params: { url: string }) => {
+    if (method !== "git.prReconcileCreation") throw Error(method);
+    pendingCreation = false;
+    return { url: params.url, state: "MERGED", cleared: 1 };
+  });
+  const source = cloudGitSource({ workspaceKey: projectKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
   const workspace = {
     projectPath: projectKey, path: cwd, name: "feature",
     host: { key: "machine:mini|session", disposition: vi.fn(disposition), remove: vi.fn(), turnRunning: () => false },
   };
   return {
     workspace,
+    mutate,
     setPr: (next: PullRequest) => { pr = next; },
     panel: (branch: string | null = mergedPr.head) => (
       <PrPanel cwd="machine://mini:project/worktree" source={source} sessionId={sessionId} branch={branch} active busy={false} inline machineWorkspace={workspace} />
@@ -152,6 +163,16 @@ describe("merged workspace action", () => {
     await screen.findByText(/A recently created pull request is awaiting verification/);
     expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
     expect(workspace.host.disposition).not.toHaveBeenCalled();
+  });
+
+  it("verifies a pending PR creation by its URL, then offers removal again", async () => {
+    const { panel, workspace, mutate } = machinePrPanel(async () => cleanMerged, true);
+    render(panel());
+    fireEvent.click(await screen.findByRole("button", { name: "Verify acme/app/pull/77" }));
+    await waitFor(() => expect(screen.queryByTestId("pr-pending-creation")).toBeNull());
+    expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prReconcileCreation", { url: pendingUrl, clientRequestId: expect.any(String) });
+    await screen.findByRole("button", { name: "Delete workspace" });
+    expect(workspace.host.disposition).toHaveBeenCalled();
   });
   it.each([
     { uncommitted: 0, unpushed: 0 },

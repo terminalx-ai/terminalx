@@ -140,6 +140,7 @@ export function PrPanel({
   const [pendingRuns, setPendingRuns] = useState<PendingCheckRun[]>([]);
   const [rows, setRows] = useState<SessionPr[]>([]);
   const [pendingCreation, setPendingCreation] = useState(false);
+  const [pendingCreationUrls, setPendingCreationUrls] = useState<string[]>([]);
   const [branchPrLinks, setBranchPrLinks] = useState(false);
   const [linkUrl, setLinkUrl] = useState<string | null>(null);
   const selection = `${sessionId ?? ""}\0${source.key}\0${branch ?? ""}\0${selectedPr?.url ?? ""}`;
@@ -239,6 +240,7 @@ export function PrPanel({
         if (cancelled) return;
         setRows(pullRequests.rows);
         setPendingCreation(!!pullRequests.pendingCreation);
+        setPendingCreationUrls(pullRequests.pendingCreationUrls ?? []);
         setBranchPrLinks(pullRequests.branchPrLinks === true);
         // The Changes view finds the same PR for its review threads without asking GitHub again (PRO-234).
         if (!selectedPr) noteSessionPrs(source, sessionId, pullRequests.rows.flatMap((row) => row.pr ? [row.pr] : []));
@@ -490,7 +492,19 @@ export function PrPanel({
         <p className="px-4 text-xs text-faint" title={error} data-testid="pr-unreachable">Can't reach GitHub right now. Pull requests will show when it answers.</p>
       ) : error && (source.cloud ? <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div> : <GitError details={error} onRetry={() => setTick((value) => value + 1)} onConnect={() => setConnection({ state: "signed_out", details: null, hostname: connection?.hostname })} />)}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
-      {loadedSelection === selection && pendingCreation && <p className="px-4 text-xs text-muted-foreground">A recently created pull request is awaiting verification. Retry creation from its branch before removing this workspace.</p>}
+      {loadedSelection === selection && pendingCreation && (
+        <div className="space-y-1 px-4 text-xs text-muted-foreground" data-testid="pr-pending-creation">
+          <p>{source.reconcilePrCreation
+            ? "A recently created pull request is awaiting verification. Once it is merged or closed, verify it to allow removing this workspace."
+            : "A recently created pull request is awaiting verification. Retry creation from its branch before removing this workspace."}</p>
+          {source.reconcilePrCreation && pendingCreationUrls.map((url) => (
+            <Button key={url} size="xs" variant="outline" disabled={!!working} title={url}
+              onClick={() => void act("verify", () => source.reconcilePrCreation!(url).then(() => `Verified ${url}.`))}>
+              Verify {url.replace(/^https:\/\/[^/]+\//, "")}
+            </Button>
+          ))}
+        </div>
+      )}
       {canLinkBranchPr && (linkUrl === null ? (
         <Button size="xs" variant="outline" className="mx-3 self-start" disabled={!!working} onClick={() => setLinkUrl("")}>Link existing branch PR</Button>
       ) : (

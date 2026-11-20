@@ -1,4 +1,4 @@
-import type { RuntimeWorkspaceRemoved, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type RuntimeWorkspaceRemoved, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { allMachineSessions, forgetMachineSessions } from "@/lib/machineCatalog";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { turnLive, type WorkspaceHost } from "@/lib/workspaceRemoval";
@@ -38,6 +38,14 @@ export function machineWorkspaceHost(input: { machineId: string; name: string; s
       // Read at the time of the action, not of the render.
       if (removed.deleted.includes(sessionId) && getSessionStore().selectedSessionId === input.sessionKey) openWelcome();
       return removed;
+    },
+    reconcilePrCreation: async (url) => {
+      await client.mutate("git.prReconcileCreation", { url }).catch((error: unknown) => {
+        if (error instanceof WorkspaceRpcError && (error.code === "method_not_found" || error.code === "capability_not_granted")) {
+          throw new Error(`Update TerminalX on ${name} to verify this pull request from here.`);
+        }
+        throw error;
+      });
     },
     turnRunning: (sessionIds) =>
       allMachineSessions().some((row) => row.machineId === machineId && sessionIds.includes(row.sessionId) && row.tabs.some((tab) => turnLive(tab.status))),

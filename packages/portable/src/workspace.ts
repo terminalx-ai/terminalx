@@ -204,6 +204,7 @@ export const MUTATING_METHODS = new Set([
   "git.fetch",
   "git.prCreate",
   "git.prCreateForSession",
+  "git.prReconcileCreation",
   "git.prLinkBranch",
   "git.prUnlink",
   "git.prConversationAction",

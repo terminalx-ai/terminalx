@@ -999,6 +999,14 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
     Ok(disposition)
 }
 
+/// The pull request a create left unverified in the checkout `path` belongs
+/// to, which keeps it from being removed until `git.prReconcileCreation` or a
+/// retried create settles it.
+pub(crate) fn pending_pr_creation_for(project: &Path, path: &Path) -> Result<Option<String>> {
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    crate::remote::git::pending_pr_creation_in(&checkout_root(&project, path)).map_err(|error| error.message)
+}
+
 fn require_resolved_pr_creation(path: &Path) -> Result<()> {
     if let Some(url) = crate::remote::git::pending_pr_creation_in(path).map_err(|error| error.message)? {
         return Err(format!("Verify the pull request at {url} before removing this workspace."));

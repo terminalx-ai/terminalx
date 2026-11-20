@@ -9,6 +9,7 @@ import type { ArchiveFailure } from "@terminalx/portable/workspace";
 import { ArchiveTerminal } from "@/components/terminal/ArchiveTerminal";
 import { archiveFailure, archiveFailureDetail, archiveFailureTitle, useArchiveTerminal } from "@/lib/archiveScript";
 import { errorMessage } from "@/lib/api";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { closeWorkspaceRemove, openWorktreeCleanup, useDialogs } from "@/lib/dialogs";
 import { relocateSession } from "@/lib/sessions";
 import { localWorkspaceHost, type WorkspaceHost } from "@/lib/workspaceRemoval";
@@ -45,13 +46,16 @@ export function WorkspaceRemoveDialog() {
   // could not be verified.
   const [checkFailed, setCheckFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"remove" | "relocate" | null>(null);
+  const [busy, setBusy] = useState<"remove" | "relocate" | "verify" | null>(null);
+  // A create the host never verified blocks the check; the host can settle it by URL.
+  const [pendingPr, setPendingPr] = useState<string | null>(null);
   const [deleteBranch, setDeleteBranch] = useState(true);
   const [deleteConversations, setDeleteConversations] = useState(false);
 
   const check = useCallback(async (host: WorkspaceHost, isLive: () => boolean = () => true) => {
     setDisp(null);
     setCheckFailed(false);
+    setPendingPr(null);
     try {
       // The one caller that fetches: the answer decides whether this
       // workspace can go with a single confirmation.
@@ -66,6 +70,8 @@ export function WorkspaceRemoveDialog() {
       if (!isLive()) return;
       setCheckFailed(true);
       setError(errorMessage(e));
+      const url = e instanceof WorkspaceRpcError && e.code === "pending_pr_creation" ? (e.data as { url?: unknown } | undefined)?.url : undefined;
+      if (typeof url === "string") setPendingPr(url);
     }
   }, []);
 
@@ -128,6 +134,20 @@ export function WorkspaceRemoveDialog() {
       const failed = archiveFailure(errorMessage(e));
       setFailure(failed);
       setError(failed ? null : errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const verifyPendingPr = async () => {
+    if (!pendingPr || !host.reconcilePrCreation) return;
+    setBusy("verify");
+    setError(null);
+    try {
+      await host.reconcilePrCreation(pendingPr);
+      await check(host);
+    } catch (e) {
+      setError(errorMessage(e));
     } finally {
       setBusy(null);
     }
@@ -217,7 +237,17 @@ export function WorkspaceRemoveDialog() {
               <Loader2 className="size-3.5 animate-spin" /> Fetching the default branch and checking the workspace…
             </span>
           )}
-          {checkFailed && <Row ok={false} text="The workspace could not be checked, so it cannot be removed from here. Close this and try again." />}
+          {checkFailed && !pendingPr && <Row ok={false} text="The workspace could not be checked, so it cannot be removed from here. Close this and try again." />}
+          {checkFailed && pendingPr && (
+            <>
+              <Row ok={false} text={`A pull request created from this workspace was never verified: ${pendingPr}. It stays until the pull request is merged or closed.`} />
+              {host.reconcilePrCreation && (
+                <Button size="xs" variant="outline" className="self-start" disabled={!!busy} onClick={() => void verifyPendingPr()}>
+                  {busy === "verify" ? <Loader2 className="animate-spin" /> : <GitPullRequest />} Verify pull request
+                </Button>
+              )}
+            </>
+          )}
           {gone && <Row ok={false} text="The workspace folder is not on disk. It may have been removed by hand, or be on a volume that is not mounted." />}
           {disp && (
             <>

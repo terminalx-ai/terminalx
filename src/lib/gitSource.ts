@@ -42,7 +42,9 @@ export interface GitSource {
   branchBase?(base: string): ReturnType<RemoteGit["branchBase"]>;
   branchDiffSize?(base: string): Promise<Awaited<ReturnType<RemoteGit["branchDiffSize"]>> | "unsupported">;
   landed?(): Promise<Pick<import("@/types/session").Landed, "safe" | "head" | "branch"> | null>;
-  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean; branchPrLinks?: boolean; pendingCreation?: boolean }>;
+  prAssociations?(sessionId: string): Promise<{ associations: PrAssociation[]; discoveryOnly?: boolean; branchPrLinks?: boolean; pendingCreation?: boolean; pendingCreationUrls?: string[] }>;
+  /** Machine only: clear a pending create's cleanup guard once its PR merged or closed. */
+  reconcilePrCreation?(url: string): Promise<void>;
   linkBranchPr?(sessionId: string, url: string, branch: string): Promise<void>;
   unlinkPr?(sessionId: string, url: string): Promise<void>;
   /** Recent history, a commit-id cursor, or `baseBranch..HEAD` for branch-owned commits. */
@@ -336,7 +338,10 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
         if (response.branchPrLinks && connection === remote.client.connection) {
           for (const entry of runtimeRows) legacyUrlGuard.set(entry, connection);
         }
-        return { associations: runtimeRows, branchPrLinks: response.branchPrLinks, ...(response.pendingCreation ? { pendingCreation: true } : {}) };
+        return {
+          associations: runtimeRows, branchPrLinks: response.branchPrLinks,
+          ...(response.pendingCreation ? { pendingCreation: true, pendingCreationUrls: response.pendingCreationUrls ?? [] } : {}),
+        };
       }
       const cached = await gh.associations(sessionId, runtimeRows);
       // The cache may predate the linked bit.
@@ -354,6 +359,10 @@ export function cloudGitSource(input: { workspaceKey: string; remote: RemoteGit;
     }),
     ...(canManageMachine && {
       unlinkPr: (sessionId: string, url: string) => remote.unlinkPr(sessionIdOnRuntime(sessionId), url).then(() => undefined),
+      reconcilePrCreation: (url: string) => remote.reconcilePrCreation(url).then(() => undefined, (error: unknown) => {
+        if (error instanceof WorkspaceRpcError && error.code === "method_not_found") throw new Error("Update the machine runtime to verify this pull request.");
+        throw error;
+      }),
     }),
     prScope: { kind: "cloud", workspace: input.workspaceKey, repo: remote.repo },
     prAccess: (association) => {

@@ -734,6 +734,7 @@ impl WorkspaceGit {
             "git.prUnlink" => self.pr_unlink(params),
             "git.prLanded" => self.pr_landed(params),
             "git.prCreate" | "git.prCreateForSession" => self.pr_create(params, method == "git.prCreateForSession"),
+            "git.prReconcileCreation" => self.pr_reconcile_creation(params),
             "git.prReady" => self.pr_ready(params),
             "git.prMerge" => self.pr_merge(params),
             _ => return None,
@@ -1618,8 +1619,12 @@ impl WorkspaceGit {
         let mut response = self.locate_pr_associations(&session, associations, url_targets);
         if self.project {
             response["branchPrLinks"] = json!(true);
-            if pending_pr_creations(|entries| (entries.iter().any(|entry| entry.session == session.id), false))? {
+            let pending = pending_pr_creations(|entries| (entries.iter().filter(|entry| entry.session == session.id)
+                .map(|entry| entry.url.clone()).collect::<Vec<_>>(), false))?;
+            if !pending.is_empty() {
                 response["pendingCreation"] = json!(true);
+                // What `git.prReconcileCreation` takes, once the PR has merged or closed.
+                response["pendingCreationUrls"] = json!(pending);
             }
         }
         Ok(response)
@@ -2052,6 +2057,72 @@ impl WorkspaceGit {
             return Err(RpcError::new("conflict", format!("GitHub opened {url} with a different head, base, or commit.")));
         }
         Ok(())
+    }
+
+    /// `git.prReconcileCreation`: settle a create whose readback never
+    /// completed, by its URL alone. The original session, its Create form and
+    /// the topic branch may all be gone by now (the PR merged and GitHub
+    /// deleted the branch), so nothing here depends on them. The record must
+    /// belong to one of this project's checkouts (its Git directory is under
+    /// the project's), the URL must be a pull request of the project's origin
+    /// repository, and GitHub must report it merged or closed. An open PR,
+    /// or one GitHub cannot answer for, keeps the record and with it the
+    /// cleanup guard.
+    fn pr_reconcile_creation(&self, params: &Value) -> Result<Value, RpcError> {
+        if !self.project || !self.project_has_git() {
+            return Err(RpcError::invalid("Pending pull request creations are only recorded on a paired machine's project."));
+        }
+        let url = crate::pr_associations::identity(required_str(params, "url")?)
+            .map_err(|_| RpcError::invalid("Give the pull request's URL."))?;
+        let repo = Repo { name: ".".into(), dir: self.root.clone() };
+        let common = self.git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = Path::new(common.trim()).canonicalize().map_err(RpcError::internal)?;
+        let owned = |entry: &PendingPrCreation| entry.url == url && entry.checkout.git_dir.starts_with(&common);
+        let evidence = pending_pr_creations(|entries| (entries.iter().filter(|entry| owned(entry)).cloned().collect::<Vec<_>>(), false))?;
+        if evidence.is_empty() {
+            // Nothing of this project waits on it: already reconciled, or never ours.
+            return Ok(json!({ "url": url, "cleared": 0 }));
+        }
+        let origin = self.git(&repo, &["remote", "get-url", "origin"])?;
+        let github_repo = self.pr_creation_repository(origin.trim())?;
+        if !url.starts_with(&format!("https://{github_repo}/pull/")) {
+            return Err(RpcError::new("conflict", "The pull request belongs to a different repository than this project's origin."));
+        }
+        let unresolved = || RpcError::new("outcome_unknown", format!("GitHub could not confirm {url} yet, so this workspace stays protected. Try again."));
+        let target = Target::new(&url).map_err(|_| unresolved())?;
+        target.require_exact_cli_host().map_err(|_| unresolved())?;
+        let pr = self.pr_view_reference(&repo, &target.url).map_err(|_| unresolved())?;
+        Self::verify_pr_url(&pr, &url).map_err(|_| unresolved())?;
+        if !matches!(pr.state.as_str(), "MERGED" | "CLOSED") {
+            return Err(RpcError::new("conflict", format!("Pull request #{} is still open. Merge or close it before removing its workspace.", pr.number))
+                .with_data(json!({ "url": url, "state": pr.state })));
+        }
+        // Where the session and its exact checkout survive and GitHub shows
+        // the very head, base and commit that were created, keep the PR on
+        // the session, as a completed retry would have.
+        for entry in &evidence {
+            let matches = pr.head == entry.branch && pr.base == entry.base && pr.head_sha == entry.head;
+            if matches && self.project_session(&entry.session).is_ok() && Self::same_checkout(&entry.checkout) {
+                crate::pr_associations::record_local(&entry.session, &entry.checkout.path, &url, &entry.branch)
+                    .map_err(|error| RpcError::internal(format!("Pull request #{} could not be saved to its session: {error}", pr.number)))?;
+            }
+        }
+        let cleared = pending_pr_creations(|entries| {
+            let count = entries.len();
+            entries.retain(|entry| !owned(entry));
+            (count - entries.len(), entries.len() != count)
+        })?;
+        Ok(json!({ "url": url, "state": pr.state, "cleared": cleared }))
+    }
+
+    /// Whether the recorded checkout is still the very directory it was.
+    fn same_checkout(checkout: &CheckoutIdentity) -> bool {
+        let Ok(path) = checkout.path.canonicalize() else { return false };
+        let git_dir = crate::git::run(&path, &["rev-parse", "--absolute-git-dir"]).ok()
+            .and_then(|dir| Path::new(dir.trim()).canonicalize().ok());
+        path == checkout.path && git_dir.as_deref() == Some(checkout.git_dir.as_path())
+            && directory_identity(&path).ok() == Some(checkout.directory)
+            && directory_identity(&checkout.git_dir).ok() == Some(checkout.admin)
     }
 
     fn pr_number(params: &Value) -> Result<String, RpcError> {
