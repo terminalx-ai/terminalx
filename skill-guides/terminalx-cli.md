@@ -1946,13 +1946,15 @@ terminalx bots delete <bot> --json
   recorded as that bot (its id in `by`). A command no tab holds is the owner's only from a
   terminal of the person's own, or a TerminalX pane: with neither it is refused those four with
   `person_required`, and while any bot is paused it starts no work (`bot_paused`; reads such as
-  `machine list` still answer). A command whose process exits before the app looks at it is
-  refused with `person_required`: let `terminalx` wait for its answer. While Bots is on, the
-  runtime's own calls that change sessions or terminals are taken from the TerminalX window (its
-  process, checked by pid and start time) and otherwise only from a session no bot works for or
-  a terminal of the person's own; everything else is refused. Known gap (PRO-489): a bot's
-  process that gives itself a terminal of its own (`script`, an existing tmux server) counts as
-  the person's; the fix is a credential only the window holds.
+  `machine list` still answer). A command whose process exits, or closes its connection, before
+  the app looks at it is refused with `person_required` (on macOS and Linux alike): let
+  `terminalx` wait for its answer. While Bots is on, the runtime's own calls that change sessions
+  or terminals are taken from the TerminalX window (its process, checked by pid and start time,
+  and carried across a runtime update) and otherwise only from a session no bot works for or a
+  terminal of the person's own; everything else is refused. The limit (PRO-489): a bot's process
+  that has left its tab and runs code of its own choosing, such as one that gives itself a
+  terminal (`script`, an existing tmux server), is not held by this; nor are the runtime's
+  `mobile` and `sharing` calls. The fix is a credential only the window holds.
   Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
   person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
   `resume` says so with `person_required` rather than waiting.

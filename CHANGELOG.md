@@ -29,13 +29,14 @@
   app places a command in the pane that started it where it can (by its
   process, its session and its terminal) and then ignores the session it
   names; a command it cannot place counts as the owner's only from a terminal
-  of the person's own, one whose process has already exited is refused, and
-  one that has made itself a terminal of its own (`script`, tmux) is not
-  placed. While Bots is on, the runtime's own calls that change sessions or
-  terminals are taken from the window (by its process and start time), from
-  a session no bot works for, or from a terminal of the person's own, and
-  refused otherwise; a bot's process that gives itself a terminal of its own
-  still counts as the person's (PRO-489). A bot's work on an agent that cannot
+  of the person's own, one whose process has already exited or closed its
+  connection is refused, and one that has made itself a terminal of its own
+  (`script`, tmux) is not placed. While Bots is on, the runtime's own calls
+  that change sessions or terminals are taken from the window (by its
+  process and start time, carried across a runtime update), from a session
+  no bot works for, or from a terminal of the person's own, and refused
+  otherwise. Not held (PRO-489): a bot's process that has left its tab and
+  runs code of its own choosing, such as one with a terminal of its own. A bot's work on an agent that cannot
   be given its rules (ACP, OpenCode) is refused at launch.
   Hiring, resuming, deleting and raising access are confirmed by the
   TerminalX window on a Mac, which restarts its runtime to do so when needed,

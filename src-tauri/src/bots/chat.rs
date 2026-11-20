@@ -186,7 +186,7 @@ fn unheld_agent(name: &str, harness: &str) -> String {
 /// that cannot be given the bot's rules or held to its access (PRO-468),
 /// with what a chat with the bot on that agent is told.
 pub fn refuse_unheld_launch(entry: &SessionEntry, harness: &str) -> Result<()> {
-    if takes_bot_instructions(harness) || !super::enabled() {
+    if !super::enabled() || takes_bot_instructions(harness) {
         return Ok(());
     }
     let Some(id) = acting_bot(entry) else { return Ok(()) };

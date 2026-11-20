@@ -448,21 +448,42 @@ thread_local! {
     pub(crate) static TEST_CALLER_PID: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 
-/// The process at the other end of the frame being answered on this thread,
-/// as the kernel says (PRO-468): who sent a control request, whatever it
-/// claims. `None` off unix, for an in-process call, or when it cannot be told.
-pub(crate) fn caller_pid() -> Option<i32> {
+/// Who sent the frame being answered on this thread, as the kernel says (PRO-468).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// No transport: a direct call inside this process.
+    InProcess,
+    /// The process at the other end, whatever it claims.
+    Pid(i32),
+    /// A transport whose other end cannot be read: on macOS, one the client
+    /// closed after sending. Who sent it cannot be told.
+    Unreadable,
+}
+
+/// The sender of the frame being answered on this thread.
+pub(crate) fn caller() -> Peer {
     #[cfg(test)]
     if let Some(pid) = TEST_CALLER_PID.with(std::cell::Cell::get) {
-        return Some(pid);
+        return Peer::Pid(pid);
     }
     #[cfg(unix)]
     {
-        let stream = CALLER.with(|caller| caller.borrow().clone())?;
-        crate::serve_cli::consent::peer_pid(&stream).ok()
+        let Some(stream) = CALLER.with(|caller| caller.borrow().clone()) else { return Peer::InProcess };
+        match crate::serve_cli::consent::peer_pid(&stream) {
+            Ok(pid) => Peer::Pid(pid),
+            Err(_) => Peer::Unreadable,
+        }
     }
     #[cfg(not(unix))]
-    None
+    Peer::InProcess
+}
+
+/// [`caller`]'s process, when the kernel names one.
+pub(crate) fn caller_pid() -> Option<i32> {
+    match caller() {
+        Peer::Pid(pid) => Some(pid),
+        Peer::InProcess | Peer::Unreadable => None,
+    }
 }
 
 /// Inspect the hook transport without consuming bytes or spawning a watcher.

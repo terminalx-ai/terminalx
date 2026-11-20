@@ -518,7 +518,17 @@ impl ControlService {
         }
         #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
-            if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
+            if command == "runtime.window.register" {
+                let registered = lifetime.window.register(lifetime, params)?;
+                // The registrant is the window from now on, unless it runs in a pane or under this runtime (PRO-468).
+                if let Some(pid) = crate::hooks::caller_pid() {
+                    match crate::serve_cli::consent::started_at(pid) {
+                        Some(started) if self.may_be_the_window(pid) => lifetime.window.recognise((pid, started)),
+                        _ => log::warn!("process {pid} registered as the window, but runs in a pane or under this runtime: not taken for the window"),
+                    }
+                }
+                return Ok(registered);
+            }
             if crate::local_runtime::window::supported(command) { return lifetime.window.call(command, params); }
         }
         if command.starts_with("runtime.") {
@@ -2650,6 +2660,17 @@ pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, Con
 /// that is only what the command's environment says, which is enough for a
 /// record that grants nothing, and a session the app does not know (the
 /// environment of one since deleted) is simply not recorded.
+impl ControlService {
+    /// Whether process `pid`, registering as the window, may be taken for it:
+    /// not in any of this runtime's panes, nor under this runtime's process.
+    #[cfg(unix)]
+    fn may_be_the_window(&self, pid: i32) -> bool {
+        // SAFETY: getpid has no preconditions.
+        let runtime = unsafe { libc::getpid() };
+        pid != runtime && !crate::serve_cli::consent::descends_from(pid, runtime) && matches!(self.manager.session_of_process(pid), Ok(None))
+    }
+}
+
 /// While Bots is on, a `runtime.session.*` or `runtime.pty.*` call that is
 /// not a read ([`runtime_read`]) is the window's: its process, by pid and
 /// start time (`window`), passes at once, every keystroke included. Any
@@ -2661,8 +2682,12 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     if !crate::bots::enabled_cached() || runtime_read(command, params) {
         return Ok(());
     }
-    // In-process: no peer to place.
-    let Some(pid) = crate::hooks::caller_pid() else { return Ok(()) };
+    let pid = match crate::hooks::caller() {
+        // In-process: no peer to place.
+        crate::hooks::Peer::InProcess => return Ok(()),
+        crate::hooks::Peer::Unreadable => return Err(gone()),
+        crate::hooks::Peer::Pid(pid) => pid,
+    };
     #[cfg(unix)]
     {
         if window.is_some_and(|(window, started)| window == pid && crate::serve_cli::consent::started_at(pid) == Some(started)) {
@@ -2670,13 +2695,6 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
         }
         let caller = Caller::of_process(manager, &json!({}), Some(pid));
         caller.refuse_gone()?;
-        if caller.incomplete {
-            return Err(ControlError::new(
-                "person_required",
-                "This call changes sessions or terminals, and TerminalX could not tell where the process that sent it runs, so while Bots is on it is not done.",
-                Some("Try again from TerminalX itself, or from a terminal of your own.".into()),
-            ));
-        }
         if caller.bot.is_some() {
             return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
         }
@@ -2838,7 +2856,16 @@ struct Caller {
 
 impl Caller {
     fn of(manager: &SessionManager, params: &Value) -> Self {
-        Self::of_process(manager, params, crate::hooks::caller_pid())
+        match crate::hooks::caller() {
+            crate::hooks::Peer::Pid(pid) => Self::of_process(manager, params, Some(pid)),
+            crate::hooks::Peer::InProcess => Self::of_process(manager, params, None),
+            // A sender that cannot be read is one that is gone.
+            crate::hooks::Peer::Unreadable => {
+                let mut caller = Self::of_process(manager, params, None);
+                caller.gone = crate::bots::enabled();
+                caller
+            }
+        }
     }
 
     fn of_process(manager: &SessionManager, params: &Value, peer: Option<i32>) -> Self {
@@ -2916,16 +2943,20 @@ impl Caller {
         false
     }
 
-    /// Refused when the process that sent it was gone before it could be placed.
+    /// Refused when the process that sent it was gone before it could be
+    /// placed, or where it runs could not be worked out.
     fn refuse_gone(&self) -> Result<(), ControlError> {
-        if !self.gone {
-            return Ok(());
+        if self.gone {
+            return Err(gone());
         }
-        Err(ControlError::new(
-            "person_required",
-            "The process that sent this had exited before TerminalX could tell where it runs, so it is not done while Bots is on.",
-            Some("Run the command again and let it wait for its answer.".into()),
-        ))
+        if self.incomplete {
+            return Err(ControlError::new(
+                "person_required",
+                "TerminalX could not tell where the process that sent this runs, so while Bots is on it is not done.",
+                Some("Try again from TerminalX itself, or from a terminal of your own.".into()),
+            ));
+        }
+        Ok(())
     }
 
     /// Refused unless only a person could have sent it from here: not a
@@ -3046,6 +3077,15 @@ impl Caller {
             Err(self.forbidden("steer a run whose lead does not work for the same bot"))
         }
     }
+}
+
+/// A command whose sender had exited, or could no longer be read, when it was looked at.
+fn gone() -> ControlError {
+    ControlError::new(
+        "person_required",
+        "The process that sent this had exited before TerminalX could tell where it runs, so it is not done while Bots is on.",
+        Some("Run the command again and let it wait for its answer.".into()),
+    )
 }
 
 /// What a `machine.*` command only reads on another computer.
@@ -3926,6 +3966,122 @@ mod tests {
         after.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r").unwrap();
         TEST_WINDOW_PROCESS.with(|window| window.set(None));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// H1 (review 6): on macOS a client that closes its socket after
+    /// sending cannot be read, and was taken for an in-process call. Over the
+    /// real socket: the same request is done while its sender waits for the
+    /// answer, and refused once it has closed. (On Linux the kernel keeps the
+    /// sender's pid, which is placed as any other.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_sender_that_closes_its_socket_after_sending_is_refused() {
+        use std::io::{BufRead, Write};
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let endpoint = crate::hooks::prepare_control().unwrap();
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()),
+            Arc::new(Default::default()), Arc::new(Default::default()), endpoint.clone(),
+        );
+        let service = ControlService::headless(sink.clone(), manager, endpoint.clone(), "test".into());
+        // What the runtime answered each frame, by its id, whether or not its sender could still read it.
+        let (answered, answers) = std::sync::mpsc::channel::<(String, Value)>();
+        let answered = std::sync::Mutex::new(answered);
+        crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::default(), move |request| {
+            let id = request.id.clone();
+            let response = service.handle(request);
+            let _ = answered.lock().unwrap().send((id, serde_json::to_value(&response).unwrap()));
+            response
+        }).unwrap();
+        let frame = |id: &str| format!("{}\n", json!({"id": id, "token": endpoint.token, "command": "send", "params": {"target": "no-such-session", "text": "go"}}));
+        let answer = |id: &str| loop {
+            let (got, response) = answers.recv_timeout(std::time::Duration::from_secs(10)).expect("answered");
+            if got == id { break response; }
+        };
+
+        // Sent and waited for: it reaches the command, which finds no such session.
+        let mut open = std::os::unix::net::UnixStream::connect(&endpoint.socket).unwrap();
+        open.write_all(frame("waited").as_bytes()).unwrap();
+        let mut reply = String::new();
+        std::io::BufReader::new(&open).read_line(&mut reply).unwrap();
+        assert_eq!(answer("waited")["error"]["code"], "not_found");
+
+        // Sent, then closed at once: who sent it can no longer be read, so it is not done.
+        let mut closed = std::os::unix::net::UnixStream::connect(&endpoint.socket).unwrap();
+        closed.write_all(frame("closed").as_bytes()).unwrap();
+        drop(closed);
+        let refused = answer("closed");
+        assert_eq!(refused["error"]["code"], "person_required", "{refused}");
+        assert!(refused["error"]["message"].as_str().unwrap().contains("exited"), "{refused}");
+    }
+
+    /// M2 (review 6): after a handover, the window's frames reach a runtime
+    /// that has not seen it register: the process the old runtime knew is
+    /// taken for the window, through the dispatch, until a window registers.
+    #[cfg(unix)]
+    #[test]
+    fn a_window_frame_answered_right_after_a_handover_is_delivered() {
+        let marker = format!("71.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        // The window: a process in no pane with no terminal, as the desktop app is.
+        let mut window = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let pid = window.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let write = || service.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r");
+        assert_eq!(write().unwrap_err().code, "person_required", "a stranger before the handover is known");
+        lifetime.window.handed_over(Some((pid, crate::serve_cli::consent::started_at(pid).unwrap())));
+        write().unwrap();
+        // A handover never replaces a window that registered here.
+        lifetime.window.handed_over(Some((1, 1)));
+        write().unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        let _ = window.kill();
+        let _ = window.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// M1 (review 6): a process in a pane, or under the runtime, is not taken
+    /// for the window when it registers as one.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_in_a_pane_is_not_taken_for_the_window() {
+        let marker = format!("72.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        assert!(!service.may_be_the_window(pid), "in the bot's pane");
+        let mut child = std::process::Command::new("sleep").arg("30").stdin(std::process::Stdio::null()).spawn().unwrap();
+        assert!(!service.may_be_the_window(child.id() as i32), "under the runtime's own process");
+        let _ = child.kill();
+        let _ = child.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// Low (review 6): where a caller runs cannot be worked out (the sessions
+    /// cannot be read), it starts nothing and does nothing only a person does.
+    #[cfg(unix)]
+    #[test]
+    fn a_caller_that_cannot_be_placed_starts_nothing() {
+        let marker = format!("73.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let index = crate::store::sessions_dir().unwrap().join("index.json");
+        let kept = std::fs::read(&index).unwrap();
+        std::fs::write(&index, b"{ not json").unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        assert_eq!(ask("sessions.create", json!({"quick": true, "agent": "claude", "prompt": "go"})).unwrap_err().code, "person_required");
+        assert_eq!(ask("bots.create", json!({"role": "cto", "name": "Echo"})).unwrap_err().code, "person_required");
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        std::fs::write(&index, kept).unwrap();
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 

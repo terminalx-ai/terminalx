@@ -4098,8 +4098,8 @@ impl SessionManager {
         if rt.child.is_none() {
             match HarnessId::parse(&tab.harness) {
                 HarnessId::Claude | HarnessId::Codex => bail!("that agent runs its own CLI"),
-                HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &tab, &entry.cwd, &binary)?,
-                HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &tab, &entry.cwd)?,
+                HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &entry, &tab, &entry.cwd, &binary)?,
+                HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &entry, &tab, &entry.cwd)?,
                 HarnessId::Other(name) => bail!("The {name} agent is not wired up yet."),
             }
         }
@@ -4210,10 +4210,10 @@ impl SessionManager {
         Ok(privacy)
     }
 
-    fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+    fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         // A bot's work runs only where its rules and access reach (PRO-468).
-        crate::bots::chat::refuse_unheld_launch(&index::get(&rt.session_id)?, &tab.harness)?;
+        crate::bots::chat::refuse_unheld_launch(entry, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("ACP launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -4227,10 +4227,10 @@ impl SessionManager {
         Ok(())
     }
 
-    fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+    fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, cwd: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         // A bot's work runs only where its rules and access reach (PRO-468).
-        crate::bots::chat::refuse_unheld_launch(&index::get(&rt.session_id)?, &tab.harness)?;
+        crate::bots::chat::refuse_unheld_launch(entry, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("OpenCode launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -10342,8 +10342,8 @@ impl SessionManager {
                     let entry = index::get(&rt.session_id)?;
                     let tab = entry.tab(&rt.tab_id).context("ACP queue tab missing")?;
                     match HarnessId::parse(&tab.harness) {
-                        HarnessId::Acp(binary) => self.start_acp(&mut rt, runtime, tab, &entry.cwd, &binary),
-                        HarnessId::OpenCode => self.start_opencode(&mut rt, runtime, tab, &entry.cwd),
+                        HarnessId::Acp(binary) => self.start_acp(&mut rt, runtime, &entry, tab, &entry.cwd, &binary),
+                        HarnessId::OpenCode => self.start_opencode(&mut rt, runtime, &entry, tab, &entry.cwd),
                         _ => bail!("carried queue engine replaced"),
                     }
                 })();
