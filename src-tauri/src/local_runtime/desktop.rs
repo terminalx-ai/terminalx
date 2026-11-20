@@ -297,6 +297,16 @@ impl Desktop {
         super::window_consent::guarded(self, command, params, |runtime, params| runtime.machine_host_once(command, params), relaunch)
     }
 
+    /// [`Self::machine_host`] with no one at the window to ask, as for an
+    /// account pairing grant: a runtime that cannot verify the window is not
+    /// restarted for it, and Settings → Machines offers the restart instead
+    /// (PRO-486, `window_consent::unattended`).
+    #[cfg(feature = "desktop")]
+    pub(crate) fn machine_host_unattended(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let repairable = super::window_consent::installed().is_some();
+        super::window_consent::unattended(self, command, params, |runtime, params| runtime.machine_host_once(command, params), repairable, super::window_consent::in_use)
+    }
+
     #[cfg(feature = "desktop")]
     fn machine_host_once(&self, command: &str, mut params: serde_json::Value) -> Result<serde_json::Value> {
         let attachment = self.attachment()?;

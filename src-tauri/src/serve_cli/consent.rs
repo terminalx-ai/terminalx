@@ -216,6 +216,9 @@ pub(crate) fn launch_public_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
 }
 
+/// The window's consent key is in a Keychain it cannot read or write.
+pub(crate) const KEYCHAIN_DENIED: &str = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
+
 /// This window's consent key is not in its Keychain: a runtime launch saves
 /// one, so the runtime attached was not launched by this window with it.
 #[derive(Debug)]
@@ -223,7 +226,7 @@ pub struct WindowKeyMissing;
 
 impl std::fmt::Display for WindowKeyMissing {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        out.write_str("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+        out.write_str("The window consent key is missing from Keychain. In TerminalX, open Settings → Machines and choose Create pairing code: TerminalX restarts its runtime so it can verify the window, or offers Restart runtime there.")
     }
 }
 
@@ -401,7 +404,7 @@ pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(),
     if let Some(refusal) = refusal {
         log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
         if refusal == Refusal::UnsupportedDesktop {
-            return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("Restart the local runtime from TerminalX on a supported desktop. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
+            return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("In TerminalX on a supported desktop, open Settings → Machines and choose Create pairing code: TerminalX restarts its runtime so it can verify the window, or offers Restart runtime there. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
         }
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }

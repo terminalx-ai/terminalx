@@ -125,6 +125,11 @@ export interface MachineHostView {
   keepAwake: boolean;
   /** Null while the runtime cannot be reached. */
   status: MachineHostStatus | null;
+  /**
+   * The attached runtime cannot verify this window and was left running for what it serves (PRO-486):
+   * `runtime_restart_required:<epoch>: <message>`, shown with Restart runtime beside it. Null otherwise.
+   */
+  restartRequired?: string | null;
 }
 
 /**

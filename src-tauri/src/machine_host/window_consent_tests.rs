@@ -377,24 +377,27 @@ const CASE: &str = "TERMINALX_TEST_WINDOW_CONSENT_CASE";
 const OTHER_SEED: [u8; 32] = [91; 32];
 
 /// The ways into a runtime that cannot verify its window, as a case name,
-/// how the adopted runtime was launched (its pinned key, if any), and whether
-/// this window's Keychain holds its consent key:
+/// how the adopted runtime was launched (its pinned key, if any), whether
+/// this window's Keychain holds its consent key, and whether it saves one:
 /// - launched by a build from before the key, and the item never saved (the
 ///   owner's Mac mini on 2026-11-20, TerminalX 0.2.37);
 /// - launched while the Keychain write failed, the item saved later, or
 ///   replaced by an unpinned runtime while the app stays open;
 /// - launched by a build with another bundle identifier, with its own key;
-/// - launched with this key, and the item removed by hand since.
-const ADOPTIONS: [(&str, Option<[u8; 32]>, bool); 4] = [
-    ("unpinned, no item", None, false),
-    ("unpinned, item", None, true),
-    ("another build's key", Some(OTHER_SEED), true),
-    ("item removed by hand", Some(SIGNING_SEED), false),
+/// - launched with this key, and the item removed by hand since;
+/// - launched while the Keychain write failed, which it still refuses: no
+///   fresh launch could pin a key, so nothing is stopped.
+const ADOPTIONS: [(&str, Option<[u8; 32]>, bool, bool); 5] = [
+    ("unpinned, no item", None, false, true),
+    ("unpinned, item", None, true, true),
+    ("another build's key", Some(OTHER_SEED), true, true),
+    ("item removed by hand", Some(SIGNING_SEED), false, true),
+    ("unpinned, Keychain refuses the write", None, false, false),
 ];
 
 #[test]
 fn an_adopted_runtime_that_cannot_verify_the_window_is_relaunched_by_it() {
-    for (case, pinned, _) in ADOPTIONS {
+    for (case, pinned, _, saves) in ADOPTIONS {
         let home = tempfile::Builder::new().prefix("wr").tempdir_in("/tmp").unwrap();
         let root = home.path().canonicalize().unwrap();
         // The runtime an earlier app left running, which this window adopts.
@@ -420,6 +423,7 @@ fn an_adopted_runtime_that_cannot_verify_the_window_is_relaunched_by_it() {
         while !root.join("stop-adopted").exists() && window.try_wait().unwrap().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert_eq!(root.join("stop-adopted").exists(), saves, "{case}: the adopted runtime is stopped only for a fresh launch that pins the key");
         drop(adopted.stdin.take());
         let adopted = adopted.wait_with_output().unwrap();
         let window = window.wait_with_output().unwrap();
@@ -434,11 +438,81 @@ fn an_adopted_runtime_that_cannot_verify_the_window_is_relaunched_by_it() {
     }
 }
 
-/// The window that adopted the runtime: the issue's failure, then the
-/// repair, as `window_consent::install_for` installs it in the app.
+/// The relaunch the window installs, in the app's order
+/// (`window_consent::relaunch_by`) with the app's own key provisioning
+/// (`consent::launch_public_key`, as `launch::launch` pins it) and what the
+/// runtime reports it serves. Only stopping the adopted runtime and
+/// launching the fresh one stand in for `launch::retire` and the
+/// supervisor, which the test binary cannot be launched by.
+struct WindowHost {
+    root: PathBuf,
+    relaunches: Arc<std::sync::atomic::AtomicUsize>,
+    keys: Arc<crate::pairing::PairingManager>,
+}
+
+static FRESH: Mutex<Option<(std::process::Child, Arc<Desktop>)>> = Mutex::new(None);
+
+impl crate::local_runtime::window_consent::Relauncher<Desktop> for WindowHost {
+    fn replaced(&self, epoch: &str) -> Option<Arc<Desktop>> {
+        FRESH.lock().unwrap().as_ref().map(|(_, fresh)| fresh.clone()).filter(|fresh| fresh.epoch() != epoch)
+    }
+
+    fn provision(&self) -> Result<()> {
+        crate::serve_cli::consent::launch_public_key()?.map(drop).context("the window provisions its key")
+    }
+
+    fn connected(&self, stale: &Desktop) -> Vec<String> {
+        crate::local_runtime::window_consent::connected(stale)
+    }
+
+    fn work(&self, _: &Desktop) -> Vec<String> {
+        panic!("an idle runtime's work is not read")
+    }
+
+    fn retire(&self, stale: &Desktop, forced: bool) -> Result<()> {
+        assert!(!forced);
+        self.relaunches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(stale.epoch(), desktop_epoch(&self.root), "the adopted runtime is the one replaced");
+        std::fs::write(self.root.join("stop-adopted"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::os::unix::net::UnixStream::connect(self.root.join("run/hooks.sock")).is_ok() {
+            assert!(Instant::now() < deadline, "the adopted runtime did not stop");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    fn reattach(&self, _: &Desktop) -> Result<Arc<Desktop>> {
+        // As `local_runtime::launch` does: the window's key pinned in the
+        // fresh runtime's environment.
+        let key = crate::serve_cli::consent::launch_public_key()?.expect("the window provisions its key");
+        let mut command = child(&self.root, "runtime-relaunched");
+        command.env(crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV, key).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        let runtime = command.spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self.root.join("runtime-relaunched").exists() {
+            assert!(Instant::now() < deadline, "the fresh runtime did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (_, fresh) = detached_desktop(&self.root);
+        // As the app's reattach does: the host key the window holds.
+        self.keys.reconcile_machine(&fresh);
+        *FRESH.lock().unwrap() = Some((runtime, fresh.clone()));
+        Ok(fresh)
+    }
+}
+
+/// The window that adopted the runtime: the issue's failure, a grant that
+/// does not restart it, then the repair, as `window_consent::install_for`
+/// installs it in the app.
 fn window_adopts() {
+    use crate::local_runtime::window_consent;
     let case = std::env::var(CASE).unwrap();
-    let (_, _, holds_item) = ADOPTIONS.iter().find(|(name, _, _)| *name == case).copied().unwrap();
+    let (_, _, holds_item, saves) = ADOPTIONS.iter().find(|(name, ..)| *name == case).copied().unwrap();
     let root = crate::store::root().unwrap();
     let (_, desktop) = detached_desktop(&root);
     let secrets = MemorySecrets::default();
@@ -447,49 +521,45 @@ fn window_adopts() {
     if holds_item {
         secrets.set(&service, CONSENT_ACCOUNT, &SIGNING_SEED).unwrap();
     }
+    if !saves {
+        secrets.fail_writes(true);
+    }
     let manager = crate::pairing::PairingManager::with_secrets_for_test(APP, Arc::new(secrets.clone()));
     crate::install_window_pairing_consent(&manager);
     manager.reconcile_machine(&desktop);
 
     // As reported: every guarded command fails, with no repair installed.
     let error = desktop.machine_host(wire::CREATE_CODE, json!({})).unwrap_err();
-    assert!(crate::local_runtime::window_consent::unverifiable(&error), "{case}: {error:#}");
+    assert!(window_consent::unverifiable(&error), "{case}: {error:#}");
     if !holds_item {
         assert!(error.to_string().contains("missing from Keychain"), "{case}: {error:#}");
     }
 
-    static FRESH: Mutex<Option<(std::process::Child, Arc<Desktop>)>> = Mutex::new(None);
     let relaunches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let (counted, window_root, keys) = (relaunches.clone(), root.clone(), manager.clone());
-    crate::local_runtime::window_consent::install(Box::new(move |stale| {
-        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(stale.epoch(), desktop_epoch(&window_root), "the adopted runtime is the one replaced");
-        std::fs::write(window_root.join("stop-adopted"), b"").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while std::os::unix::net::UnixStream::connect(window_root.join("run/hooks.sock")).is_ok() {
-            assert!(Instant::now() < deadline, "the adopted runtime did not stop");
-            std::thread::sleep(Duration::from_millis(20));
+    let host = WindowHost { root: root.clone(), relaunches: relaunches.clone(), keys: manager.clone() };
+    window_consent::install(Box::new(move |stale| window_consent::relaunch_by(&host, stale, false)));
+
+    // An account grant, with no one at the window: never a restart, only
+    // the offer in Settings → Machines.
+    let error = desktop.machine_host_unattended(wire::CREATE_CODE, json!({ "grantRequestId": "grant-1" })).unwrap_err();
+    let offered = error.downcast_ref::<window_consent::RestartRequired>().unwrap_or_else(|| panic!("{case}: {error:#}"));
+    assert_eq!(offered.epoch, desktop.epoch());
+    assert_eq!(window_consent::offered(desktop.epoch()).as_ref(), Some(offered), "{case}");
+    assert_eq!(relaunches.load(std::sync::atomic::Ordering::SeqCst), 0, "{case}: a grant restarts nothing");
+    assert!(!root.join("stop-adopted").exists(), "{case}");
+
+    if !saves {
+        // No fresh launch could pin a key: nothing is stopped, and the
+        // Keychain's own message is shown, on every attempt.
+        for _ in 0..2 {
+            let error = desktop.machine_host(wire::CREATE_CODE, json!({})).unwrap_err();
+            assert_eq!(error.to_string(), crate::serve_cli::consent::KEYCHAIN_DENIED, "{case}");
         }
-        // As `local_runtime::launch` does: the window's key, created if
-        // absent, pinned in the fresh runtime's environment.
-        let key = crate::serve_cli::consent::launch_public_key()?.expect("the window provisions its key");
-        let mut command = child(&window_root, "runtime-relaunched");
-        command.env(crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV, key).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
-        // SAFETY: setsid is async-signal-safe.
-        unsafe {
-            command.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
-        }
-        let runtime = command.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !window_root.join("runtime-relaunched").exists() {
-            assert!(Instant::now() < deadline, "the fresh runtime did not start");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let (_, fresh) = detached_desktop(&window_root);
-        keys.reconcile_machine(&fresh);
-        *FRESH.lock().unwrap() = Some((runtime, fresh.clone()));
-        Ok(fresh)
-    }));
+        assert_eq!(relaunches.load(std::sync::atomic::Ordering::SeqCst), 0, "{case}");
+        assert!(secrets.stored(&service, CONSENT_ACCOUNT).is_none(), "{case}");
+        desktop.machine_host_status().expect("the adopted runtime still answers");
+        return;
+    }
 
     let created = desktop.machine_host(wire::CREATE_CODE, json!({})).unwrap_or_else(|error| panic!("{case}: {error:#}"));
     let code = wire::MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
@@ -499,8 +569,10 @@ fn window_adopts() {
         assert!(secrets.stored(&service, CONSENT_ACCOUNT).is_some(), "{case}: the fresh launch saved a key");
     }
     let (mut runtime, fresh) = FRESH.lock().unwrap().take().unwrap();
-    // The fresh runtime verifies this window with no further restart.
+    // The fresh runtime verifies this window with no further restart, for
+    // a grant too.
     fresh.machine_host(wire::CREATE_CODE, json!({})).unwrap();
+    fresh.machine_host_unattended(wire::CREATE_CODE, json!({ "grantRequestId": "grant-2" })).unwrap();
     assert_eq!(relaunches.load(std::sync::atomic::Ordering::SeqCst), 1, "{case}");
     drop(runtime.stdin.take());
     assert!(runtime.wait().unwrap().success(), "{case}: the fresh runtime failed");

@@ -67,7 +67,7 @@ fn consent_key_distinguishes_missing_storage_entry_and_denied_read() {
         panic!("a missing key must fail closed");
     };
     assert!(missing.to_string().contains("missing from Keychain"));
-    assert!(missing.to_string().contains("Restart the local runtime"));
+    assert!(missing.to_string().contains("Settings → Machines"));
 
     let created = manager.consent_key(true).unwrap();
     let read = manager.consent_key(false).unwrap();

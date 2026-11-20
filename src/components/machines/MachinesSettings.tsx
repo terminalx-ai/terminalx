@@ -74,6 +74,8 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
     void bootMachineHost();
   }, []);
   const view = host.view;
+  // A command's failure, or a restart a pairing grant could not make by itself (PRO-486).
+  const hostError = host.error ?? view?.restartRequired ?? null;
   const allow = view?.allowOperating ?? false;
 
   return (
@@ -91,10 +93,10 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
             />
           }
         />
-        {host.error && (
+        {hostError && (
           <MachineHostError
             className="pb-2"
-            error={host.error}
+            error={hostError}
             onRestarted={() => {
               clearMachineHostError();
               void refreshMachineHost();
