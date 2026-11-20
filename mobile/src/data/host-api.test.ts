@@ -90,6 +90,22 @@ describe("phone caching and sending ahead (#1283)", () => {
     expect(request).toHaveBeenLastCalledWith("sync.prefetch", { enabled: false });
   });
 
+  it("names the conversations on screen only to a Mac that takes them (#1337)", async () => {
+    const open = [{ sessionId: "session", tabId: "tab" }];
+    const mac = (features: Record<string, number>) => vi.fn(async (method: string, params?: { enabled?: boolean }) => method === "sync.capabilities"
+      ? { ok: true, value: features }
+      : { ok: true, value: { enabled: params?.enabled } });
+    // A Mac that refuses fields it does not know is not sent one.
+    const older = mac({ transcript: 1, prefetch: 1 });
+    expect(await hostApi(older).prefetch(true, [], open)).toBe(true);
+    expect(older).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [] });
+    const newer = mac({ transcript: 1, prefetch: 1, prefetchOpen: 1 });
+    expect(await hostApi(newer).prefetch(true, [], open)).toBe(true);
+    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [], open });
+    await hostApi(newer).prefetch(true, [], []);
+    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [] });
+  });
+
   it("passes on only prefetched pages that are contiguous with the checkpoint they continue", () => {
     let emit: (event: { method: string; params?: unknown }) => void = () => {};
     const api = new HostApi({ request: vi.fn(), onEvent: (listener: typeof emit) => { emit = listener; return () => {}; } } as unknown as HostConnection);

@@ -1,6 +1,6 @@
 import { mergeEvents, type HostApi, type Prefetched } from "./host-api";
 import { cacheEpoch, readCache, savedCursors, writeCache } from "./transcript-cache";
-import { appendedCount, transcriptOpen } from "./transcript-sync";
+import { appendedCount, openTranscriptsOf, transcriptOpen } from "./transcript-sync";
 
 /** The checkpoints a phone names: the Mac takes at most 256. */
 const KNOWN_LIMIT = 128;
@@ -9,7 +9,8 @@ const KNOWN_LIMIT = 128;
 export async function startPrefetch(api: HostApi, host: string): Promise<boolean> {
   const known = await savedCursors(host, KNOWN_LIMIT);
   named.set(host, new Set(known.map(({ sessionId, tabId }) => JSON.stringify([sessionId, tabId]))));
-  return api.prefetch(true, known);
+  // Open ones read for themselves: the Mac is asked not to send them (#1337).
+  return api.prefetch(true, known, openTranscriptsOf(host).slice(0, KNOWN_LIMIT));
 }
 
 /** The conversations whose checkpoints the last prefetch named, by Mac. */

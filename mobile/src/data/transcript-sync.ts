@@ -212,6 +212,13 @@ export function watchTranscript(
 /** Conversations open on screen, which read for themselves: a prefetch leaves them alone (#1283). */
 const openTranscripts = new Map<string, number>();
 export const transcriptOpen = (host: string, session: string, tab: string) => openTranscripts.has(lossKey(host, session, tab));
+/** The conversations open on screen for a Mac: a prefetch is asked not to send them (#1337). */
+export function openTranscriptsOf(host: string): { sessionId: string; tabId: string }[] {
+  return [...openTranscripts.keys()].flatMap((key) => {
+    const [owner, sessionId, tabId] = JSON.parse(key) as [string, string, string];
+    return owner === host ? [{ sessionId, tabId }] : [];
+  });
+}
 
 /**
  * How many of `incoming` only add to `existing`: all of them when each comes

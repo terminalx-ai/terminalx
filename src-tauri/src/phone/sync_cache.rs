@@ -113,40 +113,70 @@ pub(super) struct Tail {
     bytes: Vec<u8>,
 }
 
+/// Who a page was read for. A prefetch keeps its own checkpoint (#1337): the
+/// phone may never adopt what it sent, and then the cursor the phone's reader
+/// holds must still be the one this connection continues from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reader { Phone, Prefetch }
+
+/// One conversation's checkpoints on this connection.
+struct Entry {
+    /// Where the phone's own last `session.sync` page ended.
+    phone: Option<Verified>,
+    /// Where the last prefetch page ended, which the phone may or may not have kept.
+    prefetch: Option<Verified>,
+    /// When the phone itself last read this conversation.
+    read: Option<Instant>,
+    used: Instant,
+}
+
 #[derive(Default)]
 pub(crate) struct SyncCache {
-    entries: Mutex<HashMap<(String, String), (Verified, Instant)>>,
+    entries: Mutex<HashMap<(String, String), Entry>>,
 }
 
 impl SyncCache {
-    /// The checkpoint `cursor` names, if this connection returned it last for this conversation.
+    /// The checkpoint `cursor` names, if this connection returned it last for
+    /// this conversation, to the phone's reader or in a prefetch.
     pub(super) fn matching(&self, session: &str, tab: &str, cursor: &SyncCursor) -> Option<Verified> {
         let mut entries = self.entries.lock().unwrap();
-        let (verified, used) = entries.get_mut(&(session.to_string(), tab.to_string()))?;
-        if verified.offset != cursor.offset || verified.digest != cursor.digest { return None; }
-        *used = Instant::now();
-        Some(verified.clone())
+        let entry = entries.get_mut(&(session.to_string(), tab.to_string()))?;
+        let names = |verified: &&Verified| verified.offset == cursor.offset && verified.digest == cursor.digest;
+        let verified = entry.phone.as_ref().filter(names).or(entry.prefetch.as_ref().filter(names))?.clone();
+        entry.used = Instant::now();
+        Some(verified)
     }
 
-    /// Whether `cursor` ends a page that said there was more, a moment ago.
+    /// Whether `cursor` ends a page of the phone's own that said there was more, a moment ago.
     pub(super) fn continuing(&self, session: &str, tab: &str, cursor: &SyncCursor) -> bool {
-        self.entries.lock().unwrap().get(&(session.to_string(), tab.to_string())).is_some_and(|(verified, _)|
-            verified.offset == cursor.offset && verified.digest == cursor.digest
+        self.entries.lock().unwrap().get(&(session.to_string(), tab.to_string()))
+            .and_then(|entry| entry.phone.as_ref())
+            .is_some_and(|verified| verified.offset == cursor.offset && verified.digest == cursor.digest
                 && verified.continued.is_some_and(|at| at.elapsed() < CONTINUATION))
     }
 
-    /// The checkpoint stays, but no read is under way at it.
-    pub(super) fn settle(&self, session: &str, tab: &str) {
-        if let Some((verified, _)) = self.entries.lock().unwrap().get_mut(&(session.to_string(), tab.to_string())) {
-            verified.continued = None;
-        }
+    /// Whether the phone itself read this conversation within `within`: one
+    /// open on its screen reads every few seconds, and reads for itself.
+    pub(super) fn read_within(&self, session: &str, tab: &str, within: Duration) -> bool {
+        self.entries.lock().unwrap().get(&(session.to_string(), tab.to_string()))
+            .and_then(|entry| entry.read)
+            .is_some_and(|at| at.elapsed() < within)
     }
 
-    pub(super) fn store(&self, session: &str, tab: &str, verified: Verified) {
+    /// Keeps `verified` as `reader`'s checkpoint; the other reader's stays.
+    pub(super) fn store(&self, session: &str, tab: &str, reader: Reader, mut verified: Verified) {
         let mut entries = self.entries.lock().unwrap();
-        entries.insert((session.to_string(), tab.to_string()), (verified, Instant::now()));
+        let now = Instant::now();
+        let entry = entries.entry((session.to_string(), tab.to_string()))
+            .or_insert(Entry { phone: None, prefetch: None, read: None, used: now });
+        entry.used = now;
+        match reader {
+            Reader::Phone => { entry.phone = Some(verified); entry.read = Some(now); }
+            // Not a read under way: the phone's own next read reconciles first.
+            Reader::Prefetch => { verified.continued = None; entry.prefetch = Some(verified); }
+        }
         while entries.len() > ENTRIES {
-            let Some(oldest) = entries.iter().min_by_key(|(_, (_, used))| *used).map(|(key, _)| key.clone()) else { break };
+            let Some(oldest) = entries.iter().min_by_key(|(_, entry)| entry.used).map(|(key, _)| key.clone()) else { break };
             entries.remove(&oldest);
         }
     }

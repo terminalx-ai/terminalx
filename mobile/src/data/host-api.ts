@@ -65,7 +65,7 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -234,11 +234,15 @@ export class HostApi {
    * Asks the Mac to send the newest part of its most recently active
    * conversations (#1283), from `known` where the phone keeps them; or, with
    * `enabled` false, to stop. Only to a Mac that names `prefetch`. False when
-   * it was not asked or did not start.
+   * it was not asked or did not start. `open` names the conversations on
+   * screen, which read for themselves, to a Mac that names `prefetchOpen`
+   * (#1337): it sends none of them, so no page is sent only to be dropped.
    */
-  async prefetch(enabled: boolean, known: { sessionId: string; tabId: string; cursor: SyncCursor }[] = []): Promise<boolean> {
-    if ((await this.features()).prefetch !== 1) return false;
-    const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...(enabled ? { known } : {}) });
+  async prefetch(enabled: boolean, known: { sessionId: string; tabId: string; cursor: SyncCursor }[] = [], open: { sessionId: string; tabId: string }[] = []): Promise<boolean> {
+    const features = await this.features();
+    if (features.prefetch !== 1) return false;
+    const named = enabled ? { known, ...(features.prefetchOpen === 1 && open.length > 0 ? { open } : {}) } : {};
+    const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...named });
     return result.ok && result.value?.enabled === true;
   }
 
