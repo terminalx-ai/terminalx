@@ -87,7 +87,7 @@ function BotsTeam({ focus }: { focus: boolean }) {
               </Button>
             </div>
           )}
-          {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="rounded-md bg-destructive/10 px-3 py-2" />}
+          {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="rounded-md bg-destructive/10 px-3 py-2" />}
           {store.unreadable > 0 && <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bots-unreadable">{unreadableText(store.unreadable)}</p>}
           {allPaused && (
             <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bots-all-paused">

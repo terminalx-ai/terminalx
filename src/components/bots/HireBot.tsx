@@ -259,7 +259,7 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
         />
         <span className="break-words text-[12px] text-faint">The name is the only thing to fill in. You can change the rest once it is hired.</span>
       </label>
-      {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="rounded-md bg-destructive/10 px-3 py-2" />}
+      {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="rounded-md bg-destructive/10 px-3 py-2" />}
       <div>
         <Button type="submit" variant="accent" size="sm" className="max-w-full" disabled={!trimmed || busy} data-testid="bots-hire-submit">
           {busy ? <Loader2 className="animate-spin" /> : <Check />} <span className="min-w-0 truncate">{trimmed ? `Hire ${trimmed}` : "Hire"}</span>
