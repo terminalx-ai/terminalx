@@ -381,6 +381,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const item: CloudWorkspaceListItem | null = catalog.orgs[orgId]?.workspaces.find((candidate) => candidate.workspace.id === workspaceId) ?? null;
   const orgName = status.organizations?.find((org) => org.id === orgId)?.name ?? (status.identity?.organizationId === orgId ? status.identity.organization : null) ?? "Organization";
   const workspaceState = item?.workspace.state ?? null;
+  const mailboxKinds = item?.workspace.agentCommandKinds ?? null;
   // #502: deleted, from here or elsewhere (a tombstone): nothing is left to connect to or wait for.
   const deletedHere = useCloudWorkspaceDeleted(orgId, workspaceId);
   // Deleted here while the list still shows it mid-delete counts too.
@@ -725,6 +726,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         authority,
         outbox: agents.outbox,
         followUps,
+        mailboxKinds,
         workspaceStatus,
         wake,
         you,
@@ -736,7 +738,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         agentProcess,
         signIn,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
   );
 
   const ownTabs = useMemo(() => {

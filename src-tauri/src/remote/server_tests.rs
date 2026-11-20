@@ -1934,7 +1934,7 @@ async fn a_session_1_desktop_is_served_as_before_and_never_sees_the_additions() 
     let pty = call(&f.rpc, &old, "pty.create", json!({ "clientRequestId": "request-old-5" })).await.unwrap();
     assert!(pty.get("sessionId").is_none());
     // Another client's session/2 change does not reach it as session.sessions.
-    let (new, _new_events) = hello_with(&f.rpc, "device-new", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (new, _new_events) = hello_with(&f.rpc, "device-new", Authority::Manage, protocol::CAPABILITIES).await;
     call(&f.rpc, &new, "session.update", json!({ "sessionId": session.id, "pinned": true, "clientRequestId": "request-new-1" })).await.unwrap();
     no_event(&mut events, "session.sessions").await;
     assert_eq!(call(&f.rpc, &old, "session.list", json!({})).await.unwrap()["sessions"][0]["pinned"], true);
@@ -1947,7 +1947,7 @@ async fn participants_are_refused_every_session_2_write_and_see_only_shared_sess
     listed(&f.rpc);
     f.rpc.set_offered_for_tests(installed_agents());
     let session = seed_session(&f.root, "Fix login", None);
-    let (participant, _events) = hello_with(&f.rpc, "device-phone", Authority::Participate, &protocol::CAPABILITIES).await;
+    let (participant, _events) = hello_with(&f.rpc, "device-phone", Authority::Participate, protocol::CAPABILITIES).await;
     for (method, params) in [
         ("session.update", json!({ "sessionId": session.id, "title": "x", "clientRequestId": "request-part-1" })),
         ("session.addTab", json!({ "sessionId": session.id, "agent": "claude", "clientRequestId": "request-part-2" })),
@@ -2020,7 +2020,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     let other_dir = f._dir.path().join("elsewhere");
     std::fs::create_dir(&other_dir).unwrap();
     let elsewhere = seed_session(&other_dir, "Another project", None);
-    let (manager, mut events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, mut events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
 
     // update: title, pin and archive, one at a time or together.
     let updated = call(
@@ -2125,7 +2125,7 @@ async fn a_terminal_opened_for_a_session_carries_its_id_and_closes_with_it() {
     std::fs::create_dir(&checkout).unwrap();
     let session = seed_session(&f.root, "Fix login", Some(&checkout));
     let outside = seed_session(&f.root, "Elsewhere", Some(f._dir.path()));
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
 
     let pty = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-pty-1" })).await.unwrap();
     assert_eq!(pty["sessionId"], session.id.as_str());
@@ -2178,7 +2178,7 @@ async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
     let f = fixture();
     listed(&f.rpc);
     let session = seed_session(&f.root, "Fix login", None);
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     let created = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-scope-1" })).await.unwrap();
     let pty_id = created["ptyId"].as_str().unwrap().to_string();
 
@@ -2220,7 +2220,7 @@ async fn closing_a_session_leaves_its_idle_tabs_alone() {
     let session = seed_session(&f.root, "Read later", None);
     let tab_id = session.tabs[0].id.clone();
     manager.set_status_for_test(&session.id, &tab_id, crate::store::index::TabStatus::Completed);
-    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
     assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
     let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
@@ -2234,7 +2234,7 @@ async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
     let f = fixture();
     let session = seed_session(&f.root, "Fix login", None);
     let kept = seed_session(&f.root, "Keep me", None);
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     for (session_id, request) in [(&session.id, "request-close-1"), (&kept.id, "request-close-2")] {
         call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session_id, "clientRequestId": request })).await.unwrap();
     }
@@ -3675,7 +3675,7 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     let session = seed_session(&f.root, "Fix login", None);
     let tab_id = session.tabs[0].id.clone();
     let params = json!({ "sessionId": session.id, "tabId": tab_id });
-    let (manager, _events) = hello_with(&f.rpc, "device-manage", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-manage", Authority::Manage, protocol::CAPABILITIES).await;
     // No agents in this runtime: nothing to interrupt, said as such.
     assert_eq!(code(call(&f.rpc, &manager, "session.interrupt", params.clone()).await), "unavailable");
 
@@ -3808,7 +3808,7 @@ async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
         let f = fixture();
         let session = seed_session(&f.root, "retained", None);
         let other = seed_session(&f.root, "unrelated", None);
-        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"retention-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         let _attached = call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
@@ -3844,7 +3844,7 @@ async fn remote_stop_completion_refuses_a_replaced_pane_before_closing_metadata(
         let _home = crate::store::temp_home();
         let f = fixture();
         let session = seed_session(&f.root, "replacement", None);
-        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"replacement-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
@@ -3889,7 +3889,7 @@ async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
         let _home = crate::store::temp_home();
         let f = fixture();
         let session = seed_session(&f.root, "exit retention", None);
-        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"exit-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();

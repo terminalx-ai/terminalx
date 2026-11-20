@@ -40,7 +40,7 @@ const CACHE_ENTRY_LIMIT: usize = 4 * 1024 * 1024;
 const CACHE_TOTAL_LIMIT: usize = 32 * 1024 * 1024;
 const SETTLED_KEPT_PER_TAB: usize = 20;
 const STATUS_BATCH: usize = 100;
-const KINDS: [&str; 4] = ["send", "steer", "stop", "permission-decision"];
+const KINDS: [&str; 5] = ["send", "steer", "stop", "permission-decision", "follow-up"];
 const TERMINAL_STATES: [&str; 4] = ["applied", "rejected", "cancelled", "outcome-unknown"];
 
 /// The signed-in user and the Organizations whose cloud agent data is kept.
@@ -706,6 +706,15 @@ impl CloudAgentClient {
             "permission-decision" => {
                 request_id.as_deref().is_some_and(|id| !id.is_empty())
                     && (plaintext.get("optionId").is_some_and(Value::is_string) || plaintext.get("answers").is_some_and(Value::is_object))
+            }
+            // A held follow-up's change (#1328): which one, and what to do to it; an edit says its new text.
+            "follow-up" => {
+                plaintext.get("followUpId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+                    && match plaintext.get("op").and_then(Value::as_str) {
+                        Some("edit") => text.is_some(),
+                        Some("withdraw" | "release") => true,
+                        _ => false,
+                    }
             }
             _ => true,
         };

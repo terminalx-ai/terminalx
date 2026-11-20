@@ -152,6 +152,16 @@ pub struct FollowUpView {
     pub text: String,
     /// Who sent it; empty for one queued before sharing existed.
     pub actor_id: String,
+    /// How many images it carries (#1328); absent when none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub images: usize,
+    /// The names of its other files (#1328); absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// Why a permission decision could not be delivered.
@@ -779,7 +789,13 @@ impl CloudAgents {
                 .follow_ups
                 .list(&tab.tab_id)
                 .into_iter()
-                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text, actor_id: follow_up.actor_id })
+                .map(|follow_up| FollowUpView {
+                    images: follow_up.images.len(),
+                    files: follow_up.files.iter().map(|file| file.name.clone()).collect(),
+                    client_command_id: follow_up.client_command_id,
+                    text: follow_up.text,
+                    actor_id: follow_up.actor_id,
+                })
                 .collect();
             if let Some(collab) = self.collab.get() {
                 // Busy as the mailbox and the workspace RPC judge a lease.

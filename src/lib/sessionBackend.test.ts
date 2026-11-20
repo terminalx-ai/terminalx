@@ -4,12 +4,17 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 const cloudSends = vi.hoisted(() => [] as { tabId: string; text: string; images: unknown[] }[]);
+const followUpChanges = vi.hoisted(() => [] as { tabId: string; change: unknown }[]);
 vi.mock("./cloudAgents", async (original) => ({
   ...(await original<typeof import("./cloudAgents")>()),
-  sendToCloudAgent: vi.fn(async (_scope: unknown, tabId: string, text: string, _client: unknown, images: unknown[]) => void cloudSends.push({ tabId, text, images })),
+  sendToCloudAgent: vi.fn(async (_scope: unknown, tabId: string, text: string, _client: unknown, images: unknown[]) => {
+    cloudSends.push({ tabId, text, images });
+    return { clientCommandId: `cmd-${cloudSends.length}`, tabId, kind: "send", state: "queued", createdAt: 1, updatedAt: 1 };
+  }),
+  changeCloudFollowUp: vi.fn(async (_scope: unknown, tabId: string, change: unknown) => void followUpChanges.push({ tabId, change })),
 }));
 
-const { localSessionBackend, sendFirstMessage, cloudSessionBackend, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING, TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN, REVIEW_NEEDS_ADMIN, HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN } = await import("./sessionBackend");
+const { localSessionBackend, sendFirstMessage, cloudSessionBackend, resetCloudWakes, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING, TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN, REVIEW_NEEDS_ADMIN, HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN } = await import("./sessionBackend");
 const { getSessionStore } = await import("./sessions");
 const { getTerminalState } = await import("./terminal");
 const { applyEvent } = await import("./agentEvents");
@@ -297,5 +302,89 @@ describe("a local session's Reset (PRO-378)", () => {
   it("passes on the runtime's warning about what went wrong after the reset", async () => {
     invoke.mockImplementation(async (command: string) => (command === "reset_chat" ? "Chat reset, but the agent could not restart." : null));
     await expect(localSessionBackend("s1").turns!.reset("t1", 9, false, null)).resolves.toBe("Chat reset, but the agent could not restart.");
+  });
+});
+
+describe("held follow-ups on a cloud or machine session (#1328)", () => {
+  const connected = (capabilities: string[]) => {
+    const interrupts: unknown[] = [];
+    const connection = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities, authority: "manage" } as const;
+    const client = { connection, hasCapability: (capability: string) => capabilities.includes(capability), interruptAgentTab: async (params: unknown) => (interrupts.push(params), { interrupted: true }) };
+    return { connection, client: client as never, interrupts };
+  };
+  /** What an API that takes the `follow-up` kind lists (terminalx-saas#289). */
+  const KINDS = ["send", "steer", "stop", "permission-decision", "follow-up"];
+  const backend = (made: ReturnType<typeof connected> | null, options: { authority?: string; workspaceId?: string; organizationId?: string; mailboxKinds?: string[] | null } = {}) => {
+    const organizationId = options.organizationId ?? "org-1";
+    const workspaceId = options.workspaceId ?? "ws-held";
+    return cloudSessionBackend({
+      key: `cloud:${organizationId}:${workspaceId}:s-cloud`,
+      workspaceKey: `cloud:${organizationId}:${workspaceId}`,
+      scope: { organizationId, workspaceId },
+      sessionId: "s-cloud",
+      state: made ? (made.connection as never) : { state: "suspended" },
+      client: made?.client ?? null,
+      workspaceState: made ? "ready" : "suspended",
+      authority: options.authority ?? "manage",
+      outbox: [],
+      followUps: () => [],
+      mailboxKinds: options.mailboxKinds === undefined ? KINDS : options.mailboxKinds,
+      wake: vi.fn(async () => undefined),
+    });
+  };
+
+  beforeEach(() => {
+    cloudSends.length = 0;
+    followUpChanges.length = 0;
+    resetCloudWakes();
+  });
+
+  it("are offered once the runtime says it takes changes to them, and still while it sleeps", () => {
+    expect(backend(null).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1"])).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1", "follow-ups/1"])).changeHeldQueue).toBeTypeOf("function");
+    // Through the mailbox: a sleeping workspace takes them too, from the runtime that said so.
+    expect(backend(null).changeHeldQueue).toBeTypeOf("function");
+    // Not to a view-only reader.
+    expect(backend(connected(["session/1", "follow-ups/1"]), { authority: "participate" }).changeHeldQueue).toBeUndefined();
+    // An API that does not list the kind refuses every change for good: none offered, whatever the runtime says.
+    expect(backend(connected(["session/1", "follow-ups/1"]), { mailboxKinds: null }).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1", "follow-ups/1"]), { mailboxKinds: ["send", "steer", "stop", "permission-decision"] }).changeHeldQueue).toBeUndefined();
+    // A machine takes them live, without the API: none while it is away.
+    expect(backend(connected(["session/1", "agent-commands/1", "follow-ups/1"]), { organizationId: "", workspaceId: "machine:m1" }).changeHeldQueue).toBeTypeOf("function");
+    expect(backend(null, { organizationId: "", workspaceId: "machine:m1" }).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1", "agent-commands/1", "follow-ups/1"]), { organizationId: "", workspaceId: "machine:m1", mailboxKinds: null }).changeHeldQueue).toBeTypeOf("function");
+  });
+
+  it("edits, deletes and sends one now by the command that sent it; reordering and pausing are off with why", async () => {
+    const held = backend(connected(["session/1", "follow-ups/1"]));
+    await expect(held.changeHeldQueue!("t-cloud", { type: "edit", id: "cmd-7", text: "use tabs" })).resolves.toEqual({ events: [], queued: true });
+    await held.changeHeldQueue!("t-cloud", { type: "delete", id: "cmd-8" });
+    await held.changeHeldQueue!("t-cloud", { type: "sendNow", id: "cmd-9" });
+    expect(followUpChanges).toEqual([
+      { tabId: "t-cloud", change: { op: "edit", followUpId: "cmd-7", text: "use tabs" } },
+      { tabId: "t-cloud", change: { op: "withdraw", followUpId: "cmd-8" } },
+      { tabId: "t-cloud", change: { op: "release", followUpId: "cmd-9" } },
+    ]);
+    await expect(held.changeHeldQueue!("t-cloud", { type: "move", id: "cmd-7", beforeId: null })).rejects.toThrow(REMOTE_UNAVAILABLE.moveHeld!);
+    await expect(held.changeHeldQueue!("t-cloud", { type: "pause", paused: true })).rejects.toThrow(REMOTE_UNAVAILABLE.pauseHeld!);
+    expect(held.unavailable).toMatchObject({ moveHeld: expect.any(String), pauseHeld: expect.any(String) });
+  });
+
+  it("holds a message by sending it, and an interrupting one is released by its own id", async () => {
+    const held = backend(connected(["session/1", "follow-ups/1"]));
+    await held.changeHeldQueue!("t-cloud", { type: "enqueue", text: "after this", images: [] });
+    expect(cloudSends).toEqual([{ tabId: "t-cloud", text: "after this", images: [] }]);
+    expect(followUpChanges).toEqual([]);
+    await held.changeHeldQueue!("t-cloud", { type: "enqueue", text: "now please", images: [], sendNow: true });
+    await vi.waitFor(() => expect(followUpChanges).toEqual([{ tabId: "t-cloud", change: { op: "release", followUpId: "cmd-2" } }]));
+  });
+
+  it("sends a message the agent's CLI holds by interrupting the turn, where the runtime is up with session/3", async () => {
+    const made = connected(["session/1", "session/3"]);
+    await backend(made).sendQueuedNow!("t-cloud", 12);
+    expect(made.interrupts).toEqual([{ sessionId: "s-cloud", tabId: "t-cloud" }]);
+    expect(backend(connected(["session/1"])).sendQueuedNow).toBeUndefined();
+    expect(backend(null).sendQueuedNow).toBeUndefined();
   });
 });

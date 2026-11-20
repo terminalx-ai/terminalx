@@ -1,4 +1,4 @@
-import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { AgentProcessState, AgentTabInfo, HeldFollowUpInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { agent, attachments, errorMessage, experimental, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
 import type { ContinuationContext } from "@terminalx/portable/continuation";
 import type { FileRef } from "@/types/events";
@@ -21,6 +21,8 @@ import {
   steerCloudAgent,
   stopCloudAgent,
   applyLiveTab,
+  changeCloudFollowUp,
+  changesFollowUps,
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
@@ -30,6 +32,7 @@ import { selectSessionTab, type TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
 import { localTurnCheckpoints, type TurnCheckpointApi } from "@/lib/turnCheckpoints";
+import type { HeldQueueChange } from "@/lib/heldQueue";
 
 /**
  * What one session can do, wherever it runs (PRO-23 CS-10). SessionView,
@@ -87,6 +90,10 @@ export interface SessionUnavailable {
   agentHandoff?: string;
   /** Header: the project's saved actions and previews (PRO-363). */
   runMenu?: string;
+  /** Held follow-ups: reordering them (#1328). */
+  moveHeld?: string;
+  /** Held follow-ups: pausing the queue (#1328). */
+  pauseHeld?: string;
 }
 
 /**
@@ -96,6 +103,8 @@ export interface SessionUnavailable {
  */
 export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
   runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
+  moveHeld: "Held messages here go in the order they were sent. Send one now to put it first.",
+  pauseHeld: "This session's runtime sends held messages one after each turn and cannot pause them. Delete one to keep it from going.",
 });
 
 /** Why Fork and Reset are off on a remote session that could offer them (#1326). */
@@ -273,11 +282,21 @@ export interface SessionBackend {
    */
   send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number; files?: FileInput[] }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
-  /** Local only: persist and control messages held until the turn ends. */
+  /**
+   * Persist and control messages held until the turn ends. A cloud or
+   * machine tab's runtime holds them itself (#1328): a held message is
+   * queued by a send, and edited, deleted or sent now by a command to it;
+   * `unavailable` says what it cannot do (reorder, pause). Absent where the
+   * runtime cannot take that command.
+   */
   changeHeldQueue?(tabId: string, change: import("@/lib/heldQueue").HeldQueueChange): Promise<SendResult>;
   /** Local only (PRO-290): store files in the session's attachments folder, for a follow-up that is held rather than sent. */
   storeFiles?(files: FileInput[]): Promise<FileRef[]>;
-  /** Local only: interrupt so the CLI sends input it already holds. */
+  /**
+   * Interrupt so the CLI sends input it already holds. On a cloud or machine
+   * tab (#1328) it is Escape for the running turn, which needs a runtime
+   * with `session/3` that is connected.
+   */
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
   resendUnsent?(tabId: string): Promise<SendResult>;
@@ -383,7 +402,7 @@ export interface SessionBackend {
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
-    followUps(tabId: string): { clientCommandId: string; text: string; actorId?: string | null }[];
+    followUps(tabId: string): HeldFollowUpInfo[];
     /** Where the workspace stands, for the line under a queued message (#1291); null where nothing says (a machine). */
     workspaceStatus: WorkspaceStatus;
     deciding(requestId: string): boolean;
@@ -566,6 +585,7 @@ export function clearCloudWake(workspaceKey: string) {
 export function resetCloudWakes() {
   waking.clear();
   agentPtySeen.clear();
+  followUpsSeen.clear();
 }
 
 /**
@@ -580,6 +600,17 @@ export function agentPtyServed(workspaceKey: string, served: boolean | null): bo
   if (served !== null) agentPtySeen.set(workspaceKey, served);
   return served ?? agentPtySeen.get(workspaceKey) ?? null;
 }
+
+/**
+ * Whether each cloud workspace's runtime took changes to its held
+ * follow-ups (`follow-ups/1`, #1328) when last connected. They go through
+ * the mailbox, so a workspace that is asleep or reconnecting still takes
+ * them; one never connected to here is not offered them until it says so.
+ */
+const followUpsSeen = new Map<string, boolean>();
+
+/** The mailbox kind that changes a held follow-up. */
+const FOLLOW_UP_KIND = "follow-up";
 
 export interface CloudSessionContext {
   key: string;
@@ -596,7 +627,13 @@ export interface CloudSessionContext {
   /** What the connection granted, else what the list says opening would grant. */
   authority: string | null;
   outbox: OutboxEntry[];
-  followUps: (tabId: string) => { clientCommandId: string; text: string; actorId?: string | null }[];
+  followUps: (tabId: string) => HeldFollowUpInfo[];
+  /**
+   * The agent command kinds the cloud API takes for this workspace, as its
+   * list says (terminalx-saas#289); absent from an API that takes only the
+   * first four. Held follow-ups are changed only where it lists `follow-up`.
+   */
+  mailboxKinds?: readonly string[] | null;
   /** The header chip's state, for the line under a queued message (#1291). */
   workspaceStatus?: WorkspaceStatus;
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
@@ -727,6 +764,58 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   const handoff = !handoffOff && write && client ? cloudHandoff(ctx, client) : undefined;
   // Turn cards read what a turn changed while the runtime is up, whoever may read the chat.
   const readsCheckpoints = !!client?.hasCapability("checkpoints/1");
+  // Held follow-ups (#1328): a machine's change is a live call; a cloud workspace's goes through the mailbox
+  // whether or not it is connected now, to a runtime that last said it takes it, through an API that lists
+  // the `follow-up` kind (one that does not refuses every such change for good).
+  if (client && !isDevScope(scope)) followUpsSeen.set(ctx.workspaceKey, changesFollowUps(scope, client));
+  const heldChanges = write && (isDevScope(scope)
+    ? changesFollowUps(scope, client)
+    : (followUpsSeen.get(ctx.workspaceKey) ?? false) && !!ctx.mailboxKinds?.includes(FOLLOW_UP_KIND));
+  const changeHeld = async (tabId: string, change: HeldQueueChange): Promise<SendResult> => {
+    guard();
+    switch (change.type) {
+      case "enqueue": {
+        // A held message is a send, which the runtime holds while a turn runs (or others wait).
+        const sent = await sendHeld(tabId, change.text, change.images, change.files ?? []);
+        // "Interrupt and send": it goes first, and the turn is interrupted. Not awaited:
+        // its receipt is the outbox's to show; one that found the tab idle has nothing to do.
+        if (change.sendNow && sent) {
+          void interactive(() => changeCloudFollowUp(scope, tabId, { op: "release", followUpId: sent.clientCommandId }, client)).catch(() => undefined);
+        }
+        break;
+      }
+      case "edit":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "edit", followUpId: change.id, text: change.text }, client));
+        break;
+      case "delete":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "withdraw", followUpId: change.id }, client));
+        break;
+      case "sendNow":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "release", followUpId: change.id }, client));
+        break;
+      case "move":
+        throw new Error(REMOTE_UNAVAILABLE.moveHeld);
+      case "pause":
+        throw new Error(REMOTE_UNAVAILABLE.pauseHeld);
+    }
+    return { events: [], queued: true };
+  };
+  /** A prompt as `send` makes it, with its images and files; the outbox entry of a mailbox send. */
+  const sendHeld = async (tabId: string, text: string, images: ImageInput[], files: FileInput[]) => {
+    if (files.length && isDevScope(scope) && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
+    const asleep = cloudAsleep(ctx.state, ctx.workspaceState);
+    const blocked = (images.length ? cloudImagesBlocked(client, asleep) : null) ?? (files.length && !isDevScope(scope) ? cloudFilesBlocked(client, asleep) : null);
+    if (blocked) {
+      if (blocked === CLOUD_IMAGES_NEED_RUNNING || blocked === CLOUD_FILES_NEED_RUNNING) followWake();
+      throw new CloudImageError(blocked);
+    }
+    if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
+    let entry: OutboxEntry | undefined;
+    await interactive(async () => {
+      entry = await sendToCloudAgent(scope, tabId, text, client, images, { files });
+    });
+    return entry;
+  };
   return {
     kind: "cloud",
     key: ctx.key,
@@ -781,6 +870,14 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),
+    changeHeldQueue: heldChanges ? changeHeld : undefined,
+    // A message the CLI already holds goes when the turn is interrupted: Escape, live only.
+    sendQueuedNow: interrupts
+      ? async (tabId) => {
+          guard();
+          await client!.interruptAgentTab({ sessionId: ctx.sessionId, tabId });
+        }
+      : undefined,
     // Retry and Send again (#1289): the message's own text, as a new message through the mailbox.
     resendMessage: async (tabId, seq) => {
       guard();

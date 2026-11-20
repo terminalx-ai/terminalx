@@ -23,6 +23,28 @@ const MAX_TEXT: usize = 48 * 1024;
 pub const ATTACHMENT_MISSING: &str = "attachment-missing";
 /// Said when a file a message names did not reach the runtime in full (PRO-407).
 pub const FILE_MISSING_MESSAGE: &str = "Not sent: a file of this message did not arrive in full. Attach it and send again.";
+/// What a `follow-up` command does to a held follow-up (#1328): change its
+/// text, take it out of the queue, or send it next and interrupt the turn.
+pub const FOLLOW_UP_OPS: [&str; 3] = ["edit", "withdraw", "release"];
+/// Receipt category of a `follow-up` command whose follow-up is no longer held.
+pub const FOLLOW_UP_GONE: &str = "follow-up-gone";
+pub const FOLLOW_UP_GONE_MESSAGE: &str = "That message is no longer held: it went to the agent, or was withdrawn.";
+pub const FOLLOW_UP_NOT_YOURS_MESSAGE: &str = "Only whoever sent a held message, or a workspace manager, can change it.";
+/// Why a manager may not edit someone else's held message: it is typed
+/// under its sender's name and policy, so the words must stay theirs.
+pub const FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE: &str = "Only whoever sent a held message can edit it. A workspace manager can delete it or send it now.";
+
+/// The text a command would type into the agent: a send's or steer's, or
+/// the new text of a held follow-up (#1328), which is typed as it is when
+/// its turn comes. Checked by the same rules either way.
+fn typed_text<'a>(command: &Command<'a>) -> Option<&'a str> {
+    let text = || command.plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+    match command.kind {
+        "send" | "steer" => Some(text()),
+        "follow-up" if command.plaintext.get("op").and_then(Value::as_str) == Some("edit") => Some(text()),
+        _ => None,
+    }
+}
 
 pub fn run(agents: &CloudAgents) {
     let mut failures = 0u32;
@@ -166,7 +188,7 @@ pub fn handle(agents: &CloudAgents, lease: &Lease) -> Receipt {
 /// `agent-commands/1` names it (docs/MACHINES.md, decision 3). Both mean the
 /// same: one decision and one application per id, made here.
 pub struct Command<'a> {
-    /// `send`, `steer`, `stop` or `permission-decision`.
+    /// `send`, `steer`, `stop`, `permission-decision` or `follow-up`.
     pub kind: &'a str,
     pub tab_id: &'a str,
     pub client_command_id: &'a str,
@@ -180,7 +202,8 @@ pub struct Command<'a> {
     pub access: crate::remote::collab::Access,
     pub(crate) policy_stamp: Option<crate::remote::collab::v2::Stamp>,
     /// The command's body: `text`, `images` and settings for a send or
-    /// steer, `requestId` with `optionId` or `answers` for a decision.
+    /// steer, `requestId` with `optionId` or `answers` for a decision,
+    /// `op` and `followUpId` (and `text` for an edit) for a follow-up.
     pub plaintext: &'a Value,
 }
 
@@ -234,7 +257,7 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
         if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), action, witness.as_ref()).is_err() {
             return refused("collaboration-policy-changed", json!({}));
         }
-        if collab.runtime_policy.everyone(command.actor_id) && matches!(command.kind, "send" | "steer") && slash::is_command(command.plaintext.get("text").and_then(Value::as_str).unwrap_or("")) {
+        if collab.runtime_policy.everyone(command.actor_id) && typed_text(command).is_some_and(slash::is_command) {
             // Everyone-provenance input cannot use commands to change stance,
             // even when explicit approval independently remains authorized.
             if collab.runtime_policy.admit(command.actor_id, command.policy_stamp.as_ref(), crate::remote::collab::v2::Action::Configure, None).is_err() {
@@ -249,16 +272,40 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     if !allowed {
         return refused("forbidden", json!({}));
     }
+    // A held follow-up (#1328) is its sender's to change. A manager may
+    // withdraw or release anyone's, but not edit it: it is still typed as
+    // its sender's message, under their policy, so its words stay theirs.
+    // One that is no longer held has nothing to change.
+    if command.kind == "follow-up" {
+        let op = command.plaintext.get("op").and_then(Value::as_str);
+        let id = command.plaintext.get("followUpId").and_then(Value::as_str).filter(|id| !id.is_empty());
+        let (Some(op), Some(id)) = (op, id) else { return refused("payload-invalid", json!({})) };
+        if !FOLLOW_UP_OPS.contains(&op) {
+            return refused("payload-invalid", json!({}));
+        }
+        let Some(held) = agents.follow_ups.get(command.tab_id, id) else {
+            return refused(FOLLOW_UP_GONE, json!({ "followUpId": id, "message": FOLLOW_UP_GONE_MESSAGE }));
+        };
+        if !held.actor_id.is_empty() && held.actor_id != command.actor_id {
+            if access.role != Role::Manager {
+                return refused("forbidden", json!({ "followUpId": id, "message": FOLLOW_UP_NOT_YOURS_MESSAGE }));
+            }
+            if op == "edit" {
+                return refused("forbidden", json!({ "followUpId": id, "message": FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE }));
+            }
+        }
+    }
     // Competing input is serialized by the tab's driver lease: nobody else
     // sends, steers or stops (managers may stop) while it is held, and an
     // applied send or steer claims it (below). Whether a turn ran is read
     // before this command starts one: only a lease live then counts.
     let busy_before = agents.ops.busy(&tab.session_id, command.tab_id);
-    if let (Some(collab), true, "send" | "steer" | "stop") = (agents.collab(), command.leases, command.kind) {
+    if let (Some(collab), true, "send" | "steer" | "stop" | "follow-up") = (agents.collab(), command.leases, command.kind) {
         let busy = busy_before;
+        // A manager may stop, and change held follow-ups (#1328), whoever drives.
         let held = collab
             .held_by_other(command.tab_id, command.actor_id, now_ms(), busy)
-            .filter(|_| !(command.kind == "stop" && access.role == Role::Manager));
+            .filter(|_| !(matches!(command.kind, "stop" | "follow-up") && access.role == Role::Manager));
         if let Some(held) = held {
             return refused("lease-held", json!({ "holderId": held.holder_id }));
         }
@@ -267,8 +314,7 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     // mention by itself, and each can change or get around the same
     // settings: from a plain driver only the harmless ones go through
     // (PRO-88). Refused before the applying mark: nothing reached the agent.
-    if matches!(command.kind, "send" | "steer") {
-        let text = command.plaintext.get("text").and_then(Value::as_str).unwrap_or("");
+    if let Some(text) = typed_text(command) {
         if let Some(refusal) = agents.slash_refusal(access, &tab.session_id, &tab.harness, text) {
             return refused(refusal.category(), json!({ "command": refusal.command, "message": refusal.message() }));
         }
@@ -435,6 +481,53 @@ fn apply(agents: &CloudAgents, command: &Command, session_id: &str, may_configur
                     json!({ "droppedFollowUps": dropped.iter().map(|f| f.client_command_id.clone()).collect::<Vec<_>>() }),
                 ),
                 Err(error) => failed(error),
+            }
+        }
+        "follow-up" => {
+            // Checked by `judge`: a known op, and a follow-up that was held then.
+            let op = plaintext.get("op").and_then(Value::as_str).unwrap_or("");
+            let id = plaintext.get("followUpId").and_then(Value::as_str).unwrap_or("");
+            let gone = || ("rejected", Some(FOLLOW_UP_GONE), json!({ "followUpId": id, "message": FOLLOW_UP_GONE_MESSAGE }));
+            let Some(held) = agents.follow_ups.get(tab_id, id) else { return gone() };
+            match op {
+                "edit" => {
+                    // As a message: words, unless it carries images or files.
+                    let Some(text) = text(!held.images.is_empty() || !held.files.is_empty()) else { return ("rejected", Some("payload-invalid"), json!({})) };
+                    match agents.follow_ups.edit(tab_id, id, &text) {
+                        Ok(true) => ("applied", None, json!({ "followUpId": id })),
+                        Ok(false) => gone(),
+                        Err(error) => failed(error),
+                    }
+                }
+                "withdraw" => match agents.follow_ups.remove(tab_id, id) {
+                    Ok(Some(withdrawn)) => {
+                        // Never typed: its uploads are done with.
+                        agents.attachments.remove(&withdrawn.images);
+                        ("applied", None, json!({ "followUpId": id }))
+                    }
+                    Ok(None) => gone(),
+                    Err(error) => failed(error),
+                },
+                "release" => match agents.follow_ups.to_front(tab_id, id) {
+                    // First in line, then the running turn is interrupted
+                    // (Escape, #427): the queue sends it once the turn has
+                    // settled, as it sends any follow-up. An idle tab sends it now.
+                    Ok(true) => {
+                        let interrupted = if ops.busy(session_id, tab_id) {
+                            match ops.interrupt(session_id, tab_id) {
+                                Ok(interrupted) => interrupted,
+                                Err(error) => return failed(error),
+                            }
+                        } else {
+                            false
+                        };
+                        agents.nudge_follow_ups(tab_id);
+                        ("applied", None, json!({ "followUpId": id, "interrupted": interrupted }))
+                    }
+                    Ok(false) => gone(),
+                    Err(error) => failed(error),
+                },
+                _ => ("rejected", Some("payload-invalid"), json!({})),
             }
         }
         "permission-decision" => {

@@ -1497,7 +1497,7 @@ impl WorkspaceRpc {
         // and a runtime with a mailbox has no live steer, stop or decision.
         let Some(spec) = protocol::find_method(method)
             .filter(|_| !(self.is_machine() && machine::UNSERVED.contains(&method)))
-            .filter(|spec| spec.capability != protocol::AGENT_COMMANDS || self.agent_commands.get().is_some())
+            .filter(|spec| !(spec.capability == protocol::AGENT_COMMANDS || spec.name == protocol::FOLLOW_UP_METHOD) || self.agent_commands.get().is_some())
         else {
             return Err(RpcError::new("method_not_found", format!("{method} is not a workspace method")));
         };
@@ -1696,7 +1696,7 @@ impl WorkspaceRpc {
                 if let Some(hook) = hook { hook(); }
             }
             let action = if matches!(method.as_str(), "session.decide") { collab::v2::Action::Approve }
-                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt") { collab::v2::Action::Drive }
+                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt" | protocol::FOLLOW_UP_METHOD) { collab::v2::Action::Drive }
                 else { collab::v2::Action::Configure };
             let permit = collab::v2::Permit::new(rpc.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp.clone(), action).for_peer(&peer);
             permit.with(|| crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp)))
@@ -1825,7 +1825,7 @@ impl WorkspaceRpc {
                 self.agent_command(peer, "session.send", params, policy_stamp)
             }
             "session.send" => self.session_send(peer, params),
-            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params, policy_stamp),
+            "session.steer" | "session.stop" | "session.decide" | protocol::FOLLOW_UP_METHOD => self.agent_command(peer, method, params, policy_stamp),
             "session.interrupt" => {
                 let _admission = self.collab.enter_admission();
                 if let Some(permit) = collab::v2::current().filter(|_| self.collab.runtime_policy.is_v2()) {
@@ -4619,7 +4619,7 @@ impl WorkspaceRpc {
     /// connection was granted it.
     fn durable_command(&self, peer: &Peer, spec: &protocol::Method) -> bool {
         self.agent_commands.get().is_some()
-            && (spec.capability == protocol::AGENT_COMMANDS || (spec.name == "session.send" && peer.granted(protocol::AGENT_COMMANDS)))
+            && (spec.capability == protocol::AGENT_COMMANDS || spec.name == protocol::FOLLOW_UP_METHOD || (spec.name == "session.send" && peer.granted(protocol::AGENT_COMMANDS)))
     }
 
     /// `agent-commands/1` (PRO-343): send, steer, stop or a permission
@@ -4645,6 +4645,7 @@ impl WorkspaceRpc {
             "session.steer" => "steer",
             "session.stop" => "stop",
             "session.decide" => "permission-decision",
+            protocol::FOLLOW_UP_METHOD => "follow-up",
             other => return Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         };
         // Checked by the dispatcher already.
@@ -4669,6 +4670,9 @@ impl WorkspaceRpc {
         let tab = self.visible_tab(peer, &params)?;
         if kind == "permission-decision" && params.get("requestId").and_then(Value::as_str).is_none_or(str::is_empty) {
             return Err(RpcError::invalid("requestId names the request this decision answers"));
+        }
+        if kind == "follow-up" && params.get("followUpId").and_then(Value::as_str).is_none_or(str::is_empty) {
+            return Err(RpcError::invalid("followUpId names the held follow-up this changes"));
         }
         let actor = attachment_owner(peer);
         let command = crate::cloud_agents::mailbox::Command {

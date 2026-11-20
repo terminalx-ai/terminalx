@@ -228,3 +228,27 @@ it("runs Try again through the tray's lock: not while another change or a delive
   expect(change).toHaveBeenLastCalledWith({ type: "pause", paused: false });
   expect(getErrorToasts()).toHaveLength(0);
 });
+
+it("#1328: someone else's held message names its sender; a manager may send or delete it, but not edit it, and anyone else may do neither", async () => {
+  const change = vi.fn(async () => undefined);
+  const notYours = "Only whoever sent this message, or a workspace manager, can change it.";
+  const editNotYours = "Only whoever sent this message can edit it.";
+  const rows: Record<string, { author?: string | null; locked?: string | null; editLocked?: string | null } | undefined> = {
+    first: undefined,
+    second: { author: "Bob", locked: null, editLocked: editNotYours },
+    third: { author: "Carol", locked: notYours, editLocked: editNotYours },
+  };
+  render(<HeldQueueTray queue={initial} busy scope="t1" onChange={change} row={id => rows[id]} />);
+  const [mine, managed, theirs] = screen.getAllByRole("listitem");
+  expect(within(mine).getByLabelText("Edit follow-up 1").hasAttribute("disabled")).toBe(false);
+  expect(within(managed).getByText("Bob:")).toBeTruthy();
+  const edit = within(managed).getByLabelText("Edit follow-up 2");
+  expect([edit.hasAttribute("disabled"), edit.getAttribute("title")]).toEqual([true, editNotYours]);
+  expect(within(managed).getByLabelText("Delete follow-up 2").hasAttribute("disabled")).toBe(false);
+  fireEvent.click(within(managed).getByLabelText("Send follow-up 2 now"));
+  await waitFor(() => expect(change).toHaveBeenCalledWith({ type: "sendNow", id: "second" }));
+  for (const label of ["Edit follow-up 3", "Send follow-up 3 now", "Delete follow-up 3"]) {
+    const button = within(theirs).getByLabelText(label);
+    expect([label, button.hasAttribute("disabled"), button.getAttribute("title")]).toEqual([label, true, notYours]);
+  }
+});

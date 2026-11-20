@@ -1,7 +1,7 @@
 import { localCommands } from "@/lib/localCommands";
 import { useTabRead } from "@/lib/useTabRead";
 import { HeldQueueTray } from "@/components/chat/HeldQueueTray";
-import { followUpRoute, heldQueueFrom, type HeldQueueChange } from "@/lib/heldQueue";
+import { followUpRoute, heldQueueFrom, heldQueueFromFollowUps, type HeldQueueChange } from "@/lib/heldQueue";
 import { usePrefs } from "@/lib/prefs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agent as agentApi, errorMessage, pty, type FileInput, type ImageInput } from "@/lib/api";
@@ -9,6 +9,7 @@ import { noteComposerTyping } from "@/lib/typingNote";
 import { applyEvent, getTabLog, lastSeq, respondPermissionOnce, useTabLog } from "@/lib/agentEvents";
 import type { Transcript } from "@/lib/transcript";
 import type { OutboxEntry } from "@/lib/cloudAgentApi";
+import type { HeldFollowUpInfo } from "@terminalx/portable/workspace";
 import { useConversationView } from "@/lib/conversationView";
 import { clearComposerSendError, composerSendScope, hasArrived, useComposerSend } from "@/lib/composerSends";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
@@ -69,7 +70,11 @@ import { AccountGoneNotice, AccountSwitchNote, useAccountSwitch } from "@/compon
 const newLoginIncident = () => ({ loginPane: null as string | null, launched: false, opening: false, consumed: false, cancelled: false, paused: false });
 
 const NO_ENTRIES: OutboxEntry[] = [];
-const NO_FOLLOW_UPS: { clientCommandId: string; text: string; actorId?: string | null }[] = [];
+const NO_FOLLOW_UPS: HeldFollowUpInfo[] = [];
+/** Said on a held message of someone else's in a shared workspace (#1328): the runtime refuses the change too. */
+const HELD_NOT_YOURS = "Only whoever sent this message, or a workspace manager, can change it.";
+/** A manager deletes or sends anyone's held message, but its words stay its sender's (#1328). */
+const HELD_EDIT_NOT_YOURS = "Only whoever sent this message can edit it.";
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
@@ -401,7 +406,9 @@ export function TabView({
   // The composer has already put the message in the chat and taken it back
   // out of the draft (#727); a failure puts it back there.
   const { followUps } = usePrefs();
-  const heldQueue = useMemo(() => heldQueueFrom(events), [events]);
+  // A cloud or machine tab's runtime holds its follow-ups itself (#1328); a local tab's are in its events.
+  const remoteFollowUps = useMemo(() => backend.outbox?.followUps(tab.id) ?? NO_FOLLOW_UPS, [backend.outbox, tab.id]);
+  const heldQueue = useMemo(() => (backend.outbox ? heldQueueFromFollowUps(remoteFollowUps) : heldQueueFrom(events)), [backend.outbox, remoteFollowUps, events]);
   const changeHeldQueue = useCallback(async (change: HeldQueueChange) => {
     if (blockedRef.current) throw new Error(blockedRef.current);
     if (!backend.changeHeldQueue) throw new Error("This session does not support held follow-ups.");
@@ -433,10 +440,16 @@ export function TabView({
       afterPaint(() => { drawnAt = Date.now(); });
       // A held follow-up's files (PRO-290) are stored now and held by reference, like a sent message's.
       const route = files?.length && !backend.storeFiles ? "now" : followUpRoute(followUps, alternate);
+      // "Now" on a cloud or machine tab whose runtime holds follow-ups (#1328): into the running turn,
+      // as a local CLI takes a message mid-turn. Words only: a command, a goal or an attachment is held.
+      const steerNow = !local && !!backend.changeHeldQueue && backend.caps.steer && route === "now" && tab.status === "in_progress"
+        && !images.length && !files?.length && !/^\s*[/!]/.test(text) && goalCommand(text) === null;
       try {
         const held = backend.changeHeldQueue && route !== "now";
         const stored = held && files?.length && backend.storeFiles ? await backend.storeFiles(files) : undefined;
-        const out = held
+        const out = steerNow
+          ? await backend.steer(tab.id, text).then(() => ({ events: [], queued: true }))
+          : held
           ? await backend.changeHeldQueue!(tab.id, { type: "enqueue", text, images, ...(stored?.length ? { files: stored } : {}), sendNow: route === "interrupt" })
           : await (files?.length ? backend.send(tab.id, text, images, { pressedAt, files }) : local ? backend.send(tab.id, text, images, { pressedAt }) : backend.send(tab.id, text, images));
         const answeredAt = Date.now();
@@ -454,7 +467,7 @@ export function TabView({
         throw e;
       }
     },
-    [backend, local, tab.id, followUps],
+    [backend, local, tab.id, tab.status, followUps],
   );
   const sentAfter = useCallback(() => lastSeq(backend.logSessionId, tab.id), [backend.logSessionId, tab.id]);
   // The message being sent, until its own event is in the conversation: the
@@ -753,13 +766,24 @@ export function TabView({
   const signIn = backend.signIn?.(tab.id) ?? null;
   // What Up and Down recall in the composer: this tab's own messages, plus a cloud tab's commands still on their way.
   const outboxEntries = useMemo(() => outbox?.entries(tab.id) ?? NO_ENTRIES, [outbox, tab.id]);
-  const outboxFollowUps = useMemo(() => outbox?.followUps(tab.id) ?? NO_FOLLOW_UPS, [outbox, tab.id]);
+  const outboxFollowUps = remoteFollowUps;
+  // Held messages are in the tray when the runtime takes changes to them (#1328), not drawn again in the chat.
+  const heldInTray = !!backend.changeHeldQueue;
+  const heldRow = useCallback((id: string) => {
+    const actorId = remoteFollowUps.find((followUp) => followUp.clientCommandId === id)?.actorId;
+    if (!actorId || !shared?.you || shared.you.listed === false) return undefined;
+    const mine = actorId === shared.you.userId;
+    if (mine) return undefined;
+    const manager = shared.you.role === "manager";
+    return { author: nameOf(actorId), locked: manager ? null : HELD_NOT_YOURS, editLocked: HELD_EDIT_NOT_YOURS };
+  }, [remoteFollowUps, shared, nameOf]);
   const history = useMemo(
     () => sentMessages(transcript, outbox && { entries: outboxEntries, followUps: outboxFollowUps }),
     [transcript, outbox, outboxEntries, outboxFollowUps],
   );
   // #1291: a cloud tab's messages on their way, drawn at the transcript's end as Queued cards until the conversation has them.
   const pendingMessages = usePendingCloudMessages(`${backend.key}:${tab.id}`, outboxEntries, outboxFollowUps, events, tab.historyRead !== false);
+  const chatPending = useMemo(() => (heldInTray ? pendingMessages.filter((message) => message.phase !== "held") : pendingMessages), [heldInTray, pendingMessages]);
   const resendCommand = useCallback((entry: OutboxEntry) => {
     if (!outbox) return;
     setError(null);
@@ -931,9 +955,9 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       sending={sending}
-      pending={outbox && pendingMessages.length > 0 && (
+      pending={outbox && chatPending.length > 0 && (
         <CloudPendingMessages
-          messages={pendingMessages}
+          messages={chatPending}
           workspace={outbox.workspaceStatus}
           nameOf={nameOf}
           onSendAgain={!readOnly && !gate?.blocked ? resendCommand : undefined}
@@ -994,7 +1018,7 @@ export function TabView({
         <AccountSwitchNote tabId={tab.id} reportedModel={transcript.model} modelName={(id) => modelLabel(tab.harness, id)} />
         {recovery !== "signed_out" && <AccountGoneNotice gone={accountSwitch.gone} targets={tab.providerSessionId ? accountSwitch.targets : []} switching={accountSwitch.switching} error={accountSwitch.error} onSwitch={(account) => void accountSwitch.switchTo(account)} />}
         {banner("composer")}
-        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && steerable && (
+        {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && steerable && (!backend.changeHeldQueue || followUps === "hold") && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-6 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
             <Button size="xs" variant="outline" onClick={() => void steer()}>
@@ -1002,7 +1026,8 @@ export function TabView({
             </Button>
           </div>
         )}
-        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live} /></div>}
+        {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live}
+          unavailable={local ? undefined : { move: backend.unavailable?.moveHeld, pause: backend.unavailable?.pauseHeld }} row={local ? undefined : heldRow} /></div>}
         <Composer
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}

@@ -1405,6 +1405,12 @@ export interface CloudWorkspace {
   you?: { role: CloudCollaborationRole; canApprove: boolean; canManageShares?: boolean } | null;
   /** How many members it is shared with; only reported to someone with a role. */
   sharedWith?: number | null;
+  /**
+   * The agent command kinds the API takes for it (terminalx-saas#289).
+   * Absent from a server that takes only send, steer, stop and
+   * permission-decision, and refuses any other.
+   */
+  agentCommandKinds?: string[] | null;
   /** A preparation workspace (PRO-20): when the server stops it for good. Absent on every other workspace. */
   preparation?: { stopAfter: number } | null;
   checkout?: { state: "ready" | "failed"; repositories: { repository: string; state: "ready" | "failed"; category?: string }[]; reportedAt: number } | null;

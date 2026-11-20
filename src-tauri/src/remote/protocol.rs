@@ -100,14 +100,25 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   call, so a resend never makes a second tab and the prompt never waits on
 ///   a separate send; `session.handoffContext` reads a tab's conversation for
 ///   the handoff's prompt, with this runtime's own transcript path.
+/// - `follow-ups/1` (#1328): the runtime takes the `follow-up` command, which
+///   edits, withdraws or releases (sends next, interrupting the turn) a
+///   follow-up it holds. A cloud runtime takes it through the mailbox, as it
+///   takes a send; a runtime with no mailbox takes it live as
+///   `session.followUp` with the receipts of `agent-commands/1`, and does not
+///   serve that method without them.
 ///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 32] = [
+pub const CAPABILITIES: &[&str] = &[
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1",
 ];
+
+/// The runtime edits, withdraws and releases its held follow-ups (#1328; spelled out in [`CAPABILITIES`]).
+pub const FOLLOW_UPS: &str = "follow-ups/1";
+/// Its live call, on a runtime with no mailbox.
+pub const FOLLOW_UP_METHOD: &str = "session.followUp";
 
 /// A tab's turn checkpoints, Reset and Fork (#1326; spelled out in [`CAPABILITIES`]).
 pub const CHECKPOINTS: &str = "checkpoints/1";
@@ -233,6 +244,9 @@ pub const METHODS: &[Method] = &[
     method("session.steer", "agent-commands/1", Participate, true),
     method("session.stop", "agent-commands/1", Participate, true),
     method("session.decide", "agent-commands/1", Participate, true),
+    // #1328: a held follow-up edited, withdrawn or released, live on a
+    // runtime with no mailbox (by the mailbox's rules, with its receipts).
+    method("session.followUp", "follow-ups/1", Participate, true),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
     // What the composer of an agent tab offers: read-only, and never more
@@ -444,6 +458,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
         "machine/8" => &["session.usage", "session.prepareContinuation", "session.checkFailures"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
+        FOLLOW_UPS => &[FOLLOW_UP_METHOD],
         _ => &[],
     }
 }
@@ -715,6 +730,10 @@ mod tests {
             assert_eq!((method.capability, method.authority, method.idempotent), (AGENT_COMMANDS, Participate, true), "{name}");
         }
         assert!(CAPABILITIES.contains(&AGENT_COMMANDS));
+        // A held follow-up's change, by the same rules (#1328).
+        let follow_up = find_method(FOLLOW_UP_METHOD).unwrap();
+        assert_eq!((follow_up.capability, follow_up.authority, follow_up.idempotent), (FOLLOW_UPS, Participate, true));
+        assert!(CAPABILITIES.contains(&FOLLOW_UPS));
         assert!(find_method("runtime.exec").is_none());
         assert!(find_method("invoke").is_none());
     }
