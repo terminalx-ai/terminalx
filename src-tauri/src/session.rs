@@ -498,27 +498,56 @@ const LAPSED_ECHOES: usize = 8;
 /// only once nothing still awaited does, and only by the whole of its words:
 /// the same words typed in the terminal then end the card, which is the
 /// message they repeat.
+///
+/// Each is known only in the conversation it lapsed in (#1335): the
+/// transcript file being followed then. A `/clear`, `/resume` or a CLI
+/// started by hand moving to another conversation leaves it behind, and
+/// that conversation's prompts are its own. Nor does one outlive the same
+/// words sent again from the composer: the CLI took that message, and a
+/// later prompt with those words typed in the terminal is a third.
 #[derive(Default)]
-struct LapsedEchoes(std::collections::VecDeque<(Instant, ComposerEcho)>);
+struct LapsedEchoes(std::collections::VecDeque<LapsedEcho>);
+
+struct LapsedEcho {
+    at: Instant,
+    /// The transcript the tab was following when its wait ran out.
+    conversation: PathBuf,
+    echo: ComposerEcho,
+}
 
 impl LapsedEchoes {
-    fn keep(&mut self, echoes: Vec<ComposerEcho>, now: Instant) {
+    fn keep(&mut self, echoes: Vec<ComposerEcho>, conversation: &Path, now: Instant) {
         for echo in echoes {
-            self.0.push_back((now, echo));
+            self.0.push_back(LapsedEcho { at: now, conversation: conversation.to_path_buf(), echo });
         }
         while self.0.len() > LAPSED_ECHOES {
             self.0.pop_front();
         }
     }
 
-    /// The lapsed prompt `payload` records, taken out: the CLI has it.
-    fn take(&mut self, payload: &Payload, now: Instant) -> Option<Echoed> {
+    /// Drop those past their time or from another conversation.
+    fn prune(&mut self, conversation: &Path, now: Instant) {
+        self.0.retain(|lapsed| lapsed.conversation == conversation && now.saturating_duration_since(lapsed.at) <= LAPSED_ECHO_TTL);
+    }
+
+    /// The lapsed prompt `payload` records, read from `conversation`, taken
+    /// out: the CLI has it.
+    fn take(&mut self, payload: &Payload, conversation: &Path, now: Instant) -> Option<Echoed> {
         let Payload::UserMessage { text, .. } = payload else { return None };
-        self.0.retain(|(lapsed_at, _)| now.saturating_duration_since(*lapsed_at) <= LAPSED_ECHO_TTL);
-        let at = self.0.iter().position(|(_, echo)| echo.matches(text))?;
-        let (_, mut echo) = self.0.remove(at).expect("the matched echo exists");
-        echo.confirm_delivery();
-        Some(echo.echoed())
+        self.prune(conversation, now);
+        let at = self.0.iter().position(|lapsed| lapsed.echo.matches(text))?;
+        let mut lapsed = self.0.remove(at).expect("the matched echo exists");
+        lapsed.echo.confirm_delivery();
+        Some(lapsed.echo.echoed())
+    }
+
+    /// `payload` was matched to a message the composer sent since: the
+    /// lapsed prompts with its words are not owed it, nor any later prompt
+    /// with those words, and are given up.
+    fn retire(&mut self, payload: &Payload, conversation: &Path, now: Instant) {
+        let Payload::UserMessage { text, .. } = payload else { return };
+        self.prune(conversation, now);
+        self.0.retain(|lapsed| !lapsed.echo.matches(text));
     }
 }
 
@@ -1123,7 +1152,7 @@ impl CliTab {
     fn expire_echoes(&mut self, turn_open: bool, now: Instant) -> Vec<u64> {
         let unsent = expire_composer_echoes(&mut self.echoed, turn_open, now);
         let seqs = unsent.iter().map(|echo| echo.seq).collect();
-        self.lapsed.keep(unsent, now);
+        self.lapsed.keep(unsent, &self.tail.path(), now);
         seqs
     }
 
@@ -6686,8 +6715,17 @@ impl SessionManager {
                         let joined = consume_composer_echoes_within(&mut p.echoed, &payload);
                         if joined.is_empty() { consume_awaited_echo_changed(&mut p.echoed, p.awaiting_delivery, &payload).into_iter().collect() } else { joined }
                     };
-                    // A queued prompt taken after its wait ran out (#1284).
-                    let echoed = if echoed.is_empty() { p.lapsed.take(&payload, Instant::now()).into_iter().collect() } else { echoed };
+                    // A queued prompt taken after its wait ran out (#1284),
+                    // in the conversation it was sent to (#1335). Words the
+                    // composer sent again were taken as that message: the
+                    // lapsed one is not owed them any more.
+                    let conversation = p.tail.path();
+                    let echoed = if echoed.is_empty() {
+                        p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
+                    } else {
+                        p.lapsed.retire(&payload, &conversation, Instant::now());
+                        echoed
+                    };
                     if !echoed.is_empty() {
                         forget_taken(p);
                     }

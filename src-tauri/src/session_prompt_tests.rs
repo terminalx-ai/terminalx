@@ -587,6 +587,92 @@ fn a_queued_codex_follow_up_taken_after_its_wait_ran_out_is_one_message_and_ever
     assert_eq!(rig.taken_as_prompts(), ["check the tests"]);
 }
 
+impl Rig {
+    /// A follow-up queued behind a turn that ends without the CLI taking
+    /// it, left waiting until its wait runs out (#1284). Its `seq`.
+    fn queue_and_lapse(&self, text: &str) -> u64 {
+        self.compose("start", 0);
+        self.cli_takes("start");
+        assert!(self.compose(text, 0));
+        self.enter_written();
+        self.cli_replies("one");
+        self.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        self.tick();
+        self.tick();
+        assert_eq!(self.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
+        self.queued_seq(text)
+    }
+
+    /// The `seq` of the message each turn was started for, in order.
+    fn turn_prompt_seqs(&self) -> Vec<u64> {
+        self.events().iter().filter_map(|e| match e.payload { Payload::TurnStarted { prompt_seq, .. } => prompt_seq, _ => None }).collect()
+    }
+}
+
+/// #1335: a queued prompt lapses, the CLI had discarded it, and the reader
+/// sends the same words again from the composer. The CLI takes that one;
+/// the lapsed card is not owed those words any more. The same words typed
+/// into the terminal after are a message of their own, never the old
+/// card's.
+#[test]
+fn words_sent_again_from_the_composer_retire_the_lapsed_prompt_they_repeat() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}: the CLI is idle: sent again, it starts a turn");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told(), [
+            "user: start", "queued: check the tests", "reply: one", "end",
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}: the prompt typed in the terminal is drawn as its own message");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: no turn is the lapsed card's");
+    }
+}
+
+/// #1335: a queued prompt lapses, and the conversation changes under the
+/// tab — a `/clear` opens a new transcript, which the hooks name. A prompt
+/// there with the lapsed one's words belongs to the new conversation.
+#[test]
+fn a_lapsed_prompt_is_not_matched_in_the_conversation_after_a_reset() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        let cleared = rig.transcript.with_file_name("after-clear.jsonl");
+        std::fs::write(&cleared, "").unwrap();
+        rig.tail.retarget(&cleared);
+        rig.hook("UserPromptSubmit", json!({ "prompt": "check the tests" }));
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&cleared).unwrap().write_all(rig.cli().prompt("check the tests").as_bytes()).unwrap();
+        }
+        rig.manager.pump(&rig.rt, &rig.tail);
+
+        assert_eq!(rig.told()[4..], ["user: check the tests"], "{kind:?}: a message of the new conversation");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: no turn is the lapsed card's");
+    }
+}
+
+/// #1335, beside the two above: with nothing sent again and the
+/// conversation unchanged, a late take is still the lapsed message (#1284).
+#[test]
+fn a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        assert_eq!(rig.told(), ["user: start", "queued: check the tests", "reply: one", "end", "reply: they pass", "end"], "{kind:?}");
+        assert!(rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: the card is cleared into the turn that answers it");
+    }
+}
+
 #[test]
 fn a_queued_prompt_the_cli_takes_is_never_flagged() {
     for kind in BOTH {
