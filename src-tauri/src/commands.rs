@@ -3060,6 +3060,14 @@ pub async fn answer_questions(
     tauri::async_runtime::spawn_blocking(move || m.answer_questions(&session_id, &tab_id, &request_id, answers).map_err(err)).await.map_err(err)?
 }
 
+/// Answer a question the agent's CLI drew in its own terminal (PRO-460):
+/// option `choice`, or with none, dismiss it as its Escape does.
+#[tauri::command]
+pub async fn answer_terminal_prompt(state: State<'_, AppState>, session_id: String, tab_id: String, prompt_id: String, choice: Option<usize>) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.answer_terminal_prompt(&session_id, &tab_id, &prompt_id, choice).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;

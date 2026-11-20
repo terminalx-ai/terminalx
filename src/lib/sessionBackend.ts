@@ -317,6 +317,11 @@ export interface SessionBackend {
   stop(tabId: string): Promise<void>;
   respondPermission(tabId: string, requestId: string, optionId: string): Promise<void>;
   answerQuestions(tabId: string, requestId: string, answers: Record<string, string>): Promise<void>;
+  /**
+   * Local only (PRO-460): answer a question the agent's CLI drew in its own
+   * terminal, typed there as its keys: an option's index, or null for Escape.
+   */
+  answerTerminalPrompt?(tabId: string, promptId: string, choice: number | null): Promise<void>;
   setModel(tabId: string, model: string): Promise<void>;
   setEffort(tabId: string, effort: string | null): Promise<void>;
   setPermissionMode(tabId: string, mode: string): Promise<void>;
@@ -449,6 +454,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),
     answerQuestions: (tabId, requestId, answers) => agent.answerQuestions(sessionId, tabId, requestId, answers),
+    answerTerminalPrompt: (tabId, promptId, choice) => agent.answerTerminalPrompt(sessionId, tabId, promptId, choice),
     setModel: (tabId, model) => agent.setModel(sessionId, tabId, model),
     setEffort: (tabId, effort) => agent.setEffort(sessionId, tabId, effort),
     setPermissionMode: (tabId, mode) => agent.setPermissionMode(sessionId, tabId, mode),
