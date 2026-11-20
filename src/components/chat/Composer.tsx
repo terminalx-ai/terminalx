@@ -494,7 +494,7 @@ export function Composer({
       }
     }
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
-    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
+    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name, ...(a.size != null ? { size: a.size } : {}) }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer
