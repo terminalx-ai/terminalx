@@ -38,7 +38,7 @@ vi.mock("@/lib/updates", () => ({
 }));
 
 const { MachineChip, machineStateHint } = await import("./connectionStatus");
-const { MachineRow } = await import("./MachineRow");
+const { MachineCard } = await import("./MachinesSettings");
 const { MachinePage } = await import("./MachinePage");
 const { MachineFeatureNotice, MachineHiddenFeatures } = await import("./MachineFeatureNotice");
 const { resetMachineUpdateForTests, useMachineVersion } = await import("@/lib/machineUpdate");
@@ -68,6 +68,9 @@ function fakeClient(capabilities: string[], runtimeVersion: string, status: Mach
     machineUpdateStatus: vi.fn(async () => status),
     updateMachine: vi.fn(async () => ({ ...status, progress: { phase: "downloading", version: "0.2.33", since: 2 } })),
     onMachineUpdate: vi.fn(() => () => undefined),
+    // The card's count of running sessions: none.
+    onSessions: vi.fn(() => () => undefined),
+    listSessions: vi.fn(async () => []),
     // The page's agents and resources (PRO-350): none to show here.
     runtimeAgentsReport: vi.fn(async () => ({ agents: [], missing: [] })),
     call: vi.fn(async () => ({ v: 1, memory: null, storage: null, cpu: null, observedAt: 1 })),
@@ -108,20 +111,46 @@ describe("the header chip (21.09)", () => {
   });
 });
 
+// The card Settings → Machines draws for each of Your machines.
+const renderCard = () => {
+  render(<ul><MachineCard machine={CI_BOX} onOpen={() => undefined} onRemove={() => undefined} /></ul>);
+  return screen.getByTestId("paired-machine");
+};
+
 describe("Settings → Machines card (21.02)", () => {
   it("shows Needs update with Update when the connected machine hides a feature", async () => {
     attach(CI_BOX, LIVE, fakeClient(ALL.filter((name) => name !== "ports/1"), "0.2.27", updateStatus()));
-    render(<ul><MachineRow machine={CI_BOX} onOpen={() => undefined} /></ul>);
-    expect(await screen.findByTestId("machine-needs-update")).toBeTruthy();
+    const card = renderCard();
+    await waitFor(() => expect(card.getAttribute("data-needs-update")).toBe("true"));
+    expect(card.textContent).toContain("Needs update");
+    expect(card.textContent).not.toContain("Connected");
     expect(screen.getByTestId("paired-machine-line").textContent).toBe("TerminalX 0.2.27 · some features are hidden until it is updated");
     expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
   });
 
+  it("says where to update a machine that this Mac cannot update", async () => {
+    attach(CI_BOX, LIVE, fakeClient(ALL.filter((name) => name !== "machine/3"), "0.2.27", updateStatus()));
+    const card = renderCard();
+    await waitFor(() => expect(card.getAttribute("data-needs-update")).toBe("true"));
+    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this Mac cannot update. Update it on ci-box.");
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+  });
+
+  it("says the same for a machine whose connection says it needs an update", () => {
+    attach(CI_BOX, { state: "needsUpdate", version: "0.2.27", side: "machine" }, null);
+    const card = renderCard();
+    expect(card.getAttribute("data-needs-update")).toBe("true");
+    expect(card.textContent).toContain("Needs update");
+    expect(screen.getByTestId("paired-machine-update-note").textContent).toBe("ci-box runs a TerminalX this Mac cannot update. Update it on ci-box.");
+    expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
+  });
+
   it("shows the machine as connected, with no badge, when it hides nothing", async () => {
     attach(CI_BOX, LIVE, fakeClient(ALL, "0.2.33", updateStatus({ current: "0.2.33", available: null })));
-    render(<ul><MachineRow machine={CI_BOX} onOpen={() => undefined} /></ul>);
+    const card = renderCard();
     expect(await screen.findByText("Connected")).toBeTruthy();
-    expect(screen.queryByTestId("machine-needs-update")).toBeNull();
+    expect(card.hasAttribute("data-needs-update")).toBe(false);
+    expect(card.textContent).not.toContain("Needs update");
     expect(screen.queryByRole("button", { name: "Update" })).toBeNull();
   });
 });
