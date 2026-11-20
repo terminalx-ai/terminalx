@@ -57,6 +57,8 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
+pub mod precheck;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleKind {
@@ -360,7 +362,7 @@ pub fn definition_from_input(
         keep_latest_run_visible: input.keep_latest_run_visible,
         base_ref: input.base_ref,
         schedule: input.schedule,
-        precheck: input.precheck,
+        precheck: precheck::normalized(input.precheck),
         missed_run_grace_minutes: input.missed_run_grace_minutes,
         run_timeout_minutes: input.run_timeout_minutes,
         next_run_at: next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -864,6 +866,10 @@ fn start_run(
     emit_run(app, &run);
     let started_at = run.started_at.clone().unwrap_or_else(index::now);
     update_summary(app, &automation.id, run.status, &started_at);
+    // The first check runs before any session exists (PRO-484).
+    let Some(prompt) = precheck::gate(app, automation, &mut run, prompt)? else {
+        return Ok(run);
+    };
 
     let result = (|| -> Result<()> {
         let available = crate::harness::offered()

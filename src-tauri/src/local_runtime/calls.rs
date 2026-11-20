@@ -221,6 +221,7 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "automationIssues" => return Ok(serde_json::to_value(crate::automations::issue_states()?)?),
         "automationSave" => return Ok(serde_json::to_value(crate::automations::save_definition(&manager.automation_host(), params["id"].as_str(), serde_json::from_value(params["input"].clone())?)?)?),
         "automationDelete" => { crate::automations::remove_definition(&manager.automation_host(), string(&params, "id")?)?; return Ok(Value::Null); }
+        "automationPrecheckTry" => return Ok(serde_json::to_value(crate::automations::precheck::try_precheck(serde_json::from_value(params["input"].clone())?)?)?),
         "automationRun" => return Ok(serde_json::to_value(crate::automations::dispatch(&manager.automation_host(), string(&params, "id")?, crate::automations::AutomationTrigger::Manual, None)?)?),
         "paneAgents" => return Ok(serde_json::to_value(manager.pane_agents())?),
         "addTab" => return Ok(serde_json::to_value(manager.add_tab_on(string(&params, "sessionId")?, &serde_json::from_value(params["tab"].clone())?, params["account"].as_str())?)?),

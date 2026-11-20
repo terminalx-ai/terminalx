@@ -830,6 +830,7 @@ pub fn run() {
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,
+            commands::automation_precheck_try,
             commands::automation_run_now,
             commands::session_summaries,
             commands::stats_usage_snapshot,

@@ -43,7 +43,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
-import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, PrecheckTrial, PrecheckTryInput } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
@@ -2134,6 +2134,7 @@ export const automationsApi = {
   update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
   remove: (id: string) => invoke<void>("automation_delete", { id }),
   runNow: (id: string) => invoke<AutomationRun>("automation_run_now", { id }),
+  tryPrecheck: (input: PrecheckTryInput) => invoke<PrecheckTrial>("automation_precheck_try", { input }),
 };
 
 export function errorMessage(e: unknown): string {
