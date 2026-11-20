@@ -6175,7 +6175,7 @@ async fn bots_call<T: serde::de::DeserializeOwned + Send + 'static>(state: State
 }
 
 #[tauri::command]
-pub async fn bot_list(state: State<'_, AppState>) -> CmdResult<Vec<crate::bots::Bot>> {
+pub async fn bot_list(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
     bots_call(state, "list", serde_json::json!({})).await
 }
 
@@ -6190,7 +6190,9 @@ pub async fn bot_templates(state: State<'_, AppState>) -> CmdResult<serde_json::
     bots_call(state, "templates", serde_json::json!({})).await
 }
 
-/// Hire a bot: a role and a name, everything else on its default.
+/// Hire a bot: a role and a name, everything else on its default. The list
+/// answers (`bot_list`, `bots_pause_all`, `bots_resume_all`) and `bots_changed`
+/// carry the store's revision: the higher one is the newer list.
 #[tauri::command]
 pub async fn bot_create(state: State<'_, AppState>, role_template_id: String, name: String) -> CmdResult<crate::bots::Bot> {
     bots_call(state, "create", serde_json::json!({"roleTemplateId": role_template_id, "name": name})).await
@@ -6218,12 +6220,12 @@ pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<cra
 }
 
 #[tauri::command]
-pub async fn bots_pause_all(state: State<'_, AppState>) -> CmdResult<Vec<crate::bots::Bot>> {
+pub async fn bots_pause_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
     bots_call(state, "pauseAll", serde_json::json!({})).await
 }
 
 #[tauri::command]
-pub async fn bots_resume_all(state: State<'_, AppState>) -> CmdResult<Vec<crate::bots::Bot>> {
+pub async fn bots_resume_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
     bots_call(state, "resumeAll", serde_json::json!({})).await
 }
 

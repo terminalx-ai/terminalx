@@ -1917,15 +1917,24 @@ terminalx bots delete <bot> --json
   `qa-engineer`, `release-manager`, `docs-writer`, `security-auditor` or `watcher`. A role and a
   name are all a new bot needs; it starts with full access, on Claude Code, reporting to the
   owner, with every duty of its template switched off.
-- `<bot>` is a bot's `slug`, its `id`, or its name when only one bot has that name. The slug
-  comes from the name (`Atlas` → `atlas`, a second one `atlas-2`) and follows a rename.
-- `create` and `show` answer `{"bot": {…}, "home": "<path>"}`; `list`, `pause-all` and
-  `resume-all` answer `{"bots": […]}`.
+- `<bot>` is a bot's `id`, its `slug`, or its name when only one bot has that name. **The id is
+  the only stable reference**: keep the id, never a slug, to find a bot again. A slug comes from
+  the name (`Atlas` → `atlas`, a second one `atlas-2`), changes when the bot is renamed and may
+  be given to another bot after a delete. `owner`, `personal`, `all` and `everyone` are never a
+  slug (`Owner` becomes `owner-2`). Every `--json` answer about a bot includes its `id`.
+- `create` and `show` answer `{"bot": {…}, "home": "<path>"}`. `list`, `pause-all` and
+  `resume-all` answer `{"revision": N, "bots": […], "unreadable": N}`: `revision` grows by one
+  with every change, and `unreadable` counts records in `bots.json` this app cannot read (a
+  newer app's). Those are kept as they are and never overwritten.
 - `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`); `resume` clears
   it. Pausing a paused bot keeps the first record. `pause-all` pauses every bot not already
-  paused and `resume-all` resumes every bot.
-- `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`.
-  Nothing in it is erased.
+  paused and `resume-all` resumes every bot. Today every caller is recorded as `owner`.
+- `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`,
+  with the record beside it as `bot.json`. Nothing in it is erased.
+- Refusals: `invalid_arguments` for a role, name or value the app does not accept;
+  `not_found` for no such bot (also when it was deleted while the command ran);
+  `ambiguous_selector` when several bots share the name (use the id); `internal` when the app
+  cannot read or write its store, which no change to the arguments fixes.
 
 ### This guide
 

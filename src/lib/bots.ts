@@ -1,27 +1,53 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { botsApi } from "@/lib/api";
-import type { Bot, BotPatch, BotRoleTemplate } from "@/types/bots";
+import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
 
 /**
  * The bots (PRO-466), as every view sees them. Booted only while Settings →
  * Experimental → Bots is on: off, nothing here listens or asks the app for
  * anything, and the store stays empty.
+ *
+ * Every whole list the app sends (`bots_changed`, a list read at boot or on
+ * reattaching, the pause-all answers) carries the store's revision, and the
+ * newest one wins: a list read earlier never replaces a newer one.
  */
 interface State {
   loaded: boolean;
   bots: Bot[];
+  /** The revision `bots` came from; -1 before anything was read. */
+  revision: number;
+  /** Records the app cannot read (a newer app's). They exist; they are not shown. */
+  unreadable: number;
+  /** Why the bots could not be read. Not the same as having none: a view must not offer a first hire over it. */
+  error: string | null;
   /** The bundled role templates, read the first time they are asked for. */
   templates: BotRoleTemplate[] | null;
 }
 
-const EMPTY: State = { loaded: false, bots: [], templates: null };
+const EMPTY: State = { loaded: false, bots: [], revision: -1, unreadable: 0, error: null, templates: null };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
   for (const listener of [...listeners]) listener();
+}
+
+function reason(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function isList(value: unknown): value is BotList {
+  return !!value && typeof value === "object" && Array.isArray((value as BotList).bots) && typeof (value as BotList).revision === "number";
+}
+
+/** Take a whole list unless a newer one is already here. */
+function take(list: BotList) {
+  if (list.revision < state.revision) return;
+  set({ bots: list.bots, revision: list.revision, unreadable: list.unreadable ?? 0, loaded: true, error: null });
 }
 
 /** Counts the boots and shuts so an answer that arrives after the switch went off is dropped. */
@@ -31,10 +57,11 @@ let unlisten: (() => void)[] = [];
 
 async function listBots(mine: number) {
   try {
-    const bots = await botsApi.list();
-    if (mine === generation) set({ bots, loaded: true });
-  } catch {
-    if (mine === generation) set({ loaded: true });
+    const list = await botsApi.list();
+    if (mine === generation && isList(list)) take(list);
+  } catch (error) {
+    // The bots are unknown, not absent: keep what was read and say why.
+    if (mine === generation) set({ loaded: true, error: reason(error) });
   }
 }
 
@@ -44,8 +71,8 @@ export async function bootBots() {
   const mine = ++generation;
   try {
     const stops = await Promise.all([
-      listen<Bot[]>("bots_changed", (event) => {
-        if (mine === generation && Array.isArray(event.payload)) set({ bots: event.payload, loaded: true });
+      listen<BotList>("bots_changed", (event) => {
+        if (mine === generation && isList(event.payload)) take(event.payload);
       }),
       // Changes made while the live connection was down were not announced.
       listen("local_runtime_reattached", () => void listBots(mine)),
@@ -83,10 +110,21 @@ export function getBotStore(): State {
   return state;
 }
 
+/**
+ * Run a change and take its answer at once, unless a list arrived while it
+ * ran: that list is as new as this change or newer, and this change's own
+ * `bots_changed` follows it.
+ */
+async function changed<T>(request: () => Promise<T>, apply: (answer: T) => void): Promise<T> {
+  const before = state.revision;
+  const answer = await request();
+  if (state.revision === before) apply(answer);
+  return answer;
+}
+
 function upsert(bot: Bot) {
   const exists = state.bots.some((value) => value.id === bot.id);
   set({ bots: exists ? state.bots.map((value) => (value.id === bot.id ? bot : value)) : [...state.bots, bot] });
-  return bot;
 }
 
 export async function loadBotTemplates(): Promise<BotRoleTemplate[]> {
@@ -97,37 +135,36 @@ export async function loadBotTemplates(): Promise<BotRoleTemplate[]> {
 }
 
 /** Hire a bot: a role and a name are all it asks for. */
-export async function createBot(roleTemplateId: string, name: string) {
-  return upsert(await botsApi.create(roleTemplateId, name));
+export function createBot(roleTemplateId: string, name: string) {
+  return changed(() => botsApi.create(roleTemplateId, name), upsert);
 }
 
-export async function updateBot(id: string, patch: BotPatch) {
-  return upsert(await botsApi.update(id, patch));
+export function updateBot(id: string, patch: BotPatch) {
+  return changed(() => botsApi.update(id, patch), upsert);
 }
 
 export async function deleteBot(id: string) {
-  await botsApi.remove(id);
-  set({ bots: state.bots.filter((value) => value.id !== id) });
+  await changed(() => botsApi.remove(id), () => set({ bots: state.bots.filter((value) => value.id !== id) }));
 }
 
-export async function pauseBot(id: string) {
-  return upsert(await botsApi.pause(id));
+export function pauseBot(id: string) {
+  return changed(() => botsApi.pause(id), upsert);
 }
 
-export async function resumeBot(id: string) {
-  return upsert(await botsApi.resume(id));
+export function resumeBot(id: string) {
+  return changed(() => botsApi.resume(id), upsert);
 }
 
 export async function pauseAllBots() {
-  const bots = await botsApi.pauseAll();
-  set({ bots });
-  return bots;
+  const list = await botsApi.pauseAll();
+  take(list);
+  return list.bots;
 }
 
 export async function resumeAllBots() {
-  const bots = await botsApi.resumeAll();
-  set({ bots });
-  return bots;
+  const list = await botsApi.resumeAll();
+  take(list);
+  return list.bots;
 }
 
 /** For tests: forget everything, listeners included. */

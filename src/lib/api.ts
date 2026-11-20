@@ -44,7 +44,7 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
-import type { Bot, BotPatch, BotRoleTemplate } from "@/types/bots";
+import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
@@ -2139,7 +2139,8 @@ export const automationsApi = {
 
 /** Bots (PRO-466). Every one of these is refused while Settings → Experimental → Bots is off. */
 export const botsApi = {
-  list: () => invoke<Bot[]>("bot_list"),
+  /** Every bot, with the revision they were read at (as `bots_changed` carries it). */
+  list: () => invoke<BotList>("bot_list"),
   get: (id: string) => invoke<Bot>("bot_get", { id }),
   templates: () => invoke<BotRoleTemplate[]>("bot_templates"),
   /** Hire a bot: a role and a name, everything else on its default. */
@@ -2149,8 +2150,8 @@ export const botsApi = {
   remove: (id: string) => invoke<void>("bot_delete", { id }),
   pause: (id: string) => invoke<Bot>("bot_pause", { id }),
   resume: (id: string) => invoke<Bot>("bot_resume", { id }),
-  pauseAll: () => invoke<Bot[]>("bots_pause_all"),
-  resumeAll: () => invoke<Bot[]>("bots_resume_all"),
+  pauseAll: () => invoke<BotList>("bots_pause_all"),
+  resumeAll: () => invoke<BotList>("bots_resume_all"),
   /** The bot's standing instructions, its `ROLE.md`. */
   roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
   roleWrite: (id: string, text: string) => invoke<Bot>("bot_role_write", { id, text }),

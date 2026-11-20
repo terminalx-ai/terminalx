@@ -11,7 +11,8 @@
   `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
   A bot is hired from one of eight bundled role templates with a role and a
   name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
-  deleting it moves that folder to `trash/bots/`. No screens yet (PRO-466).
+  deleting it moves that folder, with its record, to `trash/bots/`. No screens
+  yet (PRO-466).
 
 ## 0.2.36
 

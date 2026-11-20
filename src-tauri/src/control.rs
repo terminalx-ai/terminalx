@@ -948,41 +948,52 @@ impl ControlService {
     }
 
     /// Bots (`bots`, PRO-466): hire, list, rename, pause and delete them. With
-    /// Settings → Experimental → Bots off every one answers `bots_off`. A
-    /// change made here is recorded as the owner's.
+    /// Settings → Experimental → Bots off every one answers `bots_off`.
+    ///
+    /// Every caller is recorded as the owner today: a pause made here is by
+    /// `owner`, and anyone who can reach this socket can resume any bot. Once
+    /// sessions carry a bot reference (PRO-468), a call from a bot's own
+    /// session must be recorded as that bot, and a bot must not resume itself.
     fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        use crate::bots::{self, Named};
+        use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
             return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let sink = self.sink.as_ref();
-        let refused = |error: anyhow::Error| ControlError::invalid(format!("{error:#}"));
+        // Only the caller's own mistakes are `invalid_arguments`: an unreadable store or a failed write is not.
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
         let named = || -> Result<bots::Bot, ControlError> {
             let selector = required_string(&params, "bot")?;
-            match bots::named(&selector).map_err(ControlError::internal)? {
+            match bots::named(&selector).map_err(failed)? {
                 Named::One(bot) => Ok(*bot),
-                Named::Several => Err(ControlError::new("ambiguous_selector", bots::several_named(&selector), Some("Use the slug or id from `terminalx bots list --json`.".into()))),
+                Named::Several => Err(ControlError::new("ambiguous_selector", bots::several_named(&selector), Some("Use the id from `terminalx bots list --json`.".into()))),
                 Named::Nobody => Err(ControlError::not_found(bots::nobody_named(&selector))),
             }
         };
-        let shown = |bot: &bots::Bot| -> Result<Value, ControlError> { Ok(json!({"bot": bot, "home": bots::home(bot).map_err(ControlError::internal)?})) };
+        let shown = |bot: &bots::Bot| json!({"bot": bot, "home": bots::home(bot)});
         match command {
-            "bots.list" => Ok(json!({"bots": bots::list().map_err(ControlError::internal)?})),
-            "bots.show" => shown(&named()?),
-            "bots.create" => shown(&bots::create(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(refused)?),
+            "bots.list" => Ok(json!(bots::listing().map_err(failed)?)),
+            "bots.show" => Ok(shown(&named()?)),
+            "bots.create" => Ok(shown(&bots::create(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)),
             "bots.rename" => {
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
-                Ok(json!({"bot": bots::update(sink, &named()?.id, patch).map_err(refused)?}))
+                Ok(json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?}))
             }
-            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, bots::OWNER).map_err(ControlError::internal)?})),
-            "bots.resume" => Ok(json!({"bot": bots::resume(sink, &named()?.id).map_err(ControlError::internal)?})),
+            // Recorded as the owner's; see above.
+            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, bots::OWNER).map_err(failed)?})),
+            "bots.resume" => Ok(json!({"bot": bots::resume(sink, &named()?.id).map_err(failed)?})),
             "bots.delete" => {
                 let bot = named()?;
-                bots::delete(sink, &bot.id).map_err(ControlError::internal)?;
+                bots::delete(sink, &bot.id).map_err(failed)?;
                 Ok(json!({"deleted": bot.id, "name": bot.name}))
             }
-            "bots.pauseAll" => Ok(json!({"bots": bots::pause_all(sink, bots::OWNER).map_err(ControlError::internal)?})),
-            _ => Ok(json!({"bots": bots::resume_all(sink).map_err(ControlError::internal)?})),
+            "bots.pauseAll" => Ok(json!(bots::pause_all(sink, bots::OWNER).map_err(failed)?)),
+            _ => Ok(json!(bots::resume_all(sink).map_err(failed)?)),
         }
     }
 
@@ -3075,7 +3086,7 @@ mod tests {
         let mut settings = crate::store::settings::load();
         settings.experimental.bots = true;
         crate::store::settings::save(&settings).unwrap();
-        assert_eq!(ask("bots.list", json!({})).unwrap(), json!({"bots": []}));
+        assert_eq!(ask("bots.list", json!({})).unwrap(), json!({"revision": 0, "bots": [], "unreadable": 0}));
 
         let created = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap();
         let id = created["bot"]["id"].as_str().unwrap().to_owned();
@@ -3115,6 +3126,19 @@ mod tests {
         ask("bots.create", json!({"role": "watcher", "name": "argus"})).unwrap();
         assert_eq!(ask("bots.pause", json!({"bot": "Argus"})).unwrap_err().code, "ambiguous_selector");
         assert_eq!(ask("bots.pause", json!({"bot": "argus-2"})).unwrap()["bot"]["name"], "argus");
+        // Every bot answer carries its id, and the id names it whatever its slug has become.
+        let argus = ask("bots.show", json!({"bot": "argus-2"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(ask("bots.rename", json!({"bot": argus, "name": "Sentry"})).unwrap()["bot"]["id"], argus.as_str());
+        assert_eq!(ask("bots.resume", json!({"bot": argus})).unwrap()["bot"]["slug"], "sentry");
+        assert!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().iter().all(|bot| bot["id"].is_string()));
+
+        // A store the app cannot read is its own failure, not the caller's.
+        let path = crate::store::root().unwrap().join("bots.json");
+        std::fs::write(&path, "{\"bots\": [").unwrap();
+        for (command, params) in [("bots.list", json!({})), ("bots.create", json!({"role": "cto", "name": "Atlas"})), ("bots.pauseAll", json!({}))] {
+            assert_eq!(ask(command, params).unwrap_err().code, "internal", "{command}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"bots\": [");
     }
 
     /// `terminalx projects add|remove` (#1078): the app's checks and git

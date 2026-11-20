@@ -1,17 +1,30 @@
-/** What a bot may do without asking. `full` is the default for a new bot. */
-export type BotAccess = "full" | "askOutward" | "readReport";
+/**
+ * What a bot may do without asking. `full` is the default for a new bot. A level a newer app wrote
+ * arrives as its own string; act on it as `readReport`, never as `full` (see `effectiveAccess`).
+ */
+export type BotAccess = "full" | "askOutward" | "readReport" | (string & {});
 
-export type BotRunsOn = "thisMac";
+/** Only `thisMac` for now; a place a newer app wrote (a cloud workspace, another machine) arrives as its own string. */
+export type BotRunsOn = "thisMac" | (string & {});
 
-/** When a bot was paused and by whom: `owner`, or the id of the bot that paused it. */
+/** The level to act on: one this app does not know counts as the most restrictive one it knows. */
+export function effectiveAccess(access: BotAccess): KnownBotAccess {
+  return (KNOWN_ACCESS as readonly string[]).includes(access) ? (access as KnownBotAccess) : "readReport";
+}
+
+const KNOWN_ACCESS = ["full", "askOutward", "readReport"] as const;
+type KnownBotAccess = (typeof KNOWN_ACCESS)[number];
+
+/** When a bot was paused and by whom: `owner` (every caller today), or the id of the bot that paused it. */
 export interface BotPause {
   at: string;
   by: string;
 }
 
 export interface Bot {
+  /** The one stable reference to a bot: keep this, never the slug. */
   id: string;
-  /** Unique among the bots, from the name. */
+  /** Unique among the bots, from the name. Changes with a rename and may be reused after a delete. */
   slug: string;
   name: string;
   roleTitle: string;
@@ -29,6 +42,14 @@ export interface Bot {
   paused?: BotPause;
   created: string;
   modified: string;
+}
+
+/** Every bot as one save left them. Of two lists, the one with the higher `revision` is the newer. */
+export interface BotList {
+  revision: number;
+  bots: Bot[];
+  /** Records the app cannot read (a newer app's). Kept as they are, and listed by none. */
+  unreadable: number;
 }
 
 /** A change to a bot: a field left out stays as it is, and `effort: null` goes back to the agent's default. */
