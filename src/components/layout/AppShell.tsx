@@ -82,6 +82,7 @@ import { bootStatus, useStatus } from "@/lib/status";
 import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
+import { bootBots, shutBots } from "@/lib/bots";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -329,6 +330,12 @@ export function AppShell() {
   // Every paired machine stays attached while the window is open (PRO-345). With none paired this reads
   // the empty list and connects to nothing (PRO-360).
   const experimentalSwitches = useExperimentalSettings();
+  // Bots (PRO-466) are read and listened for only while Settings → Experimental → Bots is on.
+  const botsOn = experimentalSwitches?.bots === true;
+  useEffect(() => {
+    if (botsOn) void bootBots();
+    else shutBots();
+  }, [botsOn]);
   useEffect(() => startMachineConnections(), []);
   // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
   useEffect(() => {

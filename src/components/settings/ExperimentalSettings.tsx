@@ -18,6 +18,7 @@ export function ExperimentalTab() {
   const [orchestratorRuns, setOrchestratorRuns] = useState<boolean | null>(null);
   const [localVmTasks, setLocalVmTasks] = useState<boolean | null>(null);
   const [openCode, setOpenCode] = useState<boolean | null>(null);
+  const [bots, setBots] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -31,6 +32,7 @@ export function ExperimentalTab() {
         setOrchestratorRuns(settings?.orchestratorRuns ?? false);
         setLocalVmTasks(settings?.localVmTasks ?? false);
         setOpenCode(settings?.opencode ?? false);
+        setBots(settings?.bots ?? false);
       })
       .catch((e: unknown) => {
         if (!live) return;
@@ -38,6 +40,7 @@ export function ExperimentalTab() {
         setSessionCost(false);
         setOrchestratorRuns(false);
         setLocalVmTasks(false);
+        setBots(false);
         setError(errorMessage(e));
       });
     return () => {
@@ -48,7 +51,8 @@ export function ExperimentalTab() {
   // A paired phone can change it too (Settings → This Mac on the phone).
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean; orchestratorRuns?: boolean; localVmTasks?: boolean; opencode?: boolean }>("experimental_settings_changed", (event) => {
+    const unlisten = listen<{ nativeCodex?: boolean; sessionCost?: boolean; orchestratorRuns?: boolean; localVmTasks?: boolean; opencode?: boolean; bots?: boolean }>("experimental_settings_changed", (event) => {
+      if (live && typeof event.payload?.bots === "boolean") setBots(event.payload.bots);
       if (live && typeof event.payload?.opencode === "boolean") setOpenCode(event.payload.opencode);
       if (live && typeof event.payload?.nativeCodex === "boolean") setNativeCodex(event.payload.nativeCodex);
       if (live && typeof event.payload?.sessionCost === "boolean") setSessionCost(event.payload.sessionCost);
@@ -121,6 +125,21 @@ export function ExperimentalTab() {
     }
   };
 
+  const changeBots = async (on: boolean) => {
+    const before = bots;
+    setBots(on);
+    setError(null);
+    try {
+      const saved = await experimental.setBots(on);
+      setBots(saved.bots ?? false);
+      // The bots' store starts, or stops, at once (AppShell), not when the file watcher gets to it.
+      noteExperimentalSettings(saved);
+    } catch (e) {
+      setBots(before);
+      setError(errorMessage(e));
+    }
+  };
+
   const changeSessionCost = async (on: boolean) => {
     const before = sessionCost;
     setSessionCost(on);
@@ -151,6 +170,9 @@ export function ExperimentalTab() {
       />
       <RegisteredSetting setting="experimental.opencode"
         control={<Switch aria-label="OpenCode" checked={openCode ?? false} disabled={openCode === null} onCheckedChange={(on) => void changeOpenCode(on)} />}
+      />
+      <RegisteredSetting setting="experimental.bots"
+        control={<Switch aria-label="Bots" checked={bots ?? false} disabled={bots === null} onCheckedChange={(on) => void changeBots(on)} />}
       />
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>

@@ -7,6 +7,7 @@
 //!   whole under a process-wide lock and lands via write-temp + rename.
 
 pub mod automations;
+pub mod bots;
 pub mod activity;
 pub mod message_activity;
 pub mod index;

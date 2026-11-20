@@ -1,0 +1,652 @@
+//! Bots (PRO-459, PRO-466): AI employees with standing roles. A bot is data
+//! (`bots.json`) and a home folder holding its role and memory; its chats
+//! are ordinary sessions and its delegated work is orchestration runs, so
+//! nothing here starts, schedules or permits anything. Pausing only records
+//! the state for the parts that act on it.
+//!
+//! Everything is behind Settings → Experimental → Bots. With the switch off
+//! every operation here refuses, and nothing about the app changes.
+
+pub mod templates;
+
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::sink::EventSink;
+use crate::store::bots as bot_store;
+
+/// `reports_to` and `paused.by` name the person the bots belong to this way.
+pub const OWNER: &str = "owner";
+/// The place a bot works in when it works for its owner alone, with or without an organisation.
+pub const PERSONAL: &str = "personal";
+pub const OFF_MESSAGE: &str = "Bots are off. Turn them on in Settings → Experimental → Bots.";
+/// Words that name someone or everyone wherever a bot is named, so no bot's slug is one of them.
+pub const RESERVED_SLUGS: [&str; 4] = [OWNER, PERSONAL, "all", "everyone"];
+const DEFAULT_HARNESS: &str = "claude";
+const MAX_NAME_CHARS: usize = 80;
+const MAX_SLUG_CHARS: usize = 40;
+const MAX_ROLE_BYTES: usize = 256 * 1024;
+
+/// Why an operation refused. Anything else that fails is the app's problem,
+/// not something the caller can fix by asking differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BotError {
+    /// Settings → Experimental → Bots is off.
+    Off,
+    /// The request itself: a name, a role, a value this build does not accept.
+    Refused(String),
+    /// No bot has that id (any more).
+    NotFound(String),
+}
+
+impl std::fmt::Display for BotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str(OFF_MESSAGE),
+            Self::Refused(message) => f.write_str(message),
+            Self::NotFound(id) => write!(f, "No bot has the id {id}."),
+        }
+    }
+}
+
+impl std::error::Error for BotError {}
+
+fn refused(message: impl Into<String>) -> anyhow::Error {
+    BotError::Refused(message.into()).into()
+}
+
+fn not_found(id: &str) -> anyhow::Error {
+    BotError::NotFound(id.into()).into()
+}
+
+/// The refusal an error carries, if it is one.
+pub fn refusal(error: &anyhow::Error) -> Option<&BotError> {
+    error.downcast_ref::<BotError>()
+}
+
+macro_rules! refuse_unless {
+    ($cond:expr, $($message:tt)+) => {
+        if !$cond {
+            return Err(refused(format!($($message)+)));
+        }
+    };
+}
+
+/// What a bot may do without asking. Full access is the owner's decision
+/// for a new bot (PRO-459): it runs as the owner's sessions do.
+///
+/// A level a newer build wrote is kept as [`BotAccess::Other`] and written
+/// back unchanged; this build acts on it as [`BotAccess::effective`] says,
+/// never as full access.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BotAccess {
+    #[default]
+    Full,
+    /// Asks before anything that leaves this computer.
+    AskOutward,
+    /// Reads and reports only.
+    ReadReport,
+    Other(String),
+}
+
+impl BotAccess {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Full => "full",
+            Self::AskOutward => "askOutward",
+            Self::ReadReport => "readReport",
+            Self::Other(value) => value,
+        }
+    }
+
+    fn parse(value: String) -> Self {
+        match value.as_str() {
+            "full" => Self::Full,
+            "askOutward" => Self::AskOutward,
+            "readReport" => Self::ReadReport,
+            _ => Self::Other(value),
+        }
+    }
+
+    /// The level this build acts on: one it does not know counts as the
+    /// most restrictive one it knows.
+    #[allow(dead_code)] // Nothing acts on access yet; the bot's sessions do from PRO-468.
+    pub fn effective(&self) -> Self {
+        match self {
+            Self::Other(_) => Self::ReadReport,
+            known => known.clone(),
+        }
+    }
+}
+
+/// Where a bot runs. Only this Mac for now; a place a newer build wrote (a
+/// cloud workspace, another machine) is kept as [`BotRunsOn::Other`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BotRunsOn {
+    #[default]
+    ThisMac,
+    Other(String),
+}
+
+impl BotRunsOn {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ThisMac => "thisMac",
+            Self::Other(value) => value,
+        }
+    }
+
+    fn parse(value: String) -> Self {
+        if value == "thisMac" { Self::ThisMac } else { Self::Other(value) }
+    }
+}
+
+macro_rules! string_serde {
+    ($type:ty) => {
+        impl Serialize for $type {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                String::deserialize(deserializer).map(Self::parse)
+            }
+        }
+    };
+}
+
+string_serde!(BotAccess);
+string_serde!(BotRunsOn);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotPause {
+    pub at: String,
+    /// [`OWNER`], or the id of the bot that paused it. Today every caller is
+    /// the owner: the app and the `terminalx` CLI both record `owner`. Once a
+    /// session carries a bot reference (PRO-468), a bot's own pause must be
+    /// recorded as that bot, and a bot must not be able to resume itself.
+    pub by: String,
+    /// What a newer build records about a pause (its source, a reason) survives a save by this one.
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bot {
+    /// The one stable reference to a bot: never changes and is never reused.
+    pub id: String,
+    /// Unique among the bots, from the name: how the CLI and a mention name
+    /// it. Not stable: it changes with a rename and may be reused after a
+    /// delete. Never keep a slug to find the bot later; keep its id.
+    pub slug: String,
+    pub name: String,
+    pub role_title: String,
+    pub role_template_id: String,
+    pub harness: String,
+    /// Empty for the agent's own default model.
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub access: BotAccess,
+    #[serde(default)]
+    pub runs_on: BotRunsOn,
+    /// [`OWNER`] or another bot's id.
+    #[serde(default = "owner")]
+    pub reports_to: String,
+    #[serde(default = "personal")]
+    pub works_in: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<BotPause>,
+    pub created: String,
+    pub modified: String,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+/// Every bot as one save left them. `revision` grows by one with every save,
+/// so of two lists the one with the higher revision is the newer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotList {
+    pub revision: u64,
+    pub bots: Vec<Bot>,
+    /// Records in `bots.json` this build cannot read. They are kept as they are, and listed by none.
+    pub unreadable: usize,
+}
+
+impl From<&bot_store::Snapshot> for BotList {
+    fn from(snapshot: &bot_store::Snapshot) -> Self {
+        Self { revision: snapshot.revision, bots: snapshot.bots.clone(), unreadable: snapshot.unreadable.len() }
+    }
+}
+
+fn owner() -> String {
+    OWNER.into()
+}
+
+fn personal() -> Vec<String> {
+    vec![PERSONAL.into()]
+}
+
+/// A change to a bot. A field left out stays as it is; `effort` given as
+/// `null` goes back to the agent's default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BotPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub role_title: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default, deserialize_with = "given")]
+    pub effort: Option<Option<String>>,
+    #[serde(default)]
+    pub access: Option<BotAccess>,
+    #[serde(default)]
+    pub runs_on: Option<BotRunsOn>,
+    #[serde(default)]
+    pub reports_to: Option<String>,
+    #[serde(default)]
+    pub works_in: Option<Vec<String>>,
+}
+
+/// A field that is present, even as `null`, is `Some`: absent is "leave it".
+fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+pub fn enabled() -> bool {
+    crate::store::settings::load().experimental.bots
+}
+
+pub fn require_enabled() -> Result<()> {
+    if enabled() { Ok(()) } else { Err(BotError::Off.into()) }
+}
+
+/// `Atlas Prime` → `atlas-prime`. Letters and digits are kept, anything else
+/// becomes one hyphen; a name with neither is `bot`.
+pub fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() >= MAX_SLUG_CHARS {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() { "bot".into() } else { slug.into() }
+}
+
+/// `base`, or `base-2`, `base-3`… when another bot (not `except`) has it or the word is reserved.
+fn unique_slug(base: &str, bots: &[Bot], except: Option<&str>) -> String {
+    let taken = |slug: &str| RESERVED_SLUGS.contains(&slug) || bots.iter().any(|bot| bot.slug == slug && Some(bot.id.as_str()) != except);
+    if !taken(base) {
+        return base.into();
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|slug| !taken(slug)).expect("an unused number exists")
+}
+
+fn clean_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    refuse_unless!(!name.is_empty(), "A bot needs a name.");
+    refuse_unless!(name.chars().count() <= MAX_NAME_CHARS, "A bot's name is at most {MAX_NAME_CHARS} characters.");
+    refuse_unless!(!name.chars().any(char::is_control), "A bot's name is one line.");
+    Ok(name.into())
+}
+
+/// What a new bot's `ROLE.md` holds: the template's standing instructions.
+/// Its name and title are in its record, where a rename reaches them.
+pub fn role_text(template: &templates::RoleTemplate) -> String {
+    format!("{}\n", template.role.trim())
+}
+
+fn memory_text() -> String {
+    format!("# Memory\n\nNotes kept across conversations. Longer notes go in `{}/`.\n", bot_store::MEMORY_DIR)
+}
+
+/// Change the bots and announce the saved list (`bots_changed`) while the
+/// store is still locked, so announcements leave in the order of the saves.
+fn change_listed<T>(sink: &dyn EventSink, f: impl FnOnce(&mut Vec<Bot>) -> Result<T>) -> Result<(T, BotList)> {
+    let mut saved = None;
+    let out = bot_store::change(f, |snapshot| {
+        let list = BotList::from(snapshot);
+        sink.emit("bots_changed", &list);
+        saved = Some(list);
+    })?;
+    Ok((out, saved.expect("a saved change is announced")))
+}
+
+fn change<T>(sink: &dyn EventSink, f: impl FnOnce(&mut Vec<Bot>) -> Result<T>) -> Result<T> {
+    Ok(change_listed(sink, f)?.0)
+}
+
+#[cfg(test)]
+pub fn list() -> Result<Vec<Bot>> {
+    Ok(listing()?.bots)
+}
+
+/// The bots with the revision they were read at.
+pub fn listing() -> Result<BotList> {
+    require_enabled()?;
+    Ok(BotList::from(&bot_store::snapshot()?))
+}
+
+pub fn get(id: &str) -> Result<Bot> {
+    require_enabled()?;
+    bot_store::get(id)?.ok_or_else(|| not_found(id))
+}
+
+pub fn role_templates() -> Result<Vec<templates::RoleTemplate>> {
+    require_enabled()?;
+    Ok(templates::all())
+}
+
+/// What a selector came to.
+pub enum Named {
+    One(Box<Bot>),
+    /// Several bots share the name.
+    Several,
+    Nobody,
+}
+
+/// The bot a person names: by id (always works), by slug, or by name in any letter case.
+pub fn named(selector: &str) -> Result<Named> {
+    require_enabled()?;
+    let wanted = selector.trim();
+    let bots = bot_store::list()?;
+    if let Some(bot) = bots.iter().find(|bot| bot.id == wanted).or_else(|| bots.iter().find(|bot| bot.slug == wanted)) {
+        return Ok(Named::One(Box::new(bot.clone())));
+    }
+    let mut named = bots.into_iter().filter(|bot| bot.name.eq_ignore_ascii_case(wanted));
+    Ok(match (named.next(), named.next()) {
+        (Some(bot), None) => Named::One(Box::new(bot)),
+        (Some(_), Some(_)) => Named::Several,
+        _ => Named::Nobody,
+    })
+}
+
+pub fn several_named(selector: &str) -> String {
+    format!("More than one bot is named {}. Name it by its slug or id.", selector.trim())
+}
+
+pub fn nobody_named(selector: &str) -> String {
+    format!("No bot matches {}.", selector.trim())
+}
+
+/// [`named`], or why there is no one bot to act on.
+#[cfg(test)]
+pub fn resolve(selector: &str) -> Result<Bot> {
+    match named(selector)? {
+        Named::One(bot) => Ok(*bot),
+        Named::Several => Err(refused(several_named(selector))),
+        Named::Nobody => Err(refused(nobody_named(selector))),
+    }
+}
+
+/// Hire a bot: a role and a name are all it asks for (PRO-459). Everything
+/// else starts on the defaults, and its home is made from the role template.
+pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Result<Bot> {
+    require_enabled()?;
+    let template = templates::find(role_template_id).ok_or_else(|| {
+        let known: Vec<&str> = templates::all().iter().map(|template| template.id).collect();
+        refused(format!("No role template {role_template_id}. The roles are: {}.", known.join(", ")))
+    })?;
+    let name = clean_name(name)?;
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = crate::store::index::now();
+    let home = bot_store::create_home(&id, &role_text(&template), &memory_text())?;
+    let saved = change(sink, |bots| {
+        let bot = Bot {
+            slug: unique_slug(&slugify(&name), bots, None),
+            id: id.clone(),
+            name,
+            role_title: template.title.into(),
+            role_template_id: template.id.into(),
+            harness: DEFAULT_HARNESS.into(),
+            model: String::new(),
+            effort: None,
+            access: BotAccess::Full,
+            runs_on: BotRunsOn::ThisMac,
+            reports_to: owner(),
+            works_in: personal(),
+            paused: None,
+            created: now.clone(),
+            modified: now,
+            unknown: BTreeMap::new(),
+        };
+        bots.push(bot.clone());
+        Ok(bot)
+    });
+    if saved.is_err() {
+        bot_store::discard_home(&home);
+    }
+    saved
+}
+
+pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        let mut bot = bots[index].clone();
+        if let Some(name) = &patch.name {
+            let name = clean_name(name)?;
+            if name != bot.name {
+                bot.slug = unique_slug(&slugify(&name), bots, Some(id));
+                bot.name = name;
+            }
+        }
+        if let Some(title) = &patch.role_title {
+            let title = title.trim();
+            refuse_unless!(!title.is_empty() && title.chars().count() <= MAX_NAME_CHARS && !title.chars().any(char::is_control), "A role title is one line of at most {MAX_NAME_CHARS} characters.");
+            bot.role_title = title.into();
+        }
+        if let Some(harness) = &patch.harness {
+            refuse_unless!(crate::harness::binary_of(harness).is_some(), "Unknown agent {harness}.");
+            if *harness != bot.harness {
+                // A model and an effort belong to the agent they were chosen for.
+                bot.model = String::new();
+                bot.effort = None;
+            }
+            bot.harness = harness.clone();
+        }
+        if let Some(model) = &patch.model {
+            bot.model = model.trim().into();
+        }
+        if let Some(effort) = &patch.effort {
+            bot.effort = effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()).map(str::to_owned);
+        }
+        if let Some(access) = &patch.access {
+            refuse_unless!(!matches!(access, BotAccess::Other(_)), "Unknown access {}. Use full, askOutward or readReport.", access.as_str());
+            bot.access = access.clone();
+        }
+        if let Some(runs_on) = &patch.runs_on {
+            refuse_unless!(!matches!(runs_on, BotRunsOn::Other(_)), "A bot runs on thisMac for now; {} is not offered.", runs_on.as_str());
+            bot.runs_on = runs_on.clone();
+        }
+        if let Some(reports_to) = &patch.reports_to {
+            refuse_unless!(reports_to != id, "A bot does not report to itself.");
+            refuse_unless!(reports_to == OWNER || bots.iter().any(|other| other.id == *reports_to), "A bot reports to you or to another bot; {reports_to} is neither.");
+            refuse_unless!(!reports_back(bots, reports_to, id), "Those two bots would report to each other.");
+            bot.reports_to = reports_to.clone();
+        }
+        if let Some(works_in) = &patch.works_in {
+            let mut places: Vec<String> = Vec::new();
+            for place in works_in.iter().map(|place| place.trim()).filter(|place| !place.is_empty()) {
+                if !places.iter().any(|known| known == place) {
+                    places.push(place.into());
+                }
+            }
+            refuse_unless!(!places.is_empty(), "A bot works somewhere: `{PERSONAL}` when it works for you alone.");
+            bot.works_in = places;
+        }
+        if bot != bots[index] {
+            bot.modified = crate::store::index::now();
+            bots[index] = bot.clone();
+        }
+        Ok(bot)
+    })
+}
+
+/// Whether following `from`'s reporting line reaches `target`.
+fn reports_back(bots: &[Bot], from: &str, target: &str) -> bool {
+    let mut at = from;
+    for _ in 0..bots.len() {
+        if at == target {
+            return true;
+        }
+        match bots.iter().find(|bot| bot.id == at) {
+            Some(bot) => at = &bot.reports_to,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Delete a bot. Its record is kept in its home as `bot.json`, the
+/// definitions are saved without it, and only then does its home go to the
+/// trash: a failure at any step leaves no listed bot without its home.
+/// Bots that reported to it report to the owner.
+pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
+    require_enabled()?;
+    let removed = change(sink, |bots| {
+        let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        bot_store::keep_record(&bots[index])?;
+        let removed = bots.remove(index);
+        let now = crate::store::index::now();
+        for bot in bots.iter_mut().filter(|bot| bot.reports_to == id) {
+            bot.reports_to = owner();
+            bot.modified = now.clone();
+        }
+        Ok(removed)
+    })?;
+    bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
+    Ok(())
+}
+
+fn set_paused(bot: &mut Bot, pause: Option<&BotPause>) -> bool {
+    match (bot.paused.is_some(), pause) {
+        // Already paused: when and by whom it was first paused stands.
+        (true, Some(_)) | (false, None) => false,
+        (false, Some(pause)) => {
+            bot.paused = Some(pause.clone());
+            bot.modified = pause.at.clone();
+            true
+        }
+        (true, None) => {
+            bot.paused = None;
+            bot.modified = crate::store::index::now();
+            true
+        }
+    }
+}
+
+fn pause_one(sink: &dyn EventSink, id: &str, pause: Option<BotPause>) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        set_paused(bot, pause.as_ref());
+        Ok(bot.clone())
+    })
+}
+
+fn pause_every(sink: &dyn EventSink, pause: Option<BotPause>) -> Result<BotList> {
+    require_enabled()?;
+    Ok(change_listed(sink, |bots| {
+        for bot in bots.iter_mut() {
+            set_paused(bot, pause.as_ref());
+        }
+        Ok(())
+    })?
+    .1)
+}
+
+fn pause_now(by: &str) -> BotPause {
+    BotPause { at: crate::store::index::now(), by: by.into(), unknown: BTreeMap::new() }
+}
+
+/// Record that a bot is paused, when and by whom. Nothing is stopped here.
+pub fn pause(sink: &dyn EventSink, id: &str, by: &str) -> Result<Bot> {
+    pause_one(sink, id, Some(pause_now(by)))
+}
+
+pub fn resume(sink: &dyn EventSink, id: &str) -> Result<Bot> {
+    pause_one(sink, id, None)
+}
+
+/// The one pause switch: every bot not already paused is paused now.
+pub fn pause_all(sink: &dyn EventSink, by: &str) -> Result<BotList> {
+    pause_every(sink, Some(pause_now(by)))
+}
+
+pub fn resume_all(sink: &dyn EventSink) -> Result<BotList> {
+    pause_every(sink, None)
+}
+
+pub fn role_read(id: &str) -> Result<String> {
+    let bot = get(id)?;
+    bot_store::read_role(&bot.id)
+}
+
+/// Replace a bot's standing instructions.
+pub fn role_write(sink: &dyn EventSink, id: &str, text: &str) -> Result<Bot> {
+    require_enabled()?;
+    refuse_unless!(text.len() <= MAX_ROLE_BYTES, "A role is at most {} KB.", MAX_ROLE_BYTES / 1024);
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        bot_store::write_role(&bot.id, text)?;
+        bot.modified = crate::store::index::now();
+        Ok(bot.clone())
+    })
+}
+
+/// Where a bot's home folder is, or `None` for a record whose id could name none.
+pub fn home(bot: &Bot) -> Option<std::path::PathBuf> {
+    bot_store::home_dir(&bot.id).ok()
+}
+
+/// The app's commands, as the runtime that owns the store answers them
+/// (`runtime.session.bots`). A change made in the app is by the owner.
+pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Value> {
+    let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
+    Ok(match operation {
+        "list" => serde_json::to_value(listing()?)?,
+        "get" => serde_json::to_value(get(string("id")?)?)?,
+        "templates" => serde_json::to_value(role_templates()?)?,
+        "create" => serde_json::to_value(create(sink, string("roleTemplateId")?, string("name")?)?)?,
+        "update" => {
+            let patch: BotPatch = serde_json::from_value(params["patch"].clone()).map_err(|error| refused(format!("Invalid change: {error}")))?;
+            serde_json::to_value(update(sink, string("id")?, patch)?)?
+        }
+        "delete" => {
+            delete(sink, string("id")?)?;
+            Value::Null
+        }
+        // Every caller is the owner today; see `BotPause::by`.
+        "pause" => serde_json::to_value(pause(sink, string("id")?, OWNER)?)?,
+        "resume" => serde_json::to_value(resume(sink, string("id")?)?)?,
+        "pauseAll" => serde_json::to_value(pause_all(sink, OWNER)?)?,
+        "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
+        "roleRead" => json!(role_read(string("id")?)?),
+        "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
+        other => return Err(refused(format!("Unknown bots operation {other}"))),
+    })
+}
+
+#[cfg(test)]
+mod tests;

@@ -145,6 +145,16 @@ impl Sessions {
         self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
+    /// Bots (`bots`, PRO-466). A read fails fast on a wedged owner; a change waits for its answer.
+    pub fn bots<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        let request = json!({"operation": operation, "params": params});
+        if matches!(operation, "list" | "get" | "templates" | "roleRead") {
+            self.quick("runtime.session.bots", request)
+        } else {
+            self.call("runtime.session.bots", request)
+        }
+    }
+
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
         self.quick("runtime.session.automations", json!({}))
     }
