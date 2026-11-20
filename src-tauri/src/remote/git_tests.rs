@@ -1340,14 +1340,42 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
     f.clone(&origin, ".");
     f.git.project = true;
     let request = machine_pr_request(&f, &f.root);
+    let head = request["pushHead"].as_str().unwrap();
     let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
-    git(&f.root, &["remote", "set-url", "--push", "origin", separate.to_str().unwrap()]);
-    assert_eq!(f.code("git.prCreateForSession", request.clone()), "unpushed");
-    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
-    assert_eq!(git(&separate, &["rev-parse", "refs/heads/feature/pr"]), request["pushHead"].as_str().unwrap());
+    let (origin_url, separate_url) = (origin.to_str().unwrap(), separate.to_str().unwrap());
+    let config = |args: &[&str]| { git(&f.root, &[&["config"][..], args].concat()); };
+    // Each destination Git would really push to, other than the verified
+    // fetch origin: an explicit push URL, a second push URL, a push-only
+    // rewrite of origin, and a rewrite of the push URL itself.
+    type Steps<'a> = &'a [&'a [&'a str]];
+    let destinations: [(Steps, Steps); 4] = [
+        (&[&["remote.origin.pushurl", separate_url]], &[&["--unset-all", "remote.origin.pushurl"]]),
+        (
+            &[&["--add", "remote.origin.pushurl", origin_url], &["--add", "remote.origin.pushurl", separate_url]],
+            &[&["--unset-all", "remote.origin.pushurl"]],
+        ),
+        (&[&[&format!("url.{separate_url}.pushInsteadOf"), origin_url]], &[&["--remove-section", &format!("url.{separate_url}")]]),
+        (
+            &[&["remote.origin.pushurl", "alias:widgets"], &[&format!("url.{separate_url}.insteadOf"), "alias:widgets"]],
+            &[&["--unset-all", "remote.origin.pushurl"], &["--remove-section", &format!("url.{separate_url}")]],
+        ),
+    ];
+    for (set, unset) in destinations {
+        set.iter().for_each(|args| config(args));
+        let refused = f.call("git.prCreateForSession", request.clone()).expect_err("an unverified push destination is refused");
+        assert_eq!(refused.code, "conflict", "{set:?}");
+        assert!(refused.message.contains("other than the verified origin"), "{set:?}: {}", refused.message);
+        // Refused before transmission: neither the ref nor the commit reached it.
+        assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty(), "{set:?}");
+        let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+        assert!(!object.success(), "{set:?} received the confirmed commit");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+        unset.iter().for_each(|args| config(args));
+    }
     assert!(!f.gh_calls().contains("\"create\""));
 
-    git(&f.root, &["remote", "set-url", "--push", "origin", origin.to_str().unwrap()]);
+    // An explicit push URL naming the verified origin itself is accepted.
+    git(&f.root, &["remote", "set-url", "--push", "origin", origin_url]);
     std::fs::write(f.state.join("pr-head"), earlier).unwrap();
     assert_eq!(f.code("git.prCreateForSession", request.clone()), "conflict");
     assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
