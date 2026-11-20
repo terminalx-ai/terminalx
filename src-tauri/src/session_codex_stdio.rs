@@ -128,7 +128,7 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
     let mut args = route.map(|route| shell_words(&route.codex_args)).unwrap_or_default();
     args.extend(shell_words(&config.args));
     args.extend(shell_words(&computer.args));
-    args.extend(shell_words(&crate::cloud_config::prompt_args("codex", &[config.prompt.as_deref(), computer.note, note])));
+    args.extend(crate::cloud_config::prompt_argv("codex", &[config.prompt.as_deref(), computer.note, note]));
     args.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
     let mut env = config.env.clone();
     let mut unset = Vec::new();
@@ -463,7 +463,10 @@ impl SessionManager {
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
         self.accepting_work()?;
-        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone(), tab.provider_session_id.clone());
+        // Held to the bot the session works for, as a terminal launch is (PRO-468).
+        self.hold_to_bot(rt, entry)?;
+        let mode = index::get(&rt.session_id)?.tab(&rt.tab_id).map(|held| held.permission_mode.clone()).unwrap_or_else(|| tab.permission_mode.clone());
+        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), mode, tab.provider_session_id.clone());
         let launch = engine.launch.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         rt.stdio_launch_permit = collaboration_v2::current();
@@ -536,9 +539,17 @@ impl SessionManager {
         current()?;
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
+        // Kept by the engine, so a `terminalx` call from this tab can be told
+        // from one that only names it (`SessionManager::authenticates_cli`).
+        let token = crate::hooks::mint_token();
+        if let Engine::CodexStdio(engine) = &mut rt_arc.lock().unwrap().engine {
+            if Arc::ptr_eq(&engine.launch, launch) {
+                engine.hook_token = token.clone();
+            }
+        }
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
-            ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
+            ("RACCOON_HOOK_TOKEN".into(), token),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ]);
@@ -558,13 +569,15 @@ impl SessionManager {
         }
         let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
-        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`).
-        let computer = {
+        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`),
+        // and in a bot's chat the bot's rules, role and memory (`bots::chat`).
+        let (computer, bot) = {
             let entry = index::get(session)?;
             let retained = entry.tab(tab).context("This tab no longer exists")?;
-            crate::computer_targets::launch_args(session, retained)?
+            (crate::computer_targets::launch_args(session, retained)?, crate::bots::chat::launch_note(&entry, retained))
         };
-        let mut native = native_launch(&grant, &config, &computer, sparse.as_deref());
+        let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
+        let mut native = native_launch(&grant, &config, &computer, note.as_deref());
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {
@@ -617,6 +630,7 @@ impl SessionManager {
             let cancelled = !same_launch(&rt, launch) || rt.stopping || matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
             rt.environment = environment.stamp;
             rt.child_pid = Some(child.pid);
+            self.note_child(&rt);
             rt.child = Some(child.clone());
             cancelled
         };
@@ -1070,6 +1084,7 @@ impl SessionManager {
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
+        self.note_child(&rt);
         crate::cloud_grants::forget_launch(&rt.key());
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
@@ -1089,6 +1104,7 @@ impl SessionManager {
         if !ended || !gone || rt.stdio_starting || rt.stopping { return; }
         rt.stdio_writer = None; rt.stdio_receipt = None; rt.stdio_authority = None; rt.stdio_compaction = None;
         rt.child = None; rt.child_pid = None;
+        self.note_child(rt);
         rt.engine = Engine::None;
     }
 }

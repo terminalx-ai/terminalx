@@ -817,6 +817,11 @@ pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
+/// How many times this process wrote the settings (PRO-468: cached readings).
+pub(crate) fn writes() -> u64 {
+    file::WRITES.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub fn load() -> Settings {
     let mut settings = file::load();
     settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));

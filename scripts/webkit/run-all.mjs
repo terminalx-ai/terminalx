@@ -40,6 +40,7 @@ const checks = [
   "attachment-preview", "session-start", "composer-controls", "session-menu", "chat-scrollbar", "settings-stats",
   "automation-sources",
   "bots-screens",
+  "bot-chat",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

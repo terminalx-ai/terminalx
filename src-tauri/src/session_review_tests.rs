@@ -2,6 +2,11 @@
 use super::*;
 
 impl SessionManager {
+    /// The tab's agent is in a turn, as far as its runtime knows.
+    pub(crate) fn open_turn_for_test(&self, session: &str, tab: &str) {
+        self.runtime(session, tab).unwrap().lock().unwrap().turn_open = true;
+    }
+
     pub(crate) fn install_review_test_cli(&self, session: &str, tab: &str, token: &str) {
         self.runtime(session, tab).unwrap().lock().unwrap().engine = Engine::Cli(CliTab {
             usage_account: None,
