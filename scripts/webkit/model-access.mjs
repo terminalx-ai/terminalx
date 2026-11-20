@@ -105,6 +105,8 @@ try {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Account", exact: true }).click(); // Settings opens on General (PRO-374).
     await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
+    // PRO-464: model access is a page of the organization, under it in the menu.
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("group", { name: / settings$/ }).getByRole("button", { name: "Model access", exact: true }).click();
     const section = page.getByTestId("agent-routes");
     await section.getByTestId("agent-route").first().waitFor();
     const claude = section.locator('[data-agent="claude"]');

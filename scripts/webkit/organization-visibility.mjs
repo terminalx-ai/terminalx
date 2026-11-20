@@ -35,7 +35,10 @@ try {
   const prefs = () => page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   const openOrganizations = async () => {
     await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("button", { name: "Organizations", exact: true }).click();
+    // PRO-464: Organizations is one row in the menu; All organizations leads what it lists.
+    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    await nav.getByRole("button", { name: /^Organizations \d+$/ }).click();
+    await nav.getByRole("button", { name: "All organizations", exact: true }).click();
     await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
   };
   const closeSettings = async () => {

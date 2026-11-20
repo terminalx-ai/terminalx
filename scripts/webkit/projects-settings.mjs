@@ -46,6 +46,7 @@ try {
       await page.getByRole("button", { name: "Settings", exact: true }).click();
       const settings = page.getByRole("main", { name: "Settings", exact: true });
       const nav = settings.getByRole("navigation", { name: "Settings sections" });
+      await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
       const group = nav.getByRole("group", { name: "Projects", exact: true });
       await group.waitFor();
       const groupButtons = await group.getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.hasAttribute("title") ? "project" : button.textContent));

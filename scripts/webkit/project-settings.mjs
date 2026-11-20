@@ -58,6 +58,7 @@ try {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("main", { name: "Settings", exact: true });
     const nav = settings.getByRole("navigation", { name: "Settings sections" });
+    await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
     await nav.getByRole("button", { name: "terminalx", exact: true }).click();
     const pages = nav.getByRole("group", { name: "terminalx settings" });
     await pages.waitFor();
