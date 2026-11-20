@@ -308,21 +308,62 @@ async fn requests_are_still_answered_in_the_order_they_came() {
     assert_eq!(ended.reason, EndReason::StreamEnded);
 }
 
-/// A phone that reads nothing at all still falls behind, and says so.
+/// The exact fault a served connection ended with, if it was one of ours.
+fn fault(error: &anyhow::Error) -> Option<Fault> {
+    error.downcast_ref::<Fault>().copied()
+}
+
+/// A phone whose queue filled while the Mac could not send to it ends as
+/// fallen behind, and the diagnostics say so (#1334). The Mac's connection
+/// check is held, so the serve loop drains nothing while more than a queue's
+/// worth of events arrive; once it is released the loop sees the overflow
+/// before any write could reach its deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
-    let Served { phone, sink, server, _home, .. } = served(Duration::ZERO).await;
+    let Served { phone, sink, server, connection, permit, _home, .. } = served(Duration::ZERO).await;
+    permit.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    // One event wakes the loop's output path, if its connection check has
+    // not already come round; either check holds the loop.
+    sink.emit_raw("agent_event", serde_json::value::to_raw_value(&agent_event(0)).unwrap());
+    tokio::time::timeout(Duration::from_secs(5), permit.entered.notified()).await.expect("the serve loop is held in its connection check");
+    for seq in 1..=OUTBOUND_QUEUE as u64 + 1 {
+        sink.emit_raw("agent_event", serde_json::value::to_raw_value(&agent_event(seq)).unwrap());
+    }
+    // The queue overflowed while nothing was sent.
+    assert_eq!(connection.check_buffer().err().as_ref().and_then(fault), Some(Fault::FellBehind));
+    permit.release();
+    let error = tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap_err();
+    assert_eq!(fault(&error), Some(Fault::FellBehind), "{error:#}");
+    assert!(!error.chain().any(|cause| cause.is::<tokio::time::error::Elapsed>()), "{error:#}");
+    // The relay diagnostics are the desktop app's; the serve runtime has none.
+    #[cfg(feature = "desktop")]
+    assert_eq!(crate::pairing::phone_session_category(error), "fell-behind");
+    drop(phone);
+}
+
+/// A phone that stops reading while its queue still has room ends when a
+/// write reaches its deadline, recorded as a timeout and not as fallen
+/// behind (#1334): fewer events than the queue holds, each large enough
+/// that together they fill the socket the phone never reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_the_phone_never_reads_is_recorded_as_a_timeout() {
+    let Served { phone, sink, server, connection, _home, .. } = served(Duration::ZERO).await;
     let payload = "x".repeat(64 * 1024);
-    for seq in 0..400 {
+    let events = 48;
+    assert!(events < OUTBOUND_QUEUE, "the queue never overflows");
+    for seq in 0..events as u64 {
         let mut event = agent_event(seq);
         event["payload"]["text"] = json!(payload);
         sink.emit_raw("agent_event", serde_json::value::to_raw_value(&event).unwrap());
     }
-    let error = tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap_err();
-    assert!(
-        matches!(error.downcast_ref::<Fault>(), Some(Fault::FellBehind)) || error.chain().any(|cause| cause.is::<tokio::time::error::Elapsed>()),
-        "{error:#}"
-    );
+    // The write deadline is 5 s; the phone stays connected and unread until then.
+    let error = tokio::time::timeout(Duration::from_secs(15), server).await.unwrap().unwrap().unwrap_err();
+    assert!(error.chain().any(|cause| cause.is::<tokio::time::error::Elapsed>()), "{error:#}");
+    assert_eq!(fault(&error), None, "{error:#}");
+    assert_ne!(connection.check_buffer().err().as_ref().and_then(fault), Some(Fault::FellBehind), "the queue never overflowed");
+    // The relay diagnostics are the desktop app's; the serve runtime has none.
+    #[cfg(feature = "desktop")]
+    assert_eq!(crate::pairing::phone_session_category(error), "timeout");
     drop(phone);
 }
 
