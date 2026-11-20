@@ -92,6 +92,9 @@ pub struct Machines {
     pairing: Mutex<Option<watch::Sender<bool>>>,
     /// The runtime's last status, so a settings change re-emits it.
     last_status: Mutex<Option<Status>>,
+    /// The restart last offered for the attached runtime, as last read with
+    /// what it would stop (PRO-486), so a runtime event re-emits it too.
+    restart_required: Mutex<Option<String>>,
     approval_wait: std::time::Duration,
 }
 
@@ -103,7 +106,7 @@ impl Default for Machines {
 
 impl Machines {
     fn new(secrets: MachineSecrets, store_dir: Option<std::path::PathBuf>) -> Self {
-        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT }
+        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), restart_required: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT }
     }
 
     #[cfg(test)]
@@ -126,7 +129,7 @@ impl Machines {
                 let Some(machines) = machines.upgrade() else { return };
                 let Ok(status) = serde_json::from_str::<Status>(payload) else { return };
                 *machines.last_status.lock().unwrap() = Some(status.clone());
-                events.emit(HOST_CHANGED_EVENT, &view(Some(status)));
+                events.emit(HOST_CHANGED_EVENT, &view(&machines, Some(status)));
             }),
         );
         let events = sink.clone();
@@ -144,7 +147,7 @@ impl Machines {
             Box::new(move |_| {
                 let Some(machines) = machines.upgrade() else { return };
                 let status = machines.last_status.lock().unwrap().clone();
-                events.emit(HOST_CHANGED_EVENT, &view(status));
+                events.emit(HOST_CHANGED_EVENT, &view(&machines, status));
             }),
         );
         Ok(())
@@ -247,12 +250,9 @@ fn this_computer_label() -> String {
     crate::machine_host::direct::computer_label(Some(&crate::machine_name::current().name))
 }
 
-fn view(status: Option<Status>) -> MachineHostView {
+fn view(machines: &Machines, status: Option<Status>) -> MachineHostView {
     let settings = crate::store::settings::load();
-    #[cfg(all(unix, feature = "desktop"))]
-    let restart_required = crate::local_runtime::window_consent::offered_now().map(|required| required.to_string());
-    #[cfg(not(all(unix, feature = "desktop")))]
-    let restart_required = None;
+    let restart_required = machines.restart_required.lock().unwrap().clone();
     MachineHostView { allow_operating: settings.machines.allow_operating, keep_awake: settings.pairing.keep_awake, status, restart_required }
 }
 
@@ -270,7 +270,7 @@ fn runtime(state: &crate::AppState) -> Result<Arc<crate::local_runtime::desktop:
 
 /// The view, asking the runtime for its status now. Blocking.
 fn host_view(machines: &Machines, runtime: Option<Arc<crate::local_runtime::desktop::Desktop>>) -> MachineHostView {
-    let status = runtime.and_then(|runtime| match runtime.machine_host_status() {
+    let status = runtime.as_ref().and_then(|runtime| match runtime.machine_host_status() {
         Ok(status) => status,
         Err(error) => {
             log::debug!("machines: the runtime's machine host status is unavailable: {error:#}");
@@ -280,7 +280,25 @@ fn host_view(machines: &Machines, runtime: Option<Arc<crate::local_runtime::desk
     if status.is_some() {
         *machines.last_status.lock().unwrap() = status.clone();
     }
-    view(status)
+    // What a restart would stop now, not when it was offered (PRO-486).
+    #[cfg(all(unix, feature = "desktop"))]
+    let restart_required = runtime.as_ref().and_then(|runtime| {
+        crate::local_runtime::window_consent::offered_now_for(runtime.epoch(), || crate::local_runtime::window_consent::in_use(runtime))
+    });
+    #[cfg(not(all(unix, feature = "desktop")))]
+    let restart_required: Option<String> = None;
+    *machines.restart_required.lock().unwrap() = restart_required.map(|required| required.to_string());
+    view(machines, status)
+}
+
+/// Send every window a fresh view, as after the restart offered for the
+/// attached runtime changed (PRO-486). Blocking: runtime IPC.
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+pub(crate) fn emit_host_view(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    let machines = app.state::<Arc<Machines>>().inner().clone();
+    let runtime = app.state::<crate::AppState>().runtime();
+    let _ = app.emit(HOST_CHANGED_EVENT, &host_view(&machines, runtime));
 }
 
 /// A machine host command that names the window's attachment, then the view.
@@ -495,7 +513,7 @@ mod tests {
         settings.machines.allow_operating = true;
         settings.pairing.keep_awake = false;
         crate::store::settings::save(&settings).unwrap();
-        let value = serde_json::to_value(view(None)).unwrap();
+        let value = serde_json::to_value(view(&Machines::default(), None)).unwrap();
         assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "status": null, "restartRequired": null }));
     }
 }

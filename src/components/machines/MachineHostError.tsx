@@ -11,7 +11,9 @@ import { machinesApi, restartRequired } from "@/lib/machines";
  * runtime is attached, to try again.
  */
 export function MachineHostError({ error, onRestarted, className }: { error: string; onRestarted: () => void; className?: string }) {
-  const required = restartRequired(error);
+  // Restart runtime answers with the offer again when it would now stop more than was shown: that list replaces it.
+  const [updated, setUpdated] = useState<{ for: string; offer: string } | null>(null);
+  const required = restartRequired(updated?.for === error ? updated.offer : error);
   const [restarting, setRestarting] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   if (!required) return <p role="alert" className={cn("text-[12.5px] text-destructive", className)}>{error}</p>;
@@ -22,7 +24,9 @@ export function MachineHostError({ error, onRestarted, className }: { error: str
       await machinesApi.restartRuntimeForWindow(required.epoch);
       onRestarted();
     } catch (e) {
-      setFailed(errorMessage(e));
+      const message = errorMessage(e);
+      if (restartRequired(message)) setUpdated({ for: error, offer: message });
+      else setFailed(message);
     } finally {
       setRestarting(false);
     }
