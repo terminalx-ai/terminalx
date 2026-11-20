@@ -160,7 +160,7 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
           <WorkspaceTabStrip session={session} selected={row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey)) ?? null}
             paneRow={{ ...row, tabs: row.tabs.filter((tab) => pane.tabs.includes(tab.key)) }} paneDrag={paneDrag}
             trailing={strip && index === 0 ? (remote ? remote.newTab : <TabActions session={session} selected={selected} />) : undefined}
-            readOnlyReason={remote ? remote.cloud.backend.readOnlyReason : undefined}
+            readOnlyReason={remote ? remote.cloud.closeBlockedReason : undefined}
             accounts={!remote}
             end={(() => {
               const shown = row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey));

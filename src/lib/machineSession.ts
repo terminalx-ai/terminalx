@@ -462,6 +462,9 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     openTerminal,
     addAgentTab,
     closeTab,
+    closeBlockedReason: sendBlocked ?? null,
+    // A machine session draws no remote row (it keeps its own strip, 21.08): there is no layout of it to prune.
+    tabsListed: false,
     canAddTabs: manage && !!client?.hasCapability("session/2"),
     agents: agentList,
     client: connected ? client : null,

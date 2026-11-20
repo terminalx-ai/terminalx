@@ -10,6 +10,8 @@ import { onCloudConnected, retainCloudConnection, useCloudConnection, waitCloudC
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { getSessionStore, openWelcome } from "@/lib/sessions";
 import { clearSessionTabsUnder } from "@/lib/terminal";
+import { remoteLayoutKey } from "@/lib/sessionTabs";
+import { NO_LAYOUT, saveTabLayout } from "@/lib/tabLayouts";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudKey, type CloudWorkspaceNode } from "@/types/target";
 import type { TabStatus } from "@/types/session";
 
@@ -539,6 +541,8 @@ export function deleteCloudSession(row: CloudSessionRow, options: { confirmedUns
     const result = await client.deleteSession(row.sessionId, { removeWorktree: !!row.worktreeName, confirmedUnsafe: options.confirmedUnsafe });
     const deleted = result.deleted?.length ? result.deleted : [row.sessionId];
     applySession(row, null, deleted);
+    // What this viewer arranged of each deleted session's tabs goes with it (#1325).
+    for (const sessionId of deleted) saveTabLayout(remoteLayoutKey(cloudSessionKey(row.orgId, row.workspaceId, sessionId)), NO_LAYOUT);
     return deleted;
   });
 }

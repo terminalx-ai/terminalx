@@ -1,16 +1,17 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { RuntimeSession } from "@terminalx/portable/workspace";
 
-const mocks = vi.hoisted(() => ({ update: vi.fn(), release: vi.fn() }));
+const mocks = vi.hoisted(() => ({ update: vi.fn(), remove: vi.fn(), release: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/cloudConnections", async (original) => ({
   ...(await original<typeof import("@/lib/cloudConnections")>()),
   retainCloudConnection: async () => ({ release: mocks.release }),
-  waitCloudConnected: async () => ({ updateSession: mocks.update }),
+  waitCloudConnected: async () => ({ updateSession: mocks.update, deleteSession: mocks.remove }),
 }));
 
-const { updateCloudSession } = await import("./cloudSessions");
+const { deleteCloudSession, updateCloudSession } = await import("./cloudSessions");
+const { getTabState, layoutOf, saveTabLayout } = await import("./tabLayouts");
 const { getSessionStore, selectCloudSession, openIssues } = await import("./sessions");
 const row = {
   key: "cloud:org:ws:session" as const, orgId: "org", workspaceId: "ws", sessionId: "session",
@@ -49,4 +50,14 @@ it("does not leave for unarchive or other edits", async () => {
   await updateCloudSession(row, { archived: false });
   await updateCloudSession(row, { title: "Renamed" });
   expect(getSessionStore().selectedSessionId).toBe(row.key);
+});
+
+it("forgets this viewer's layout of each deleted session's tabs (#1325)", async () => {
+  const arranged = { order: ["agent:t-2", "agent:t-1"], pinned: ["agent:t-2"], muted: [], titles: {} };
+  saveTabLayout("remote:cloud:org:ws:session", arranged);
+  saveTabLayout("remote:cloud:org:ws:kept", arranged);
+  mocks.remove.mockResolvedValueOnce({ deleted: ["session"] });
+  await deleteCloudSession(row);
+  expect(layoutOf(getTabState(), "remote:cloud:org:ws:session").order).toEqual([]);
+  expect(layoutOf(getTabState(), "remote:cloud:org:ws:kept").pinned).toEqual(["agent:t-2"]);
 });

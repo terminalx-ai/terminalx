@@ -1,8 +1,8 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { terminalViewOf } from "@/lib/sessionBackend";
 import { remoteRow, type RemoteTabs, type TabRow } from "@/lib/sessionTabs";
-import { useTabState } from "@/lib/tabLayouts";
+import { saveTabLayout, settleLayout, useTabState } from "@/lib/tabLayouts";
 import { toggleTabView } from "@/lib/tabViews";
 import { selectSessionTab } from "@/lib/terminal";
 import type { SessionEntry } from "@/types/session";
@@ -34,5 +34,17 @@ export function useRemoteTabRow(session: SessionEntry, cloud: CloudSessionModel 
     return remoteRow(session, terminals, saved, remote);
   }, [enabled, backend, terminals, closeTab, session, saved]);
   latest.current = row;
+  // A tab closed elsewhere (by someone else in the workspace, or ended by the runtime) leaves this viewer's
+  // layout once the runtime's lists are known in full; while either may be partial, nothing is taken out.
+  const listed = enabled && !!cloud?.tabsListed;
+  useEffect(() => {
+    if (!listed || !row) return;
+    const keys = new Set(row.tabs.map((tab) => tab.key));
+    const gone = (key: string) => !keys.has(key);
+    const { layout } = row;
+    // A layout that names no closed tab is left as it is: one nobody arranged is never written.
+    if (![...layout.order, ...layout.pinned, ...layout.muted, ...Object.keys(layout.titles), ...(layout.panes ?? []).flatMap((pane) => pane.tabs)].some(gone)) return;
+    saveTabLayout(row.workspace, settleLayout(layout, row.tabs.map((tab) => tab.key), gone));
+  }, [listed, row]);
   return row;
 }

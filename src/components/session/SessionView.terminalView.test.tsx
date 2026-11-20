@@ -93,7 +93,7 @@ import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
 import { dropSessionTerminals, selectSessionTab } from "@/lib/terminal";
 import { TERMINAL_VIEW_OLD_RUNTIME, resetCloudWakes } from "@/lib/sessionBackend";
-import { resetTabLayouts, saveTabLayout } from "@/lib/tabLayouts";
+import { getTabState, layoutOf, resetTabLayouts, saveTabLayout } from "@/lib/tabLayouts";
 import { workspaceRow } from "@/lib/sessionTabs";
 import { resetTabViews } from "@/lib/tabViews";
 import { addProject, getSessionStore, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -628,14 +628,29 @@ describe("a local session's row of tabs under the title bar", () => {
       await waitFor(() => expect(within(strip).getAllByRole("tab").map((tab) => [tab.getAttribute("aria-label"), tab.getAttribute("aria-selected")])).toEqual([["Fix login", "true"]]));
     });
 
-    it("leaves a viewer's row without a close, and the runtime's tabs untouched", async () => {
-      shared("viewer");
+    it.each(["driver", "viewer"] as const)("leaves a %s's row without a close, which the runtime would refuse them", async (role) => {
+      shared(role);
       twoTabs();
       await open();
       const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
       await within(strip).findByRole("tab", { name: "Review the fix" });
       expect(within(strip).queryByRole("button", { name: /^Close / })).toBeNull();
       expect(runtime.methods("session.close")).toEqual([]);
+    });
+
+    it("forgets what this viewer arranged of a tab closed elsewhere, once the runtime has listed its tabs", async () => {
+      twoTabs();
+      // Arranged here earlier: a tab someone else has since closed is pinned, and in the right pane.
+      saveTabLayout(`remote:${KEY}`, { order: ["agent:t-gone", "agent:t-1", "agent:t-2"], pinned: ["agent:t-gone"], muted: [], titles: {}, panes: [{ id: "left", tabs: ["agent:t-1"], active: "agent:t-1" }, { id: "right", tabs: ["agent:t-2", "agent:t-gone"], active: "agent:t-gone" }] });
+      await open(null);
+      await settle();
+      // Not connected yet: the lists may be partial, so nothing is taken out.
+      expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual(["agent:t-gone"]);
+      await act(async () => runtime.connect());
+      await waitFor(() => expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual([]));
+      const layout = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(layout.order).not.toContain("agent:t-gone");
+      expect(layout.panes?.map((pane) => [pane.id, pane.tabs, pane.active])).toEqual([["left", ["agent:t-1"], "agent:t-1"], ["right", ["agent:t-2"], "agent:t-2"]]);
     });
   });
 

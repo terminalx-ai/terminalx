@@ -61,11 +61,15 @@ A cloud workspace session draws the same strip and panes as a local one
   runtime's active tab still decides only what the view opens on.
 - **Closing** a tab closes it on the runtime, for everyone in the workspace
   (`CloudSessionModel.closeTab`: `session.close` with `remove`, or the
-  shell's `pty.kill`). A viewer has no close.
+  shell's `pty.kill`). It is a manager's: a driver or a viewer has no close
+  (`closeBlockedReason`), as the runtime would refuse them.
 - **Layout** (order, pins, the split into two panes and its ratio) is the
   viewer's own, kept on this computer under `remote:<session key>` with the
   other tab layouts. Nothing of it is sent to the runtime, so two people in
   one workspace each keep their own arrangement.
+  A tab closed elsewhere (by someone else, or ended by the runtime) leaves it
+  once the runtime has listed the session's agent tabs and shells since
+  connecting (`tabsListed`); deleting the session drops its layout.
 - A tab's menu holds only what applies to a runtime tab: pin, the other pane,
   terminal view (where the runtime serves it), move, close.
 

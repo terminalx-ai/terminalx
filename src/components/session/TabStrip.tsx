@@ -330,7 +330,7 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
   useShortcut("session.closeTab", () => {
     const current = latestRow.current;
     const shown = current?.tabs.find((tab) => tab.kind === selected?.kind && tab.id === selected.id);
-    if (!current || !shown || cloud.backend.readOnlyReason) return;
+    if (!current || !shown || cloud.closeBlockedReason) return;
     void closeRowTabTelling(current, shown, selected, peerLabel(shown, current.layout, cloudAgentLabel));
   }, { enabled: !!row });
   const blocked = newTabBlockedReason(cloud);
