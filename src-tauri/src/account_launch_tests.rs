@@ -11,6 +11,8 @@
 //! given, as in `session_agent_key_tests`. One rig per test, each with its
 //! own session id: an agent from one test exiting late must not write into
 //! the next one's store.
+#[cfg(unix)]
+use crate::paths::Canonical;
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
@@ -84,7 +86,7 @@ exec cat
         manager.follow_pane_exits();
         let checkout = dir.path().join("checkout");
         std::fs::create_dir(&checkout).unwrap();
-        let checkout = checkout.canonicalize().unwrap();
+        let checkout = checkout.canonical().unwrap();
         let entry = json!({
             "id": session, "projectPath": checkout, "cwd": checkout, "title": "Accounts",
             "created": index::now(), "modified": index::now(),
@@ -429,7 +431,7 @@ fn a_tabs_usage_and_conversation_are_found_where_its_account_wrote_them() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("checkout");
     std::fs::create_dir(&cwd).unwrap();
-    let cwd = cwd.canonicalize().unwrap();
+    let cwd = cwd.canonical().unwrap();
     let conversation = "33333333-3333-4333-8333-333333333333";
     // Written in the account's own `projects`, which is not the person's.
     let folder = account_dir(Agent::Claude, &account).join("projects").join(claude::transcript::encoded_cwd(&cwd.to_string_lossy()));

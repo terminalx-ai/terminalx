@@ -531,6 +531,7 @@ async fn phase2_collaboration_v2_observed_disconnect_fences_direct_rpc_and_durab
     assert!(m.agent.sends().is_empty(), "durable direct work must not be reinterpreted as a mailbox lease");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn phase2_collaboration_v2_observed_disconnect_fences_queued_raw_pty_before_snapshot_refresh() {
     let _home = crate::store::temp_home();

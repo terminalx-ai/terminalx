@@ -22,7 +22,7 @@ impl Drop for Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+    let root = crate::paths::canonicalize(dir.path()).unwrap().join("workspace");
     std::fs::create_dir(&root).unwrap();
     let terminals = Arc::new(Terminals::new());
     let sink = Arc::new(BroadcastSink::new(64));
@@ -183,6 +183,7 @@ async fn output_until(events: &mut Notifications, marker: &str) -> (String, u64)
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn terminals_stream_with_offsets_replay_and_drop_resent_writes() {
     let f = fixture();
@@ -274,6 +275,7 @@ async fn next_event(events: &mut Notifications, event: &str) -> Value {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn terminals_are_listed_with_their_identity_and_survive_a_new_connection() {
     let f = fixture();
@@ -348,6 +350,7 @@ async fn input_is_applied_once_in_order_and_backpressure_keeps_it() {
     assert_eq!(call(&f.rpc, &peer, "pty.write", write(2, "w1")).await.unwrap()["applied"], true);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn one_controller_owns_input_and_size_and_viewers_follow() {
     let f = fixture();
@@ -390,6 +393,7 @@ async fn one_controller_owns_input_and_size_and_viewers_follow() {
     output_until(&mut laptop_events, "30 100").await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn silent_resizes_and_returning_viewers_receive_ordered_size_completions() {
     let f = fixture();
@@ -413,6 +417,7 @@ async fn silent_resizes_and_returning_viewers_receive_ordered_size_completions()
     assert_eq!(next_event(&mut viewing, "pty.resize-complete").await["size"], json!({"cols":18,"rows":8}));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
     let f = fixture();
@@ -612,7 +617,7 @@ async fn a_manager_rotates_the_key_and_nudges_the_mailbox() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rotation_tells_key_holders_to_fetch_the_new_key() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     let sink = Arc::new(BroadcastSink::new(64));
     let terminals = Arc::new(Terminals::new());
     let rpc = WorkspaceRpc::new(&root, 7, sink.clone(), terminals, None).unwrap();
@@ -1192,6 +1197,7 @@ async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
     assert_eq!(reopened.keys.current().unwrap().0, current);
 }
 
+#[cfg(unix)]
 /// PRO-88: a shell is arbitrary code as the workspace's user, so typing into
 /// one needs what changing the agent's settings needs. A plain driver
 /// watches; an approving viewer still only watches; and a driver whose
@@ -1257,6 +1263,7 @@ async fn a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_wi
     assert!(tokio::time::timeout(Duration::from_millis(50), erin.closed()).await.is_err(), "a driver stays connected");
 }
 
+#[cfg(unix)]
 /// PRO-88: the live `session.send` applies the mailbox's slash command rule.
 /// (The fixture runs no agents: a send that passed every check is
 /// `unavailable`.)
@@ -2270,6 +2277,7 @@ async fn agent_person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authorit
 }
 
 /// Everything under the fixture's directory, with sizes: what the runtime has on disk.
+#[cfg(unix)]
 fn files_on_disk(dir: &Path) -> Vec<(String, u64)> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -2335,6 +2343,7 @@ async fn an_agent_terminal_needs_its_capability_and_is_never_a_shell() {
     assert_eq!(code(call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": "tab:" })).await), "not_found");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_the_cli() {
     let f = fixture();
@@ -2378,6 +2387,7 @@ async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_th
 
 /// Stands in for Codex for `session.toTerminal`: an app server whose turn
 /// never ends, a terminal-capable CLI, and a record of how it was started.
+#[cfg(unix)]
 const NATIVE_TERMINAL_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
@@ -2420,6 +2430,7 @@ fn a_driver_who_may_start_its_terminal_moves_native_codex_there() {
     assert!(status.success(), "{}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn native_terminal_child() {
     use crate::store::index::AgentTransport::{ExperimentalCodexStdio as Native, Pty};
@@ -2524,6 +2535,7 @@ async fn native_terminal_child() {
     manager.stop(&session, &tab).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_lease_holder_types_into_an_agent_terminal_and_a_manager_takes_it_over() {
     let f = fixture();
@@ -2608,6 +2620,7 @@ fn controller_of(f: &Fixture, pty_id: &str) -> Option<String> {
     f.rpc.ptys.lock().unwrap()[pty_id].controller.clone()
 }
 
+#[cfg(unix)]
 /// A stop revokes every attachment and a wake issues the same installation a
 /// new attachment and device. On a runtime that kept running underneath (a
 /// frozen container), the terminal is still that person's: they control it
@@ -2704,6 +2717,7 @@ async fn a_returning_device_waits_for_every_connection_of_the_old_one_to_end() {
     assert_eq!(call(&f.rpc, &after, "pty.write", write).await.unwrap()["applied"], true);
 }
 
+#[cfg(unix)]
 /// Control moves by itself only to the same person on the same installation
 /// whose old device is gone. Anyone else, and the same person from another
 /// installation, watches until they ask (`pty.control`), and asking is still
@@ -2828,6 +2842,7 @@ async fn a_terminal_does_not_come_back_to_someone_who_may_not_type() {
     assert_eq!(call(&f.rpc, &back, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["control"], "you");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_viewer_never_resizes_the_controllers_agent_terminal() {
     let f = fixture();
@@ -2853,6 +2868,7 @@ async fn a_second_viewer_never_resizes_the_controllers_agent_terminal() {
     assert_eq!((resized["cols"].as_u64(), resized["rows"].as_u64()), (Some(90), Some(30)));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_access_ends_an_agent_terminal_stream() {
     let f = fixture();
@@ -2898,6 +2914,7 @@ async fn revoked_access_ends_an_agent_terminal_stream() {
     assert_eq!(code(call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await), "forbidden");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_terminal_outlives_its_cli_and_keeps_nothing_on_disk() {
     let f = fixture();
@@ -2947,6 +2964,7 @@ async fn an_agent_terminal_outlives_its_cli_and_keeps_nothing_on_disk() {
 
 // ---- review of PRO-86 -----------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_terminals_own_reports_reach_the_program_without_driving_or_counting_as_use() {
     let f = fixture();
@@ -3039,6 +3057,7 @@ async fn a_refused_take_of_an_agent_terminal_moves_nothing() {
     assert_eq!((seen["control"].as_str(), seen["controllerId"].as_str()), (Some("other"), Some("alice")));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_tab_drops_its_terminal_and_what_it_kept() {
     let f = fixture();
@@ -3093,6 +3112,7 @@ async fn a_manage_attachment_the_workspace_is_not_shared_with_reaches_no_agent_t
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_viewer_added_later_is_replayed_what_the_terminal_kept() {
     let f = fixture();
@@ -3419,6 +3439,7 @@ async fn an_application_that_speaks_first_is_never_heard_before_the_open_answer(
 
 // ---- the open app comes back as a new device (a stop and a wake) ---------------
 
+#[cfg(unix)]
 /// A stop revokes every attachment, and the wake issues the app that stayed
 /// open a new attachment and a new device. To a runtime process that
 /// survived the stop (a frozen container) that is another device: it watches
@@ -3478,6 +3499,7 @@ async fn a_returning_app_is_a_new_device_that_takes_control_and_types_from_one()
     assert_eq!(f.rpc.input_activity.load(Ordering::SeqCst), typed + 2);
 }
 
+#[cfg(unix)]
 /// Another person coming back after a stop never finds the terminal theirs,
 /// whoever they are: taking it is the explicit call, decided by the rules for typing.
 #[tokio::test(flavor = "multi_thread")]
@@ -3512,6 +3534,7 @@ async fn nobody_elses_terminal_is_ever_taken_without_asking() {
     assert_eq!(call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["controllerId"], "alice");
 }
 
+#[cfg(unix)]
 /// A provider that boots the machine cold restarts the runtime: the new
 /// process knows no controller and no writer, and says so instead of typing.
 #[tokio::test(flavor = "multi_thread")]
@@ -3685,6 +3708,7 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn privacy_raw_pty_queues_and_partial_writes_retain_authority() {
     for kind in ["personal", "managed"] {
@@ -3801,6 +3825,7 @@ fn privacy_raw_pty_child() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
     for method in ["session.delete", "session.close"] {

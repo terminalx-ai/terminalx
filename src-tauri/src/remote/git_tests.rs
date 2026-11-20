@@ -65,6 +65,7 @@ impl Fixture {
         target
     }
 
+    #[cfg(unix)]
     fn fault(&self, name: &str) {
         std::fs::write(self.state.join(name), "").unwrap();
     }
@@ -76,7 +77,7 @@ impl Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let root = base.join("workspace");
     let state = base.join("github");
     std::fs::create_dir_all(&root).unwrap();
@@ -681,6 +682,7 @@ fn expired_credentials_and_an_unreachable_remote_are_told_apart() {
     assert_eq!(error.code, "outcome_unknown", "{}", error.message);
 }
 
+#[cfg(unix)]
 #[test]
 fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_base() {
     let f = fixture();
@@ -719,6 +721,7 @@ fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_bas
     assert_eq!(f.code("git.prs", json!({ "repo": "app", "number": 0 })), "invalid_params");
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_enterprise_pr_creation_retains_verified_repository_routing() {
     let _home = crate::store::temp_home();
@@ -1606,6 +1609,7 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
     assert!(!f.gh_calls().contains(r#"["pr", "create","#));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
@@ -1624,6 +1628,7 @@ fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     let f = fixture();
@@ -1646,6 +1651,7 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
     let f = fixture();
@@ -1666,6 +1672,7 @@ fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
     assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")));
 }
 
+#[cfg(unix)]
 #[test]
 fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let f = fixture();
@@ -1717,6 +1724,7 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     assert!(listed["prs"][0]["mergeQueueEntry"].is_null());
 }
 
+#[cfg(unix)]
 #[test]
 fn disposition_facts_report_unpublished_work_per_repository() {
     let f = fixture();
@@ -1793,6 +1801,7 @@ fn a_root_inside_a_checkout_is_that_repository() {
     assert_eq!(inner.handle("git.status", &json!({})).unwrap().unwrap()["branch"], "main");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_forks_pull_request_from_a_branch_of_the_same_name_is_not_this_branchs() {
     let f = fixture();
@@ -1942,6 +1951,7 @@ fn remote_landed_verification_recognizes_rewritten_merges_but_not_new_work() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() {
     let f = fixture();

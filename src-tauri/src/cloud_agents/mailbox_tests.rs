@@ -1,3 +1,4 @@
+use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -1218,7 +1219,7 @@ fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() 
     assert_eq!(h.ops.images.lock().unwrap()[0].len(), 1, "the image goes as an image");
     let files = h.ops.files.lock().unwrap()[0].clone();
     assert_eq!(files.len(), 1);
-    let folder = crate::store::attachments_dir("s1").unwrap().canonicalize().unwrap();
+    let folder = crate::store::attachments_dir("s1").unwrap().canonical().unwrap();
     assert!(std::path::Path::new(&files[0].path).starts_with(&folder), "{:?}", files[0].path);
     assert_eq!(std::fs::read(&files[0].path).unwrap(), b"# Plan");
     assert!(h.agents.attachments.check_files("u1", &["attach-0002".into()]).is_err(), "typed: the upload is gone");

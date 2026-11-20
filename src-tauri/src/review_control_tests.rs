@@ -279,6 +279,7 @@ fn cloud_runtime_refuses_to_write_a_store_the_desktop_cannot_read() {
         .exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn preserves_spaces_in_filenames_and_uses_the_shared_note_normalization() {
     let _home = crate::store::temp_home();
@@ -653,6 +654,7 @@ fn branch_comments_use_the_pr_comparison_tree_and_renamed_path() {
     );
 }
 
+#[cfg(unix)]
 /// The lead's own take-over of a piece of a plan a person approved (part of #1004) is decided
 /// by which tab asks, so the tab is proved as a review comment's author is: by its own secret.
 /// The session and tab a caller names are claims any process can make.

@@ -25,7 +25,7 @@ impl Home {
     }
 
     fn path(&self) -> PathBuf {
-        std::fs::canonicalize(self.dir.path()).unwrap()
+        crate::paths::canonicalize(self.dir.path()).unwrap()
     }
 
     fn folder(&self, name: &str) -> PathBuf {
@@ -84,7 +84,8 @@ fn browse_never_leaves_home() {
 
     assert_eq!(code(browse(&home.path(), &json!({ "path": s(outside.path()) }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": format!("{}/..", s(&home.path())) }))), "path_forbidden");
-    assert_eq!(code(browse(&home.path(), &json!({ "path": "/" }))), "path_forbidden");
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    assert_eq!(code(browse(&home.path(), &json!({ "path": root }))), "path_forbidden");
     // Outside home, a missing path is refused as one that exists: the answer never says which.
     assert_eq!(code(browse(&home.path(), &json!({ "path": s(&outside.path().join("missing")) }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "work" }))), "invalid_params", "relative");
@@ -250,7 +251,7 @@ fn a_clone_that_fails_leaves_nothing_at_its_destination() {
     let home = Home::new();
     let code_dir = home.folder("code");
     let sources = tempfile::tempdir().unwrap();
-    let missing = format!("file://{}", s(&sources.path().join("missing-repo")));
+    let missing = url::Url::from_file_path(sources.path().join("missing-repo")).unwrap().to_string();
     let (sink, changed) = counting_sink();
     let clones = Arc::new(Clones::default());
 
@@ -285,7 +286,7 @@ fn a_clone_into_a_folder_that_holds_something_else_is_destination_exists() {
     let (sink, _) = counting_sink();
     let clones = Arc::new(Clones::default());
 
-    let repository = format!("file://{}", s(&sources.path().join("occupied")));
+    let repository = url::Url::from_file_path(sources.path().join("occupied")).unwrap().to_string();
     let started = clones.start(&home.path(), &json!({ "repository": repository, "parent": s(&code_dir) }), sink).unwrap()["clone"].clone();
     let clone = ended(&clones, started["cloneId"].as_str().unwrap());
     assert_eq!(clone["state"], "failed");
@@ -326,7 +327,7 @@ fn a_whole_clone_is_added_as_a_project_and_announced() {
     let (sink, changed) = counting_sink();
     let clones = Arc::new(Clones::default());
 
-    let repository = format!("file://{}", s(&origin));
+    let repository = url::Url::from_file_path(&origin).unwrap().to_string();
     let started = clones.start(&home.path(), &json!({ "repository": repository, "parent": s(&code_dir) }), sink).unwrap()["clone"].clone();
     let clone = ended(&clones, started["cloneId"].as_str().unwrap());
     assert_eq!(clone["state"], "done", "{clone}");

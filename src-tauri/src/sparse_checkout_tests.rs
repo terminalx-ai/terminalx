@@ -1,6 +1,8 @@
 use super::*;
 use crate::git;
+#[cfg(unix)]
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 fn sh(cwd: &Path, args: &[&str]) -> String { git::run(cwd, args).unwrap() }
@@ -19,6 +21,7 @@ fn init(path: &Path) {
 
 /// README, a/top, a/x/f, a/y/f, b/f, c/f, "q d/f": the brief's layout and a
 /// folder whose name needs quoting.
+#[cfg(unix)]
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path();
@@ -31,11 +34,13 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
+#[cfg(unix)]
 fn choose(project: &Path, folders: serde_json::Value) {
     write(project, ".terminalx/settings.json", &serde_json::to_string(&serde_json::json!({ "sparseCheckout": folders })).unwrap());
 }
 
 /// Every file on disk under `root`, its `.git` and managed worktrees aside.
+#[cfg(unix)]
 fn files(root: &Path) -> BTreeSet<String> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -50,10 +55,13 @@ fn files(root: &Path) -> BTreeSet<String> {
     out
 }
 
+#[cfg(unix)]
 fn set(paths: &[&str]) -> BTreeSet<String> { paths.iter().map(|path| path.to_string()).collect() }
 
+#[cfg(unix)]
 const EVERYTHING: [&str; 7] = ["README", "a/top", "a/x/f", "a/y/f", "b/f", "c/f", "\"q d/f"];
 
+#[cfg(unix)]
 #[test]
 fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_they_are() {
     let _home = crate::store::temp_home();
@@ -112,6 +120,7 @@ fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_th
     assert_eq!(files(Path::new(&again.path)), set(&EVERYTHING));
 }
 
+#[cfg(unix)]
 #[test]
 fn existing_branch_and_pull_request_worktrees_are_narrowed_too() {
     let _home = crate::store::temp_home();
@@ -140,6 +149,7 @@ fn existing_branch_and_pull_request_worktrees_are_narrowed_too() {
     assert_eq!(files(project), set(&EVERYTHING));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_worktree_that_cannot_be_narrowed_is_removed_with_its_branch() {
     let _home = crate::store::temp_home();
@@ -275,6 +285,7 @@ fn the_wire_shape_is_the_one_the_settings_dialog_reads() {
     }));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_partial_clone_missing_its_blobs_still_lists_its_folders() {
     let _home = crate::store::temp_home();
@@ -324,6 +335,7 @@ fn descriptions_take_the_first_line_of_prose() {
     assert!(cut.ends_with('…') && cut.chars().count() <= MAX_DESCRIPTION, "{cut}");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_agent_in_a_sparse_workspace_is_told_which_folders_it_has() {
     let _home = crate::store::temp_home();

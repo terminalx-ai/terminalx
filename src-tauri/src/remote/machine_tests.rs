@@ -29,7 +29,7 @@ impl Drop for Machine {
 
 impl Machine {
     fn path(&self, name: &str) -> PathBuf {
-        std::fs::canonicalize(self.dir.path()).unwrap().join(name)
+        crate::paths::canonicalize(self.dir.path()).unwrap().join(name)
     }
 }
 
@@ -122,7 +122,7 @@ async fn one_connection_lists_three_projects_and_starts_a_session_in_each() {
     assert_eq!(described["hasWindow"], false);
     assert_eq!(described["arch"], std::env::consts::ARCH);
     assert!(described["name"].as_str().is_some_and(|name| !name.is_empty()));
-    assert!(matches!(described["os"]["family"].as_str(), Some("macos" | "linux")), "{described}");
+    assert!(matches!(described["os"]["family"].as_str(), Some("macos" | "linux" | "windows")), "{described}");
     let listed = call(&m.rpc, &peer, "machine.projects", json!({})).await.unwrap();
     let listed = listed["projects"].as_array().unwrap();
     assert_eq!(listed.len(), 3);
@@ -269,18 +269,18 @@ async fn a_file_call_stays_inside_the_project_it_names_and_its_own_worktrees() {
     assert_eq!(code(read(&api_id, "to-web/secret.txt").await), "path_forbidden");
     // Its own worktree outside its folder is named absolutely, as
     // git.repositories lists it; one inside is a relative path as before.
-    let api_worktree = shared.join("api-one/notes.md").to_string_lossy().into_owned();
+    let api_worktree = shared.join("api-one").join("notes.md").to_string_lossy().into_owned();
     assert_eq!(read(&api_id, &api_worktree).await.unwrap()["text"], "api worktree");
     assert_eq!(read(&web_id, &web_worktree).await.unwrap()["text"], "web worktree");
     let repositories = call(&m.rpc, &peer, "git.repositories", json!({ "projectId": api_id })).await.unwrap();
     let names: Vec<&str> = repositories["repositories"].as_array().unwrap().iter().filter_map(|repo| repo["repo"].as_str()).collect();
-    let api_one = std::fs::canonicalize(shared.join("api-one")).unwrap();
+    let api_one = crate::paths::canonicalize(shared.join("api-one")).unwrap();
     // The checkout, then its worktrees by path.
     assert_eq!(names, vec![".", "nested/inside", api_one.to_str().unwrap()], "{repositories}");
     let status = call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": api_one })).await.unwrap();
     assert_eq!(status["branch"], "api-one", "{status}");
     assert!(status["files"].as_array().unwrap().iter().any(|file| file["path"] == "notes.md"), "{status}");
-    let web_one = std::fs::canonicalize(shared.join("web-one")).unwrap();
+    let web_one = crate::paths::canonicalize(shared.join("web-one")).unwrap();
     assert_eq!(code(call(&m.rpc, &peer, "git.status", json!({ "projectId": api_id, "repo": web_one })).await), "not_found");
     // Writes, listings and searches hold to the same rule.
     assert_eq!(code(call(&m.rpc, &peer, "fs.write", json!({ "projectId": api_id, "path": "../web/new.txt", "text": "x", "clientRequestId": "write-request-1" })).await), "path_forbidden");
@@ -561,7 +561,7 @@ async fn a_client_without_machine_1_is_served_only_what_names_no_project() {
 async fn a_one_root_runtime_never_offers_machine_1_and_serves_as_before() {
     let _home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join("a.txt"), "workspace").unwrap();
     let terminals = Arc::new(Terminals::new());
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
@@ -641,6 +641,7 @@ fn no_blockers() -> Vec<Blocker> {
 }
 
 /// What `runtime.handover.plan` names for an agent mid-turn.
+#[cfg(unix)]
 fn an_agent_mid_turn() -> Vec<Blocker> {
     vec![Blocker::of(&json!({ "kind": "turn", "sessionId": "s1", "tabId": "t1", "harness": "claude" }))]
 }
@@ -672,6 +673,7 @@ fn serving(m: &Machine, env: Environment, host: Host) -> Arc<MachineUpdates> {
     m.rpc.machine_updates_for_tests()
 }
 
+#[cfg(unix)]
 fn refused(result: Result<Value, (String, String)>) -> (String, String) {
     result.expect_err("expected a refusal")
 }
@@ -683,6 +685,7 @@ async fn failure(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params
     response["error"].clone()
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn update_status_has_the_contract_s_shape() {
     let m = machine_rpc();
@@ -737,6 +740,7 @@ async fn machine_3_is_granted_only_when_asked_for() {
     assert_eq!(code(call(&m.rpc, &viewer, "machine.update", json!({ "version": "9.9.9" })).await), "forbidden");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_update_asks_first_about_work_it_stops_and_other_computers() {
     let m = machine_rpc();
@@ -775,6 +779,7 @@ async fn an_update_asks_first_about_work_it_stops_and_other_computers() {
     }
 }
 
+#[cfg(unix)]
 fn read_update_record(m: &Machine) -> Record {
     updates::read_record(&updates::status_path(&m.path("data")))
 }
@@ -846,6 +851,7 @@ async fn a_desktop_machine_asks_its_window_to_update_the_app() {
     assert_eq!(status["progress"], json!({ "phase": "failed", "version": "0.9.0", "at": status["progress"]["at"], "message": "The download was interrupted.", "running": env!("CARGO_PKG_VERSION"), "rolledBack": false }));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn each_connection_is_told_of_changes_without_itself_as_another_computer() {
     let m = machine_rpc();
@@ -950,7 +956,7 @@ async fn runtime_agents_reports_each_agents_sign_in_and_the_missing_ones() {
 async fn a_one_root_runtime_reports_agents_without_sign_in() {
     let _home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     let terminals = Arc::new(Terminals::new());
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(16)), terminals.clone(), None).unwrap();
     rpc.set_offered_for_tests(crate::harness::catalog().into_iter().map(|mut agent| { agent.available = agent.id == "claude"; agent }).collect());
@@ -964,6 +970,7 @@ async fn a_one_root_runtime_reports_agents_without_sign_in() {
     terminals.kill_all();
 }
 
+#[cfg(unix)]
 /// PRO-350: Sign in and Install run in a terminal on the machine, one step at
 /// a time per agent; the terminal is not a shell of `pty.list`, and its exit
 /// code is the setup wrapper's.
@@ -1034,7 +1041,7 @@ fn a_sign_in_started_from_another_computer_uses_the_device_code_where_there_is_o
 async fn a_paired_computer_adds_and_removes_a_machines_projects() {
     let m = machine_rpc();
     let home = m.path("home");
-    let api = home.join("code/api");
+    let api = home.join("code").join("api");
     std::fs::create_dir_all(&api).unwrap();
     std::fs::write(api.join("README.md"), "api\n").unwrap();
     m.rpc.set_home_for_tests(&home);
@@ -1097,6 +1104,7 @@ async fn a_one_root_runtime_has_no_machine_6() {
 
 /// A workspace session of `project` on the machine: its own checkout inside
 /// the project's folder, as a worktree session has.
+#[cfg(unix)]
 fn workspace_session(project: &Path, id: &str) -> SessionEntry {
     let cwd = project.join(".worktrees").join(id);
     std::fs::create_dir_all(&cwd).unwrap();
@@ -1114,6 +1122,7 @@ fn workspace_session(project: &Path, id: &str) -> SessionEntry {
 }
 
 /// `pty.list` until `found` picks a terminal out of it.
+#[cfg(unix)]
 async fn listed_until(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, what: &str, found: impl Fn(&Value) -> bool) -> Value {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -1127,11 +1136,13 @@ async fn listed_until(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, what: &str, fou
 }
 
 /// What a terminal printed, from its first byte.
+#[cfg(unix)]
 async fn output_of(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, pty_id: &str) -> String {
     let attached = call(rpc, peer, "pty.attach", json!({ "ptyId": pty_id })).await.unwrap();
     String::from_utf8_lossy(&STANDARD.decode(attached["data"].as_str().unwrap()).unwrap()).into_owned()
 }
 
+#[cfg(unix)]
 /// PRO-403: a machine session's Setup and Run come from the machine. Its
 /// project's actions and setup script are read from the machine's store; each
 /// run is the machine runtime's own pane in the session's folder there, with
@@ -1184,7 +1195,7 @@ async fn a_machine_sessions_setup_and_actions_run_on_the_machine() {
         assert!(std::time::Instant::now() < deadline, "setup did not finish: {now}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(output_of(&m.rpc, &peer, &pane).await.contains(&format!("set up in {}", std::fs::canonicalize(&session.cwd).unwrap().display())));
+    assert!(output_of(&m.rpc, &peer, &pane).await.contains(&format!("set up in {}", crate::paths::canonicalize(&session.cwd).unwrap().display())));
     assert_eq!(code(call(&m.rpc, &peer, "pty.kill", json!({ "ptyId": pane })).await), "forbidden", "setup is stopped as setup");
     let after = listed_until(&m.rpc, &peer, "Run after setup", |terminal| terminal["run"]["actionId"] == "after").await;
     assert_eq!(after["run"]["name"], "after action");
@@ -1227,6 +1238,7 @@ async fn a_machine_sessions_setup_and_actions_run_on_the_machine() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exited_machine_runs_stay_evicted_when_their_runtime_panes_are_listed() {
     let m = machine_rpc();
@@ -1286,6 +1298,7 @@ async fn exited_machine_runs_stay_evicted_when_their_runtime_panes_are_listed() 
     assert_eq!(listed["terminals"].as_array().unwrap().len(), 7, "{listed}");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn delayed_run_exit_gets_observed_priority_after_backfill_eviction() {
     let m = machine_rpc();
