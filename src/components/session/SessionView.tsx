@@ -680,6 +680,8 @@ export function SessionView({
   const tabsInPanes = filesInPanes || remotePanes;
   const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow, remoteTabRow);
   const switchInPaneStrip = tabsInPanes && paneLayout.showStrip;
+  // The header's own switch, where no pane strip ends with one: the location chip gives way to it in a narrow header, and only to it.
+  const switchInHeader = !!activeTab && !!terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !switchInPaneStrip;
   const hasEditors = !filesInPanes && ed.editors.some((e) => e.sessionId === session.id);
   const shownFile = filesInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
   useFileTabShortcuts(session.id, shownFile, filesInPanes);
@@ -931,7 +933,7 @@ export function SessionView({
                   : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
               </span>
             )}
-            {cloud && !machine && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
+            {cloud && !machine && <CloudLocation cloud={cloud} yields={switchInHeader} onShowPorts={showPorts} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -980,7 +982,7 @@ export function SessionView({
             {/* The "+" that opens a tab, where no row of tabs ends with it (the floating window's row comes and goes). Keyed by session: a menu left open never carries over to another session. */}
             {(!stripRow || compact) && !cloud?.locked && !(machine && !compact) && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
             {/* With the row of tabs, the switch is at the right end of each pane's strip (PRO-381, 03.14). */}
-            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && !(machine && !compact) && !switchInPaneStrip && (
+            {activeTab && switchInHeader && (
               <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
