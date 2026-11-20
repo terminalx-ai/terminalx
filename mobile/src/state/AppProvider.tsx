@@ -1,5 +1,5 @@
 import { forgetConversationState, sendHeldMessages } from "./conversation-state";
-import { cacheEpoch, clearTranscriptCaches, readSaved, writeSaved } from "../data/transcript-cache";
+import { cacheEpoch, clearTranscriptCaches, readSaved, reclaimOrphanChunks, writeSaved } from "../data/transcript-cache";
 import { keepPrefetched, startPrefetch, stopPrefetch } from "../data/prefetch";
 import { usePrefetchSetting } from "../data/prefetch-setting";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -412,6 +412,11 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, []);
+  // Chunks a save cut short left behind go on every connect, whatever the prefetch setting (#1340).
+  useEffect(() => {
+    if (connectionStage !== "connected" || !activeHostId) return;
+    void reclaimOrphanChunks(activeHostId).catch(() => undefined);
+  }, [activeHostId, connectionEpoch, connectionStage]);
   useEffect(() => {
     if (!prefetchOn || !foreground || connectionStage !== "connected" || !activeHostId) return;
     const host = activeHostId;

@@ -1,5 +1,5 @@
 import { mergeEvents, type HostApi, type Prefetched } from "./host-api";
-import { cacheEpoch, readCache, reclaimOrphanChunks, savedCursors, writeCache } from "./transcript-cache";
+import { cacheEpoch, readCache, savedCursors, writeCache } from "./transcript-cache";
 import { appendedCount, transcriptOpen } from "./transcript-sync";
 
 /** The checkpoints a phone names: the Mac takes at most 256. */
@@ -9,8 +9,6 @@ const KNOWN_LIMIT = 128;
 export async function startPrefetch(api: HostApi, host: string): Promise<boolean> {
   const known = await savedCursors(host, KNOWN_LIMIT);
   named.set(host, new Set(known.map(({ sessionId, tabId }) => JSON.stringify([sessionId, tabId]))));
-  // Chunks left by a save cut short go before the pages that follow are kept (#1340).
-  void reclaimOrphanChunks(host).catch(() => undefined);
   return api.prefetch(true, known);
 }
 

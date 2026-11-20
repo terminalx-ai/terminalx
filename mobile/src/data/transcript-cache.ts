@@ -227,8 +227,11 @@ function chunkIdOf(stored: string, host: string, session: string, tab: string): 
 
 /** Transcripts whose chunks one sweep checks, so a phone holding many does each pass in bounded work. */
 export const SWEEP_TRANSCRIPTS = 64;
-/** Where the last sweep of each Mac stopped: the next continues after it. */
-const sweptTo = new Map<string, string>();
+/**
+ * Where the last sweep of each Mac stopped, kept with the Mac's saved values
+ * so the next continues after it in a later process too, and is cleared with them.
+ */
+const sweptToName = "chunk-sweep";
 
 /**
  * Removes a Mac's chunks that no index names (#1340). A save writes its
@@ -257,7 +260,11 @@ export function reclaimOrphanChunks(host: string, epoch = cacheEpoch(host), budg
       byTranscript.set(k, entry);
     }
     const all = [...byTranscript.keys()].sort();
-    const after = sweptTo.get(host);
+    let after: string | undefined;
+    try {
+      const stored: unknown = JSON.parse(await AsyncStorage.getItem(savedKey(host, sweptToName)) ?? "null");
+      if (typeof stored === "string") after = stored;
+    } catch { /* Start from the first. */ }
     const start = after === undefined ? 0 : all.findIndex((k) => k > after);
     const order = start <= 0 ? all : [...all.slice(start), ...all.slice(0, start)];
     const picked = order.slice(0, Math.max(0, budget));
@@ -273,7 +280,7 @@ export function reclaimOrphanChunks(host: string, epoch = cacheEpoch(host), budg
       for (const [id, stored] of byTranscript.get(k)!.chunks) if (!live.has(id)) orphaned.push(stored);
     }
     if (orphaned.length) await AsyncStorage.multiRemove(orphaned);
-    sweptTo.set(host, picked.at(-1)!);
+    await AsyncStorage.setItem(savedKey(host, sweptToName), JSON.stringify(picked.at(-1)!));
     return orphaned.length;
   });
   writes = operation;
@@ -281,8 +288,8 @@ export function reclaimOrphanChunks(host: string, epoch = cacheEpoch(host), budg
 }
 
 export function clearTranscriptCaches(host?: string): Promise<void> {
-  if (host) { hostEpochs.set(host, ++cleanupCounter); sweptTo.delete(host); }
-  else { allHostsEpoch = ++cleanupCounter; hostEpochs.clear(); sweptTo.clear(); }
+  if (host) hostEpochs.set(host, ++cleanupCounter);
+  else { allHostsEpoch = ++cleanupCounter; hostEpochs.clear(); }
   for (const k of [...layouts.keys()]) {
     try { if (!host || JSON.parse(k.slice(indexPrefix.length))[0] === host) layouts.delete(k); } catch { layouts.delete(k); }
   }

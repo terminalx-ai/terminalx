@@ -160,6 +160,9 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     return (JSON.parse(envelope.data).chunks as { id: string }[]).map((c) => c.id).sort();
   };
   const idOf = (key: string) => JSON.parse(key.slice("terminalx:transcript:v3c:".length))[3] as string;
+  /** What is kept of transcripts, without the sweep's own resume point. */
+  const transcriptEntries = () => [...storage].filter(([key]) => key.startsWith("terminalx:transcript:")).sort();
+  const transcriptKeys = () => transcriptEntries().map(([key]) => key);
   /** A process that stopped and started again: nothing kept in memory. */
   const restart = async () => { vi.resetModules(); return await import("./transcript-cache"); };
 
@@ -204,7 +207,7 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     await expect(writeCache("host", "session", "tab", { events: range(1, 80), cursor: cursor(80), hasEarlier: false })).rejects.toThrow();
     expect(chunkKeys()).toHaveLength(2);
     expect(await (await restart()).reclaimOrphanChunks("host")).toBe(2);
-    expect(storage.size).toBe(0);
+    expect(transcriptKeys()).toEqual([]);
   });
 
   it("removes the chunks under an index that cannot be read, which then reads empty and not as old history", async () => {
@@ -234,9 +237,9 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     await writeCache("other", "session", "tab", { events: range(1, 10), cursor: cursor(10), hasEarlier: false });
     const orphan = "terminalx:transcript:v3c:" + JSON.stringify(["other", "session", "tab", "orphan"]);
     storage.set(orphan, "[]");
-    const before = new Map(storage);
+    const before = transcriptEntries();
     expect(await reclaimOrphanChunks("host")).toBe(0);
-    expect(new Map(storage)).toEqual(before);
+    expect(transcriptEntries()).toEqual(before);
     for (const session of ["a", "b", "c"]) expect((await readCache("host", session, "tab")).events).toHaveLength(130);
   });
 
@@ -257,8 +260,12 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     await expect(writeCache("host", "session", "tab", { events: range(1, 200), cursor: cursor(200), hasEarlier: false })).rejects.toThrow();
     const epoch = 0;
     await clearTranscriptCaches("host");
+    // A chunk no index names, which a sweep with the current epoch would remove.
+    const orphan = "terminalx:transcript:v3c:" + JSON.stringify(["host", "session", "tab", "orphan"]);
+    storage.set(orphan, "[]");
     expect(await reclaimOrphanChunks("host", epoch)).toBe(0);
-    expect(storage.size).toBe(0);
+    expect([...storage.keys()]).toEqual([orphan]);
+    expect(await reclaimOrphanChunks("host")).toBe(1);
   });
 
   it("removes nothing when the indexes cannot be read", async () => {
@@ -284,5 +291,26 @@ describe("reclaiming chunks a save cut short left behind (#1340)", () => {
     expect(await reclaimOrphanChunks("host", undefined, 2)).toBe(1);
     expect(orphans()).toBe(0);
     for (const session of sessions) expect((await readCache("host", session, "tab")).events).toHaveLength(1);
+  });
+
+  it("continues after the transcripts the last process swept, rather than from the first again", async () => {
+    const sessions = Array.from({ length: 4 }, (_, i) => `s${i}`);
+    for (const session of sessions) {
+      await writeCache("host", session, "tab", { events: [{ ...event(1), sessionId: session }], cursor: cursor(1), hasEarlier: false });
+      storage.set("terminalx:transcript:v3c:" + JSON.stringify(["host", session, "tab", "orphan"]), "[]");
+    }
+    const left = () => chunkKeys().filter((key) => key.endsWith('"orphan"]')).map((key) => JSON.parse(key.slice("terminalx:transcript:v3c:".length))[1]);
+    expect(await (await restart()).reclaimOrphanChunks("host", undefined, 2)).toBe(2);
+    expect(left()).toEqual(["s2", "s3"]);
+    expect(await (await restart()).reclaimOrphanChunks("host", undefined, 2)).toBe(2);
+    expect(left()).toEqual([]);
+  });
+
+  it("forgets where it stopped with the Mac", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 10), cursor: cursor(10), hasEarlier: false });
+    await reclaimOrphanChunks("host");
+    expect([...storage.keys()].some((key) => key.startsWith("terminalx:saved:v1:"))).toBe(true);
+    await clearTranscriptCaches("host");
+    expect(storage.size).toBe(0);
   });
 });
