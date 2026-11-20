@@ -23,8 +23,9 @@
 //!   branch as the remote has it now.
 //! - **unverifiable**: the answer could not be established (not a working
 //!   tree of the project, files hidden from `git status`, submodules, another
-//!   checkout inside an ignored folder, git failing). Unknown is never read
-//!   as clean.
+//!   checkout inside an ignored folder, git failing, a pull request created
+//!   from it that GitHub has not yet confirmed). Unknown is never read as
+//!   clean.
 //! - **ignoredData**: clean, but it holds ignored files that are not known
 //!   build or dependency output (`.env`, a local database). Removable only
 //!   when the request says so for that worktree. Known output is a fixed list
@@ -720,6 +721,10 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         if !git::is_worktree_of(&repository.root, &path) {
             return unverifiable("It is not a working Git checkout of this project, so it cannot be checked for unsaved work.");
         }
+        if let Some(why) = pending_pr_creation(&path) {
+            candidate.brief = Some("pull request to verify".into());
+            return (Verdict::Unverifiable, Some(why));
+        }
         candidate.head = git::head_commit(&path);
         candidate.branch = git::current_branch(&path).or(candidate.branch.take());
         candidate.last_activity = last_activity(&path, &sessions);
@@ -843,6 +848,19 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
     candidate.reason = reason;
     candidate.token = token(&candidate, &listing);
     candidate
+}
+
+/// Why a worktree must stay while a pull request created from it is not yet
+/// confirmed: GitHub accepted the create but its read-back failed, so the
+/// pending record in it is the only evidence of an open pull request. The
+/// branch it was made on may since have been switched for a clean, merged
+/// one, so nothing else in the review sees it. Unknown is never read as none.
+fn pending_pr_creation(path: &Path) -> Option<String> {
+    match crate::remote::git::pending_pr_creation_in(path) {
+        Ok(None) => None,
+        Ok(Some(url)) => Some(format!("Verify the pull request at {url} before removing this workspace.")),
+        Err(error) => Some(format!("Pull requests created from it could not be checked: {}", error.message)),
+    }
 }
 
 fn token(candidate: &Candidate, listing: &str) -> String {
@@ -1051,6 +1069,11 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
             return failed;
         }
     };
+    // The final admission, after any archive hook: a pull request created
+    // meanwhile keeps the worktree and its conversations.
+    if let Some(why) = pending_pr_creation(&target) {
+        return result(item, Outcome::Skipped, why);
+    }
     if ran {
         // A hook may modify files or start processes: reapply the full review,
         // including ignored data and sessions, after it has finished.

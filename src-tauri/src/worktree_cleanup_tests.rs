@@ -974,6 +974,49 @@ fn archive_changes_are_checked_again_before_bulk_removal() {
     terminals.kill_all();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pull_request_created_during_the_archive_hook_keeps_the_worktree_and_its_conversations() {
+    let f = Fixture::new();
+    let tree = f.worktree(&f.alpha(), "pending");
+    let session = f.session(&f.alpha(), &tree, TabStatus::Idle);
+    let item = f.item(&f.find(&tree));
+    // GitHub accepted a create from this worktree while its archive hook ran,
+    // and the read-back failed: only the pending record says a PR is open.
+    let pending = serde_json::json!([{
+        "session": session.id,
+        "checkout": { "path": canonical(&tree), "git_dir": tree.join(".git"), "directory": [0, 0], "admin": [0, 0] },
+        "branch": "feature/pr", "base": "main", "head": "0000000", "url": "https://github.test/octo/repo/pull/7",
+    }]);
+    let staged = f.base.join("pending.json");
+    std::fs::write(&staged, serde_json::to_vec(&pending).unwrap()).unwrap();
+    let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+    let marker = f.base.join("hook-ran");
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts {
+            setup: String::new(),
+            archive: format!("cp '{}' '{}' && touch '{}'", staged.display(), record.display(), marker.display()),
+            archive_timeout_minutes: None,
+        }), ..Default::default()
+    }).unwrap();
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let results = f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, &[RemoveItem { delete_sessions: true, ..item }], Watch::default())
+    });
+    terminals.kill_all();
+    assert!(marker.exists(), "the archive hook ran");
+    assert_eq!(results[0].outcome, Outcome::Skipped, "{:?}", results[0]);
+    assert_eq!(results[0].reason.as_deref(), Some("Verify the pull request at https://github.test/octo/repo/pull/7 before removing this workspace."));
+    assert!(tree.is_dir());
+    assert!(index::get(&session.id).is_ok());
+    let candidate = f.find(&tree);
+    assert_eq!(candidate.verdict, Verdict::Unverifiable);
+    assert!(candidate.reason.unwrap().contains("pull/7"));
+}
+
 #[test]
 fn removal_wire_format_preserves_archive_consent_and_omits_absent_receipts() {
     let old = serde_json::json!({ "projectPath": "/p", "path": "/p/tree", "token": "review" });
