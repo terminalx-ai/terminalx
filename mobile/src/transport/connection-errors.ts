@@ -1,4 +1,4 @@
-import { RelayOuterError } from "./relay-client";
+import { CREDENTIAL_REFUSED, CredentialRefusedError, RelayOuterError } from "./relay-client";
 
 /**
  * What a transport failure means to the person holding the phone (#670).
@@ -7,8 +7,20 @@ import { RelayOuterError } from "./relay-client";
  */
 export type ConnectionProblem = "pairing-invalid" | "mac-offline" | "dropped" | "reconnecting" | "network" | "too-large" | "no-answer";
 
+/**
+ * A connection path's failure, or a whole attempt's when every path failed
+ * (#1316): the message is already redacted for the connection log, and
+ * `problem` keeps what the failure meant, which the message no longer says.
+ */
+export class ConnectionAttemptError extends Error {
+  constructor(message: string, readonly problem: ConnectionProblem | null) {
+    super(message);
+  }
+}
+
 /** Null when the failure is not the connection's: the Mac answered, and its message can be shown as it is. */
 export function connectionProblem(cause: unknown): ConnectionProblem | null {
+  if (cause instanceof ConnectionAttemptError) return cause.problem;
   if (cause instanceof RelayOuterError) {
     switch (cause.code) {
       case 4401: return "pairing-invalid";
@@ -27,6 +39,35 @@ export function connectionProblem(cause: unknown): ConnectionProblem | null {
   if (cause.message.startsWith("WebSocket connection failed")) return "network";
   if (cause.message.startsWith("RPC timed out")) return "no-answer";
   return null;
+}
+
+/**
+ * What one path's failure says about the pairing while connecting. A 4401
+ * counts as the pairing refused only when it is the refusal of this pairing:
+ * a `CredentialRefusedError` (the relay or the pinned Mac), and not one for a
+ * grace credential after a rotation (`entitled` false). A plain 4401 came
+ * from a party not entitled to refuse it, such as a stale LAN address now
+ * answered by another computer, and says nothing (null).
+ */
+export function pathProblem(cause: unknown, entitled = true): ConnectionProblem | null {
+  if (cause instanceof RelayOuterError && cause.code === CREDENTIAL_REFUSED && !(entitled && cause instanceof CredentialRefusedError)) return null;
+  return connectionProblem(cause);
+}
+
+/**
+ * Most telling first: what an attempt that failed on every path reports.
+ * A refused pairing needs pairing again; the relay saying the Mac is not
+ * there explains a LAN path that never answered; a typed relay close says
+ * more than a socket that never opened; a plain drop says least.
+ */
+const PRECEDENCE: readonly ConnectionProblem[] = ["pairing-invalid", "mac-offline", "too-large", "network", "no-answer", "reconnecting", "dropped"];
+
+/**
+ * The one classification for an attempt whose paths failed with `problems`,
+ * the same whatever order the paths failed in; null when none was known.
+ */
+export function decisiveProblem(problems: readonly (ConnectionProblem | null)[]): ConnectionProblem | null {
+  return PRECEDENCE.find((problem) => problems.includes(problem)) ?? null;
 }
 
 /**

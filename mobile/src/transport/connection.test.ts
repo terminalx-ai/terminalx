@@ -666,6 +666,48 @@ describe("a refused credential", () => {
     expect((snapshot.events as { kind: string }[]).map(({ kind }) => kind)).toEqual(expect.arrayContaining(["connected", "connection-lost", "disconnected-on-mac"]));
   });
 
+  describe("when every connection path fails (#1316)", () => {
+    const networkDown = () => new Error("WebSocket connection failed (network unavailable or connection refused)");
+    const failures = () => (reported().events as { kind: string; classification?: string }[]).filter(({ kind }) => kind === "attempt-failed");
+    const failedDetails = () => logs.filter((entry) => entry.message === "Connection attempt failed").map((entry) => entry.detail ?? "");
+
+    it("reports the Mac offline when the relay says so and the LAN addresses never answer", async () => {
+      mocks.refused.set("relay", 4404);
+      connection.start(owned, relayCredential); await flush();
+      await vi.advanceTimersByTimeAsync(DIRECT_GRACE_MS); await flush();
+      expect(failures()).toEqual([{ at: expect.any(Number), kind: "attempt-failed", classification: "mac-offline" }]);
+      expect(failedDetails()[0]).toContain("relay_outer_4404");
+    });
+
+    it("reports a network failure when no path's socket opens", async () => {
+      mocks.refused.set("relay", 1006);
+      for (const endpoint of [vpn, lan, bonjour]) mocks.refused.set(endpoint, networkDown());
+      connection.start(owned, relayCredential); await flush();
+      expect(failures()).toEqual([{ at: expect.any(Number), kind: "attempt-failed", classification: "network" }]);
+    });
+
+    it("does not read a refused grace credential or a stranger's 4401 as the pairing refused", async () => {
+      mocks.refused.set("relay:current", 4404); mocks.refused.set("relay:grace", new CredentialRefusedError());
+      mocks.refused.set(vpn, new RelayOuterError(4401)); mocks.refused.set(lan, networkDown()); mocks.refused.set(bonjour, networkDown());
+      connection.start(owned, relayCredential); await flush();
+      expect(failures().map(({ classification }) => classification)).toEqual(["mac-offline"]);
+      expect(reported().pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+    });
+
+    it("ends the pairing on a refused current credential, and exports nothing for it", async () => {
+      // `pairing-invalid` is what the attempt is classified as (connection-errors.test.ts); the
+      // report never carries it, because the refusal ends the pairing it would be filed under.
+      mocks.refused.set("relay:current", new CredentialRefusedError()); mocks.refused.set("relay:grace", 4404);
+      for (const endpoint of [vpn, lan, bonjour]) mocks.refused.set(endpoint, networkDown());
+      const instance = pairingInstance(owned.id);
+      connection.start(owned, relayCredential); await flush();
+      expect(isCurrentPairingInstance({ hostId: owned.id, instance })).toBe(false);
+      expect(failedDetails()).toHaveLength(1);
+      expect(failedDetails()[0]).not.toMatch(/current|grace|device-secret/);
+      expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+    });
+  });
+
   it("does not end a pairing made again after the refused attempt began", async () => {
     let refuse!: (error: Error) => void;
     mocks.reachable.clear();

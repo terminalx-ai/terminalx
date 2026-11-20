@@ -1,7 +1,41 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { canRetry, closeDetail, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "./connection-errors";
-import { RelayOuterError } from "./relay-client";
+import { canRetry, closeDetail, ConnectionAttemptError, connectionProblem, decisiveProblem, isTransportError, mayHaveArrived, pathProblem, problemText, screenMessage } from "./connection-errors";
+import { CredentialRefusedError, RelayOuterError } from "./relay-client";
+
+describe("an attempt that failed on every path (#1316)", () => {
+  it("keeps a path's classification once its message is redacted and wrapped", () => {
+    const wrapped = new ConnectionAttemptError("https://relay.example: relay_outer_4404 (the Mac is not connected to Relay)", "mac-offline");
+    expect(connectionProblem(wrapped)).toBe("mac-offline");
+    expect(connectionProblem(new ConnectionAttemptError("ws://192.168.1.2:6768: Direct handshake timed out", null))).toBeNull();
+    // Still the connection's own, worded for the log and never for a screen.
+    expect(screenMessage(wrapped, "fallback")).toBe("fallback");
+  });
+
+  it("counts a 4401 as the pairing refused only when it refuses this pairing", () => {
+    expect(pathProblem(new CredentialRefusedError())).toBe("pairing-invalid");
+    // A grace credential refused after a rotation, and a 4401 from an unverified direct peer.
+    expect(pathProblem(new CredentialRefusedError(), false)).toBeNull();
+    expect(pathProblem(new RelayOuterError(4401))).toBeNull();
+    expect(pathProblem(new RelayOuterError(4404), false)).toBe("mac-offline");
+    expect(pathProblem(new RelayOuterError(1006))).toBe("network");
+    expect(pathProblem(new Error("WebSocket connection failed (network unavailable or connection refused)"))).toBe("network");
+    expect(pathProblem(new Error("no answer 3 s after Relay failed"))).toBeNull();
+  });
+
+  it("reports the most telling cause, whatever order the paths failed in", () => {
+    const mixed = [null, "network", "mac-offline", "dropped", "pairing-invalid"] as const;
+    for (let shift = 0; shift < mixed.length; shift++) {
+      expect(decisiveProblem([...mixed.slice(shift), ...mixed.slice(0, shift)])).toBe("pairing-invalid");
+      expect(decisiveProblem([...mixed.slice(shift), ...mixed.slice(0, shift)].filter((problem) => problem !== "pairing-invalid"))).toBe("mac-offline");
+    }
+    expect(decisiveProblem([null, "network", "dropped"])).toBe("network");
+    expect(decisiveProblem(["dropped", "too-large", "network"])).toBe("too-large");
+    expect(decisiveProblem(["dropped", "no-answer", "reconnecting"])).toBe("no-answer");
+    expect(decisiveProblem([null, null])).toBeNull();
+    expect(decisiveProblem([])).toBeNull();
+  });
+});
 
 describe("transport failures in plain words (#670)", () => {
   it.each([
