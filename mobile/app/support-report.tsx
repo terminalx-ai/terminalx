@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Linking, Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { usePreventRemove, useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
@@ -10,7 +10,7 @@ import { appVersion } from "@mobile/state/app-version";
 import { useApp } from "@mobile/state/AppProvider";
 import { supportApi } from "@mobile/support/api";
 import { scopedConnectionSnapshot, supportConnectionClassifications, supportConnectionStages } from "@mobile/transport/connection";
-import { supportPairingsCurrent, type SupportPairing } from "@mobile/store/pairing-instance";
+import { pairingInstancesVersion, subscribePairingInstances, supportPairingsCurrent, type SupportPairing } from "@mobile/store/pairing-instance";
 import { readHosts } from "@mobile/store/hosts";
 import { Button, Card, Screen } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -45,6 +45,8 @@ function ReportForm() {
   const [server, setServer] = useState(false);
   const [storedPreview, setPreview] = useState<PreparedReport | undefined>(previous?.preview);
   const [pairings, setPairings] = useState<readonly SupportPairing[]>(previous?.pairings ?? []);
+  // A refused credential ends a pairing without changing the saved hosts (#1315).
+  const pairingVersion = useSyncExternalStore(subscribePairingInstances, pairingInstancesVersion);
   const revoked = Boolean(storedPreview) && !supportPairingsCurrent(app.hosts, owner, pairings);
   const preview = revoked ? undefined : storedPreview;
   const [receipt, setReceipt] = useState<string | undefined>(previous?.receipt);
@@ -70,7 +72,7 @@ function ReportForm() {
     if (pending && pending.owner === owner && !pending.receipt && !supportPairingsCurrent(app.hosts, owner, pending.pairings)) {
       pendingReport = undefined;
     }
-  }, [app.hosts, owner]);
+  }, [app.hosts, owner, pairingVersion]);
 
   async function authorizePairings() {
     if (pairings.length && !supportPairingsCurrent(await readHosts(), owner, pairings)) {

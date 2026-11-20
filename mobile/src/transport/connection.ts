@@ -1,12 +1,12 @@
 import { directEndpoints } from "./direct-endpoints";
 import { z } from "zod";
-import { accountPairedHostIds, isCurrentPairingInstance, pairingInstance, type SupportPairing } from "../store/pairing-instance";
+import { accountPairedHostIds, isCurrentPairingInstance, pairingInstance, revokePairingInstance, type SupportPairing } from "../store/pairing-instance";
 import type { ReportEvent, ReportWindow } from "@terminalx/portable/supportReports";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
-import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
+import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
 import { closeDetail, connectionProblem } from "./connection-errors";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
@@ -419,7 +419,10 @@ export class HostConnection {
   private async connectOnce(generation: number): Promise<void> {
     const cancelled = () => new Error("Connection attempt cancelled");
     if (!this.active) throw cancelled();
-    const { host: storedHost, credential } = this.active;
+    const { host: storedHost, credential, pairing } = this.active;
+    // Pinned here: a refusal ends the pairing this attempt was made for, even
+    // if the person has chosen another computer or paired again meanwhile.
+    const contributing: SupportPairing = { hostId: storedHost.id, instance: pairing };
     const clientSecretKey = await loadOrCreateE2EESecretKey();
     if (generation !== this.generation || !this.active) throw cancelled();
     const clients = new Set<RelayClient>();
@@ -445,6 +448,7 @@ export class HostConnection {
         return connecting;
       });
       try { await Promise.race([connecting, abandoned]); } catch (error) {
+        this.refusedBy(contributing, error);
         client.close();
         const reason = `${redactEndpoint(endpoint)}: ${safeError(error)}`;
         if (racing()) this.log("info", "Direct path failed", reason);
@@ -473,6 +477,8 @@ export class HostConnection {
           this.pendingClients.add(client);
           this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
           try { await client.connect(); } catch (error) {
+            // A grace credential refused after a rotation says nothing about the pairing.
+            if (resume === credential.current) this.refusedBy(contributing, error);
             client.close();
             throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`);
           }
@@ -513,6 +519,7 @@ export class HostConnection {
         this.emitStage("connected", 0);
         this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`, { kind: "connected", classification: winner.path });
       } else if (state === "disconnected" && wasConnected) {
+        this.refusedBy(contributing, cause);
         clearInterval(this.refreshTimer);
         this.client = null;
         if (this.heldByMac) {
@@ -577,6 +584,16 @@ export class HostConnection {
     const held = { ...this.active.host, disconnectedOnMacAt: Date.now() };
     this.active.host = held;
     void updateStoredHost(held).catch(() => undefined);
+  }
+
+  /**
+   * The relay or the pinned Mac refused this pairing's credential (#1315):
+   * the phone was revoked, so its diagnostics stop authorizing reports. A
+   * network failure, a dropped socket and a disconnect chosen on the Mac
+   * (`pairing.disconnected`) keep the pairing and are not this.
+   */
+  private refusedBy(pairing: SupportPairing, cause: unknown): void {
+    if (cause instanceof CredentialRefusedError) revokePairingInstance(pairing);
   }
 
   /** The person reconnects: the stored hold goes, so the next launch connects by itself again. */
