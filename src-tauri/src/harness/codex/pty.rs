@@ -74,6 +74,11 @@ pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
 ///
 /// A box with no blank row under it before the screen ends is not one this
 /// can tell from the footer, and is taken as unseen rather than waited on.
+///
+/// Codex draws its own questions (the working-directory prompt on resume,
+/// PRO-462) as a list whose selected row starts with the same glyph, drawn
+/// in reverse video; the box's glyph is only bold. That row is a choice the
+/// reader has to make in the terminal, not text in the box.
 pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     use crate::harness::tui::Composer;
     let (rows, cols) = screen.size();
@@ -81,6 +86,9 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     let cell = |row: u16, col: u16| screen.cell(row, col).map_or("", |cell| cell.contents());
     let blank = |row: u16| (0..cols).all(|col| cell(row, col).trim().is_empty());
     let Some(first) = (0..rows).rev().find(|row| cell(*row, 0) == "›" && cell(*row, 1).trim().is_empty()) else { return Composer::Unseen };
+    if screen.cell(first, 0).is_some_and(|cell| cell.inverse()) {
+        return Composer::Choice;
+    }
     let Some(end) = (first + 1..rows).find(|row| blank(*row)) else { return Composer::Unseen };
     let mut words = Vec::new();
     for row in first..end {
@@ -221,6 +229,12 @@ impl Launcher {
         let mut c = format!("{} --no-daemon", quote(&self.program.to_string_lossy()));
         if let Some(id) = opts.resume {
             c.push_str(&format!(" resume {}", quote(id)));
+            // The app chooses the folder a tab runs in. Codex otherwise stops
+            // at start-up to ask whether to use the folder its session last
+            // recorded instead, one that can have been removed with its
+            // worktree, and the message that resumed the tab waits behind
+            // that question (PRO-462). Verified against codex-cli 0.169.0.
+            c.push_str(&format!(" -c {}", quote(RESUME_IN_CURRENT_DIRECTORY)));
         }
         if !opts.model.is_empty() {
             c.push_str(&format!(" -m {}", quote(opts.model)));
@@ -237,6 +251,9 @@ impl Launcher {
         c
     }
 }
+
+/// Resume in the folder the tab is started in, without asking (PRO-462).
+const RESUME_IN_CURRENT_DIRECTORY: &str = "tui.resume_cwd=\"current\"";
 
 /// The stance that means "no sandbox, no questions"; it is a flag of its own
 /// rather than an `-a`/`-s` pair.
@@ -352,6 +369,22 @@ mod tests {
         assert_eq!(composer(drawn(b"").screen()), Composer::Unseen);
     }
 
+    /// Codex 0.169.0 resuming a session whose folder was removed, recorded in
+    /// a 300 by 12 pty with the folders renamed: its working-directory
+    /// question, drawn where the box was (PRO-462). The selected option is
+    /// a choice to make, not text in the box.
+    #[test]
+    fn codexs_own_question_is_a_choice_not_text_in_the_box() {
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(12).unwrap(), std::num::NonZeroU16::new(300).unwrap(), 0);
+        parser.process(include_bytes!("fixtures/resume_cwd_question.bin"));
+        assert!(parser.screen().contents().contains("Working directory · resume"));
+        assert_eq!(composer(parser.screen()), Composer::Choice);
+        // A typed prompt that reads like an option is still text in the box.
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(4).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process("\x1b[2;1H\x1b[1m›\x1b[22m 1. Use session directory\r\n\r\n  GPT-6 xhigh".as_bytes());
+        assert_eq!(composer(parser.screen()), Composer::Holds("1. Use session directory".into()));
+    }
+
     #[test]
     fn login_menu_blocks_but_a_cleared_menu_does_not() {
         let menu = b"\x1b[2J\x1b[1mSign in with ChatGPT\x1b[0m\r\nSign in with an API key";
@@ -428,6 +461,8 @@ mod tests {
         let back = launcher.command(LaunchOptions { resume: Some("01a0-uuid"), model: "", effort: None, permission_mode: "auto" });
         assert!(back.starts_with("'/opt/codex' --no-daemon resume '01a0-uuid' "));
         assert!(back.contains(" resume '01a0-uuid'"));
+        assert!(back.contains(r#" -c 'tui.resume_cwd="current"'"#), "no working-directory question on resume: {back}");
+        assert!(!fresh.contains("resume_cwd"));
         assert!(!back.contains(" -m "));
         assert!(!back.contains("model_reasoning_effort"));
     }

@@ -285,6 +285,16 @@ describe("a message on its way to the agent", () => {
     expect(screen.getByTestId("input-occupied").textContent).toContain("input box already has text in it");
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
+
+  it("says the agent is asking a question in its terminal, not that its box has text (PRO-462)", () => {
+    const value = turn([]);
+    value.prompt!.inputOccupied = true;
+    value.prompt!.inputChoice = true;
+    render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+    const note = screen.getByTestId("input-occupied").textContent;
+    expect(note).toContain("asking a question in its terminal");
+    expect(note).not.toContain("already has text");
+  });
 });
 
 describe("a message stopped before it was typed (#722)", () => {
