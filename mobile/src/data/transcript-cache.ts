@@ -28,7 +28,9 @@ export function isSyncCursor(value: unknown): value is SyncCursor {
  * a page that only adds events rewrites the last chunk and the small index,
  * not the whole conversation. Chunks are written under new keys before the
  * index that names them, and dropped after, so an index always names chunks
- * that are there, each checked against the checksum it records.
+ * that are there, each checked against the checksum it records. A save cut
+ * short between those writes leaves chunks no index names; a sweep on
+ * connect removes them (#1340, `reclaimOrphanChunks`).
  */
 const indexPrefix = "terminalx:transcript:v3:";
 const chunkPrefix = "terminalx:transcript:v3c:";
@@ -189,14 +191,100 @@ async function appendChunks(host: string, session: string, tab: string, layout: 
 
 async function replaceChunks(host: string, session: string, tab: string, events: AgentEvent[], cursor: SyncCursor | undefined, hasEarlier: boolean): Promise<void> {
   const k = indexKey(host, session, tab);
-  let previous = layouts.get(k)?.index.chunks;
-  if (!previous) { try { previous = readIndex(await AsyncStorage.getItem(k))?.chunks; } catch { /* Nothing to drop. */ } }
+  let previous = layouts.get(k)?.index.chunks.map((c) => c.id);
+  // An index that is there but cannot be read no longer names its chunks
+  // (#1340): every chunk kept for this transcript is found by its key instead.
+  let unreadable = false;
+  if (!previous) {
+    try {
+      const raw = await AsyncStorage.getItem(k);
+      try { previous = readIndex(raw)?.chunks.map((c) => c.id); unreadable = raw !== null && !previous; } catch { unreadable = true; }
+    } catch { /* Storage failed: nothing known to drop; a sweep reclaims it later. */ }
+  }
   const written: [string, string][] = [];
   const chunks: ChunkRef[] = [];
   for (let at = 0; at < events.length; at += CHUNK) chunks.push(chunkOf(events.slice(at, at + CHUNK), written, host, session, tab));
   const last = events.length ? events.slice(Math.floor((events.length - 1) / CHUNK) * CHUNK) : [];
-  await saveIndex(host, session, tab, { ...(cursor ? { cursor } : {}), hasEarlier, chunks, savedAt: Date.now() }, written, (previous ?? []).map((c) => c.id), last, events.at(-1)?.id ?? null);
+  if (unreadable) {
+    const kept = new Set(chunks.map((c) => c.id));
+    previous = (await AsyncStorage.getAllKeys()).flatMap((stored) => {
+      const id = chunkIdOf(stored, host, session, tab);
+      return id !== null && !kept.has(id) ? [id] : [];
+    });
+  }
+  await saveIndex(host, session, tab, { ...(cursor ? { cursor } : {}), hasEarlier, chunks, savedAt: Date.now() }, written, previous ?? [], last, events.at(-1)?.id ?? null);
   await AsyncStorage.multiRemove([key(host, session, tab), `terminalx:transcript:${host}:${session}:${tab}`]);
+}
+
+/** The chunk id a stored key names for this transcript, or null when it is another key. */
+function chunkIdOf(stored: string, host: string, session: string, tab: string): string | null {
+  if (!stored.startsWith(chunkPrefix)) return null;
+  try {
+    const parts: unknown = JSON.parse(stored.slice(chunkPrefix.length));
+    return Array.isArray(parts) && parts.length === 4 && parts[0] === host && parts[1] === session && parts[2] === tab && typeof parts[3] === "string" ? parts[3] : null;
+  } catch { return null; }
+}
+
+/** Transcripts whose chunks one sweep checks, so a phone holding many does each pass in bounded work. */
+export const SWEEP_TRANSCRIPTS = 64;
+/**
+ * Where the last sweep of each Mac stopped, kept with the Mac's saved values
+ * so the next continues after it in a later process too, and is cleared with them.
+ */
+const sweptToName = "chunk-sweep";
+
+/**
+ * Removes a Mac's chunks that no index names (#1340). A save writes its
+ * chunks before the index that names them and drops replaced ones after, so
+ * a save cut short between those writes leaves chunks nothing reads again.
+ * A chunk named by a readable index, or by the last index this process
+ * committed, is kept; one under an index that cannot be read is never read
+ * either (the transcript reads empty), so it goes. Runs in the same queue as
+ * saves and host removal: a save's chunks are never seen before their index,
+ * and a forgotten Mac's are already gone. Checks at most `budget`
+ * transcripts, continuing where the last pass stopped. Returns how many
+ * chunks it removed.
+ */
+export function reclaimOrphanChunks(host: string, epoch = cacheEpoch(host), budget = SWEEP_TRANSCRIPTS): Promise<number> {
+  const operation = writes.catch(() => undefined).then(async () => {
+    if (epoch !== cacheEpoch(host)) return 0;
+    const byTranscript = new Map<string, { session: string; tab: string; chunks: [string, string][] }>();
+    for (const stored of await AsyncStorage.getAllKeys()) {
+      if (!stored.startsWith(chunkPrefix)) continue;
+      let parts: unknown;
+      try { parts = JSON.parse(stored.slice(chunkPrefix.length)); } catch { continue; }
+      if (!Array.isArray(parts) || parts.length !== 4 || parts[0] !== host || typeof parts[1] !== "string" || typeof parts[2] !== "string" || typeof parts[3] !== "string") continue;
+      const k = indexKey(host, parts[1], parts[2]);
+      const entry = byTranscript.get(k) ?? { session: parts[1], tab: parts[2], chunks: [] };
+      entry.chunks.push([parts[3], stored]);
+      byTranscript.set(k, entry);
+    }
+    const all = [...byTranscript.keys()].sort();
+    let after: string | undefined;
+    try {
+      const stored: unknown = JSON.parse(await AsyncStorage.getItem(savedKey(host, sweptToName)) ?? "null");
+      if (typeof stored === "string") after = stored;
+    } catch { /* Start from the first. */ }
+    const start = after === undefined ? 0 : all.findIndex((k) => k > after);
+    const order = start <= 0 ? all : [...all.slice(start), ...all.slice(0, start)];
+    const picked = order.slice(0, Math.max(0, budget));
+    if (!picked.length) return 0;
+    // A read that fails leaves everything: only a missing or unreadable index lets chunks go.
+    const indexes = await AsyncStorage.multiGet(picked);
+    const orphaned: string[] = [];
+    for (const [i, k] of picked.entries()) {
+      const raw = indexes[i]?.[1] ?? null;
+      let live: Set<string>;
+      try { live = new Set(readIndex(raw)?.chunks.map((c) => c.id) ?? []); } catch { live = new Set(); }
+      for (const c of layouts.get(k)?.index.chunks ?? []) live.add(c.id);
+      for (const [id, stored] of byTranscript.get(k)!.chunks) if (!live.has(id)) orphaned.push(stored);
+    }
+    if (orphaned.length) await AsyncStorage.multiRemove(orphaned);
+    await AsyncStorage.setItem(savedKey(host, sweptToName), JSON.stringify(picked.at(-1)!));
+    return orphaned.length;
+  });
+  writes = operation;
+  return operation;
 }
 
 export function clearTranscriptCaches(host?: string): Promise<void> {
