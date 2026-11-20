@@ -43,6 +43,8 @@ interface ActionDef {
   hold?: boolean;
   /** A character typed in the composer, not a key that can be moved. */
   fixed?: boolean;
+  /** The Experimental switch the action is behind: while it is off, Settings and ⌘K do not list it. */
+  requires?: "bots";
 }
 
 const ACTIONS = [
@@ -73,6 +75,8 @@ const ACTIONS = [
   { id: "app.agentDashboard", label: "Overview", group: "App", keys: ["mod+1"], menu: { section: "go", order: 0, label: "Overview" } },
   { id: "app.stats", label: "Stats & usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
+  // The Bots page (PRO-467); does nothing while Settings → Experimental → Bots is off.
+  { id: "app.bots", label: "Bots", group: "App", keys: ["mod+shift+j"], requires: "bots" },
   // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
   // (18.01) drew ⇧⌘R, but that is Automations; ⇧⌘O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
   { id: "app.runView", label: "Run view", group: "App", keys: ["mod+shift+o"], menu: { section: "go", order: 2.5, label: "Run View" } },

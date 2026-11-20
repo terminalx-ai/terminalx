@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { suspendHotkeys, useHotkey } from "@/lib/hotkeys";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { SystemShortcutSection } from "./FloatingWindowSettings";
 import { ChordCap, SHORTCUT_CARD, SHORTCUT_GROUP_TITLE } from "./Keycap";
 import { Pencil, Plus } from "@/icons";
@@ -36,6 +37,7 @@ import {
  */
 export function ShortcutsTab() {
   const keymap = useKeymap();
+  const switches = useExperimentalSettings();
   // The binding being changed: which action, and which of its bindings (its count for a new one).
   const [editing, setEditing] = useState<{ id: string; slot: number } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
@@ -78,7 +80,7 @@ export function ShortcutsTab() {
         <section key={group} aria-label={`${group} shortcuts`}>
           <div className={SHORTCUT_GROUP_TITLE}>{group}</div>
           <ul className={SHORTCUT_CARD}>
-            {SHORTCUT_ACTIONS.filter((action) => action.group === group).map((action) => (
+            {SHORTCUT_ACTIONS.filter((action) => action.group === group && (!action.requires || switches?.[action.requires] === true)).map((action) => (
               <ShortcutRow
                 key={action.id}
                 action={action}

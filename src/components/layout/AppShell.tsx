@@ -46,7 +46,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
-import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openWelcome, openAgents, openAutomations, openIssues, openSkills, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { subscribeAgentEvents } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
 import { sendHeldFirstMessage } from "@/lib/sessionBackend";
@@ -83,6 +83,8 @@ import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootBots, shutBots } from "@/lib/bots";
+import { showBotsTeam } from "@/lib/botsPage";
+import { BotsView } from "@/components/bots/BotsView";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -336,6 +338,11 @@ export function AppShell() {
     if (botsOn) void bootBots();
     else shutBots();
   }, [botsOn]);
+  useShortcut("app.bots", () => { if (!botsOn || !canLeave()) return; setSettingsOpen(false); showBotsTeam(); });
+  // The switch went off while the Bots page was open: leave it for the resting screen.
+  useEffect(() => {
+    if (experimentalSwitches && !botsOn && store.view === "bots") openWelcome();
+  }, [experimentalSwitches, botsOn, store.view]);
   useEffect(() => startMachineConnections(), []);
   // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
   useEffect(() => {
@@ -578,7 +585,7 @@ function UnselectedWorkspace({
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
             {view === "issues"
               ? "Issues"
-              : view === "agents" || view === "skills" || view === "project"
+              : view === "agents" || view === "skills" || view === "project" || view === "bots"
                 ? ""
                 : view === "automations"
                   ? "Automations"
@@ -608,6 +615,8 @@ function UnselectedWorkspace({
               <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
             ) : view === "agents" ? (
               <AgentDashboard />
+            ) : view === "bots" ? (
+              <BotsView />
             ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : view === "skills" ? (

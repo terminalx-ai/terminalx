@@ -1,4 +1,5 @@
 import { ArchiveRowButton, DraftPreview, SessionRowExtras, useSessionDraft } from "./SessionRowExtras";
+import { BotsSidebarSection } from "@/components/bots/BotsSidebarSection";
 import { isUnread } from "@/lib/dashboard";
 import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
 import { GroupHeader, LocalSidebarSections, MoveToLocalSectionItems } from "./LocalSidebarSections";
@@ -334,6 +335,8 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
       <SidebarOrderError />
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2 pb-2" aria-label="Conversations" data-testid="conversation-list">
+        {/* Bots (PRO-467) sit above the project lists, only while their experimental switch is on. */}
+        <BotsSidebarSection />
         <ListHeading label={hasSections ? "Sections" : "Sessions"} actions={<><ViewMenu />{!sectioned && addProjectMenu}</>} />
         <PinnedGroup sessions={pinned} selectedId={store.selectedSessionId} showArchived={showArchived}>{(session) => sectionRow(session, true)}</PinnedGroup>
         <LocalSidebarSections

@@ -84,7 +84,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns" | "localVmTasks" | "opencode";
+  requires?: "orchestratorRuns" | "localVmTasks" | "opencode" | "bots";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -1095,6 +1095,7 @@ export const SETTINGS_ROWS = [
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
     description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys", "hotkeys", "key bindings", "shortcut"],
     scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
+    ...(action.requires ? { requires: action.requires } : {}),
   } as const)),
 ] as const;
 export type SettingId = (typeof SETTINGS_ROWS)[number]["id"];
