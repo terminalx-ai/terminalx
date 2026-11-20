@@ -1960,13 +1960,14 @@ terminalx bots delete <bot> --json
   key is pinned, the window is the process that registered with the key's proof, checked by pid
   and start time and carried across a runtime update, and no other process makes those calls
   (PRO-489). Where no key can be pinned (Linux, a server) the window's process is the one that
-  registered from no pane, and the changing calls are otherwise taken only from a session no bot
-  works for or a terminal of the person's own. The limit: a bot's process that has left its tab
+  registered from no pane, and the changing calls, and `mobile` and `sharing`, are otherwise
+  taken only from a session no bot works for or a terminal of the person's own. The limit: a bot's process that has left its tab
   and gives itself a terminal (`script`, an existing tmux server) passes as a person.
   Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
   person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
   `resume` and `resume-all` apply at once when run in a terminal of your own (not a TerminalX
-  tab), as pairing does there, and are refused with `person_required` from anywhere else.
+  tab), as pairing does there, and are refused with `person_required` from anywhere else. There
+  the limit above reaches resuming too: a bot's process that gives itself a terminal can resume.
 - A session that works for a bot runs in no wider a permission mode than the bot's access
   allows (full: bypass; ask before acting: Ask every time, or Plan on native Codex, which cannot
   ask; read and report: Plan), and in Plan while the bot is paused. A tab the limit cannot

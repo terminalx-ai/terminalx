@@ -142,6 +142,14 @@ impl Desktop {
             // the window services belong to a different desktop process.
             Err(error) if format!("{error:#}").contains("Another desktop currently provides") =>
                 Err(Blocked("Another TerminalX window is connected to this background runtime. Close it, then try again.".into()).into()),
+            // Attached, but not taken for the window (review 2): a runtime
+            // whose window's key is pinned, with Bots on, took no proof from
+            // this one, so it changes nothing until it can prove it (the
+            // Keychain unlocked, then Restart runtime). It still shows what runs.
+            Ok(answer) if answer["proven"] == false => {
+                log::warn!("the runtime attached this window without taking it for the window: {}", answer["message"].as_str().unwrap_or("no proof"));
+                Ok(())
+            }
             other => other.map(drop),
         }
     }

@@ -126,7 +126,8 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   itself: there, and on a runtime with no window, a registrant that runs in
   no pane is taken for the window as before, and the changing calls are
   otherwise taken only from a session no bot works for or a terminal of the
-  person's own. A bot's sessions still hire, delete and resume no bot there.
+  person's own; a paired phone's and a share's calls are placed the same
+  way. A bot's sessions still hire, delete and resume no bot there.
   No window can confirm a resume, so a resume, or Resume all, applies only
   when run in a terminal of the person's own (not a TerminalX tab, not under
   the runtime), as `terminalx-serve pair` does.
@@ -152,9 +153,20 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   agent's permission mode: a bot that asks first must have its owner approve
   the command that does this, and a paused or read-only bot runs in plan
   mode and runs nothing. A full-access bot can do it, as it can run anything
-  its owner can. A resume, or more access, is still only ever given in the
-  window, or where there is none, in a terminal of the person's own. On a
-  Mac it cannot register as the window either: it has no key to prove it.
+  its owner can. More access is still only ever given in the window. On a
+  Mac a resume is too, and such a process cannot register as the window
+  either: it has no key to prove it. Where no window can confirm (Linux, a
+  headless runtime), a resume is taken from a terminal of the person's own,
+  the same trust pairing uses there, so such a process can resume its own
+  bot, or every bot: on those runtimes, a pause holds a bot that stays in
+  its tabs, not one that has already left them.
+- **A window that cannot read its key.** With Bots on, a Mac window whose
+  Keychain key is locked, denied or missing still attaches and shows what
+  runs, but is not taken for the window: it provides no computer use, and
+  its session and terminal changes are refused with what to do (unlock the
+  Keychain and allow TerminalX, then Restart runtime in Settings →
+  Machines). An unproven registrant never takes the window's services, so
+  a process with only the control token cannot stand in for the window.
 
 ## Build map
 

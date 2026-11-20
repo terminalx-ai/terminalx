@@ -531,7 +531,19 @@ impl ControlService {
                 let window = current_window();
                 let proven = if crate::bots::enabled_cached() && window.keyed() {
                     let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                    Some(crate::serve_cli::consent::verify_peer_for(run, &mut params, &window)?)
+                    match crate::serve_cli::consent::verify_peer_for(run, &mut params, &window) {
+                        Ok(witness) => Some(witness),
+                        // Unproven (a window that cannot read its Keychain key, or
+                        // not the window at all): its attachment stays, so the app
+                        // still shows what runs and can repair, but it provides no
+                        // window services, which a launch trusts, and is not taken
+                        // for the window, so it changes nothing here (review 2).
+                        Err(error) => {
+                            if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
+                            log::warn!("a registration as the window did not prove it is the window ({}): attached, not taken for the window", error.message);
+                            return Ok(json!({"registered": false, "proven": false, "message": error.message}));
+                        }
+                    }
                 } else {
                     if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
                     None
@@ -588,7 +600,7 @@ impl ControlService {
                 // Who a paired phone's or a share's request is from is taken
                 // from its parameters: only the window relays them (PRO-489).
                 if command.starts_with("runtime.mobile.") || command.starts_with("runtime.sharing.") {
-                    refuse_unless_the_window(command, self.window_process(lifetime), current_window().keyed())?;
+                    refuse_unless_the_window(&self.manager, self.window_process(lifetime), current_window().keyed())?;
                 }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
@@ -2740,32 +2752,23 @@ fn window_only(what: &str) -> ControlError {
     ControlError::new(
         "person_required",
         format!("While Bots is on, only the TerminalX window may {what} through the runtime directly, and this call came from another process."),
-        Some("Use the `terminalx` commands, or TerminalX itself.".into()),
+        Some(format!("Use the `terminalx` commands, or TerminalX itself. If this is TerminalX, it could not prove it is the window: {} Then choose Restart runtime in Settings → Machines.", crate::serve_cli::consent::KEYCHAIN_DENIED_SHORT)),
     )
 }
 
-/// While Bots is on, on a runtime whose window proves itself (`keyed`), a
-/// paired phone's or a share's call (`runtime.mobile.*`, `runtime.sharing.*`)
-/// comes from the window, which relays them, or from the runtime itself
-/// (PRO-489). Their actor is in their parameters, so any other holder of the
-/// control token could otherwise answer permissions or send as a phone.
-fn refuse_unless_the_window(command: &str, window: Option<(i32, u64)>, keyed: bool) -> Result<(), ControlError> {
-    if !keyed || !crate::bots::enabled_cached() {
+/// While Bots is on, a paired phone's or a share's call (`runtime.mobile.*`,
+/// `runtime.sharing.*`) comes from the window, which relays them, or from the
+/// runtime itself (PRO-489). Their actor is in their parameters, so any other
+/// holder of the control token could otherwise answer permissions or send as
+/// a phone. Where the window proves itself (`keyed`) nothing else passes;
+/// elsewhere (Linux, a headless runtime, a Mac runtime launched unpinned) a
+/// caller is placed as for session writes: never from a bot's session, nor
+/// from a process in no pane with no terminal of its own.
+fn refuse_unless_the_window(manager: &SessionManager, window: Option<(i32, u64)>, keyed: bool) -> Result<(), ControlError> {
+    if !crate::bots::enabled_cached() {
         return Ok(());
     }
-    match crate::hooks::caller() {
-        crate::hooks::Peer::InProcess => Ok(()),
-        crate::hooks::Peer::Unreadable => Err(gone()),
-        crate::hooks::Peer::Pid(pid) => {
-            #[cfg(unix)]
-            if is_the_window(window, pid) {
-                return Ok(());
-            }
-            let _ = (window, pid);
-            log::warn!("refused {command} from process {pid}: not the TerminalX window");
-            Err(window_only("act for a paired phone or a share"))
-        }
-    }
+    refuse_unless_window_or_person(manager, window, keyed, "act for a paired phone or a share")
 }
 
 /// While Bots is on, a `runtime.session.*` or `runtime.pty.*` call that is
@@ -2782,6 +2785,15 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     if !crate::bots::enabled_cached() || runtime_read(command, params) {
         return Ok(());
     }
+    refuse_unless_window_or_person(manager, window, keyed, "change sessions or terminals")
+}
+
+/// The guard of [`refuse_bot_runtime_call`] and [`refuse_unless_the_window`],
+/// for a call that `what`: the window passes; where it proves itself
+/// (`keyed`) nothing else does; elsewhere a caller is placed, and passes
+/// only from a session no bot works for, or with no session but a terminal
+/// of the person's own.
+fn refuse_unless_window_or_person(manager: &SessionManager, window: Option<(i32, u64)>, keyed: bool, what: &str) -> Result<(), ControlError> {
     let pid = match crate::hooks::caller() {
         // In-process: no peer to place.
         crate::hooks::Peer::InProcess => return Ok(()),
@@ -2793,25 +2805,26 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
         if is_the_window(window, pid) {
             return Ok(());
         }
-        // Not placed: no other process changes anything here, whoever it is.
+        // Not placed: no other process does this here, whoever it is.
         if keyed {
-            return Err(window_only("change sessions or terminals"));
+            log::warn!("refused a call to {what} from process {pid}: not the TerminalX window");
+            return Err(window_only(what));
         }
         let caller = Caller::of_process(manager, &json!({}), Some(pid));
         caller.refuse_gone()?;
         if caller.bot.is_some() {
-            return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
+            return Err(caller.forbidden(&format!("{what} through the runtime directly")));
         }
-        if caller.placed.is_none() && !person_terminal(pid) {
+        if caller.placed.is_none() && !own_terminal(pid) {
             return Err(ControlError::new(
                 "person_required",
-                "This call changes sessions or terminals, and came from a process that is not the TerminalX window, runs in no TerminalX pane and has no terminal of its own: while Bots is on, it may be a bot's.",
+                format!("This call would {what}, and came from a process that is not the TerminalX window, runs in no TerminalX pane and has no terminal of its own: while Bots is on, it may be a bot's."),
                 Some("Use the `terminalx` commands, or run it in a terminal of your own.".into()),
             ));
         }
     }
     #[cfg(not(unix))]
-    let _ = (manager, window, pid, keyed);
+    let _ = (manager, window, pid, keyed, what);
     Ok(())
 }
 
@@ -4334,6 +4347,44 @@ mod tests {
         assert!(refused.message.contains("could not tell where"), "{}", refused.message);
     }
 
+    /// PRO-489 (review 2): where no window key is pinned, a phone's or a
+    /// share's call is still held: placed as session writes are, it is
+    /// refused from a bot's session and from a detached process with no
+    /// terminal, and passes from the window; with Bots off nothing is asked.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_pinned_key_phone_and_share_calls_are_placed() {
+        let marker = format!("73.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, in_bot) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        let mut helper = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let detached = helper.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let ask = |pid: i32, command: &str| {
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+            service.execute(command, json!({}), "r").map_err(|error| error.code).err()
+        };
+        assert!(!current_window().keyed());
+        for command in ["runtime.mobile.check", "runtime.mobile.register", "runtime.sharing.status", "runtime.sharing.register"] {
+            assert_eq!(ask(detached, command).as_deref(), Some("person_required"), "{command}: a detached helper");
+            assert_eq!(ask(in_bot, command).as_deref(), Some("forbidden"), "{command}: a bot's session");
+        }
+        lifetime.window.handed_over(Some((detached, crate::serve_cli::consent::started_at(detached).unwrap())));
+        assert!(!matches!(ask(detached, "runtime.sharing.status").as_deref(), Some("person_required" | "forbidden")), "the window passes");
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert!(!matches!(ask(in_bot, "runtime.sharing.status").as_deref(), Some("person_required" | "forbidden")), "Bots off");
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        let _ = helper.kill();
+        let _ = helper.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
     /// PRO-489: while Bots is on, a runtime whose window's key is pinned takes
     /// for the window only a registrant that proves it, and lets no other
     /// process change a session or a terminal, nor act for a phone or a
@@ -4356,16 +4407,22 @@ mod tests {
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
         let ask = |command: &str, params: Value| service.execute(command, params, "r");
 
-        // A lease is anyone's: registering on it alone, or with a witness of a process the runtime started, is refused.
+        // A lease is anyone's: registering on it alone, or with a witness of a
+        // process the runtime started, proves nothing. Review 2: the attachment
+        // stays (a window that cannot read its Keychain key still shows what
+        // runs), but it provides no window services and is not the window.
         let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
         let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": "/nowhere.sock", "token": "ab".repeat(16)});
-        let refused = ask(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone()).unwrap_err();
-        assert_eq!(refused.code, "person_required", "{}", refused.message);
+        let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone()).unwrap();
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
         let mut witnessed = registration.clone();
         let run = service.endpoint.socket.parent().unwrap().to_owned();
         let _witness = crate::serve_cli::consent::witness_for_test(crate::serve_cli::consent::WINDOW_REGISTER, &run, &mut witnessed, Some(&[7; 32])).unwrap();
-        assert_eq!(ask(crate::serve_cli::consent::WINDOW_REGISTER, witnessed).unwrap_err().code, "person_required", "the runtime's own process is never the window");
+        let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, witnessed).unwrap();
+        assert_eq!(unproven["proven"], false, "the runtime's own process is never the window: {unproven}");
         assert!(lifetime.window.window_process().is_none(), "nobody is taken for the window");
+        assert!(lifetime.attachment(attached["epoch"].as_str().unwrap(), attached["lease"].as_str().unwrap()).is_ok(), "still attached");
+        assert!(lifetime.window.call("computer.capabilities", json!({})).is_err(), "no window services from it");
 
         let writes = [
             ("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="})),

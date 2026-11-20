@@ -297,6 +297,10 @@ pub(crate) fn forget_launch_key() {
     PROVISIONED.lock().unwrap().take();
 }
 
+/// What to do when the window cannot prove itself, for a refusal the runtime
+/// gives any caller (`control::window_only`).
+pub(crate) const KEYCHAIN_DENIED_SHORT: &str = "unlock your login Keychain and allow TerminalX access if asked.";
+
 /// The window's consent key is in a Keychain it cannot read or write.
 pub(crate) const KEYCHAIN_DENIED: &str = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
 

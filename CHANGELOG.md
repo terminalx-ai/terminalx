@@ -57,7 +57,9 @@
   TerminalX window, proved with its Keychain key when it registers, changes
   sessions and terminals through the runtime directly or acts for a paired
   phone or a share. On Linux and servers, `terminalx bots resume` in a
-  terminal of your own resumes a bot at once (PRO-489).
+  terminal of your own resumes a bot at once. A Mac window that cannot read
+  its Keychain key still connects, and says what to do before it changes
+  anything (PRO-489).
 - Settings → Machines: Restart runtime is offered only for the runtime running
   now, restarts only what the window showed, and a failure stays on screen
   when a handover withdraws the offer (PRO-489).
