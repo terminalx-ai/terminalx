@@ -309,6 +309,24 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("does not replay a connection-bound PR write on a replacement runtime", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    const view = client.forProject("project");
+    runtime.loseAnswers = true;
+    const write = view.mutate("git.prReady", { number: 1, url: "https://github.com/acme/repo/pull/1" }, undefined, view.connection);
+    const refused = expect(write).rejects.toMatchObject({ code: "outcome_unknown" });
+    await settle();
+    runtime.drop();
+    runtime.connect();
+    await refused;
+    const requests = runtime.sent.filter((frame) => frame.method === "git.prReady");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].params).toMatchObject({ projectId: "project", number: 1, url: "https://github.com/acme/repo/pull/1" });
+    client.close();
+  });
+
   it("numbers terminal writes so a resend is not typed twice", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);

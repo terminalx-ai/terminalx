@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::github::conversation::Target;
 
 use super::files::WorkspaceFiles;
 use super::protocol::RpcError;
@@ -47,6 +48,8 @@ const MAX_BODY_BYTES: usize = 4096;
 const HEADER_DIFF_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
+const PR_LOCATOR_TIMEOUT: Duration = Duration::from_secs(8);
+const LEGACY_PR_REPO_PREFIX: &str = "pr-association://";
 /// Per repository in `lifecycle.dispositionFacts`.
 pub const FACTS_TIMEOUT: Duration = Duration::from_secs(2);
 const TOO_LARGE: &str = "<file too large to show>";
@@ -680,9 +683,27 @@ impl WorkspaceGit {
         self.gh = Some(gh);
     }
 
-    /// Answer a `git.*` method; `None` for any other.
+    #[cfg(test)]
     pub fn handle(&self, method: &str, params: &Value) -> Option<Result<Value, RpcError>> {
+        self.handle_negotiated(method, params, true)
+    }
+
+    /// Answer a `git.*` method; `None` for any other.
+    pub(super) fn handle_negotiated(&self, method: &str, params: &Value, url_targets: bool) -> Option<Result<Value, RpcError>> {
         let _request = crate::github_process::scope();
+        if !url_targets && params.get("url").is_some() && params.get("number").is_none() && matches!(method, "git.prs" | "git.prReady" | "git.prMerge") {
+            return Some(Err(RpcError::new("capability_not_granted", "Pull request URL targeting was not negotiated.")));
+        }
+        let bound;
+        let params = if let Some(locator) = params["repo"].as_str().and_then(|repo| repo.strip_prefix(LEGACY_PR_REPO_PREFIX)) {
+            bound = match self.bind_legacy_pr_repo(method, params, locator) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
+            &bound
+        } else {
+            params
+        };
         let result = match method {
             "git.repositories" => Ok(self.list(params)),
             "git.status" => self.status(params),
@@ -708,7 +729,7 @@ impl WorkspaceGit {
             "git.pull" => self.pull(params),
             "git.prs" => self.prs(params),
             "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch" => self.pr_conversation(method, params),
-            "git.prAssociations" => self.pr_associations(params),
+            "git.prAssociations" => self.pr_associations(params, url_targets),
             "git.prLinkBranch" => self.pr_link_branch(params),
             "git.prUnlink" => self.pr_unlink(params),
             "git.prLanded" => self.pr_landed(params),
@@ -718,6 +739,27 @@ impl WorkspaceGit {
             _ => return None,
         };
         Some(result)
+    }
+
+    fn bind_legacy_pr_repo(&self, method: &str, params: &Value, locator: &str) -> Result<Value, RpcError> {
+        if !self.project || !matches!(method, "git.prs" | "git.prReady" | "git.prMerge" | "git.prConversation" | "git.prConversationAction" | "git.prReviewerSearch") {
+            return Err(RpcError::invalid("This repository locator is only for machine pull requests."));
+        }
+        let (checkout, url): (String, String) = serde_json::from_str(locator).map_err(|_| RpcError::invalid("Invalid pull request repository locator."))?;
+        let target = Target::new(&url).map_err(|error| RpcError::invalid(error.to_string()))?;
+        if checkout.is_empty() {
+            return Err(RpcError::invalid("Invalid legacy pull request repository locator."));
+        }
+        target.require_exact_cli_host().map_err(|error| RpcError::invalid(error.to_string()))?;
+        if params.get("url").is_some()
+            && params["url"].as_str().and_then(|url| crate::pr_associations::identity(url).ok()).as_deref() != Some(&target.url)
+        {
+            return Err(RpcError::invalid("The pull request does not match its repository locator."));
+        }
+        let mut bound = params.clone();
+        bound["repo"] = json!(checkout);
+        bound["url"] = json!(target.url);
+        Ok(bound)
     }
 
     // ---- repositories ----------------------------------------------------
@@ -1569,11 +1611,11 @@ impl WorkspaceGit {
         Ok(CheckoutIdentity { path, git_dir, directory, admin })
     }
 
-    fn pr_associations(&self, params: &Value) -> Result<Value, RpcError> {
+    fn pr_associations(&self, params: &Value, url_targets: bool) -> Result<Value, RpcError> {
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let associations = crate::pr_associations::for_session(&session.id, vec![])
             .map_err(|error| RpcError::new("internal_error", error.to_string()))?;
-        let mut response = self.locate_pr_associations(&session, associations);
+        let mut response = self.locate_pr_associations(&session, associations, url_targets);
         if self.project {
             response["branchPrLinks"] = json!(true);
             if pending_pr_creations(|entries| (entries.iter().any(|entry| entry.session == session.id), false))? {
@@ -1647,52 +1689,104 @@ impl WorkspaceGit {
         Ok(json!({}))
     }
 
-    fn locate_pr_associations(&self, session: &crate::store::index::SessionEntry, associations: Vec<crate::pr_associations::Association>) -> Value {
-        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
-            self.project_repositories().into_iter().filter_map(|name| {
-                let root = self.dir(&name).canonicalize().ok()?;
-                Some((name, root))
-            }).collect()
-        } else {
-            vec![]
+    fn linked_pr_checkout<'a>(session: &crate::store::index::SessionEntry, cwd: &str, checkouts: &[(&'a String, PathBuf)]) -> Option<&'a String> {
+        let (path, missing) = Self::existing_link_directory(Path::new(cwd))?;
+        let (name, root) = checkouts.iter().filter(|(_, root)| path.starts_with(root))
+            .max_by_key(|(_, root)| root.components().count())?;
+        // A vanished worktree must never resolve to the enclosing project's checkout.
+        if missing && (session.worktree_removed || match session.checkout_root() {
+            Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
+            None => name.as_str() == "." && (session.worktree_name.is_some() || cwd != session.cwd),
+        }) {
+            return None;
+        }
+        Self::checkout_contains(root, &path).then_some(*name)
+    }
+
+    fn locate_pr_associations(&self, session: &crate::store::index::SessionEntry, associations: Vec<crate::pr_associations::Association>, url_targets: bool) -> Value {
+        use crate::pr_associations::Scope;
+
+        if associations.is_empty() {
+            return json!({ "associations": [] });
+        }
+        let names = if self.project { self.project_repositories() } else { self.repositories().0 };
+        let can_locate = |association: &crate::pr_associations::Association| {
+            url_targets || association.url.starts_with("https://github.com/") || (self.project && association.linked)
         };
-        let repositories: Vec<_> = self.repositories().0.into_iter().filter_map(|name| {
-            let origin = crate::git::remote_url(&self.dir(&name))?;
-            let identity = crate::issues::github_repo_from_url(&origin)?;
-            Some((name, format!("https://github.com/{}/pull/", identity.to_ascii_lowercase())))
+        let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
+            names.iter().filter_map(|name| Some((name, self.dir(name).canonicalize().ok()?))).collect()
+        } else {
+            Vec::new()
+        };
+        let selected: Vec<_> = associations.iter().map(|association| match &association.scope {
+            Scope::Local { cwd } if self.project && association.linked => {
+                Self::linked_pr_checkout(session, cwd, &linked_checkouts)
+            }
+            Scope::Local { cwd } if can_locate(association) => names.iter().find(|name| self.dir(name) == Path::new(cwd)),
+            _ => None,
         }).collect();
-        json!({ "associations": associations.into_iter().map(|association| {
-            // Match repository identity, never whichever checkout is live.
-            // Keep unavailable identities too, so missing repositories cannot
-            // turn an incomplete history into permission to clean up.
-            let repo = match &association.scope {
-                // A machine link is verified in its saved checkout, which can
-                // have its own gh routing even when another shares its origin.
-                crate::pr_associations::Scope::Local { cwd } if self.project && association.linked => {
-                    Self::existing_link_directory(Path::new(cwd)).and_then(|(path, missing)| {
-                        let (name, root) = linked_checkouts.iter()
-                            .filter(|(_, root)| path.starts_with(root))
-                            .max_by_key(|(_, root)| root.components().count())?;
-                        // Never climb out of a removed worktree and use the
-                        // project checkout's GitHub configuration.
-                        if missing && (session.worktree_removed || match session.checkout_root() {
-                                Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
-                                None => name == "." && (session.worktree_name.is_some() || cwd != &session.cwd),
-                            })
-                        {
-                            return None;
-                        }
-                        (self.verified_machine_repo(name) && Self::checkout_contains(root, &path)).then_some(name)
-                    })
+
+        // Give recorded checkouts their own budget before scanning fallbacks.
+        // Several histories can point at the same checkout, so resolve it once.
+        let mut recorded = std::collections::HashSet::new();
+        let recorded: Vec<_> = selected.iter().flatten().copied().filter(|name| recorded.insert(*name)).collect();
+        const BATCH_SIZE: usize = 8;
+        let batch_count = u32::try_from(recorded.len().div_ceil(BATCH_SIZE)).unwrap_or(u32::MAX).max(1);
+        let batch_timeout = (2 * PR_LOCATOR_TIMEOUT) / batch_count;
+        let mut identities = std::collections::HashMap::new();
+        for batch in recorded.chunks(BATCH_SIZE) {
+            // Reserve time for every batch, including when an earlier host stalls.
+            let deadline = Instant::now() + batch_timeout;
+            std::thread::scope(|scope| {
+                let jobs: Vec<_> = batch.iter().map(|&name| {
+                    (name, scope.spawn(crate::github_process::queued(move || self.pr_locator_identity(name, deadline))))
+                }).collect();
+                // An unanswered recorded probe can still be retried under the fallback budget.
+                for (name, task) in jobs {
+                    if let Ok(Some(identity)) = task.join() {
+                        identities.insert(name.clone(), Some(identity));
+                    }
                 }
-                _ => repositories.iter().find(|(_, prefix)| association.url.starts_with(prefix)).map(|(name, _)| name),
-            };
+            });
+        }
+        let deadline = Instant::now() + PR_LOCATOR_TIMEOUT;
+        let mut matches = |name: &str, repository: &str| {
+            identities.entry(name.to_owned()).or_insert_with(|| self.pr_locator_identity(name, deadline)).as_deref() == Some(repository)
+        };
+        json!({ "associations": associations.into_iter().zip(selected).map(|(association, selected)| {
+            let repo = association.url.rsplit_once("/pull/").and_then(|(repository, _)| {
+                if !can_locate(&association) { return None; }
+                let selected = selected.filter(|name| matches(name, repository));
+                if self.project && association.linked { return selected; }
+                selected.or_else(|| {
+                    // Journal and pipeline records may only know the project root.
+                    // Keep the association even if no available checkout matches.
+                    let limit = if self.project { MAX_PROJECT_REPOSITORIES } else { names.len() };
+                    names.iter().take(limit).find(|name| matches(name, repository))
+                })
+            }).map(|name| {
+                // Older desktop clients pass this value back as an opaque repo
+                // string. Bind their numeric actions to this specific PR.
+                if self.project && !url_targets {
+                    format!("{LEGACY_PR_REPO_PREFIX}{}", json!([name, association.url]))
+                } else {
+                    name.clone()
+                }
+            });
             json!({ "url": association.url, "number": association.number, "head": association.head, "repo": repo, "linked": association.linked })
         }).collect::<Vec<_>>() })
     }
 
+    fn pr_locator_identity(&self, name: &str, deadline: Instant) -> Option<String> {
+        if Instant::now() >= deadline || !self.verified_machine_repo(name) {
+            return None;
+        }
+        let repo = Repo { name: name.to_owned(), dir: self.dir(name) };
+        self.default_pr_repository(&repo, deadline.saturating_duration_since(Instant::now())).ok()
+    }
+
     fn pr_conversation(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        use crate::github::conversation::{self, Action, Target};
+        use crate::github::conversation::{self, Action};
         // Cloud gh uses an organisation App installation token, never the
         // caller's personal identity. It must not satisfy required reviews.
         let action = if method == "git.prConversationAction" {
@@ -1703,16 +1797,11 @@ impl WorkspaceGit {
             Some(action)
         } else { None };
         let repo = self.repo(params)?;
-        let target = Target::new(required_str(params, "url")?).map_err(RpcError::internal)?;
-        // Resolve through this repository's gh routing before allowing a supplied
-        // URL to address anything. A participant cannot use workspace credentials
-        // to read an unrelated private repository.
-        let info = self.gh(&repo, &["repo", "view", "--json", "url"], NETWORK_TIMEOUT)?;
-        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
-        let expected = format!("https://{}/{}/{}", target.host, target.owner, target.name);
-        if info["url"].as_str().map(|url| url.trim_end_matches('/').to_lowercase()).as_deref() != Some(&expected) {
-            return Err(RpcError::invalid("The pull request belongs to another repository."));
+        let target = Target::new(required_str(params, "url")?).map_err(|error| RpcError::invalid(error.to_string()))?;
+        if action.is_some() {
+            target.require_exact_cli_host().map_err(|error| RpcError::invalid(error.to_string()))?;
         }
+        self.require_pr_repository(&repo, &target.repository_url())?;
         let run = |args: &[&str]| self.gh(&repo, args, NETWORK_TIMEOUT).map_err(|error| anyhow::anyhow!("{}", error.message));
         match method {
             "git.prConversation" => conversation::read_with(&target, run).map(|value| json!(value)),
@@ -1733,13 +1822,8 @@ impl WorkspaceGit {
 
     fn prs(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        if params.get("number").is_some() {
-            let number = Self::pr_number(params)?;
-            let url = Self::pr_url(params, &number)?;
-            let mut pr = self.pr_view(&repo, &number)?;
-            if let Some(url) = url {
-                Self::verify_pr_url(&pr, &url)?;
-            }
+        if params.get("number").is_some() || params.get("url").is_some() {
+            let mut pr = self.pr_view(&repo, &self.pr_selector(&repo, params)?)?;
             self.panel_pr(&repo, &mut pr);
             return Ok(json!({ "repo": repo.name, "branch": pr.head, "prs": [pr] }));
         }
@@ -1853,8 +1937,11 @@ impl WorkspaceGit {
         let read_created = |url: &str| {
             let unresolved = || RpcError::new("outcome_unknown", format!("GitHub reported {url}, but the pull request could not be verified yet. Try again."));
             if !known_url(url) { return Err(RpcError::new("conflict", "The pull request belongs to a different repository than origin.")); }
-            let pr = self.pr_view(&repo, url).map_err(|_| unresolved())?;
-            if crate::pr_associations::identity(&pr.url).as_deref().ok() != Some(url) || (self.project && pr.head_sha.is_empty()) { return Err(unresolved()); }
+            let target = Target::new(url).map_err(|_| unresolved())?;
+            target.require_exact_cli_host().map_err(|_| unresolved())?;
+            let pr = self.pr_view_reference(&repo, &target.url).map_err(|_| unresolved())?;
+            Self::verify_pr_url(&pr, url).map_err(|_| unresolved())?;
+            if self.project && pr.head_sha.is_empty() { return Err(unresolved()); }
             Ok(pr)
         };
         let pending = if let Some((session, checkout)) = session.zip(checkout.as_ref()) {
@@ -1976,47 +2063,164 @@ impl WorkspaceGit {
             .ok_or_else(|| RpcError::invalid("number is required"))
     }
 
-    fn pr_url(params: &Value, number: &str) -> Result<Option<String>, RpcError> {
-        if params.get("url").is_none() { return Ok(None); }
-        let target = crate::github::conversation::Target::new(required_str(params, "url")?)
-            .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
-        if target.number != number {
-            return Err(RpcError::invalid("Pull request number does not match its URL."));
-        }
-        Ok(Some(target.url))
-    }
-
     fn verify_pr_url(pr: &crate::github::PullRequest, url: &str) -> Result<(), RpcError> {
         if !crate::pr_associations::identity(&pr.url).is_ok_and(|found| found == url) {
-            return Err(RpcError::not_found("This checkout no longer resolves the requested pull request."));
+            return Err(RpcError::not_found("GitHub returned a different pull request for this checkout."));
         }
         Ok(())
     }
 
-    fn pr_mutation_ref(&self, repo: &Repo, params: &Value) -> Result<String, RpcError> {
-        let number = Self::pr_number(params)?;
-        let Some(url) = Self::pr_url(params, &number)? else { return Ok(number) };
-        // Check scope through the checkout, then use the full URL so even a
-        // change to gh's default repository cannot redirect the action.
-        Self::verify_pr_url(&self.pr_view(repo, &number)?, &url)?;
-        Ok(url)
+    fn default_pr_repository(&self, repo: &Repo, timeout: Duration) -> Result<String, RpcError> {
+        let info = self.gh(repo, &["repo", "view", "--json", "url"], timeout)?;
+        let info: Value = serde_json::from_str(&info).map_err(RpcError::internal)?;
+        let url = info["url"].as_str().ok_or_else(|| RpcError::invalid("GitHub did not return a repository URL."))?;
+        let target = crate::github::conversation::Target::new(&format!("{}/pull/1", url.trim_end_matches('/')))
+            .map_err(|error| RpcError::invalid(error.to_string()))?;
+        Ok(target.repository_url())
     }
 
-    fn pr_view(&self, repo: &Repo, reference: &str) -> Result<crate::github::PullRequest, RpcError> {
-        let out = self.gh(repo, &["pr", "view", reference, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
-        let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
-        let pr = crate::github::parse_pr(&value);
-        if reference.starts_with("https://") {
-            Self::verify_pr_url(&pr, reference)?;
+    fn require_pr_repository(&self, repo: &Repo, expected: &str) -> Result<(), RpcError> {
+        if self.default_pr_repository(repo, NETWORK_TIMEOUT)? != expected {
+            return Err(RpcError::invalid("The pull request belongs to another repository."));
+        }
+        Ok(())
+    }
+
+    fn pr_selector(&self, repo: &Repo, params: &Value) -> Result<String, RpcError> {
+        if params.get("url").is_none() {
+            return Self::pr_number(params);
+        }
+        let target = crate::github::conversation::Target::new(required_str(params, "url")?).map_err(|error| RpcError::invalid(error.to_string()))?;
+        target.require_exact_cli_host().map_err(|error| RpcError::invalid(error.to_string()))?;
+        if params.get("number").is_some() && Self::pr_number(params)? != target.number {
+            return Err(RpcError::invalid("Pull request number does not match its URL."));
+        }
+        self.require_pr_repository(repo, &target.repository_url())?;
+        Ok(target.url)
+    }
+
+    fn pr_view(&self, repo: &Repo, selector: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let number = selector.rsplit('/').next().unwrap_or(selector);
+        let pr = self.pr_view_reference(repo, number)?;
+        if selector.starts_with("https://") {
+            Self::verify_pr_url(&pr, selector)?;
         }
         Ok(pr)
     }
 
+    fn pr_view_reference(&self, repo: &Repo, reference: &str) -> Result<crate::github::PullRequest, RpcError> {
+        let out = self.gh(repo, &["pr", "view", reference, "--json", crate::github::FIELDS], NETWORK_TIMEOUT)?;
+        let value: Value = serde_json::from_str(&out).map_err(|error| RpcError::new("git_failed", format!("gh pr view: {error}")))?;
+        Ok(crate::github::parse_pr(&value))
+    }
+
+    fn verified_pr(&self, repo: &Repo, url: &str) -> Result<(Target, String, crate::github::PullRequest), RpcError> {
+        let target = Target::new(url).map_err(RpcError::internal)?;
+        let fields = format!("id,{}", crate::github::FIELDS);
+        let out = self.gh(repo, &["pr", "view", &target.number, "--json", &fields], NETWORK_TIMEOUT)?;
+        let value: Value = serde_json::from_str(&out).map_err(RpcError::internal)?;
+        let pr = crate::github::parse_pr(&value);
+        Self::verify_pr_url(&pr, url)?;
+        let id = target.verified_pr_id(&value).map_err(|error| RpcError::invalid(error.to_string()))?.to_owned();
+        Ok((target, id, pr))
+    }
+
+    fn pr_graphql(&self, repo: &Repo, target: &Target, query: &str, fields: &[String]) -> Result<Value, RpcError> {
+        target.graphql(query, fields, |args| self.gh(repo, args, NETWORK_TIMEOUT))
+    }
+
+    fn pr_by_id(&self, repo: &Repo, target: &Target, id: &str, fields: &str) -> Result<Value, RpcError> {
+        let query = format!("query($id: ID!) {{ node(id: $id) {{ ... on PullRequest {{ id {fields} }} }} }}");
+        let reply = self.pr_graphql(repo, target, &query, &[format!("id={id}")])?;
+        let pr = &reply["data"]["node"];
+        if pr["id"].as_str() != Some(id) {
+            return Err(RpcError::invalid("GitHub returned a different pull request."));
+        }
+        Ok(pr.clone())
+    }
+
+    fn ready_verified_pr(&self, repo: &Repo, url: &str) -> Result<Value, RpcError> {
+        let (target, id, mut pr) = self.verified_pr(repo, url)?;
+        if pr.is_draft {
+            const READY: &str = "mutation($id: ID!) { change: markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { id isDraft } } }";
+            let result = self.pr_graphql(repo, &target, READY, &[format!("id={id}")]);
+            let ready = match &result {
+                Ok(reply) => {
+                    let current = &reply["data"]["change"]["pullRequest"];
+                    current["id"].as_str() == Some(&id) && current["isDraft"] == false
+                }
+                Err(_) => self.pr_by_id(repo, &target, &id, "isDraft").is_ok_and(|current| current["isDraft"] == false),
+            };
+            if !ready {
+                return Err(result.err().unwrap_or_else(|| RpcError::new("outcome_unknown", "GitHub did not confirm this pull request is ready.")));
+            }
+            pr.is_draft = false;
+        }
+        Ok(json!({ "repo": repo.name, "pr": pr }))
+    }
+
+    fn merge_verified_pr(&self, repo: &Repo, url: &str, method: &str, head: Option<&str>) -> Result<Value, RpcError> {
+        let (target, id, mut pr) = self.verified_pr(repo, url)?;
+        if head.is_some_and(|head| head != pr.head_sha) {
+            return Err(RpcError::new("conflict", "The pull request head changed. Refresh and try again."));
+        }
+        if pr.state == "MERGED" && method != "queue" {
+            return Ok(json!({ "repo": repo.name, "pr": pr }));
+        }
+        let queue = self.pr_by_id(repo, &target, &id, "state mergeStateStatus isMergeQueueEnabled mergeQueueEntry { position state } autoMergeRequest { enabledAt }")?;
+        let queue_required = queue["isMergeQueueEnabled"].as_bool()
+            .ok_or_else(|| RpcError::new("outcome_unknown", "GitHub did not confirm whether this branch needs a merge queue."))?;
+        let mut fields = vec![format!("id={id}")];
+        if let Some(head) = head {
+            fields.push(format!("head={head}"));
+        }
+        if method == "queue" || queue_required {
+            crate::github::ensure_queue_enabled(&queue).map_err(|error| RpcError::new("conflict", error.to_string()))?;
+            const ENQUEUE: &str = "mutation($id: ID!, $head: GitObjectID) { change: enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head}) { mergeQueueEntry { position state } } }";
+            const AUTO: &str = "mutation($id: ID!, $head: GitObjectID) { change: enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head}) { pullRequest { id autoMergeRequest { enabledAt } } } }";
+            pr.merge_queue_enabled = Some(true);
+            pr.merge_queue_entry = serde_json::from_value(queue["mergeQueueEntry"].clone()).map_err(RpcError::internal)?;
+            pr.auto_merge_enabled = queue["autoMergeRequest"].is_object();
+            if pr.merge_queue_entry.is_none() && !pr.auto_merge_enabled {
+                if matches!(queue["mergeStateStatus"].as_str(), Some("CLEAN" | "HAS_HOOKS" | "UNSTABLE")) {
+                    let reply = self.pr_graphql(repo, &target, ENQUEUE, &fields)?;
+                    pr.merge_queue_entry = Some(serde_json::from_value(reply["data"]["change"]["mergeQueueEntry"].clone()).map_err(RpcError::internal)?);
+                } else {
+                    let reply = self.pr_graphql(repo, &target, AUTO, &fields)?;
+                    let current = &reply["data"]["change"]["pullRequest"];
+                    if current["id"].as_str() != Some(&id) || !current["autoMergeRequest"].is_object() {
+                        return Err(RpcError::new("outcome_unknown", "GitHub did not confirm auto-merge for this pull request."));
+                    }
+                    pr.auto_merge_enabled = true;
+                }
+            }
+        } else {
+            fields.push(format!("method={}", method.to_ascii_uppercase()));
+            const MERGE: &str = "mutation($id: ID!, $head: GitObjectID, $method: PullRequestMergeMethod!) { change: mergePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method}) { pullRequest { id state } } }";
+            let result = self.pr_graphql(repo, &target, MERGE, &fields);
+            let merged = match &result {
+                Ok(reply) => {
+                    let current = &reply["data"]["change"]["pullRequest"];
+                    current["id"].as_str() == Some(&id) && current["state"] == "MERGED"
+                }
+                Err(_) => self.pr_by_id(repo, &target, &id, "state").is_ok_and(|current| current["state"] == "MERGED"),
+            };
+            if !merged {
+                return Err(result.err().unwrap_or_else(|| RpcError::new("outcome_unknown", "GitHub did not confirm this pull request was merged.")));
+            }
+            pr.state = "MERGED".into();
+        }
+        Ok(json!({ "repo": repo.name, "pr": pr }))
+    }
+
     fn pr_ready(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let reference = self.pr_mutation_ref(&repo, params)?;
-        let result = self.gh(&repo, &["pr", "ready", &reference], NETWORK_TIMEOUT);
-        let pr = self.pr_view(&repo, &reference);
+        let selector = self.pr_selector(&repo, params)?;
+        if selector.starts_with("https://") {
+            return self.ready_verified_pr(&repo, &selector);
+        }
+        let result = self.gh(&repo, &["pr", "ready", &selector], NETWORK_TIMEOUT);
+        let pr = self.pr_view(&repo, &selector);
         match (result, pr) {
             (_, Ok(pr)) if !pr.is_draft => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
@@ -2027,34 +2231,38 @@ impl WorkspaceGit {
 
     fn pr_merge(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
-        let reference = self.pr_mutation_ref(&repo, params)?;
-        let flag = match params.get("method").and_then(Value::as_str).unwrap_or("merge") {
-            "merge" => "--merge",
-            "squash" => "--squash",
-            "rebase" => "--rebase",
-            "queue" => {
-                let pr = self.pr_view(&repo, &reference)?;
-                let (host, query) = crate::github::queue_query(&pr.url).map_err(RpcError::internal)?;
-                let out = self.gh(&repo, &["api", "graphql", "--hostname", &host, "-f", &query], NETWORK_TIMEOUT)?;
-                let queue = crate::github::parse_queue_response(&out).map_err(RpcError::internal)?;
-                crate::github::ensure_queue_enabled(&queue).map_err(|error| RpcError::new("conflict", error.to_string()))?;
-                "--auto"
-            }
-            _ => return Err(RpcError::invalid("method is merge, squash, rebase or queue")),
-        };
+        let selector = self.pr_selector(&repo, params)?;
+        let method = params.get("method").and_then(Value::as_str).unwrap_or("merge");
         // A merge pinned to the head the person saw: GitHub refuses it once the head has moved.
         let head = match params.get("head") {
             None | Some(Value::Null) => None,
             Some(Value::String(head)) if valid_object_id(head) => Some(head.as_str()),
-            Some(_) => return Err(RpcError::invalid("head is a commit id")),
+            _ => return Err(RpcError::invalid("head is a commit id")),
         };
-        let mut args = vec!["pr", "merge", reference.as_str(), flag];
+        let flag = match method {
+            "merge" => "--merge",
+            "squash" => "--squash",
+            "rebase" => "--rebase",
+            "queue" => "--auto",
+            _ => return Err(RpcError::invalid("method is merge, squash, rebase or queue")),
+        };
+        if selector.starts_with("https://") {
+            return self.merge_verified_pr(&repo, &selector, method, head);
+        }
+        if method == "queue" {
+            let pr = self.pr_view(&repo, &selector)?;
+            let (host, query) = crate::github::queue_query(&pr.url).map_err(RpcError::internal)?;
+            let out = self.gh(&repo, &["api", "graphql", "--hostname", &host, "-f", &query], NETWORK_TIMEOUT)?;
+            let queue = crate::github::parse_queue_response(&out).map_err(RpcError::internal)?;
+            crate::github::ensure_queue_enabled(&queue).map_err(|error| RpcError::new("conflict", error.to_string()))?;
+        }
+        let mut args = vec!["pr", "merge", selector.as_str(), flag];
         if let Some(head) = head {
             args.extend(["--match-head-commit", head]);
         }
         let result = self.gh(&repo, &args, NETWORK_TIMEOUT);
         // `gh pr merge` can fail with the merge already through; ask again.
-        match (result, self.pr_view(&repo, &reference)) {
+        match (result, self.pr_view(&repo, &selector)) {
             (_, Ok(pr)) if pr.state == "MERGED" => Ok(json!({ "repo": repo.name, "pr": pr })),
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),

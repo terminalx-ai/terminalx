@@ -582,6 +582,10 @@ pub(crate) struct MobileConnection {
     /// What this connection's latest `notifications.subscribe` asked for.
     notification_filter: ConnectionFilter,
     terminal_subscriptions: Mutex<HashMap<String,String>>,
+    /// The request being answered and what its stream produced meanwhile:
+    /// held until its reply is on the socket, so a subscription's opening
+    /// result always comes before its first item (#1333).
+    opening: Mutex<Option<(String, Vec<Value>)>>,
     polling: std::sync::atomic::AtomicBool,
     overflowed: Arc<std::sync::atomic::AtomicBool>,
     invalidations: Arc<super::Invalidations>,
@@ -622,6 +626,7 @@ impl MobileConnection {
             wire: Wire::new(transport),
             subscriptions: Mutex::new(HashMap::new()),
             terminal_subscriptions: Mutex::new(HashMap::new()),
+            opening: Mutex::new(None),
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
             sync_cache: SyncCache::default(),
@@ -721,11 +726,47 @@ impl MobileConnection {
 
     fn stream(&self, request_id: &str, result: Value) {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) { return; }
-        if let Err(error) = self.outbound.try_send(success_response(request_id, result)) {
+        let mut opening = self.opening.lock().unwrap();
+        if let Some((id, held)) = opening.as_mut().filter(|(id, _)| id == request_id) {
+            // As many as the queue holds: a stream that outruns it falls behind as a queued one would.
+            if held.len() >= self.outbound.max_capacity() {
+                log::debug!("stream {id} filled before its reply was sent");
+                self.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(opening);
+                self.finish();
+                return;
+            }
+            held.push(success_response(request_id, result));
+            return;
+        }
+        // Queued under the lock, so a stream released meanwhile keeps its order.
+        self.queue(success_response(request_id, result));
+    }
+
+    fn queue(&self, message: Value) {
+        if let Err(error) = self.outbound.try_send(message) {
             if matches!(error, mpsc::error::TrySendError::Full(_)) {
                 self.overflowed.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             self.finish();
+        }
+    }
+
+    /// Hold what `request_id`'s stream produces until `opened`: called before
+    /// the request is answered.
+    pub(crate) fn opening(&self, request_id: &str) {
+        *self.opening.lock().unwrap() = Some((request_id.to_string(), Vec::new()));
+    }
+
+    /// `request_id`'s reply was sent: what its stream held is queued, in
+    /// order, ahead of anything it streams later.
+    pub(crate) fn opened(&self, request_id: &str) {
+        let mut opening = self.opening.lock().unwrap();
+        if opening.as_ref().is_none_or(|(id, _)| id != request_id) { return; }
+        let (_, held) = opening.take().expect("checked");
+        for message in held {
+            if self.closed.load(std::sync::atomic::Ordering::SeqCst) { return; }
+            self.queue(message);
         }
     }
 

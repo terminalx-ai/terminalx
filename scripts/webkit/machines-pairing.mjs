@@ -158,11 +158,13 @@ function measure(page) {
     out.tabs = [...dialog.querySelectorAll('[role="tab"]')].map((tab) => [tab.textContent, tab.getAttribute("aria-selected")]);
     out.wrappedButtons = [...dialog.querySelectorAll("button")].filter(shown).filter((button) => getComputedStyle(button).whiteSpace !== "nowrap" && button.textContent.trim()).map((button) => button.textContent.trim());
     const transcript = dialog.querySelector('[data-testid="server-transcript"]');
-    // PRO-398: the code field shows the whole code and has no focus ring while locked; the waiting spinner is the arc; the footer's commands are mono.
+    // PRO-398: the code field shows the whole code and has no focus ring while locked; the waiting spinner is the arc.
     const code = dialog.querySelector("textarea#machine-code");
     out.code = code ? { whole: code.scrollHeight <= code.clientHeight + 1, readOnly: code.readOnly, focused: document.activeElement === code, ring: getComputedStyle(code).boxShadow } : null;
     out.waitingMark = [...dialog.querySelectorAll('[role="status"]')].find((el) => el.textContent.includes("Waiting for approval"))?.querySelector("[data-icon]")?.getAttribute("data-icon") ?? null;
-    out.noteCommands = [...dialog.querySelectorAll('[data-testid="headless-agents-note"] code')].map((el) => [el.textContent, getComputedStyle(el).fontFamily === mono]);
+    // PRO-350: agents sign in from the machine's page, so the footer names no command to type on the server.
+    out.footer = dialog.querySelector("footer")?.textContent ?? null;
+    out.footerCommands = [...dialog.querySelectorAll("footer code")].map((el) => el.textContent);
     out.transcript = transcript ? [...transcript.children].map((line) => line.textContent.replace(/\u00a0/g, " ").trimEnd()) : null;
     const panel = dialog.querySelector("[data-terminal]");
     out.panelInside = panel ? panel.getBoundingClientRect().right <= r.right + 0.5 && panel.scrollWidth <= panel.clientWidth + 1 : null;
@@ -289,12 +291,14 @@ try {
             .map((node) => node.textContent.trim().slice(0, 30)),
         };
       });
+      const intro = (await settings.locator("#settings-section-subtitle").textContent()) ?? "";
       failed += report(`${name}, Settings → Machines`, {
         "operate switch, code, Add a machine and the computers show": ["Let other computers operate this Mac", "works once", "Add a machine", "Computers that can operate this Mac", "Paresh’s MacBook Air", "build-box"].every((said) => section.text.includes(said)),
         "the section does not scroll sideways": section.scroll,
         "revoking does not claim to remove all access": !/removes all access|all of its access/.test(section.text),
-        // PRO-398, screen 21.02.
-        "the intro and the Your machines line are the screen's": section.text.includes("Operate TerminalX on your other computers from this Mac. Sessions, terminals and files stay on the machine that runs them.")
+        // PRO-398, screen 21.02. The intro is the page's one description, under its title (not repeated in the section).
+        "the intro and the Your machines line are the screen's": intro.startsWith("Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them.")
+          && !section.text.includes("Operate TerminalX on your other computers")
           && section.text.includes("Computers this Mac can operate. Each one appears as a section in the sidebar."),
         "section headings are 14 px semibold": section.headings.every((heading) => heading?.size === 14 && heading.weight === 600),
         // The screen draws it h-8: 32 px, the app's default button.
@@ -411,8 +415,9 @@ try {
           "you@server ~ $ terminalx-serve pair", "TerminalX <version> · <OS> <arch>", "Name        <server name>", "Machine ID  <machine ID>", "", "Pairing code, valid for 5:00, works once:", "txm2.…", "",
           "Waiting for a computer to pair…", "✓Paresh’s MacBook Pro asks to operate this server. Fingerprint <fingerprint>.", "Allow? [y/N]"]),
         "the panel fits the dialog": m.panelInside === true,
-        "the footer's agent commands are mono": JSON.stringify(m.noteCommands) === JSON.stringify([["claude", true], ["codex login --device-auth", true]]),
-        "the footer note, Cancel, and Continue off": m.text.includes("Sign in the agents in a terminal on the server: run claude, or codex login --device-auth.") && (await dialog.getByRole("button", { name: "Continue" }).isDisabled()),
+        "the footer names no command to type on the server": m.footerCommands.length === 0 && !/\bclaude\b|codex login/.test(m.footer ?? ""),
+        "the footer note, Cancel, and Continue off": (m.footer ?? "").includes("Agents sign in on the server after pairing, from its machine page.") && (await dialog.getByRole("button", { name: "Cancel" }).count()) === 1
+          && (await dialog.getByRole("button", { name: "Continue" }).isDisabled()),
       }, m);
       await dialog.getByRole("button", { name: "Copy install command" }).click();
       await dialog.getByRole("button", { name: "install command copied" }).waitFor();
