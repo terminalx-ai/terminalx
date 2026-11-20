@@ -39,6 +39,8 @@ const fixture = `
   backend.answers.check_agent_readiness = () => ({ state: "ready", checkedAt: at(0), version: "1", loginMethod: "Claude account", plan: "max", account: "alex@example.com" });
   const soon = now + 88 * 60_000;
   const saturday = new Date(); saturday.setDate(saturday.getDate() + ((6 - saturday.getDay()) % 7 || 7)); saturday.setHours(11, 0, 0, 0);
+  // The weekly windows must reset more than a day out, or the popover shows "Resets at …" for them too (on Fridays).
+  if (saturday.getTime() - now < 24 * 3600_000) saturday.setDate(saturday.getDate() + 7);
   backend.answers.status_resource_overview = { agentCount: 0, orphanCount: 0, rssBytes: 0, pressure: 0 };
   backend.answers.status_resource_sample = { totalRssBytes: 0, processes: [] };
   backend.answers.status_usage_refresh = () => backend.answers.status_usage_snapshot;
