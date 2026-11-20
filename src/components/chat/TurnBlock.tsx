@@ -678,7 +678,7 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string; failed?: boolean }) {
+export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string; size?: number }[] }; cwd?: string; failed?: boolean }) {
   const layout = usePrefs().transcriptLayout;
   return (
     <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy={!failed}>
@@ -732,7 +732,7 @@ function ReaderMessage({
 }: {
   /** Said above a message the agent took mid-turn; the bubble is edged in blue and keeps its time inside. */
   steered?: string;
-  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
+  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string; size?: number }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
   className: string;
