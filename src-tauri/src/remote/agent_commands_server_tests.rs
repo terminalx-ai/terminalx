@@ -76,6 +76,8 @@ impl AgentOps for Ops {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: false,
+            history: None,
+            reset: None,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {

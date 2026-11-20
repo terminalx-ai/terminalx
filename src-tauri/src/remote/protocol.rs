@@ -81,14 +81,26 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   rules. Each outcome is a durable receipt per connection device and
 ///   `clientRequestId` (`agent_commands.rs`). A runtime with a mailbox never
 ///   offers it, so a cloud command has exactly one path.
+/// - `checkpoints/1` (#1326): a tab's per-turn checkpoints, Reset and Fork,
+///   as a local tab has them. `session.turnCheckpoint` reads what a finished
+///   turn changed; `session.keepTurn`, `session.undoTurn` and
+///   `session.restoreUndo` review it; `session.reset` cuts the conversation
+///   (and, when asked, the checkout's files) back to a turn or undoes the last
+///   reset; `session.fork` copies it up to a turn into a new tab or session.
+///   The runtime keeps the checkpoints itself, at every turn's start and end.
+///   A reset rewrites the tab's history: `session.tabs` then names a new
+///   `history`, and a reader drops what it kept of the old one.
 ///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 29] = [
+pub const CAPABILITIES: [&str; 30] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1",
 ];
+
+/// A tab's turn checkpoints, Reset and Fork (#1326; spelled out in [`CAPABILITIES`]).
+pub const CHECKPOINTS: &str = "checkpoints/1";
 
 /// URL-bound PR reads and writes and actionable machine association locators.
 pub const GIT_PR_TARGET: &str = "git-pr-target/1";
@@ -186,6 +198,16 @@ pub const METHODS: &[Method] = &[
     // to the same per-call rules. Only a runtime that makes native tabs has
     // any to move, so no newer version was needed. A resend changes nothing.
     method("session.toTerminal", "session/3", Participate, true),
+    // #1326: what a finished turn changed is the conversation's to read;
+    // reviewing it, resetting the chat or forking it changes the workspace's
+    // files and sessions, which is a manager's, as `session.configure` is.
+    // A resend is answered from the cache: an undo or a reset is not done twice.
+    method("session.turnCheckpoint", "checkpoints/1", Participate, false),
+    method("session.keepTurn", "checkpoints/1", Manage, true),
+    method("session.undoTurn", "checkpoints/1", Manage, true),
+    method("session.restoreUndo", "checkpoints/1", Manage, true),
+    method("session.reset", "checkpoints/1", Manage, true),
+    method("session.fork", "checkpoints/1", Manage, true),
     // PRO-343: the mailbox's steer, stop and permission decision as live
     // calls, on a runtime with no mailbox. Each is decided by the mailbox's
     // own rules (a driver steers and stops, an approver decides) and
@@ -387,6 +409,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
         "composer/3" => &["session.attach"],
+        CHECKPOINTS => &["session.turnCheckpoint", "session.keepTurn", "session.undoTurn", "session.restoreUndo", "session.reset", "session.fork"],
         // `composer/4` adds no method: `session.attach` takes `kind: "file"`
         // and `session.send` names `files` (PRO-407).
         "ports/1" => &["ports."],

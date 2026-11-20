@@ -864,7 +864,6 @@ pub(crate) fn legacy_fork_workspace(
 
 /// The checkout's files and staging at the end of the turn a fork starts from
 /// (PRO-379), as tree ids in the session's repository, while they are kept.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Option<(&Path, &Path)>) -> Result<(String, String)> {
     let read = || {
         let state = load(session, tab)?;
@@ -908,7 +907,6 @@ pub fn turn_end(session: &str, tab: &str, end_seq: u64, verified_checkout: Optio
 
 /// Put a fresh checkout's files and staging at a turn's end (see [`turn_end`]).
 /// Only for a worktree made for the fork: whatever it held is replaced.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub fn check_out_turn(cwd: &str, tree: &str, index: &str) -> Result<()> {
     let cwd = Path::new(cwd);
     git::run(cwd, &["read-tree", "--reset", "-u", tree])?;

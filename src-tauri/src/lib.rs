@@ -207,6 +207,7 @@ mod sidebar_activity;
 mod session_archive;
 mod session_usage;
 mod session_names;
+mod session_fork;
 mod session_ops;
 mod workspace_setup;
 mod action_runner;

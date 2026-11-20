@@ -108,6 +108,41 @@ pub struct AgentTabInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_last_message_at: Option<String>,
     pub session_has_messages: bool,
+    /// Which history the tab's events are (#1326): a reset rewrites it and
+    /// names a new one, and a reader drops what it kept of the old one before
+    /// reading on. Absent until the tab's first reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
+    /// What the tab's last reset did, for the notice over its chat and its one Undo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset: Option<ResetNotice>,
+}
+
+/// The last reset of a tab (#1326), as a local tab's notice says it:
+/// "Reset to turn 2 · 3 files restored", with Undo while it can be undone.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetNotice {
+    /// The turn the chat was reset to; absent after an Undo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    /// How many files the reset put back, when it put any back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_restored: Option<u64>,
+    /// The conversation before the reset is kept: `session.reset` with no `endSeq` brings it back.
+    pub undoable: bool,
+}
+
+impl ResetNotice {
+    /// From the fields a reset saves on its tab (`session_reset.rs`); none before the first reset.
+    pub fn of(tab: &index::TabEntry) -> Option<Self> {
+        tab.unknown.get("resetLogId")?;
+        Some(Self {
+            turn: tab.unknown.get("resetTurn").and_then(serde_json::Value::as_u64),
+            files_restored: tab.unknown.get("resetFilesRestored").and_then(serde_json::Value::as_u64),
+            undoable: tab.unknown.get("resetBackupId").and_then(serde_json::Value::as_str).is_some(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -322,6 +357,8 @@ impl AgentOps for ManagerOps {
                     session_created: Some(entry.created.clone()),
                     session_last_message_at: entry.unknown.get("lastMessageAt").and_then(|value| value.as_str()).map(str::to_owned),
                     session_has_messages: entry.unknown.get("hasMessages").and_then(|value| value.as_bool()).unwrap_or(false),
+                    history: tab.unknown.get("resetLogId").and_then(|value| value.as_str()).map(str::to_owned),
+                    reset: ResetNotice::of(tab),
                 });
             }
         }

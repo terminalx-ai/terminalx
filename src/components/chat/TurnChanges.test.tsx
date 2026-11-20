@@ -132,3 +132,22 @@ it("explains an expired checkpoint without offering an unsafe restore", async ()
   expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Keep" })).toBeNull();
 });
+
+it("reads and reviews a remote tab's turn through its runtime, not this computer (#1326)", async () => {
+  const remote = { get: vi.fn().mockResolvedValue(saved), keep: vi.fn().mockResolvedValue(undefined), undo: vi.fn().mockResolvedValue({ overlap: [], token: "", undone: true }), restore: vi.fn() };
+  render(<TurnChanges changes={[]} checkpoint={{ ...checkpoint, api: remote }} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
+  expect(await screen.findByText("Undone")).toBeDefined();
+  expect(remote.get).toHaveBeenCalledWith("session", "tab", 7);
+  expect(remote.undo).toHaveBeenCalledWith("session", "tab", 7, null);
+  expect(api.turnCheckpoint).not.toHaveBeenCalled();
+  expect(api.undoTurn).not.toHaveBeenCalled();
+});
+
+it("shows a viewer what a remote turn changed, with nothing to keep, undo or restore (#1326)", async () => {
+  const remote = { readOnly: true, get: vi.fn().mockResolvedValue({ ...saved, undone: true, reviewed: true, backupRef: "refs/backup" }), keep: vi.fn(), undo: vi.fn(), restore: vi.fn() };
+  render(<TurnChanges changes={[]} checkpoint={{ ...checkpoint, api: remote }} />);
+  expect(await screen.findByText("shell-edit.ts")).toBeDefined();
+  expect(await screen.findByText("Undone")).toBeDefined();
+  for (const name of ["Undo turn", "Keep", "Restore what Undo removed"]) expect(screen.queryByRole("button", { name })).toBeNull();
+});

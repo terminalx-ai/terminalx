@@ -9,7 +9,9 @@ vi.mock("./cloudAgents", async (original) => ({
   sendToCloudAgent: vi.fn(async (_scope: unknown, tabId: string, text: string, _client: unknown, images: unknown[]) => void cloudSends.push({ tabId, text, images })),
 }));
 
-const { localSessionBackend, sendFirstMessage, cloudSessionBackend, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING } = await import("./sessionBackend");
+const { localSessionBackend, sendFirstMessage, cloudSessionBackend, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING, TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN, REVIEW_NEEDS_ADMIN } = await import("./sessionBackend");
+const { getSessionStore } = await import("./sessions");
+const { getTerminalState } = await import("./terminal");
 const { applyEvent } = await import("./agentEvents");
 const { getErrorToasts, dismissError } = await import("./errorToasts");
 
@@ -115,8 +117,122 @@ describe("a cloud session's options a local one has (#1289)", () => {
   });
 
   it("says why each option it cannot take is off; a local session has none to say", () => {
-    expect(backend().unavailable).toBe(REMOTE_UNAVAILABLE);
-    for (const key of ["fork", "reset", "secondOpinion", "retryInNewChat", "runMenu"] as const) expect(REMOTE_UNAVAILABLE[key]).toMatch(/\w/);
+    expect(backend().unavailable).toEqual({ ...REMOTE_UNAVAILABLE, ...TURNS_OFFLINE });
+    expect(backend().unavailable).toBe(backend().unavailable);
+    for (const key of ["secondOpinion", "retryInNewChat", "runMenu"] as const) expect(REMOTE_UNAVAILABLE[key]).toMatch(/\w/);
     expect(localSessionBackend("s1").unavailable).toBeUndefined();
+  });
+});
+
+describe("Reset, Fork and turn checkpoints on a remote session (#1326)", () => {
+  type Call = [string, Record<string, unknown>];
+  const client = (capabilities: string[], authority: "manage" | "participate" = "manage") => {
+    const calls: Call[] = [];
+    const connection = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities, authority } as const;
+    const tab = (tabId: string, history?: string) => ({ sessionId: "s-cloud", tabId, title: null, harness: "claude", model: "opus", effort: null, permissionMode: "default", status: "idle", process: "running", pendingPermissions: [], followUps: [], lastSeq: 3, created: "", modified: "", ...(history ? { history } : {}) });
+    const fake = {
+      connection,
+      hasCapability: (capability: string) => capabilities.includes(capability),
+      turnCheckpoint: async (...args: unknown[]) => (calls.push(["turnCheckpoint", { args }]), { number: 2, reviewed: false, undone: false, files: [] }),
+      keepTurn: async (...args: unknown[]) => void calls.push(["keepTurn", { args }]),
+      undoTurn: async (...args: unknown[]) => (calls.push(["undoTurn", { args }]), { overlap: [], token: "", undone: true }),
+      restoreUndo: async (...args: unknown[]) => (calls.push(["restoreUndo", { args }]), { overlap: [], token: "", undone: true }),
+      resetAgentTab: async (params: Record<string, unknown>) => (calls.push(["reset", params]), { warning: null, tab: tab("t-cloud", "generation-2") }),
+      forkAgentTab: async (params: Record<string, unknown>) => (calls.push(["fork", params]), params.into === "tab"
+        ? { sessionId: "s-cloud", tabId: "t-fork", note: null, tab: tab("t-fork") }
+        : { sessionId: "s-new", tabId: "t-new", note: "The fork shares this checkout, so its files are as they are now.", tab: null }),
+    };
+    return { calls, connection, client: fake as never };
+  };
+  const backend = (made: ReturnType<typeof client>, authority = made.connection.authority as string) =>
+    cloudSessionBackend({
+      key: "cloud:org-1:ws-1:s-cloud",
+      workspaceKey: "cloud:org-1:ws-1",
+      scope: { organizationId: "org-1", workspaceId: "ws-1" },
+      sessionId: "s-cloud",
+      state: made.connection as never,
+      client: made.client,
+      workspaceState: "ready",
+      authority,
+      outbox: [],
+      followUps: () => [],
+      wake: vi.fn(async () => undefined),
+    });
+
+  it("are off with why: not connected, a runtime from before checkpoints/1, or someone who is not an admin", () => {
+    const offline = cloudSessionBackend({ key: "cloud:o:w:s", workspaceKey: "cloud:o:w", scope: { organizationId: "o", workspaceId: "w" }, sessionId: "s", state: { state: "idle" }, client: null, workspaceState: "suspended", authority: "manage", outbox: [], followUps: () => [], wake: vi.fn(async () => undefined) });
+    expect(offline.turns).toBeUndefined();
+    expect(offline.checkpoints).toBeUndefined();
+    expect(offline.unavailable).toMatchObject(TURNS_OFFLINE);
+    const old = backend(client(["session/1", "session/3"]));
+    expect(old.turns).toBeUndefined();
+    expect(old.unavailable).toMatchObject(TURNS_OLD_RUNTIME);
+    // A driver reads what a turn changed, and is offered neither Reset nor Fork nor its review.
+    const driver = backend(client(["session/1", "checkpoints/1"], "participate"));
+    expect(driver.turns).toBeUndefined();
+    expect(driver.unavailable).toMatchObject(TURNS_NEED_ADMIN);
+    expect(driver.checkpoints?.readOnly).toBe(true);
+    for (const key of ["fork", "reset"] as const) for (const off of [TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN]) expect(off[key]).toMatch(/\w/);
+  });
+
+  it("a viewer's turn card reads the runtime's checkpoint and is refused its review", async () => {
+    const made = client(["session/1", "checkpoints/1"], "participate");
+    const checkpoints = backend(made).checkpoints!;
+    await expect(checkpoints.get("s-cloud", "t-cloud", 7)).resolves.toMatchObject({ number: 2 });
+    await expect(checkpoints.undo("s-cloud", "t-cloud", 7, null)).rejects.toThrow(REVIEW_NEEDS_ADMIN);
+    expect(made.calls.map(([name]) => name)).toEqual(["turnCheckpoint"]);
+  });
+
+  it("an admin resets, reviews and forks on the runtime, and is shown the fork", async () => {
+    const made = client(["session/1", "checkpoints/1"]);
+    const remote = backend(made);
+    expect(remote.unavailable).toBe(REMOTE_UNAVAILABLE);
+    const turns = remote.turns!;
+    expect(remote.checkpoints).toBe(turns.checkpoints);
+    expect(turns.checkpoints.readOnly).toBe(false);
+    await turns.checkpoints.undo("s-cloud", "t-cloud", 7, "token-1");
+    await turns.checkpoints.keep("s-cloud", "t-cloud", 9);
+    await expect(turns.reset("t-cloud", 4, true, "reset:token")).resolves.toBeNull();
+    expect(made.calls.slice(0, 3)).toEqual([
+      ["undoTurn", { args: ["s-cloud", "t-cloud", 7, "token-1"] }],
+      ["keepTurn", { args: ["s-cloud", "t-cloud", 9] }],
+      ["reset", { sessionId: "s-cloud", tabId: "t-cloud", endSeq: 4, resetFiles: true, confirm: "reset:token" }],
+    ]);
+    // Into a tab of this session: it is the one shown.
+    await expect(turns.fork("t-cloud", 4, "tab")).resolves.toEqual({ key: "cloud:org-1:ws-1:s-cloud", tabId: "t-fork", note: null });
+    expect(getTerminalState().selected["cloud:org-1:ws-1:s-cloud"]).toEqual({ kind: "agent", id: "t-fork" });
+    // Into a session of its own, on the same workspace: that session is opened, on its tab.
+    const forked = await turns.fork("t-cloud", 4, "session");
+    expect(forked).toEqual({ key: "cloud:org-1:ws-1:s-new", tabId: "t-new", note: expect.stringContaining("shares this checkout") });
+    expect(getSessionStore().selectedSessionId).toBe("cloud:org-1:ws-1:s-new");
+    expect(getTerminalState().selected["cloud:org-1:ws-1:s-new"]).toEqual({ kind: "agent", id: "t-new" });
+    expect(made.calls.slice(3)).toEqual([
+      ["fork", { sessionId: "s-cloud", tabId: "t-cloud", endSeq: 4, into: "tab" }],
+      ["fork", { sessionId: "s-cloud", tabId: "t-cloud", endSeq: 4, into: "session" }],
+    ]);
+  });
+});
+
+describe("a local session's Reset (PRO-378)", () => {
+  it("resets on this computer's runtime, then reads the tab's history and the session list again", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "list_sessions" || command === "load_tab_events" ? [] : null));
+    await expect(localSessionBackend("s1").turns!.reset("t1", 9, true, "reset:token")).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("reset_chat", { sessionId: "s1", tabId: "t1", endSeq: 9, resetFiles: true, confirm: "reset:token" });
+    expect(commands()[0]).toBe("reset_chat");
+    expect(commands()).toContain("list_sessions");
+  });
+
+  it("a reset that went through is not repeated when reading it back fails: it says so instead", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "reset_chat") return null;
+      throw new Error("disconnected");
+    });
+    await expect(localSessionBackend("s1").turns!.reset("t1", null, false, null)).resolves.toMatch(/Chat reset/);
+    expect(commands().filter((command) => command === "reset_chat")).toHaveLength(1);
+  });
+
+  it("passes on the runtime's warning about what went wrong after the reset", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "reset_chat" ? "Chat reset, but the agent could not restart." : null));
+    await expect(localSessionBackend("s1").turns!.reset("t1", 9, false, null)).resolves.toBe("Chat reset, but the agent could not restart.");
   });
 });

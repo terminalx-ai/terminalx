@@ -37,8 +37,9 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 | Second opinion | yes | disabled with why | #1327 |
 | Agent handoff (composer) | yes | no | #1327 |
 | Retry in new chat | yes | disabled with why | #1327 |
-| Reset, Fork | yes | disabled with why | #1326 |
-| Checkpoints, first message | yes | no | #1326 |
+| Reset, Fork | yes | **yes** with `checkpoints/1`, for a workspace admin; otherwise disabled with why (`TURNS_*`) | runtime update |
+| Turn checkpoints (Keep, Undo turn) | yes | **yes** with `checkpoints/1`: everyone who reads the chat sees what a turn changed; an admin keeps or undoes it | runtime update |
+| First message preview | yes | not needed: a cloud session's first prompt goes with its `session.create`, so no send waits on this computer to be shown | — |
 | Send again / Retry | yes | **yes**: the message's text, through the mailbox; one with attachments is refused with why | — |
 | "Send now" on a queued message | yes | no; the runtime holds follow-ups (outbox) | #1328 |
 | Held follow-ups tray, hold/now preference | yes | no | #1328 |
@@ -46,6 +47,36 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 | PR and dropped-file mentions | yes | off | #1329 |
 | Terminal view toggle | always | with `agent-pty/1` and a terminal-first agent; otherwise the reason (`TERMINAL_VIEW_*`) | runtime update |
 | Interrupt | yes | with `session/3` while connected; otherwise Stop is the hard stop | runtime update |
+
+## Reset, Fork and turn checkpoints (#1326)
+
+The runtime keeps a tab's turn checkpoints itself: the one publication path
+(`checkpoints::observe`) snapshots the checkout at every turn's start and
+end, on a runtime as on this computer. `checkpoints/1` serves them:
+
+- `session.turnCheckpoint` (a reader of the chat): what a finished turn
+  changed, for the turn card. Only the card's fields leave the runtime.
+- `session.keepTurn`, `session.undoTurn`, `session.restoreUndo` (manage): the
+  card's review, refused with the overlapping paths and a token exactly as
+  locally, and done when sent again with that token.
+- `session.reset` (manage): `SessionManager::reset_chat`, the same code a
+  local reset runs, with "Also reset files" and its one Undo.
+- `session.fork` (manage): `session_fork`, shared with the desktop's
+  `fork_turn`: into a tab beside the source, or a session on a worktree of
+  its own with the turn's files where they were kept.
+
+A reset rewrites the tab's history. `session.tabs` (and the encrypted
+checkpoint) then carry a new `history` id and the `reset` notice; a reader
+whose copy is of another history drops it and replays the tab from its first
+event (`followHistory` in `cloudAgents.ts`), so the cut turns leave every
+viewer's chat, not only the one who reset it.
+
+In the client, `SessionBackend.turns` holds the session's checkpoints, reset
+and fork (`localTurnActions` / `cloudTurnActions`); `TabView`, the turn card
+and `ResetChatDialog` call it and never the local commands directly. A
+remote session without it says why: not connected (`TURNS_OFFLINE`), a
+runtime from before `checkpoints/1` (`TURNS_OLD_RUNTIME`), or someone who is
+not a workspace admin (`TURNS_NEED_ADMIN`, whose turn cards still read).
 
 ## Tabs and panes of a cloud session (#1325)
 

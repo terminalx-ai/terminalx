@@ -712,6 +712,8 @@ impl crate::cloud_agents::AgentOps for OneTab {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: false,
+            history: None,
+            reset: None,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {
@@ -3913,3 +3915,159 @@ async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
 
 #[path = "agent_commands_server_tests.rs"]
 mod agent_commands;
+
+// ---- turn checkpoints, Reset and Fork (`checkpoints/1`, #1326) --------------
+
+/// Every tab of the stored sessions, as a runtime's agents list them.
+struct StoredTabs;
+
+impl crate::cloud_agents::AgentOps for StoredTabs {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        let sessions = crate::store::index::load().unwrap_or_default();
+        sessions.iter().flat_map(|session| session.tabs.iter().map(move |tab| crate::cloud_agents::AgentTabInfo {
+            session_id: session.id.clone(),
+            tab_id: tab.id.clone(),
+            title: None,
+            harness: tab.harness.clone(),
+            transport: Default::default(),
+            model: tab.model.clone(),
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            permission_mode: "default".into(),
+            status: crate::store::index::TabStatus::Idle,
+            process: "exited",
+            pending_permissions: Vec::new(),
+            follow_ups: Vec::new(),
+            lease: None,
+            sign_in: None,
+            last_seq: 0,
+            created: String::new(),
+            modified: String::new(),
+            last_message_at: None,
+            has_messages: false,
+            session_created: None,
+            session_last_message_at: None,
+            session_has_messages: false,
+            history: tab.unknown.get("resetLogId").and_then(Value::as_str).map(str::to_owned),
+            reset: crate::cloud_agents::ResetNotice::of(tab),
+        })).collect()
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        panic!("a fork or a checkpoint read never sends to the agent")
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A Claude chat of three events, one finished turn, with its saved conversation.
+fn seed_chat(root: &Path) -> (SessionEntry, String) {
+    let session = seed_session(root, "Fork me", None);
+    let tab = session.tabs[0].id.clone();
+    let provider = "32610000-0000-4000-8000-000000001326";
+    crate::store::index::update_session(&session.id, |entry| {
+        entry.tab_mut(&tab).unwrap().provider_session_id = Some(provider.into());
+        Ok(())
+    })
+    .unwrap();
+    let native = crate::session::fork_conversation_destination("claude", &session.cwd, provider).unwrap();
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(native, include_str!("../harness/fixtures/claude-reset.jsonl")).unwrap();
+    let log = crate::store::log_path(&session.id, &tab).unwrap();
+    for (seq, payload) in [
+        (1, json!({"type":"turn_started"})),
+        (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"})),
+        (3, json!({"type":"turn_completed","status":"ok"})),
+    ] {
+        crate::store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":session.id,"tabId":tab,"harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+    }
+    (crate::store::index::get(&session.id).unwrap(), tab)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_forks_a_turn_into_a_tab_or_a_session_and_a_viewer_only_reads_its_checkpoint() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    listed(&f.rpc);
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(StoredTabs), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (session, tab) = seed_chat(&f.root);
+    let want = json!({ "protocol": PROTOCOL, "want": ["session/1", protocol::CHECKPOINTS] });
+    let (admin, _admin_events) = Peer::for_user("d-admin".into(), Authority::Manage, Some("admin".into()));
+    assert_eq!(call(&f.rpc, &admin, "rpc.hello", want.clone()).await.unwrap()["capabilities"], json!(["session/1", "checkpoints/1"]));
+    let (viewer, _viewer_events) = Peer::for_user("d-viewer".into(), Authority::Participate, Some("viewer".into()));
+    call(&f.rpc, &viewer, "rpc.hello", want).await.unwrap();
+
+    // Reading what a turn changed is the conversation's: a checkout that is not Git kept none.
+    let read = json!({ "sessionId": session.id, "tabId": tab, "seq": 3 });
+    assert_eq!(call(&f.rpc, &viewer, "session.turnCheckpoint", read.clone()).await.unwrap(), json!({ "checkpoint": null }));
+    assert_eq!(call(&f.rpc, &admin, "session.turnCheckpoint", read).await.unwrap(), json!({ "checkpoint": null }));
+    // Changing the workspace's files or sessions is a manager's.
+    let fork = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "tab", "clientRequestId": "request-fork-1" });
+    assert_eq!(code(call(&f.rpc, &viewer, "session.fork", fork.clone()).await), "forbidden");
+    for method in ["session.reset", "session.undoTurn", "session.keepTurn", "session.restoreUndo"] {
+        let params = json!({ "sessionId": session.id, "tabId": tab, "seq": 3, "endSeq": 3, "clientRequestId": "request-viewer-1" });
+        assert_eq!(code(call(&f.rpc, &viewer, method, params).await), "forbidden", "{method}");
+    }
+    assert_eq!(code(call(&f.rpc, &admin, "session.fork", json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "elsewhere", "clientRequestId": "request-fork-0" })).await), "invalid_params");
+
+    // Into a tab beside the source: the conversation up to the turn, owned by the new tab.
+    let forked = call(&f.rpc, &admin, "session.fork", fork.clone()).await.unwrap();
+    assert_eq!(forked["sessionId"], session.id.as_str());
+    let new_tab = forked["tabId"].as_str().unwrap().to_string();
+    assert_ne!(new_tab, tab);
+    assert_eq!(forked["tab"]["tabId"], new_tab.as_str(), "the runtime lists the fork at once");
+    let stored = crate::store::index::get(&session.id).unwrap();
+    assert_eq!(stored.tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [tab.as_str(), new_tab.as_str()]);
+    let copied = std::fs::read_to_string(crate::store::log_path(&session.id, &new_tab).unwrap()).unwrap();
+    assert_eq!(copied.lines().count(), 3);
+    assert!(copied.lines().all(|line| serde_json::from_str::<Value>(line).unwrap()["tabId"] == new_tab.as_str()));
+    // A resend is answered from the cache: one fork, not two.
+    assert_eq!(call(&f.rpc, &admin, "session.fork", fork).await.unwrap()["tabId"], new_tab.as_str());
+    assert_eq!(crate::store::index::get(&session.id).unwrap().tabs.len(), 2);
+
+    // Into a session of its own; a checkout that is not a worktree is shared, and the note says so.
+    let into_session = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "session", "clientRequestId": "request-fork-2" });
+    let forked = call(&f.rpc, &admin, "session.fork", into_session).await.unwrap();
+    let new_session = crate::store::index::get(forked["sessionId"].as_str().unwrap()).unwrap();
+    assert_ne!(new_session.id, session.id);
+    assert_eq!(new_session.title, "Fork me (fork)");
+    assert_eq!(new_session.active_tab.as_deref(), forked["tabId"].as_str());
+    assert!(forked["note"].as_str().unwrap().contains("shares this checkout"), "{forked}");
+
+    // Reset runs the tab's agent: a runtime with no session manager says so instead of resetting.
+    let reset = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 1, "resetFiles": false, "clientRequestId": "request-reset-1" });
+    assert_eq!(code(call(&f.rpc, &admin, "session.reset", reset).await), "unavailable");
+}
+
+#[test]
+fn a_reset_tab_names_its_history_and_what_its_reset_did() {
+    let mut tab: crate::store::index::TabEntry = serde_json::from_value(json!({ "id": "t", "harness": "claude", "created": "now" })).unwrap();
+    assert_eq!(crate::cloud_agents::ResetNotice::of(&tab), None, "no reset yet");
+    tab.unknown.insert("resetLogId".into(), json!("generation-2"));
+    tab.unknown.insert("resetBackupId".into(), json!("generation-2"));
+    tab.unknown.insert("resetTurn".into(), json!(2));
+    tab.unknown.insert("resetFilesRestored".into(), json!(3));
+    let notice = crate::cloud_agents::ResetNotice::of(&tab).unwrap();
+    assert_eq!(serde_json::to_value(&notice).unwrap(), json!({ "turn": 2, "filesRestored": 3, "undoable": true }));
+    // After an Undo: the backup is used up and no turn is named.
+    for key in ["resetBackupId", "resetTurn", "resetFilesRestored"] {
+        tab.unknown.remove(key);
+    }
+    assert_eq!(serde_json::to_value(crate::cloud_agents::ResetNotice::of(&tab).unwrap()).unwrap(), json!({ "undoable": false }));
+}

@@ -1,8 +1,6 @@
 import { useState } from "react";
-import { agent, errorMessage } from "@/lib/api";
-import { reloadTabHistory } from "@/lib/agentEvents";
+import { errorMessage } from "@/lib/api";
 import { usePref } from "@/lib/prefs";
-import { refreshSessions } from "@/lib/sessions";
 import { Button } from "@/components/ui/button";
 import { keycaps } from "@/lib/hotkeys";
 import type { ResetTarget } from "@/components/chat/Chat";
@@ -31,8 +29,14 @@ export function overlapRefusal(message: string): { paths: string[]; token: strin
 const SHOWN = 5;
 
 /** Mounted per selection, so confirmation always names the selected turn. */
-export function ResetChatDialog({ sessionId, tabId, endSeq, target, agent: agentLabel, filesRestored, onClose, onWarning }: {
-  sessionId: string; tabId: string; endSeq: number | null;
+export function ResetChatDialog({ reset: run, endSeq, target, agent: agentLabel, filesRestored, onClose, onWarning }: {
+  /**
+   * The session's reset (`TurnActions.reset`): this computer's runtime for a
+   * local tab, the session's own for a cloud or machine one (#1326). Resolves
+   * to a warning about what went wrong after the reset, or null.
+   */
+  reset: (endSeq: number | null, resetFiles: boolean, confirm: string | null) => Promise<string | null>;
+  endSeq: number | null;
   /** The turn reset to, the turns that go, and how many files changed since: what the dialog names. */
   target?: ResetTarget;
   /** The agent's name, for what it remembers ("Claude Code"). */
@@ -56,11 +60,8 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, target, agent: agent
     try {
       // "Reset anyway" hands back the token of the list that was shown; the backend
       // goes ahead only if nothing changed since that plan was made.
-      const warning = await agent.resetChat(sessionId, tabId, endSeq, !undo && resetFiles, refusal?.token ?? null);
-      // Also refresh directly: the window may have missed the owner event.
-      const refreshed = await Promise.allSettled([reloadTabHistory(sessionId, tabId), refreshSessions()]);
+      const warning = await run(endSeq, !undo && resetFiles, refusal?.token ?? null);
       if (warning) onWarning(warning);
-      else if (refreshed.some((result) => result.status === "rejected")) onWarning("Chat reset. Reopen the tab if its history has not refreshed yet.");
       onClose();
     } catch (e) {
       const message = errorMessage(e);

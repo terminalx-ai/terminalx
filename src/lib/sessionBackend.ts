@@ -3,8 +3,8 @@ import { agent, attachments, errorMessage, type FileInput, type ImageInput, type
 import type { FileRef } from "@/types/events";
 import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { showError } from "@/lib/errorToasts";
-import { applyEvent, getTabLog, loadTab, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
-import { patchTab } from "@/lib/sessions";
+import { applyEvent, getTabLog, loadTab, reloadTabHistory, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
+import { forkTurn, patchTab, refreshSessions, selectCloudSession } from "@/lib/sessions";
 import {
   attachCloudAgentTab,
   configureCloudAgentTab,
@@ -19,14 +19,16 @@ import {
   setViewing,
   steerCloudAgent,
   stopCloudAgent,
+  applyLiveTab,
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
 import { CLOUD_FILES_REFUSED, MACHINE_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
-import type { TerminalInstance } from "@/lib/terminal";
+import { selectSessionTab, type TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
+import { localTurnCheckpoints, type TurnCheckpointApi } from "@/lib/turnCheckpoints";
 
 /**
  * What one session can do, wherever it runs (PRO-23 CS-10). SessionView,
@@ -82,14 +84,61 @@ export interface SessionUnavailable {
   runMenu?: string;
 }
 
-/** What a session that runs on a workspace runtime or a paired machine cannot do yet, and why. */
+/**
+ * What a session that runs on a workspace runtime or a paired machine cannot
+ * do yet, and why. Fork and Reset are its runtime's (#1326): see `TURNS_*`.
+ */
 export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
-  fork: "Fork is not available here yet: this session's runtime does not offer forking a conversation.",
-  reset: "Reset is not available here yet: this session's runtime does not offer resetting a conversation.",
   secondOpinion: "A second opinion is not available here yet: this session's runtime cannot hand a turn to another agent.",
   retryInNewChat: "Retry in a new chat is not available here yet: this session's runtime cannot open a chat with this prompt. Retry sends it again in this chat.",
   runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
 });
+
+/** Why Fork and Reset are off on a remote session that could offer them (#1326). */
+export const TURNS_OFFLINE: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Fork needs this session's runtime connected. It is offered once the workspace or machine is back.",
+  reset: "Reset needs this session's runtime connected. It is offered once the workspace or machine is back.",
+});
+export const TURNS_OLD_RUNTIME: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Fork needs a newer runtime. It is offered here once this session's runtime is updated.",
+  reset: "Reset needs a newer runtime. It is offered here once this session's runtime is updated.",
+});
+export const TURNS_NEED_ADMIN: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Forking a conversation changes the workspace's sessions, which needs a workspace admin.",
+  reset: "Resetting a chat changes the workspace's files and conversation, which needs a workspace admin.",
+});
+
+/** `REMOTE_UNAVAILABLE` with why Fork and Reset are off, once per reason so a rebuilt backend keeps the same object. */
+const REMOTE_TURNS_OFF = new Map<object, Readonly<SessionUnavailable>>(
+  [TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN].map((off) => [off, Object.freeze({ ...REMOTE_UNAVAILABLE, ...off })]),
+);
+
+/** A fork made (PRO-379): the session it is in, by its selection key, and its tab. */
+export interface ForkedTab {
+  key: string;
+  tabId: string;
+  /** Said beside the fork when its files are not the turn's. */
+  note: string | null;
+}
+
+/**
+ * Reset, Fork and the per-turn checkpoints a tab's turn cards review
+ * (PRO-379, #1326), wherever the session runs: this computer's runtime for a
+ * local session, the session's own runtime (`checkpoints/1`) for a cloud
+ * workspace's or a machine's.
+ */
+export interface TurnActions {
+  checkpoints: TurnCheckpointApi;
+  /**
+   * Reset the chat to the end of the turn `endSeq`, or with null undo the
+   * last reset. Refused with `OVERLAP …` and a token when files would be
+   * overwritten; sent again with that token as `confirm`, it goes ahead.
+   * Resolves to a warning about what went wrong after the reset, or null.
+   */
+  reset(tabId: string, endSeq: number | null, resetFiles: boolean, confirm: string | null): Promise<string | null>;
+  /** Fork the conversation as it stood at the end of the turn `endSeq`; the caller shows the fork. */
+  fork(tabId: string, endSeq: number, into: "tab" | "session"): Promise<ForkedTab>;
+}
 
 /**
  * What a cloud workspace session leaves on this computer (#1325, as
@@ -221,6 +270,14 @@ export interface SessionBackend {
   signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string; machine?: string } | null;
   /** Options a local session has that this one cannot take, each with why (#1289). Absent on a local session. */
   unavailable?: Readonly<SessionUnavailable>;
+  /** Reset, Fork and turn checkpoints (#1326). Absent where the session cannot take them; `unavailable` says why. */
+  turns?: TurnActions;
+  /**
+   * Where turn cards read what a turn changed when this person may not
+   * review it (a viewer, #1326): `keep`, `undo` and `restore` refuse.
+   * Absent where no checkpoint can be read; `turns.checkpoints` otherwise.
+   */
+  checkpoints?: TurnCheckpointApi;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /** The workspace client for model discovery, independent of collaboration capabilities. */
@@ -315,10 +372,29 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     patchTab: (tabId, patch) => patchTab(sessionId, tabId, patch),
     setTabStatus: (tabId, status) => setTabStatus(sessionId, tabId, status),
     terminalView: () => OFFERED,
+    turns: localTurnActions(sessionId),
   };
   if (localBackends.size > 256) localBackends.clear();
   localBackends.set(sessionId, backend);
   return backend;
+}
+
+/** A local session's Reset and Fork: this computer's runtime, then the window's copy of the tab and the session list. */
+function localTurnActions(sessionId: string): TurnActions {
+  return {
+    checkpoints: localTurnCheckpoints,
+    reset: async (tabId, endSeq, resetFiles, confirm) => {
+      const warning = await agent.resetChat(sessionId, tabId, endSeq, resetFiles, confirm);
+      // Also refresh directly: the window may have missed the owner event.
+      const refreshed = await Promise.allSettled([reloadTabHistory(sessionId, tabId), refreshSessions()]);
+      if (warning) return warning;
+      return refreshed.some((result) => result.status === "rejected") ? "Chat reset. Reopen the tab if its history has not refreshed yet." : null;
+    },
+    fork: async (tabId, endSeq, into) => {
+      const forked = await forkTurn(sessionId, tabId, endSeq, into);
+      return { key: forked.session.id, tabId: forked.tabId, note: forked.note ?? null };
+    },
+  };
 }
 
 /**
@@ -483,6 +559,49 @@ export interface CloudSessionContext {
   signIn?: (tabId: string) => AgentTabInfo["signIn"];
 }
 
+/** Why reviewing a turn is refused to a reader who may only read it. */
+export const REVIEW_NEEDS_ADMIN = "Keeping or undoing a turn's changes needs a workspace admin.";
+
+/** A runtime's checkpoints of a tab's turns (`checkpoints/1`); `review: false` reads them only. */
+function remoteTurnCheckpoints(client: WorkspaceRpcClient, review: boolean): TurnCheckpointApi {
+  const refuse = () => Promise.reject(new Error(REVIEW_NEEDS_ADMIN));
+  return {
+    readOnly: !review,
+    get: (sessionId, tabId, seq) => client.turnCheckpoint(sessionId, tabId, seq),
+    keep: review ? (sessionId, tabId, seq) => client.keepTurn(sessionId, tabId, seq) : refuse,
+    undo: review ? (sessionId, tabId, seq, confirmed) => client.undoTurn(sessionId, tabId, seq, confirmed) : refuse,
+    restore: review ? (sessionId, tabId, seq, confirmed) => client.restoreUndo(sessionId, tabId, seq, confirmed) : refuse,
+  };
+}
+
+/**
+ * A cloud or machine session's Reset and Fork (#1326), on its runtime. The
+ * new history a reset leaves reaches every reader through `session.tabs`
+ * (`AgentTabInfo.history`), and a fork's tab or session through the
+ * runtime's tab and session lists, as a tab added any other way does.
+ */
+function cloudTurnActions(ctx: CloudSessionContext, client: WorkspaceRpcClient): TurnActions {
+  const sessionKey = (sessionId: string) => `${ctx.key.slice(0, ctx.key.length - ctx.sessionId.length)}${sessionId}`;
+  return {
+    checkpoints: remoteTurnCheckpoints(client, true),
+    reset: async (tabId, endSeq, resetFiles, confirm) => {
+      const { warning, tab } = await client.resetAgentTab({ sessionId: ctx.sessionId, tabId, endSeq, resetFiles, confirm });
+      // The runtime's own account of the tab, at once: its new history replaces the turns that went.
+      if (tab) applyLiveTab(ctx.scope, tab);
+      return warning;
+    },
+    fork: async (tabId, endSeq, into) => {
+      const forked = await client.forkAgentTab({ sessionId: ctx.sessionId, tabId, endSeq, into });
+      if (forked.tab) applyLiveTab(ctx.scope, forked.tab);
+      // Shown at once, as a local fork is: its session (when it is a new one) on its tab.
+      const key = sessionKey(forked.sessionId);
+      if (key !== ctx.key) selectCloudSession(key);
+      selectSessionTab(key, { kind: "agent", id: forked.tabId });
+      return { key, tabId: forked.tabId, note: forked.note };
+    },
+  };
+}
+
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
 export function cloudAsleep(state: WorkspaceConnectionState, workspaceState: string | null): boolean {
   if (state.state === "connected") return false;
@@ -520,6 +639,11 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   const terminalBase = ctx.terminalBase;
   // An interrupt is a live call: there is a turn to interrupt only on a runtime that is up.
   const interrupts = write && !!client?.hasCapability("session/3");
+  // Reset and Fork (#1326): live calls to a runtime that keeps the turns' checkpoints, by a workspace admin.
+  const turnsOff = !client ? TURNS_OFFLINE : !client.hasCapability("checkpoints/1") ? TURNS_OLD_RUNTIME : ctx.authority !== "manage" ? TURNS_NEED_ADMIN : null;
+  const turns = !turnsOff && write && client ? cloudTurnActions(ctx, client) : undefined;
+  // Turn cards read what a turn changed while the runtime is up, whoever may read the chat.
+  const readsCheckpoints = !!client?.hasCapability("checkpoints/1");
   return {
     kind: "cloud",
     key: ctx.key,
@@ -527,7 +651,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) && (!client || client.hasCapability("composer/4")), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
-    unavailable: REMOTE_UNAVAILABLE,
+    unavailable: turnsOff ? REMOTE_TURNS_OFF.get(turnsOff)! : REMOTE_UNAVAILABLE,
+    turns,
+    checkpoints: turns?.checkpoints ?? (readsCheckpoints && client ? remoteTurnCheckpoints(client, false) : undefined),
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,
     modelClient: cloudAsleep(ctx.state, ctx.workspaceState) ? null : client,
