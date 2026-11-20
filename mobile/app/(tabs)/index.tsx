@@ -14,6 +14,7 @@ import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
 import { DeviceOptionsButton, MachineGlyph, useDeviceMenu } from "@mobile/ui/DeviceMenu";
+import { takePairingRequest } from "@mobile/state/pairing-request";
 
 /**
  * Machines (#987): one list of every machine this phone knows, paired ones
@@ -26,7 +27,7 @@ export default function MachinesScreen() {
   const router = useRouter();
   const [pairing, setPairing] = useState<"general" | "server" | null>(null);
   const [showHidden, setShowHidden] = useState(false);
-  const { session, refreshMachines } = app;
+  const { session, refreshMachines, clearError } = app;
   const pairingOpen = pairing !== null;
   const openPairing = () => { app.clearError(); setPairing("general"); };
   const openServerPairing = () => { app.clearError(); setPairing("server"); };
@@ -44,6 +45,8 @@ export default function MachinesScreen() {
 
   // Read the account again each time the list comes into view: whether a machine is online must not be stale.
   useFocusEffect(useCallback(() => { if (session) void refreshMachines(); }, [refreshMachines, session]));
+  // Sessions' "Add a machine" and "Pair again" land here with pairing open (PRO-465).
+  useFocusEffect(useCallback(() => { if (takePairingRequest()) { clearError(); setPairing("general"); } }, [clearError]));
 
   const add = <GlassIconButton label="Add a machine" icon={<Plus size={22} color={palette.ink} />} onPress={openPairing} testID="add-machine" />;
   const sheet = <PairingSheet key={pairing ?? "closed"} visible={pairingOpen} server={pairing === "server"} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairing(null); }} />;

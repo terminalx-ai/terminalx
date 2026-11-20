@@ -14,11 +14,15 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.";
 
+export const BOTS_DESCRIPTION =
+  "AI employees with standing roles: each has a name, a role, its own memory and a home folder. Also turns on the terminalx bots commands.";
+
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run, splitting one goal into pieces for worker sessions. Shows the Run view and Settings → Orchestrator.";
 
 // PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
-export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
+// PRO-464: projects and organizations share one heading, each one collapsible row in the menu.
+export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects & organizations", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 // PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has one introductory description.
 export const SETTINGS_SECTIONS = {
@@ -28,15 +32,17 @@ export const SETTINGS_SECTIONS = {
   shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
   devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: "Phones paired with this Mac." },
   machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them." },
+  // PRO-463, design 09.44: reference information, looked at now and then, so a page of Settings rather than a view of the main window.
+  stats: { title: "Stats & usage", group: "Personal", entry: "stats.activity", subtitle: "TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here." },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "The agent CLIs TerminalX runs on this Mac, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account." },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: "Variables for new agent and shell tabs, kept in the Keychain." },
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model", subtitle: "Dictation: the model, your microphone and your words." },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github", subtitle: "GitHub and Linear, for issues and pull requests." },
-  projects: { title: "Project templates", group: "Projects", entry: "projects.templates", subtitle: "Starting points for new projects." },
-  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath", subtitle: "Where this project’s workspaces live and what runs in them." },
-  organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
+  projects: { title: "Project templates", group: "Projects & organizations", entry: "projects.templates", subtitle: "Starting points for new projects." },
+  repositories: { title: "Projects", group: "Projects & organizations", entry: "repositories.rootPath", subtitle: "Where this project’s workspaces live and what runs in them." },
+  organizations: { title: "Organizations", group: "Projects & organizations", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup", subtitle: "When finished workspaces are deleted, and what is left behind." },
   experimental: { title: "Experimental", group: "More", entry: "experimental.nativeCodex", subtitle: "Early features. They may change or go away." },
   // PRO-157, design 09.29: the executables again, for whoever looks for them among the folders and limits.
@@ -78,7 +84,7 @@ interface SettingDefinition {
    * (lib/settingsSections.ts `settingOffered`). A whole section behind a
    * switch is `settingsSectionOffered`'s.
    */
-  requires?: "orchestratorRuns" | "localVmTasks" | "opencode";
+  requires?: "orchestratorRuns" | "localVmTasks" | "opencode" | "bots";
 }
 export interface SettingRegistration extends SettingDefinition {
   render: (props: RowProps) => ReactNode;
@@ -204,7 +210,7 @@ export const SETTINGS_ROWS = [
   }),
   defineSetting({
     id: "agents.followUps", section: "agents", title: "Follow-ups while the agent works",
-    description: "For local desktop chats on this device. Held messages are not read mid-turn; they go one per finished turn. Idle messages send immediately. The “Send the other way” shortcut in Shortcuts reverses this choice: hold, or interrupt and send. Phone and cloud messages keep their current behavior.",
+    description: "For desktop chats on this device, local and on cloud workspaces or machines whose runtime holds follow-ups. Held messages are not read mid-turn; they go one per finished turn. Idle messages send immediately. The “Send the other way” shortcut in Shortcuts reverses this choice: hold, or interrupt and send. Phone messages keep their current behavior.",
     searchTerms: ["queue", "hold", "follow-ups", "pause", "composer"], scope: "user",
     storage: { kind: "localStorage", location: "raccoon.prefs#followUps" },
   }),
@@ -306,12 +312,6 @@ export const SETTINGS_ROWS = [
     storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
   }),
   defineSetting({
-    id: "general.openUsage", section: "general", title: "Usage",
-    description: "Tokens, cost and rate limits across every agent, by day and by project.",
-    searchTerms: ["usage"], scope: "user",
-    storage: { kind: "action", location: "Usage page" },
-  }),
-  defineSetting({
     id: "general.statusBar", section: "general", title: "Status bar",
     description: "Show app-wide agent usage and the resources used by live tabs along the bottom edge.",
     searchTerms: ["status", "bar"], scope: "user",
@@ -372,6 +372,24 @@ export const SETTINGS_ROWS = [
     storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
   }),
   defineSetting({
+    id: "stats.activity", section: "stats", title: "Activity",
+    description: "Agents spawned, time agents worked and pull requests created on this installation.",
+    searchTerms: ["stats", "statistics", "activity", "agents spawned", "time agents worked", "working time", "prs created", "pull requests", "lifetime", "tracking"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: activity totals" }, layout: "content",
+  }),
+  defineSetting({
+    id: "stats.accountLimits", section: "stats", title: "Usage limits by account",
+    description: "Each signed-in account’s current usage windows and when they reset, read with that account’s own login.",
+    searchTerms: ["usage", "limits", "rate limits", "account", "accounts", "window", "windows", "5-hour", "weekly", "reset", "subscription", "quota"], scope: "user",
+    storage: { kind: "service", location: "Agent providers (each account’s own login)" }, layout: "content",
+  }),
+  defineSetting({
+    id: "stats.analytics", section: "stats", title: "Usage analytics",
+    description: "Tokens, estimated cost, token mix, providers and daily intensity from local Claude and Codex transcripts.",
+    searchTerms: ["usage", "analytics", "usage overview", "tokens", "cost", "spend", "token mix", "cache", "providers", "daily intensity", "heatmap", "claude", "codex", "transcripts"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: local transcript scan" }, layout: "content",
+  }),
+  defineSetting({
     id: "devices.pairing", section: "devices", title: "Pair a phone",
     description: "Choose Relay or LAN and create a one-time pairing code.",
     searchTerms: ["devices", "pair", "a", "phone"], scope: "user",
@@ -418,6 +436,12 @@ export const SETTINGS_ROWS = [
     description: LOCAL_VM_TASKS_DESCRIPTION,
     searchTerms: ["experimental", "local vm", "vm", "virtual machine", "computer", "desktop", "tasks", "guest", "linux", "macos"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
+  }),
+  defineSetting({
+    id: "experimental.bots", section: "experimental", title: "Bots",
+    description: BOTS_DESCRIPTION,
+    searchTerms: ["experimental", "bots", "bot", "employees", "roles", "cto", "watcher", "hire"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.bots" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",
@@ -1071,6 +1095,7 @@ export const SETTINGS_ROWS = [
     id: `shortcuts.${action.id}`, section: "shortcuts", title: action.label,
     description: `${action.group} keyboard shortcut.`, searchTerms: [action.group, action.label, "keyboard", "keys", "hotkeys", "key bindings", "shortcut"],
     scope: "user", storage: { kind: "file", location: `$TERMINALX_HOME/settings.json#preferences.shortcuts.${action.id}` }, layout: "content",
+    ...(action.requires ? { requires: action.requires } : {}),
   } as const)),
 ] as const;
 export type SettingId = (typeof SETTINGS_ROWS)[number]["id"];
@@ -1081,9 +1106,12 @@ const MOVED_ROWS: Readonly<Record<string, SettingId>> = {
   "general.dataPrivacy": "account.dataPrivacy",
   // PRO-377: Appearance keeps the design's rows; these moved to General.
   ...Object.fromEntries(
-    (["textSize", "transcriptLayout", "customOrder", "tabBar", "branchSessions", "openUsage", "statusBar", "usage", "resources", "usageDisplay", "usageRefresh"] as const)
+    (["textSize", "transcriptLayout", "customOrder", "tabBar", "branchSessions", "statusBar", "usage", "resources", "usageDisplay", "usageRefresh"] as const)
       .map((key) => [`appearance.${key}`, `general.${key}` satisfies SettingId]),
   ),
+  // PRO-463: the row that left Settings for the usage view; the usage is a page of Settings now.
+  "general.openUsage": "stats.activity",
+  "appearance.openUsage": "stats.activity",
 };
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id) ?? (Object.hasOwn(MOVED_ROWS, id) ? byId.get(MOVED_ROWS[id]) : undefined); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }

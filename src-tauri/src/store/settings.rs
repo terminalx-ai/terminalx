@@ -623,6 +623,10 @@ pub struct ExperimentalSettings {
     /// Off, it stays hidden as `harness::HIDDEN_HARNESSES` has it, and a tab
     /// already on it still runs.
     pub opencode: bool,
+    /// Bots (PRO-459): AI employees with standing roles. Off, the app shows
+    /// nothing of them, its bot commands refuse, and `terminalx bots` says
+    /// the feature is off.
+    pub bots: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -865,7 +869,10 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"opencode":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"opencode":false,"bots":false}));
+        assert!(!legacy.experimental.bots);
+        let bots: Settings = serde_json::from_value(serde_json::json!({"experimental":{"bots":true}})).unwrap();
+        assert!(bots.experimental.bots && !bots.experimental.orchestrator_runs && !bots.experimental.native_codex);
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);

@@ -21,6 +21,7 @@ mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
 mod automations;
+mod bots;
 mod binpath;
 mod chat_link;
 mod cleanup;
@@ -494,6 +495,9 @@ pub fn run() {
             // window, which has no terminal (PRO-369).
             #[cfg(any(target_os = "macos", windows))]
             install_window_pairing_consent(&pairing);
+            // A runtime that cannot verify this window is relaunched by it (PRO-486).
+            #[cfg(target_os = "macos")]
+            local_runtime::window_consent::install_for(app.handle());
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
@@ -615,6 +619,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
+            local_runtime::window_consent::local_runtime_restart_for_window,
             local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_work,
             local_runtime::ui::local_runtime_plan_update,
@@ -840,7 +845,20 @@ pub fn run() {
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,
+            commands::automation_precheck_try,
             commands::automation_run_now,
+            commands::bot_list,
+            commands::bot_get,
+            commands::bot_templates,
+            commands::bot_create,
+            commands::bot_update,
+            commands::bot_delete,
+            commands::bot_pause,
+            commands::bot_resume,
+            commands::bots_pause_all,
+            commands::bots_resume_all,
+            commands::bot_role_read,
+            commands::bot_role_write,
             commands::session_summaries,
             commands::stats_usage_snapshot,
             commands::app_activity_summary,
@@ -934,6 +952,7 @@ pub fn run() {
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,
+            commands::answer_terminal_prompt,
             commands::set_tab_model,
             commands::set_tab_permission_mode,
             commands::set_tab_effort,

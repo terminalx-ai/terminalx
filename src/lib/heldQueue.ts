@@ -1,4 +1,5 @@
 import type { ImageInput } from "@/lib/api";
+import type { HeldFollowUpInfo } from "@terminalx/portable/workspace";
 import type { AgentEvent, FileRef, HeldQueue } from "@/types/events";
 
 export type HeldQueueChange =
@@ -24,6 +25,28 @@ export function heldQueueFrom(events: readonly AgentEvent[]): HeldQueue {
     }
   }
   return queue;
+}
+
+/**
+ * The follow-ups a cloud or machine tab's runtime holds (#1328), as the held
+ * queue a local tab keeps, by the id of the command that sent each. Their
+ * images and files stay on the runtime: only their names are shown here.
+ * The runtime sends them one after each turn; nothing pauses them.
+ */
+export function heldQueueFromFollowUps(followUps: readonly HeldFollowUpInfo[]): HeldQueue {
+  if (!followUps.length) return EMPTY;
+  return {
+    items: followUps.map((followUp) => ({
+      id: followUp.clientCommandId,
+      text: followUp.text,
+      images: Array.from({ length: followUp.images ?? 0 }, () => ({ url: "", name: "Image" })),
+      ...(followUp.files?.length ? { files: followUp.files.map((name) => ({ path: "", name })) } : {}),
+    })),
+    paused: false,
+    sending: null,
+    next: null,
+    error: null,
+  };
 }
 
 export function followUpRoute(setting: "now" | "hold", alternate: boolean): "now" | "hold" | "interrupt" {

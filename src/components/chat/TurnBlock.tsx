@@ -516,7 +516,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }
           files={item.files?.length ? <MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /> : null}
           onSendNow={onSendQueuedNow && !item.inputOccupied && !item.withdrawn ? () => onSendQueuedNow(item.seq) : undefined}
         >
-          {item.inputOccupied && <InputOccupiedNote />}
+          {item.inputOccupied && <InputOccupiedNote choice={item.inputChoice} />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
         </QueuedCard>
       );
@@ -641,13 +641,16 @@ export function QueuedCard({
 
 /**
  * Why a message has not been typed yet (#722): the agent's input box holds something else, and typing would send
- * the two as one prompt. It goes in once the box is empty.
+ * the two as one prompt. It goes in once the box is empty. With `choice`, the box is not there at all: the agent
+ * drew a question of its own in its place (PRO-462), and typing would answer that instead.
  */
-function InputOccupiedNote() {
+function InputOccupiedNote({ choice }: { choice?: boolean }) {
   return (
     <p className="mt-2 flex items-start gap-1.5 text-xs text-warning" data-testid="input-occupied">
       <Keyboard className="mt-0.5 size-3.5 shrink-0" />
-      <span>Waiting: the agent&apos;s input box already has text in it. Send or clear that text in the terminal, and this message goes in after it.</span>
+      <span>{choice
+        ? "Waiting: the agent is asking a question in its terminal. Answer it there, and this message goes in after."
+        : "Waiting: the agent's input box already has text in it. Send or clear that text in the terminal, and this message goes in after it."}</span>
     </p>
   );
 }
@@ -678,7 +681,7 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string; failed?: boolean }) {
+export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string; size?: number }[] }; cwd?: string; failed?: boolean }) {
   const layout = usePrefs().transcriptLayout;
   return (
     <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy={!failed}>
@@ -732,7 +735,7 @@ function ReaderMessage({
 }: {
   /** Said above a message the agent took mid-turn; the bubble is edged in blue and keeps its time inside. */
   steered?: string;
-  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
+  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string; size?: number }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
   className: string;
@@ -803,7 +806,7 @@ function ReaderMessage({
             <div className="mt-1.5 border-l border-hairline pl-2 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={message.sent} context={linkContext} /></div>
           </details>
         )}
-        {message.inputOccupied && <InputOccupiedNote />}
+        {message.inputOccupied && <InputOccupiedNote choice={message.inputChoice} />}
         {message.withdrawn && <WithdrawnNote unconfirmed={message.unconfirmed} seq={message.seq} onSendAgain={onSendAgain} />}
         {message.replaced && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-replaced">

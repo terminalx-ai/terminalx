@@ -215,13 +215,16 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
             return Ok(Value::Null);
         }
         "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
+        // Bots (PRO-466): the runtime owns `bots.json` and the homes, and announces each change.
+        "bots" => return crate::bots::call(manager.sink().as_ref(), string(&params, "operation")?, &params["params"]),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),
         "automationIssues" => return Ok(serde_json::to_value(crate::automations::issue_states()?)?),
         "automationSave" => return Ok(serde_json::to_value(crate::automations::save_definition(&manager.automation_host(), params["id"].as_str(), serde_json::from_value(params["input"].clone())?)?)?),
         "automationDelete" => { crate::automations::remove_definition(&manager.automation_host(), string(&params, "id")?)?; return Ok(Value::Null); }
-        "automationRun" => return Ok(serde_json::to_value(crate::automations::dispatch(&manager.automation_host(), string(&params, "id")?, crate::automations::AutomationTrigger::Manual, None)?)?),
+        "automationPrecheckTry" => return Ok(serde_json::to_value(crate::automations::precheck::try_precheck(serde_json::from_value(params["input"].clone())?)?)?),
+        "automationRun" => return Ok(serde_json::to_value(crate::automations::precheck::run_now(&manager.automation_host(), string(&params, "id")?)?)?),
         "paneAgents" => return Ok(serde_json::to_value(manager.pane_agents())?),
         "addTab" => return Ok(serde_json::to_value(manager.add_tab_on(string(&params, "sessionId")?, &serde_json::from_value(params["tab"].clone())?, params["account"].as_str())?)?),
         "resourceOverview" => return Ok(serde_json::to_value(manager.resource_overview())?),
@@ -274,6 +277,14 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "cancelQueued" => serde_json::to_value(manager.cancel_queued(session, tab, string(&params, "messageId")?)?)?,
         "permission" => { manager.respond_permission(session, tab, string(&params, "requestId")?, string(&params, "optionId")?)?; Value::Null }
         "questions" => { manager.answer_questions(session, tab, string(&params, "requestId")?, serde_json::from_value(params["answers"].clone())?)?; Value::Null }
+        "terminalPrompt" => {
+            let choice = match &params["choice"] {
+                Value::Null => None,
+                choice => Some(choice.as_u64().context("choice must be an option's index")? as usize),
+            };
+            manager.answer_terminal_prompt(session, tab, string(&params, "promptId")?, choice)?;
+            Value::Null
+        }
         "model" => { manager.set_model(session, tab, string(&params, "model")?)?; Value::Null }
         "mode" => { manager.set_permission_mode(session, tab, string(&params, "mode")?)?; Value::Null }
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }

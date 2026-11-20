@@ -315,10 +315,13 @@ export function MachineBranchButton({ branch, workspace }: { branch: MachineBran
             result = await source.push(now.branch, now.head);
             break;
           case "createPr": {
-            // The machine opens a pull request only for a pushed head: publish first, as a local Create PR does.
-            if (now.state === "ahead") await source.push(now.branch, now.head);
-            if (!alive.current || activeSource.current !== source) return;
-            result = await source.createPr({ title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id, branch: now.branch });
+            const input = { title: text.message.trim(), body: text.body, base: now.base, draft: false, sessionId: session.id, branch: now.branch };
+            if (now.state === "ahead") {
+              if (!source.createPrWithPush || !now.head) throw new Error("Verified PR publishing is unavailable for this checkout.");
+              result = await source.createPrWithPush(input, now.head);
+            } else {
+              result = await source.createPr(input);
+            }
             break;
           }
           case "pull":

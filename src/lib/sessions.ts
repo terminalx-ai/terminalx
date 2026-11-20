@@ -38,7 +38,7 @@ interface State {
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
-  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "stats" | "project";
+  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project" | "bots";
   /** The issues browser opens its new-issue form when it next shows; it sets this back. */
   newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
@@ -411,9 +411,9 @@ export function openAgents() {
   set({ selectedSessionId: null, view: "agents", selectedAutomationId: null });
 }
 
-/** Local app activity and transcript-backed token analytics. */
-export function openStats() {
-  set({ selectedSessionId: null, view: "stats", selectedAutomationId: null });
+/** The Bots page (PRO-467), shown only while Settings → Experimental → Bots is on. */
+export function openBots() {
+  set({ selectedSessionId: null, view: "bots", selectedAutomationId: null });
 }
 
 /** Saved agent runs share the full workspace with issues and the dashboard. */

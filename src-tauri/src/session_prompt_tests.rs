@@ -2580,7 +2580,7 @@ impl Rig {
                 Payload::PromptChanged { prompt_seq, text: received } => Some(format!("changed: {} -> {received}", text(*prompt_seq))),
                 Payload::PromptAbsorbed { prompt_seq } => Some(format!("taken: {}", text(*prompt_seq))),
                 Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
-                Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
+                Payload::InputOccupied { prompt_seq, occupied, .. } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
                 Payload::PromptJoined { prompt_seq, into_seq } => Some(format!("joined: {} -> {}", text(*prompt_seq), text(*into_seq))),
                 Payload::PromptWithdrawn { prompt_seq, .. } => Some(format!("withdrawn: {}", text(*prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
@@ -2692,6 +2692,68 @@ sleep 600
             format!("typed: {LATER}"),
         ]
     );
+}
+
+/// PRO-462, against a real pane drawing what Codex 0.169.0 drew: resumed in
+/// a folder other than the one its session last recorded, it asks at
+/// start-up which working directory to use, a list of choices drawn where
+/// its input box goes. The message that resumed the tab is not typed into
+/// that question, where its Enter would pick the selected option, and the
+/// chat says the agent is asking something rather than that its box has text
+/// in it. Once the question is answered in the terminal, the message goes in
+/// without anything more from the reader.
+#[cfg(unix)]
+#[test]
+fn a_message_held_up_by_codexs_own_question_says_so_and_goes_in_once_it_is_answered() {
+    let rig = Rig::of(CliKind::Codex, "");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/codex/fixtures");
+    let answered = rig._dir.path().join("answered");
+    rig.run_in_pane_sized(
+        &format!(
+            r#"stty raw -echo
+printf '\033]0;CLI-IS-UP\007'
+cat '{question}'
+printf '\033]0;ASKED\007'
+stty min 0 time 1
+while :; do
+  early=$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')
+  if [ -n "$early" ]; then printf '\033]0;TYPED-INTO-QUESTION\007'; sleep 600; fi
+  if [ -e '{answered}' ]; then break; fi
+done
+printf '\033[2J\033[H'
+cat '{idle}'
+printf '\033]0;ANSWERED\007'
+stty min 1 time 0
+got=''
+while :; do
+  got="$got$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')"
+  case "$got" in *'[201~'*'\r'*) break ;; esac
+done
+printf '\033]0;PROMPT-SUBMITTED\007'
+sleep 600
+"#,
+            question = fixtures.join("resume_cwd_question.bin").display(),
+            idle = fixtures.join("composer_idle.bin").display(),
+            answered = answered.display(),
+        ),
+        300,
+        40,
+    );
+    rig.pane_says(&["ASKED"]);
+    assert!(!rig.compose("hello", 0), "sent while idle");
+    let seq = rig.type_composed("hello");
+    rig.chat_says("waiting: hello");
+    let choices = |events: Vec<AgentEvent>| events.into_iter().filter_map(|e| match e.payload {
+        Payload::InputOccupied { prompt_seq, occupied: true, choice } if prompt_seq == seq => Some(choice),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(choices(rig.events()), [true], "said to wait on a question, not on text in the box");
+    assert!(!rig.pane_has_said("TYPED-INTO-QUESTION"), "nothing is typed into the question");
+
+    std::fs::write(&answered, b"").unwrap();
+    assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "TYPED-INTO-QUESTION"]), "PROMPT-SUBMITTED", "the message goes in once the question is answered");
+    rig.typed();
+    rig.chat_says("typed: hello");
 }
 
 /// Test 2 of #722: a transcript with two prompts that follow the same
@@ -2934,14 +2996,14 @@ fn a_wait_on_the_input_box_nobody_is_waiting_on_is_ended_on_load() {
     {
         let mut rt = rig.rt.lock().unwrap();
         for prompt_seq in &seqs {
-            rig.manager.publish(&mut rt, Payload::InputOccupied { prompt_seq: *prompt_seq, occupied: true }, None);
+            rig.manager.publish(&mut rt, Payload::InputOccupied { prompt_seq: *prompt_seq, occupied: true, choice: false }, None);
         }
         // The second is still waiting, as far as the runtime knows.
         if let Engine::Cli(p) = &mut rt.engine {
             p.input.marks.push(seqs[1]);
         }
     }
-    let ended = |events: &[AgentEvent]| events.iter().filter_map(|e| match e.payload { Payload::InputOccupied { prompt_seq, occupied: false } => Some(prompt_seq), _ => None }).collect::<Vec<_>>();
+    let ended = |events: &[AgentEvent]| events.iter().filter_map(|e| match e.payload { Payload::InputOccupied { prompt_seq, occupied: false, .. } => Some(prompt_seq), _ => None }).collect::<Vec<_>>();
     let loaded = rig.manager.load_events(SESSION, TAB).unwrap();
     assert_eq!(ended(&loaded), [seqs[0]]);
     assert_eq!(ended(&rig.events()), [seqs[0]], "the end is in the log, for a reload");

@@ -8,7 +8,8 @@ import { minutesSeconds, useSecondsLeft } from "@/components/pairing/pairingText
 import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
-import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { MachineHostError } from "./MachineHostError";
+import { clearMachineHostError, openMachineHost, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineVersion } from "@/lib/machineUpdate";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -70,9 +71,11 @@ function MachinesSettingsContent({ showIntroduction }: { showIntroduction: boole
 function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string) => void; showIntroduction: boolean }) {
   const host = useMachineHost();
   useEffect(() => {
-    void bootMachineHost();
+    void openMachineHost();
   }, []);
   const view = host.view;
+  // A command's failure, or a restart a pairing grant could not make by itself (PRO-486).
+  const hostError = host.error ?? view?.restartRequired ?? null;
   const allow = view?.allowOperating ?? false;
 
   return (
@@ -90,7 +93,16 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
             />
           }
         />
-        {host.error && <p role="alert" className="pb-2 text-[12.5px] text-destructive">{host.error}</p>}
+        {hostError && (
+          <MachineHostError
+            className="pb-2"
+            error={hostError}
+            onRestarted={() => {
+              clearMachineHostError();
+              void refreshMachineHost();
+            }}
+          />
+        )}
         {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
         {view?.status?.error && <p role="alert" className="pb-2 text-[12.5px] text-destructive">{view.status.error}</p>}
       </div>
@@ -272,7 +284,7 @@ function PairingCode() {
       {paused && (
         <p role="status" className="text-[12.5px] text-warning">Pairing is paused after too many wrong codes. Try again in {minutesSeconds(pausedLeft)}.</p>
       )}
-      {error && <p role="alert" className="text-[12.5px] text-destructive">{error}</p>}
+      {error && <MachineHostError error={error} onRestarted={() => void create()} />}
     </div>
   );
 }

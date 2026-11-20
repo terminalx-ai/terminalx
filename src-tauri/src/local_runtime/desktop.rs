@@ -287,9 +287,28 @@ impl Desktop {
         }
     }
 
-    /// A machine host command that names this attachment.
+    /// A machine host command that names this attachment. One only a person
+    /// may send, refused because this runtime cannot verify the window, is
+    /// sent again to a fresh runtime the window launches (PRO-486,
+    /// `window_consent`).
     #[cfg(feature = "desktop")]
-    pub(crate) fn machine_host(&self, command: &str, mut params: serde_json::Value) -> Result<serde_json::Value> {
+    pub(crate) fn machine_host(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let relaunch = super::window_consent::installed().map(|relaunch| relaunch.as_ref() as super::window_consent::Relaunching<'_, Self>);
+        super::window_consent::guarded(self, command, params, |runtime, params| runtime.machine_host_once(command, params), relaunch)
+    }
+
+    /// [`Self::machine_host`] with no one at the window to ask, as for an
+    /// account pairing grant: a runtime that cannot verify the window is not
+    /// restarted for it, and Settings → Machines offers the restart instead
+    /// (PRO-486, `window_consent::unattended`).
+    #[cfg(feature = "desktop")]
+    pub(crate) fn machine_host_unattended(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let repairable = super::window_consent::installed().is_some();
+        super::window_consent::unattended(self, command, params, |runtime, params| runtime.machine_host_once(command, params), repairable, super::window_consent::in_use)
+    }
+
+    #[cfg(feature = "desktop")]
+    fn machine_host_once(&self, command: &str, mut params: serde_json::Value) -> Result<serde_json::Value> {
         let attachment = self.attachment()?;
         let object = params.as_object_mut().ok_or_else(|| anyhow::anyhow!("Machine host parameters must be an object."))?;
         object.insert("epoch".into(), attachment.epoch.into());

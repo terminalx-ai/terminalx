@@ -491,3 +491,25 @@ describe("times the transcript keeps for its rows", () => {
     expect(call?.kind === "tool" ? [call.call.startedTs, call.call.endedTs] : null).toEqual(["2026-11-16T10:00:10Z", "2026-11-16T10:00:11.5Z"]);
   });
 });
+
+describe("a question the agent's CLI drew in its own terminal (PRO-460)", () => {
+  const event = (seq: number, payload: Payload, extra: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: `prompt-${seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-11-20T10:00:00Z", payload, ...extra,
+  });
+  const offer = { id: "abc", title: "We recommend compacting earlier", options: [{ label: "Autocompact at ‹ 400k › tokens" }, { label: "Keep auto (1m tokens)" }], selected: 0 };
+
+  it("is the last one told, until it is gone or the terminal holds another conversation", () => {
+    expect(buildTranscript([event(1, { type: "terminal_prompt", prompt: offer })], false).terminalPrompt).toEqual(offer);
+    expect(buildTranscript([event(1, { type: "terminal_prompt", prompt: offer }), event(2, { type: "terminal_prompt", prompt: null })], false).terminalPrompt).toBeUndefined();
+    expect(buildTranscript([event(1, { type: "terminal_prompt", prompt: offer }), event(2, { type: "conversation", harness: "codex", resumed: false })], false).terminalPrompt).toBeUndefined();
+    // A subagent has no terminal of its own.
+    expect(buildTranscript([event(1, { type: "terminal_prompt", prompt: offer }, { subagent: { id: "child" } })], false).terminalPrompt).toBeUndefined();
+  });
+
+  it("does not end what follows a compaction", () => {
+    const summary = event(3, { type: "user_message", text: "This session is being continued from a previous conversation that ran out of context. Summary.", queued: false });
+    const compacted = event(1, { type: "context_compacted" });
+    const asked = buildTranscript([compacted, event(2, { type: "terminal_prompt", prompt: offer }), summary], false);
+    expect(asked.turns).toEqual(buildTranscript([compacted, summary], false).turns);
+  });
+});

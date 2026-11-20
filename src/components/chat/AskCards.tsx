@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ShieldAlert, MessageCircleQuestion } from "@/icons";
+import { Check, ShieldAlert, MessageCircleQuestion, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
@@ -9,6 +9,7 @@ import { usePromptTextProps } from "@/lib/autocorrect";
 import { askAgentNote, questionAnswers, questionsLabel, toggleQuestionChoice, type PendingAsk, type QuestionChoices } from "@/lib/transcript";
 import { approvalFiles, rawPatch } from "@/lib/approvalDiff";
 import { ApprovalDiff, Counts } from "./ApprovalDiff";
+import type { ScreenPrompt } from "@/types/events";
 import { LinkedText } from "./LinkedText";
 
 /**
@@ -375,6 +376,115 @@ export function QuestionCard({
               </div>
             );
           })}
+        </div>
+      </AskShell>
+    </form>
+  );
+}
+
+/**
+ * A question the agent's CLI drew in its own terminal and is stopped on
+ * (PRO-460), such as Claude Code's "We recommend compacting earlier": no hook
+ * reports it, so the app read it off the screen. Its options are answered
+ * with the keys the CLI's hint names; one that could not be read only sends
+ * the reader to the terminal.
+ */
+export function TerminalPromptCard({
+  prompt,
+  agent,
+  onAnswer,
+  onOpenTerminal,
+  busy,
+  blockedReason = null,
+  aside,
+}: {
+  prompt: ScreenPrompt;
+  /** The agent's name, as the header calls it. */
+  agent: string;
+  /** Answer with an option's index, or null for what Escape does. Absent where the chat cannot type into the terminal. */
+  onAnswer?: (choice: number | null) => void;
+  onOpenTerminal?: () => void;
+  busy?: boolean;
+  blockedReason?: string | null;
+  aside?: ReactNode;
+}) {
+  const readable = prompt.options.length > 0;
+  const [chosen, setChosen] = useState<number>(prompt.selected ?? 0);
+  // A new question, or the pointer moved in the terminal: start from where the CLI is.
+  useEffect(() => setChosen(prompt.selected ?? 0), [prompt.id, prompt.selected]);
+  const blocked = !!blockedReason;
+  const answering = !!onAnswer && readable;
+  const open = onOpenTerminal && (
+    <Button size="sm" variant={readable ? "ghost" : "accent"} type="button" disabled={busy} onClick={onOpenTerminal} className={cn(readable && "text-muted-foreground")}>
+      Open terminal
+    </Button>
+  );
+  const actions = (
+    <>
+      {open}
+      {answering && prompt.dismiss && (
+        <Button size="sm" variant="ghost" type="button" disabled={busy || blocked} title={blockedReason ?? "Escape, in the terminal"} onClick={() => onAnswer(null)} className="text-muted-foreground">
+          {prompt.dismiss}
+        </Button>
+      )}
+      {answering && (
+        <Button size="sm" variant={blocked ? "outline" : "accent"} type="submit" disabled={busy || blocked} title={blockedReason ?? undefined} className={cn(blocked && "text-muted-foreground")}>
+          Choose {!blocked && <EnterKey />}
+        </Button>
+      )}
+    </>
+  );
+  const heading = readable ? prompt.title ?? `${agent} is asking in its terminal` : `${agent} is waiting on a decision in its terminal`;
+  return (
+    <form
+      data-testid="terminal-prompt"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (answering && !busy && !blocked) onAnswer(chosen);
+      }}
+    >
+      <AskShell icon={<SquareTerminal className="size-3.5" />} label="In the terminal" tone="info" aside={aside} note={answering && blocked ? blockedReason : null} actions={actions} heading={<span>{heading}</span>}>
+        <div className="space-y-3 px-4 py-3">
+          {!readable && (
+            <p className="text-[13px] leading-relaxed text-muted-foreground">
+              It stopped on a prompt of its own that TerminalX cannot show here. Open the terminal view to read it and answer there.
+            </p>
+          )}
+          {prompt.text?.split("\n\n").map((paragraph, i) => (
+            <p key={i} className="text-[13px] leading-relaxed text-muted-foreground"><LinkedText text={paragraph} /></p>
+          ))}
+          {readable && (
+            <div className="flex flex-col gap-1.5" role="radiogroup" aria-label={prompt.title ?? "Options"}>
+              {prompt.options.map((option, i) => {
+                const on = chosen === i;
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    disabled={!answering}
+                    onClick={() => setChosen(i)}
+                    className={cn(
+                      "group flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                      answering ? "cursor-pointer" : "cursor-default",
+                      on ? "border-accent/50 bg-accent/[0.07]" : "border-hairline enabled:hover:border-hairline-strong enabled:hover:bg-veil-card",
+                    )}
+                  >
+                    <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", on ? "border-accent bg-accent" : "border-muted-foreground/50")}>
+                      {on && <span className="size-1.5 rounded-full bg-accent-foreground" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-[13px] font-medium leading-5 text-foreground">{option.label}</span>
+                      {option.description && <span className="mt-0.5 block text-[12px] leading-relaxed text-muted-foreground">{option.description}</span>}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {readable && !onAnswer && <p className="text-[12px] text-muted-foreground">Answer it in the terminal view.</p>}
+          {readable && prompt.hint && <p className="text-[11.5px] text-faint" data-testid="terminal-prompt-hint">In the terminal: {prompt.hint}</p>}
         </div>
       </AskShell>
     </form>

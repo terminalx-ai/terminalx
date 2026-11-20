@@ -2954,7 +2954,10 @@ pub fn search_prs(cwd: &Path, query: &str) -> Result<Vec<PullRequest>> {
     search_prs_with(cwd, query, run)
 }
 
-fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+/// `search_prs` with the `gh` runner given: a workspace runtime runs its own
+/// (`remote::git`), so the composer's `#` list names the workspace's pull
+/// requests (#1329).
+pub(crate) fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
     // The fork a head is on, for the row that says where it comes from.
     let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
     let fields = fields.as_str();
@@ -3069,10 +3072,18 @@ pub fn attach_pr(cwd: &Path, number: u64) -> Result<String> {
     attach_pr_with(cwd, number, run)
 }
 
-fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+/// The context file a `#` mention attaches: the pull request's title,
+/// description and changed files, as Markdown. A workspace runtime reads it
+/// with its own `gh` (#1329); this computer's is in [`attach_pr`].
+pub(crate) fn pr_context_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     if number == 0 { bail!("Invalid pull request number"); }
     let fields = format!("{FIELDS},files,changedFiles");
     let value = serde_json::from_str(&run(cwd, &["pr", "view", &number.to_string(), "--json", &fields])?)?;
+    Ok(pr_markdown(&value))
+}
+
+fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+    let text = pr_context_with(cwd, number, run)?;
     let dir = crate::store::root()?.join("pr-attachments");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("pr-{number}-{}.md", uuid::Uuid::now_v7()));
@@ -3083,7 +3094,7 @@ fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> R
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(&path)?.write_all(pr_markdown(&value).as_bytes())?;
+    options.open(&path)?.write_all(text.as_bytes())?;
     Ok(path.to_string_lossy().into_owned())
 }
 

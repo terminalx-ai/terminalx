@@ -36,7 +36,7 @@ import { openStartupDiagnostics } from "@/lib/startupDiagnostics";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { CopyAgentConfigsRow } from "./AgentConfigsDialog";
 
-export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
+export function GeneralTab() {
   const prefs = usePrefs();
   // PRO-377: the layout, sidebar and status bar rows live here; Appearance keeps the design's rows (09.08).
   const order = useSidebarOrder();
@@ -172,15 +172,6 @@ export function GeneralTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
           />
         }
       />
-      {onOpenUsage && (
-        <RegisteredSetting setting="general.openUsage"
-          control={
-            <Button size="sm" variant="outline" onClick={onOpenUsage}>
-              Open usage <ExternalLink />
-            </Button>
-          }
-        />
-      )}
       <RegisteredSetting setting="general.statusBar"
         control={<Switch checked={status.settings.visible} onCheckedChange={(visible) => void setStatusSettings({ visible })} />}
       />

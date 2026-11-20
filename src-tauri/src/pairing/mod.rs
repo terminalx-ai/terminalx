@@ -697,12 +697,8 @@ impl PairingManager {
     #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
         self.secrets.window_consent_key(create)
-            .map_err(|_| {
-                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
-            })?
-            .ok_or_else(|| {
-                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
-            })
+            .map_err(|_| anyhow!(crate::serve_cli::consent::KEYCHAIN_DENIED))?
+            .ok_or_else(|| anyhow::Error::new(crate::serve_cli::consent::WindowKeyMissing))
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {

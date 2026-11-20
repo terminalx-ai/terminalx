@@ -52,12 +52,6 @@ impl Launch {
         ensure!(!self.stamp.unavailable, "Environment overrides are unavailable. Open TerminalX Settings → Environment, restore Keychain access, then retry.");
         Ok(())
     }
-
-    pub fn inject(&self, command: &mut portable_pty::CommandBuilder) {
-        for (name, value) in &self.values {
-            command.env(name, value);
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -606,6 +600,12 @@ pub fn launch(cwd: &str) -> Result<Launch> {
 #[cfg(test)]
 thread_local! {
     static TEST_LAUNCH: std::cell::RefCell<Option<Launch>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The next `launch` on this thread resolves to `values` (tests only).
+#[cfg(test)]
+pub(crate) fn set_test_launch(values: BTreeMap<String, String>) {
+    TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch { values, stamp: Stamp::default() }));
 }
 
 #[cfg(test)]

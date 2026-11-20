@@ -3,16 +3,14 @@ import { cn } from "@/lib/cn";
 
 export const CLOUD_COMPUTE_TABS = [
   { id: "providers", label: "Providers" },
-  { id: "environment", label: "Environment" },
   { id: "limits", label: "Limits" },
-  { id: "agentLogins", label: "Agent logins" },
 ] as const;
 export type CloudComputeTab = (typeof CLOUD_COMPUTE_TABS)[number]["id"];
 
 /**
- * Cloud compute on an organization's page (PRO-391): its providers,
- * environment builds, limits and agent logins as tabs of one section, as
- * the design draws them, instead of separate sections down the page.
+ * An organization's Cloud compute page (PRO-391): its providers and limits
+ * as tabs of one section, as the design draws them. Its environment and
+ * agent logins have pages of their own in the Settings menu (PRO-464).
  *
  * Every tab stays mounted while hidden, so an unsaved template or limit
  * survives a switch. A settings link or search result opens the tab that
@@ -58,10 +56,8 @@ export function OrganizationCloudCompute({ organizationName, panels, initialTab 
 
   return (
     <section ref={root} className="flex flex-col gap-4" aria-label="Cloud compute" data-testid="organization-cloud-compute">
-      <div>
-        <h3 className="text-base font-semibold">Cloud compute</h3>
-        <p className="mt-0.5 text-xs text-muted-foreground">Where {organizationName}'s cloud workspaces run, the environment every one of them starts from, and how many can run.</p>
-      </div>
+      {/* The page is titled Cloud compute; this says what it holds. */}
+      <p className="text-xs text-muted-foreground">Where {organizationName}'s cloud workspaces run, and how many can run.</p>
       <div
         role="tablist"
         aria-label="Cloud compute"

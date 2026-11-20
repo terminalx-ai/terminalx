@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-type View = "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "stats" | "project";
+type View = "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project" | "bots";
 interface FakeSession { id: string; projectPath: string; kind?: string; archived: boolean }
 
 // The session store as the last view reads it, with its subscribers, and the ways to navigate it.
@@ -38,7 +38,7 @@ vi.mock("@/lib/sessions", () => ({
   openAgents: vi.fn(() => app.page("agents")()),
   openAutomations: vi.fn(() => app.page("automations")()),
   openSkills: vi.fn(() => app.page("skills")()),
-  openStats: vi.fn(() => app.page("stats")()),
+  openBots: vi.fn(() => app.page("bots")()),
 }));
 vi.mock("@/lib/sessionTabs", () => ({ activatePeer: vi.fn() }));
 
@@ -93,6 +93,8 @@ describe("reopening the last view on launch (PRO-130)", () => {
   it("reopens the page that was on screen", () => {
     expect(restoreLastView({ sessionId: null, view: "issues", projectPath: null, panelTabs: {} })).toEqual({ view: "issues" });
     expect(sessions.openIssues).toHaveBeenCalled();
+    expect(restoreLastView({ sessionId: null, view: "bots", projectPath: null, panelTabs: {} })).toEqual({ view: "bots" });
+    expect(sessions.openBots).toHaveBeenCalled();
     expect(restoreLastView({ sessionId: null, view: "project", projectPath: "/code/api", panelTabs: {} })).toEqual({ view: "project", projectPath: "/code/api" });
     expect(restoreLastView({ sessionId: null, view: "project", projectPath: "/code/removed", panelTabs: {} })).toBeNull();
     expect(restoreLastView({ sessionId: null, view: "welcome", projectPath: null, panelTabs: {} })).toBeNull();
@@ -117,8 +119,15 @@ describe("keeping the last view", () => {
     expect(saved()).toMatchObject({ sessionId: "s2", view: "welcome", projectPath: "/code/api" });
     app.overview("/code/web");
     expect(saved()).toMatchObject({ sessionId: null, view: "project", projectPath: "/code/web" });
-    app.page("stats")();
-    expect(saved()).toMatchObject({ sessionId: null, view: "stats", projectPath: null });
+    app.page("skills")();
+    expect(saved()).toMatchObject({ sessionId: null, view: "skills", projectPath: null });
+  });
+
+  it("reopens on Home when the app last closed on the Stats view, now a page of Settings (PRO-463)", () => {
+    save({ sessionId: null, view: "stats", projectPath: null });
+    expect(readLastView().view).toBe("home");
+    expect(restoreLastView()).toEqual({ view: "home" });
+    expect(sessions.openHome).toHaveBeenCalled();
   });
 
   it("keeps the session behind a new-session draft, a cloud session or a cloud workspace", async () => {

@@ -6,6 +6,7 @@ import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSea
 
 const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on, localVmTasks: false });
 const localVmTasks = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: on });
+const bots = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, opencode: false, bots: on });
 const openCode = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, opencode: on });
 
 beforeEach(() => orchestratorRuns(false));
@@ -25,7 +26,6 @@ describe("settings row search", () => {
     ["reorder", "general.customOrder"],
     ["tab bar", "general.tabBar"],
     ["sessions on a branch", "general.branchSessions"],
-    ["usage", "general.openUsage"],
     ["status bar", "general.statusBar"],
     ["usage", "general.usage"],
     ["resources", "general.resources"],
@@ -34,6 +34,21 @@ describe("settings row search", () => {
   ])("still finds %s in General after removing the old section alias (%s)", (query, id) => {
     expect(searchSettings(query)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id, section: "general", sectionTitle: "General" }),
+    ]));
+  });
+
+  // PRO-463: Stats & usage is a page of Settings, found by its name and by each of its sections.
+  it.each([
+    ["stats", "stats.activity"],
+    ["agents spawned", "stats.activity"],
+    ["prs created", "stats.activity"],
+    ["usage limits", "stats.accountLimits"],
+    ["usage analytics", "stats.analytics"],
+    ["token mix", "stats.analytics"],
+    ["daily intensity", "stats.analytics"],
+  ])("finds %s on Stats & usage (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "stats", sectionTitle: "Stats & usage" }),
     ]));
   });
 
@@ -156,12 +171,17 @@ describe("settings row search", () => {
 
   it("offers every row behind a switch only while that switch is on, and every other row always", () => {
     const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
-    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator"]);
+    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.bots"]);
     expect(behind.every((row) => !settingOffered(row))).toBe(true);
     orchestratorRuns(true);
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["repositories.orchestrator"]);
     openCode(true);
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["agents.opencodeProviders"]);
+    bots(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.bots"]);
+    expect(searchSettings("bots").map((match) => match.id)).toContain("shortcuts.app.bots");
+    bots(false);
+    expect(searchSettings("bots").map((match) => match.id)).not.toContain("shortcuts.app.bots");
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
     expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);

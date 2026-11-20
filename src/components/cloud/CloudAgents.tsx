@@ -488,7 +488,7 @@ export function commandError(e: unknown): string {
   return `Could not queue the command (${code}).`;
 }
 
-const KIND_TEXT: Record<string, string> = { stop: "Stop", "permission-decision": "Decision" };
+const KIND_TEXT: Record<string, string> = { stop: "Stop", "permission-decision": "Decision", "follow-up": "Held message" };
 
 /**
  * Commands other than messages on their way, and the ones whose fate needs
@@ -505,8 +505,10 @@ export function CloudOutbox({
   onSendAgain: (entry: OutboxEntry) => void;
 }) {
   // Settled commands the transcript already shows are not repeated here.
+  // A change to a held message that went to the agent first has nothing left to say: the message is in the chat (#1328).
   const shown = entries.filter(
-    (entry) => !isMessageCommand(entry) && (!TERMINAL_OUTBOX_STATES.has(entry.state) || entry.state === "rejected" || entry.state === "outcome-unknown"),
+    (entry) => !isMessageCommand(entry) && !(entry.kind === "follow-up" && entry.category === "follow-up-gone")
+      && (!TERMINAL_OUTBOX_STATES.has(entry.state) || entry.state === "rejected" || entry.state === "outcome-unknown"),
   );
   if (!shown.length) return null;
   return (
@@ -522,7 +524,7 @@ export function CloudOutbox({
         >
           <span className="shrink-0 text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
           <span className="min-w-0 flex-1 break-words">{outboxStateText(entry, nameOf)}</span>
-          {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
+          {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && entry.kind !== "follow-up" && (
             <Button size="xs" variant="outline" className="shrink-0 self-center" onClick={() => onSendAgain(entry)}>
               Send again
             </Button>

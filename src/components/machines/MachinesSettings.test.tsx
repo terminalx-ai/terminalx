@@ -208,6 +208,122 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(screen.getByRole("button", { name: "Create a new code" })).toBeTruthy();
   });
 
+  it("offers Restart runtime when the runtime running cannot verify this window, then makes the code (PRO-486)", async () => {
+    const EPOCH = "6f1c2f6e-8d0a-4c55-9a43-0c3f1d2b7e11";
+    const unverified = `runtime_restart_required:${EPOCH}: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops what it runs: Claude in api. Each agent picks up its conversation again when its tab next starts.`;
+    let restarted = false;
+    view = { ...view, allowOperating: true };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "machines_create_code" && !restarted) throw unverified;
+      if (command === "local_runtime_restart_for_window") {
+        restarted = true;
+        return null;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create pairing code" }));
+    const alert = await screen.findByText(/was not started by this window/);
+    expect(alert.textContent).not.toContain("runtime_restart_required");
+    expect(alert.textContent).not.toContain(EPOCH);
+    expect(alert.textContent).toContain("Restarting stops what it runs: Claude in api. Each agent picks up its conversation again when its tab next starts.");
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH }));
+    // Once the fresh runtime is attached, the code is made again by itself.
+    expect((await screen.findByTestId("machine-pairing-code")).textContent).toContain(CODE.code);
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "machines_create_code")).toHaveLength(2);
+  });
+
+  it("offers the restart a pairing grant could not make by itself, and reads the host again after it (PRO-486)", async () => {
+    const EPOCH = "0b5f8a2e-4c1d-4e7a-9f3b-2d6c8e1a7b90";
+    const offered = `runtime_restart_required:${EPOCH}: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops what it runs: the connection of MacBook. Each agent picks up its conversation again when its tab next starts.`;
+    view = { ...view, allowOperating: true, restartRequired: offered };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "local_runtime_restart_for_window") {
+        view = { ...view, restartRequired: null };
+        return null;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    const alert = await screen.findByText(/was not started by this window/);
+    expect(alert.textContent).toContain("the connection of MacBook");
+    expect(alert.textContent).not.toContain(EPOCH);
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
+  const grantOffer = (epoch: string, stops: string) =>
+    `runtime_restart_required:${epoch}: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops what it runs: ${stops}. Each agent picks up its conversation again when its tab next starts.`;
+
+  it("shows a restart offered while Machines was closed when it opens again (PRO-486 follow-up)", async () => {
+    view = { ...view, allowOperating: true, restartRequired: null };
+    const first = render(<MachinesSettings />);
+    await screen.findByTestId("machines-settings");
+    await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "machines_host_status")).toBe(true));
+    first.unmount();
+    // An account grant, with no window looking: the offer is made in the backend only.
+    view = { ...view, restartRequired: grantOffer("3d2e1f00-aaaa-4bbb-8ccc-000000000001", "the connection of MacBook") };
+    render(<MachinesSettings />);
+    expect((await screen.findByText(/was not started by this window/)).textContent).toContain("the connection of MacBook");
+    expect(screen.getByRole("button", { name: "Restart runtime" })).toBeTruthy();
+  });
+
+  it("shows a restart offered while Machines is open, as the backend announces it", async () => {
+    view = { ...view, allowOperating: true, restartRequired: null };
+    render(<MachinesSettings />);
+    await screen.findByTestId("machines-settings");
+    await waitFor(() => expect(mocks.listeners.has("machines_host_changed")).toBe(true));
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+    act(() => mocks.listeners.get("machines_host_changed")!({ payload: { ...view, restartRequired: grantOffer("3d2e1f00-aaaa-4bbb-8ccc-000000000002", "Claude in api") } }));
+    expect(await screen.findByRole("button", { name: "Restart runtime" })).toBeTruthy();
+    // Withdrawn, as after a fresh runtime attached: it goes.
+    act(() => mocks.listeners.get("machines_host_changed")!({ payload: { ...view, restartRequired: null } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
+  it("asks again when Restart runtime would now stop more than was shown", async () => {
+    const EPOCH = "3d2e1f00-aaaa-4bbb-8ccc-000000000003";
+    view = { ...view, allowOperating: true, restartRequired: grantOffer(EPOCH, "Claude in api") };
+    let asked = 0;
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "local_runtime_restart_for_window") {
+        asked += 1;
+        if (asked === 1) throw grantOffer(EPOCH, "Claude in api; a terminal in web");
+        view = { ...view, restartRequired: null };
+        return null;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    await screen.findByText(/Restarting stops what it runs: Claude in api\./);
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    expect((await screen.findByText(/a terminal in web/)).textContent).toContain("Restarting stops what it runs: Claude in api; a terminal in web.");
+    expect(screen.queryByText(/runtime_restart_required/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(asked).toBe(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
+  it("shows any other pairing-code failure as it is, with no restart offered", async () => {
+    const denied = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
+    view = { ...view, allowOperating: true };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "machines_create_code") throw denied;
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create pairing code" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(denied);
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+  });
+
   it("says pairing is paused and does not offer a code then", async () => {
     view = hostView({}, { pausedUntil: Date.now() + 42_000 });
     render(<MachinesSettings />);

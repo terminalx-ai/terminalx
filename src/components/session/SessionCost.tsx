@@ -6,7 +6,8 @@ import { agentName } from "@/components/AgentMark";
 import { checkAgentReadiness } from "@/lib/agentReadiness";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { modelLabel } from "@/lib/models";
-import { openStats, upsertSession } from "@/lib/sessions";
+import { upsertSession } from "@/lib/sessions";
+import { openStatsSettings } from "@/lib/settingsLinks";
 import { useStatus } from "@/lib/status";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
@@ -194,7 +195,7 @@ function UsagePopover({ session, models, total, onClose, machine }: { session: S
         {machine && <span className="shrink-0 truncate text-[11px] text-faint" data-testid="session-usage-where">on {machine.name}</span>}
       </button>
       {/* Stats counts this computer's sessions; a machine's are counted on the machine. */}
-      {!machine && <button type="button" className="ml-auto flex shrink-0 items-center gap-1.5 hover:text-foreground" onClick={() => { onClose(); openStats(); }}>
+      {!machine && <button type="button" className="ml-auto flex shrink-0 items-center gap-1.5 hover:text-foreground" onClick={() => { onClose(); openStatsSettings(); }}>
         <BarChart3 className="size-[13px]" />Open Stats
       </button>}
     </div>

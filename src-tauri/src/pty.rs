@@ -1015,6 +1015,35 @@ struct PaneProgram<'a> {
     started: &'a dyn Fn(),
 }
 
+/// What a session's processes must not inherit from the app. Raccoon itself
+/// may have been started from inside an agent's session (a `tauri dev` an
+/// agent ran): those stamps would tell a CLI spawned here that it is a nested
+/// child, and a nested child stops writing the transcript the chat view is
+/// projected from. And a new pane must never inherit another workspace's
+/// port; workspace assignments come after.
+pub(crate) const UNINHERITED_ENV: [&str; 6] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "TERMINALX_PORT",
+    "TERMINALX_PORTS",
+];
+
+/// What a session pane's process gets on top of the app's environment: the
+/// environment overrides, then the login-shell `PATH` (which wins over an
+/// override), less [`UNINHERITED_ENV`]. Panes and an automation's first
+/// check (PRO-484) both start from this.
+pub(crate) fn session_environment(overrides: &std::collections::BTreeMap<String, String>) -> (Vec<(String, String)>, &'static [&'static str]) {
+    let mut set: Vec<(String, String)> = overrides
+        .iter()
+        .filter(|(name, _)| name.as_str() != "PATH" && !UNINHERITED_ENV.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    set.push(("PATH".into(), crate::binpath::login_path()));
+    (set, &UNINHERITED_ENV)
+}
+
 /// What a pane runs and where.
 pub struct PaneSpec<'a> {
     pub cwd: &'a str,
@@ -1372,23 +1401,17 @@ impl Terminals {
             None => {}
         } }
         cmd.cwd(cwd);
-        environment.inject(&mut cmd);
+        let (session_env, uninherited) = session_environment(&environment.values);
+        for (name, value) in &session_env {
+            cmd.env(name, value);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Raccoon");
-        cmd.env("PATH", crate::binpath::login_path());
         cmd.env("RACCOON", "1");
-        // Raccoon itself may have been started from inside an agent's session
-        // (a `tauri dev` an agent ran). Those stamps would tell a CLI spawned
-        // here that it is a nested child, and a nested child stops writing the
-        // transcript the chat view is projected from.
-        for k in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID"] {
-            cmd.env_remove(k);
+        for name in uninherited {
+            cmd.env_remove(name);
         }
-        // Workspace assignments override inherited/configured values. A new
-        // pane must never accidentally inherit another workspace's port.
-        cmd.env_remove("TERMINALX_PORT");
-        cmd.env_remove("TERMINALX_PORTS");
         for (k, v) in env {
             cmd.env(k, v);
         }

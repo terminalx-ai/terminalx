@@ -3,7 +3,8 @@ import { Paperclip } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { attachments as attachmentsApi, files as filesApi, type FileFacts, type FileInput, type ImageInput } from "@/lib/api";
+import { attachments as attachmentsApi, files as filesApi, fs, type FileFacts, type FileInput, type ImageInput } from "@/lib/api";
+import { hasTextPreview, isDrawableImage, textSnippet, TEXT_PREVIEW_BYTES } from "./AttachmentPreview";
 import { admit, type Offered, type Refusal } from "@/lib/attachmentRules";
 import { announceAdmission } from "@/lib/attachmentNotices";
 import { showError } from "@/lib/errorToasts";
@@ -21,8 +22,18 @@ export interface Attachment {
   name: string;
   /** An image of a type an agent takes, up to 5 MB: sent with `agent.send`'s images, as before PRO-290. */
   image?: ImageInput;
-  /** The image's thumbnail, for the message drawn as sending. */
+  /**
+   * Its thumbnail (PRO-461): an image block's, also drawn on the message as
+   * it sends, or that of an image going as a file. A `blob:` URL is revoked
+   * and a media grant (`mediaToken`) closed when the chip goes.
+   */
   previewUrl?: string;
+  /** The media server's grant behind a picked image file's thumbnail. */
+  mediaToken?: string;
+  /** Its size in bytes, said on its card. */
+  size?: number;
+  /** A text file's first lines, its preview. */
+  text?: string | null;
   /** Stored with `attachments.store` on send; its `FileRef` goes with the message. */
   file?: FileInput;
   /** Why it was not attached. It takes no place in the 10. */
@@ -58,6 +69,12 @@ export interface Attachments {
   fileRef: RefObject<HTMLInputElement | null>;
   /** Queue browser `File`s (from paste, the DOM drop path, or the hidden picker). */
   addFiles: (list: File[], verb?: OfferVerb) => Promise<void>;
+  /**
+   * Queue files already read into memory, by the same rules as any other
+   * (a pull request's context file read on a runtime, #1329). On a composer
+   * that takes images only they are left out, and it says so.
+   */
+  addInputs: (list: FileInput[]) => Promise<void>;
   /** Open the native picker, or the hidden browser picker outside Tauri. */
   chooseFiles: () => Promise<void>;
   remove: (id: string) => void;
@@ -99,6 +116,15 @@ function readBase64(file: File): Promise<string> {
 
 const takenAsImage = (mediaType: string | undefined, size: number) => !!mediaType && AGENT_IMAGE_TYPES.has(mediaType) && size <= MAX_IMAGE_BYTES;
 
+/** A text file's first lines, from its first few kilobytes; null when they cannot be read. */
+async function headText(f: File): Promise<string | null> {
+  try {
+    return textSnippet(await f.slice(0, TEXT_PREVIEW_BYTES).text());
+  } catch {
+    return null;
+  }
+}
+
 /** A pasted or DOM-dropped `File`: its bytes go with it, as an image or as a file. */
 function browserCandidate(f: File): Candidate {
   return {
@@ -107,7 +133,10 @@ function browserCandidate(f: File): Candidate {
     read: async () => {
       const data = await readBase64(f);
       if (takenAsImage(f.type, f.size)) return { image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) };
-      return { file: { name: f.name, data, ...(f.type ? { mediaType: f.type } : {}) } };
+      const file: FileInput = { name: f.name, data, ...(f.type ? { mediaType: f.type } : {}) };
+      if (f.type.startsWith("image/") || isDrawableImage(f.name)) return { file, previewUrl: URL.createObjectURL(f) };
+      if (hasTextPreview(f.name)) return { file, text: await headText(f) };
+      return { file };
     },
   };
 }
@@ -122,12 +151,38 @@ function pathCandidate(facts: FileFacts): Candidate {
         const img = await filesApi.readImage(facts.path);
         if (img) return { image: { mediaType: img.mediaType, data: img.data, name: img.name }, previewUrl: `data:${img.mediaType};base64,${img.data}` };
       }
-      return { file: { name: facts.name, path: facts.path } };
+      return { file: { name: facts.name, path: facts.path }, ...(await pathPreview(facts)) };
     },
   };
 }
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** How many bytes a base64 text decodes to. */
+const base64Bytes = (data: string) => Math.max(0, Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0));
+
+/**
+ * The preview of a picked or dropped file that goes as a file (PRO-461): an
+ * image's thumbnail through the media server, which streams it without
+ * reading it here, or a text file's first lines. Nothing when neither is
+ * possible; the card then says the file's type and size.
+ */
+async function pathPreview(facts: FileFacts): Promise<Pick<Attachment, "previewUrl" | "mediaToken" | "text">> {
+  try {
+    if (isDrawableImage(facts.name)) {
+      const cut = Math.max(facts.path.lastIndexOf("/"), facts.path.lastIndexOf("\\"));
+      const media = await fs.openMedia(facts.path.slice(0, cut) || "/", facts.path.slice(cut + 1));
+      return media?.url ? { previewUrl: media.url, mediaToken: media.token } : {};
+    }
+    if (hasTextPreview(facts.name)) {
+      const file = await fs.readText(facts.path);
+      return file && !file.binary ? { text: textSnippet(file.content.slice(0, TEXT_PREVIEW_BYTES)) } : {};
+    }
+  } catch {
+    // No preview: the card names the file instead.
+  }
+  return {};
+}
 
 /**
  * Everything a composer needs to carry files with a prompt (PRO-290): the
@@ -137,12 +192,14 @@ const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
  * counted and said in a toast. Dropped paths reach the app through the Tauri
  * window, not the DOM; a folder dropped there becomes an `@path` mention.
  *
- * A cloud tab (`mentionFiles` false) takes images only, as before: nothing
- * is stored for it, and its own limit of 8 is checked on upload. A machine
- * tab (`mentionFiles` false, `anyFile` true, PRO-407) takes any file by the
- * same rules as a local tab; its files are uploaded to the machine when the
- * message is sent, and a dropped folder is left out, since its path here
- * names nothing there.
+ * A tab on a runtime that takes images only (`mentionFiles` and `anyFile`
+ * false: a cloud workspace from before `composer/4`) takes images only:
+ * nothing is stored for it, and its own limit of 8 is checked on upload. A
+ * machine or cloud tab whose runtime takes files (`mentionFiles` false,
+ * `anyFile` true; PRO-407, #1329) takes any file by the same rules as a local
+ * tab; a dropped file is uploaded to the runtime when the message is sent
+ * rather than mentioned by its path here, and a dropped folder is left out,
+ * since its path here names nothing there.
  *
  * Shared by the in-session composer and the new-session screen so the first
  * prompt of a session can carry files like every one after it.
@@ -227,7 +284,7 @@ export function useAttachments({
       const reason = refusedOf.get(item);
       const body = readOf.get(item);
       if (reason) added.push({ id: nextId(), name: item.name, refused: reason });
-      else if (body) added.push({ id: nextId(), name: item.name, ...body });
+      else if (body) added.push({ id: nextId(), name: item.name, size: item.size, ...body });
     }
     if (added.length) setAttachments((list) => [...list, ...added]);
   }, [setAttachments]);
@@ -249,9 +306,14 @@ export function useAttachments({
         continue;
       }
       const data = await readBase64(f);
-      images.push({ name: f.name, image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) });
+      images.push({ name: f.name, size: f.size, image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) });
     }
     await addCloudImages(images, skipped);
+  }), [imagesOnly, offer, addCloudImages, readInput]);
+
+  const addInputs = useCallback((list: FileInput[]) => readInput(async () => {
+    if (imagesOnly) return addCloudImages([], list.map((file) => file.name));
+    await offer(list.map((file): Candidate => ({ name: file.name, size: base64Bytes(file.data ?? ""), read: async () => ({ file }) })), "picked");
   }), [imagesOnly, offer, addCloudImages, readInput]);
 
   const addPaths = useCallback(
@@ -261,7 +323,7 @@ export function useAttachments({
         const images: Omit<Attachment, "id">[] = [];
         for (const path of paths) {
           const img = await filesApi.readImage(path).catch(() => null);
-          if (img) images.push({ name: img.name, image: { mediaType: img.mediaType, data: img.data, name: img.name }, previewUrl: `data:${img.mediaType};base64,${img.data}` });
+          if (img) images.push({ name: img.name, size: Math.floor((img.data.length * 3) / 4), image: { mediaType: img.mediaType, data: img.data, name: img.name }, previewUrl: `data:${img.mediaType};base64,${img.data}` });
           else skipped.push(baseName(path));
         }
         await addCloudImages(images, skipped);
@@ -300,6 +362,8 @@ export function useAttachments({
 
   const release = (item: Attachment) => {
     if (item.previewUrl?.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
+    const token = item.mediaToken;
+    if (token) void Promise.resolve().then(() => fs.closeMedia(token)).catch(() => {});
   };
 
   const remove = useCallback((id: string) => {
@@ -412,8 +476,8 @@ export function useAttachments({
   // One stable object per change, so a composer's send callback can list it
   // as a dependency without being rebuilt on every render.
   return useMemo(
-    () => ({ attachments, notAdded, imagesOnly, dragging, fileRef, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps }),
-    [attachments, notAdded, imagesOnly, dragging, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps],
+    () => ({ attachments, notAdded, imagesOnly, dragging, fileRef, addFiles, addInputs, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps }),
+    [attachments, notAdded, imagesOnly, dragging, addFiles, addInputs, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps],
   );
 }
 

@@ -34,6 +34,13 @@
 //! desktop runtime without a pinned consent key cannot identify its window, so
 //! guarded pairing actions are unavailable there, including when macOS app
 //! identification fails.
+//!
+//! The key is pinned only in the environment of a runtime the window itself
+//! launches, and a handover execs the newer runtime in the same environment,
+//! so a runtime first launched without the window's key (by a build before
+//! PRO-369, before the key was saved, or by another build) keeps none for
+//! good. The window repairs that by launching a fresh runtime
+//! (`local_runtime::window_consent`, PRO-486); nothing pins a key over IPC.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -96,7 +103,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    fn says(self) -> &'static str {
+    pub(crate) fn says(self) -> &'static str {
         match self {
             Self::Runtime => "the runtime itself asked",
             Self::Descendant => "it was asked by a process this runtime started (an agent, or a terminal it runs)",
@@ -204,10 +211,51 @@ fn window_message(socket: &Path, nonce: &str) -> Vec<u8> {
     ].concat()
 }
 
+/// The public key the next runtime launch pins: the one a relaunch
+/// provisioned (`provision_launch_key`), or else the window's key, read or
+/// created now.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub(crate) fn launch_public_key() -> Result<Option<String>> {
+    if let Some(key) = PROVISIONED.lock().unwrap().take() {
+        return Ok(Some(key));
+    }
+    read_launch_key()
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn read_launch_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
 }
+
+/// A key read or saved before stopping a runtime so that the next launch
+/// pins it (PRO-486): that launch does not depend on reading Keychain again.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+static PROVISIONED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Read the window's key, or create and save it, for the next runtime
+/// launch to pin as it is.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub(crate) fn provision_launch_key() -> Result<Option<String>> {
+    let key = read_launch_key()?;
+    *PROVISIONED.lock().unwrap() = key.clone();
+    Ok(key)
+}
+
+/// The window's consent key is in a Keychain it cannot read or write.
+pub(crate) const KEYCHAIN_DENIED: &str = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
+
+/// This window's consent key is not in its Keychain: a runtime launch saves
+/// one, so the runtime attached was not launched by this window with it.
+#[derive(Debug)]
+pub struct WindowKeyMissing;
+
+impl std::fmt::Display for WindowKeyMissing {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("The window consent key is missing from Keychain. In TerminalX, open Settings → Machines and choose Create pairing code: TerminalX restarts its runtime so it can verify the window, or offers Restart runtime there.")
+    }
+}
+
+impl std::error::Error for WindowKeyMissing {}
 
 /// Loads the window's signing key. Only runtime launch may request creation.
 pub type WindowKey = Box<dyn Fn(bool) -> Result<Ed25519KeyPair> + Send + Sync>;
@@ -381,7 +429,7 @@ pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(),
     if let Some(refusal) = refusal {
         log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
         if refusal == Refusal::UnsupportedDesktop {
-            return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("Restart the local runtime from TerminalX on a supported desktop. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
+            return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("In TerminalX on a supported desktop, open Settings → Machines and choose Create pairing code: TerminalX restarts its runtime so it can verify the window, or offers Restart runtime there. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
         }
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }

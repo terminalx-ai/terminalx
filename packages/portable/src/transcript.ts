@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ScreenPrompt, ToolResult, Usage } from "./events";
 import { shellRecord, withoutHarnessBlocks, type ShellRecord } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -32,6 +32,8 @@ const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previ
 export interface Delivery {
   /** Not typed yet: the agent's input box holds something else. */
   inputOccupied?: boolean;
+  /** What holds it up is a question the agent drew in place of its input box, not text in it (PRO-462). */
+  inputChoice?: boolean;
   /** The agent dropped its turn before answering it, and took another prompt in its place. */
   replaced?: boolean;
   /** Stopped while it waited on the agent's input box: never typed. */
@@ -161,6 +163,8 @@ export interface Transcript {
   workingSince?: number;
   authFailed: boolean;
   rateLimit?: { status?: string; resetsAt?: number; window?: string };
+  /** A question the agent's CLI drew in its own terminal and is stopped on (PRO-460). */
+  terminalPrompt?: ScreenPrompt;
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
   /** Settings the app recorded a change to somewhere in this transcript: a turn without its own record of one ran before it. */
@@ -226,8 +230,8 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   if (at == null) return undefined;
   const [item] = turn.work.splice(at, 1);
   if (item.kind !== "queued" && item.kind !== "message") return undefined;
-  const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
-  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
+  const { inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent } = item;
+  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -327,6 +331,7 @@ export class TranscriptReducer {
   private modelRequestOpen = false;
   private authFailed = false;
   private rateLimit: Transcript["rateLimit"];
+  private terminalPrompt: ScreenPrompt | undefined;
   private usageWindows: Transcript["usageWindows"];
   private codexUsage: Transcript["codexUsage"];
   private workingSince: number | undefined;
@@ -450,7 +455,7 @@ export class TranscriptReducer {
     const eventAt = Date.parse(event.ts);
     if (!event.subagent && Number.isFinite(eventAt)) this.lastTs = eventAt;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
-    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
+    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared" && payload.type !== "terminal_prompt") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "goal_updated":
         if (!event.subagent && event.harness === "codex") this.goal = payload.goal;
@@ -565,7 +570,7 @@ export class TranscriptReducer {
         break;
       }
       case "input_occupied": {
-        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined, inputChoice: (payload.occupied && payload.choice) || undefined }));
         break;
       }
       case "prompt_replaced": {
@@ -574,7 +579,7 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined, inputChoice: undefined }));
         break;
       }
       case "prompt_joined": {
@@ -856,7 +861,13 @@ export class TranscriptReducer {
         if (payload.effort) this.settings = { ...this.settings, effort: payload.effort };
         if (payload.permissionMode) this.settings = { ...this.settings, permissionMode: payload.permissionMode };
         break;
+      case "terminal_prompt":
+        if (!event.subagent) this.terminalPrompt = payload.prompt ?? undefined;
+        break;
       case "conversation":
+        // What the terminal asked belonged to the conversation before.
+        this.terminalPrompt = undefined;
+        break;
       case "delta":
       case "unknown":
         break;
@@ -950,6 +961,7 @@ export class TranscriptReducer {
       workingSince: live ? this.workingSince : undefined,
       authFailed: this.authFailed,
       rateLimit: this.rateLimit,
+      terminalPrompt: this.terminalPrompt,
       usageWindows: this.usageWindows,
       codexUsage: this.codexUsage,
       changedSettings: this.settings.effort || this.settings.permissionMode ? { effort: !!this.settings.effort, permissionMode: !!this.settings.permissionMode } : undefined,

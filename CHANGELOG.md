@@ -2,10 +2,17 @@
 
 ## Unreleased
 
-- Orchestration runs (experimental): a session that leads no run looks like
-  any other session. The Run | Lead chat strip and the Idle pill no longer
-  show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
-  (#1404).
+- Bots (experimental, off by default): the foundation for AI employees with
+  standing roles. Settings → Experimental → Bots turns on the bots' store and
+  `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
+  A bot is hired from one of eight bundled role templates with a role and a
+  name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
+  deleting it moves that folder, with its record, to `trash/bots/` (PRO-466).
+  With the switch on, a Bots section sits above the sidebar's project lists
+  (each bot's role, status and where it runs, with a + to hire), and a Bots
+  page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
+  no bots it offers three roles to hire in one click, and Hire a bot lists
+  every role with its duties and skills and asks only for a name (PRO-467).
 - TerminalX runs on Windows 10 and 11: the desktop app, its background
   runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
   machines, phone pairing and the headless `terminalx-serve` tools. Named
@@ -14,6 +21,67 @@
   for Windows' `sh` runs setup, archive and action scripts. Not yet on
   Windows: keeping agents running through a runtime update (an update
   restarts the runtime), Local VM tasks, and the runtime's self-update.
+
+## 0.2.37
+
+- Cloud and machine sessions catch up with local ones: the shared tab strip
+  with the runtime's agent tabs, shells and split panes, layout saved per
+  viewer (#1362); Fork, Reset and turn checkpoints (#1388); second opinion,
+  agent handoff and Retry in a new chat (#1401); the held follow-ups tray and
+  Send now on a queued message (#1412); any-file attachments, the # PR list
+  and dropped files attached rather than mentioned (#1410). Queued cards on a
+  sleeping cloud tab wait for its checkpoint history before matching
+  delivery (#1395).
+- Claude Code's own in-terminal prompts (such as the compacting offer) show
+  as a chat card answered with the CLI's keys, or an Open terminal card when
+  the prompt can't be read (PRO-460, #1413).
+- Composer: attached files show previews: image thumbnails that open the
+  viewer, and cards with type, size and a text snippet, also on the sent
+  message (PRO-461, #1411).
+- Orchestration runs (experimental): a session that leads no run looks like
+  any other session. The Run | Lead chat strip and the Idle pill no longer
+  show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
+  (#1404, #1405).
+- Queued prompts: a stale lapsed echo is retired after a resend or a
+  conversation reset, so a later identical prompt no longer inherits its
+  card (#1365). Claude shell records are recognised with the same strict
+  grammar on the Rust and TypeScript sides (#1366).
+- Phone: the phone closes with its own codes and the Mac records why a
+  connection ended (#1353); a disconnect on the Mac stops live output even
+  mid-request (#1355), and the revoke acknowledgement goes out before the
+  close (#1397); a stream's opening snapshot arrives before its deltas
+  (#1351); the backpressure tests tell falling behind from a write timeout
+  (#1369). Prefetch keeps the open transcript's sync checkpoint and skips
+  conversations the phone has open (#1368), runs one bounded worker per
+  connection (#1402), and asks which conversations the Mac will prefetch so
+  cached ones get only new events (#1409). The transcript cache reclaims
+  chunks orphaned by interrupted writes (#1364).
+- Phone support reports keep each connection path's typed cause when all
+  fail (#1378), and a credential refusal ends that pairing's report access
+  (#1359).
+- Machines: PR publish refuses unless every push URL Git would use is the
+  verified origin (#1387); a nested project's session can no longer claim
+  its parent's PR (#1352); a pending PR creation can be reconciled by URL
+  once the PR is merged or closed (#1361) and protects its worktree from
+  bulk cleanup (#1367); PR associations keep GitHub Enterprise repository
+  locators (#1274).
+- OpenCode: Connect and Disconnect re-read auth.json before writing, so a
+  refreshed sign-in is not reverted (#1354); Disconnect works for hand-made
+  servers, also offline (#1406, #1408); a saved custom base URL is kept on
+  reconnect, and clearing it warns (#1400, #1380).
+- Agent config copy validates an existing skill folder even without
+  SKILL.md (#1356) and reports files already written when a copy fails
+  (#1384).
+- GitHub connect no longer expires a waiting attempt by the desktop's wall
+  clock (#1360). Organization deletion reads the server's 401 as a sign-in
+  refusal (#1350).
+- Cloud scheduled tasks: the fresh-workspace and single GitHub-event
+  automation editor is back (PRO-228, PRO-231, #1357).
+- Tests and CI: the glass-mode check renders the real RecoveryBanner
+  (#1358); the WebKit layout job gets 50 minutes and its session-start and
+  machine-screen checks were fixed (#1372, #1363); a capability-list test
+  reads the slice declaration (#1415); close_open_turn documentation moved
+  to the right function (#1392).
 
 ## 0.2.36
 

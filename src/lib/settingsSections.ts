@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS = [
   { id: "integrations", title: "Integrations", description: "Connect GitHub and Linear for issues and pull requests", terms: ["token api key login"] },
   { id: "devices", title: "Devices", description: "Pair a phone and manage connected devices", terms: ["mobile pairing remote revoke"] },
   { id: "machines", title: "Machines", description: "Let other computers operate this Mac, and add machines to operate", terms: ["operate remote computer pairing code fingerprint revoke mac mini server"] },
+  { id: "stats", title: "Stats & usage", description: "Activity totals, usage limits by account and local token analytics", terms: ["statistics usage tokens cost limits rate windows analytics token mix providers daily intensity agents spawned prs created"] },
   { id: "agents", title: "Agents", description: "Install and sign in to agents, permissions and skills", terms: ["claude codex gemini approval idle archive computer use browser runtime"] },
   { id: "orchestrator", title: "Orchestrator", description: "Runs a lead session splits across workers: approval, limits, budget and worker permissions", terms: ["orchestration run plan pieces lead workers approve bypass deny rules", "queue concurrent budget points dollars window stall"] },
   { id: "environment", title: "Environment", description: "User and repository variables for local agents and shells", terms: ["env dotenv secrets keychain overrides import"] },
@@ -22,7 +23,7 @@ export const SETTINGS_SECTIONS = [
   { id: "repositories", title: "Projects", description: "Project paths, preview URLs, files to copy, scripts, actions and workspace cleanup", terms: ["repositories repository project git root worktrees ignored glob patterns env worktreeinclude setup archive hooks terminal"] },
   { id: "organizations", title: "Organizations", description: "Members, cloud workspaces and organization settings", terms: ["team invite billing compute environment agent logins routes github setup"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks and OpenCode", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer", "opencode providers models"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks, OpenCode and Bots", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer", "opencode providers models", "bots roles employees"] },
   { id: "advanced", title: "Advanced", description: "Which Claude Code and Codex programs TerminalX runs", terms: ["executable binary path program use system claude code codex homebrew npm"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;

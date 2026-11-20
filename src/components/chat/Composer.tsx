@@ -48,7 +48,7 @@ import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, 
 import { useComposerHistory } from "./useComposerHistory";
 import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
-import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
+import type { ComposerCommandList, ComposerCommands, ComposerFiles, ComposerPrs } from "@/lib/cloudComposer";
 
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
 
@@ -103,6 +103,7 @@ export function Composer({
   cwd,
   commands: givenCommands,
   files: givenFiles,
+  prs = null,
   remote = false,
   attachFiles,
   busy,
@@ -148,11 +149,20 @@ export function Composer({
   commands?: ComposerCommands | null;
   /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
   files?: ComposerFiles | null;
-  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  /**
+   * Where the `#` list comes from for such a tab (its runtime's `gh`, #1329).
+   * Without it a remote tab has no `#` list; a local tab asks this computer in `cwd`.
+   */
+  prs?: ComposerPrs | null;
+  /**
+   * The tab runs on another computer (a cloud workspace, a machine): a file
+   * dropped from this one is not mentioned to it by its path here; it is
+   * attached, when the tab takes files.
+   */
   remote?: boolean;
   /**
-   * Files other than images attach (PRO-290; on a machine, PRO-407). Defaults
-   * to `!remote`: a local tab takes any file, a cloud tab images only.
+   * Files other than images attach (PRO-290; on a machine, PRO-407; in a
+   * cloud workspace, #1329). Defaults to `!remote`.
    */
   attachFiles?: boolean;
   busy: boolean;
@@ -382,7 +392,9 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
+  // A remote tab's `#` list is its runtime's: a picked pull request's context file is read there and attached as a file.
+  const prSource = remote ? (attach.imagesOnly ? null : prs) : (cwd ?? null);
+  const prMention = usePrMention(!disabled && dismissedToken !== tokenKey ? prSource : null, draft, caret, onDraftChange, ref, setCaret, { onAttachFile: (file) => void attach.addInputs([file]) });
   // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
   const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
   const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || snippets.length > 0 || !!commandList.note);
@@ -482,7 +494,7 @@ export function Composer({
       }
     }
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
-    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
+    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name, ...(a.size != null ? { size: a.size } : {}) }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer

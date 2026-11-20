@@ -1840,6 +1840,41 @@ impl WorkspaceGit {
         Ok(json!({ "repo": repo.name, "branch": branch, "prs": prs }))
     }
 
+    /// The composer's `#` list for a session whose checkout is `dir`
+    /// (`composer/5`, #1329): the pull requests a typed number or words
+    /// match, read with this workspace's `gh`, as a local tab's list is read
+    /// with this computer's (`github::search_prs`).
+    pub(super) fn mention_prs(&self, dir: &Path, query: &str) -> Result<Vec<crate::github::PullRequest>, RpcError> {
+        let repo = Repo { name: ".".into(), dir: dir.to_path_buf() };
+        let refused = std::cell::RefCell::new(None);
+        let found = crate::github::search_prs_with(dir, query, |_, args| self.gh_for_mention(&repo, args, &refused));
+        found.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
+    }
+
+    /// What picking pull request `number` in that list attaches: its context
+    /// file, as Markdown (`github::pr_context_with`).
+    pub(super) fn mention_pr_context(&self, dir: &Path, number: u64) -> Result<String, RpcError> {
+        if number == 0 {
+            return Err(RpcError::invalid("number is a pull request number"));
+        }
+        let repo = Repo { name: ".".into(), dir: dir.to_path_buf() };
+        let refused = std::cell::RefCell::new(None);
+        let text = crate::github::pr_context_with(dir, number, |_, args| self.gh_for_mention(&repo, args, &refused));
+        text.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
+    }
+
+    /// One `gh` call of a mention lookup, as the shared `github` code runs
+    /// it: its refusal is kept, so the caller answers with the runtime's own
+    /// code (`auth_failed`, `unavailable`, the privacy gate's `forbidden`)
+    /// rather than a bare message.
+    fn gh_for_mention(&self, repo: &Repo, args: &[&str], refused: &std::cell::RefCell<Option<RpcError>>) -> anyhow::Result<String> {
+        self.gh(repo, args, NETWORK_TIMEOUT).map_err(|error| {
+            let message = anyhow::anyhow!("{}", error.message);
+            *refused.borrow_mut() = Some(error);
+            message
+        })
+    }
+
     fn pr_create(&self, params: &Value, for_session: bool) -> Result<Value, RpcError> {
         if for_session && !self.project {
             return Err(RpcError::invalid("This pull request operation requires a machine session"));

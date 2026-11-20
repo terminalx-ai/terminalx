@@ -823,6 +823,20 @@ describe("a message on its way to the agent", () => {
     expect(t.turns[0].prompt?.inputOccupied).toBeUndefined();
     expect(t.turns[0].work).toContainEqual(expect.objectContaining({ kind: "queued", seq: queued.seq, inputOccupied: undefined }));
   });
+
+  it("says when what is in the way is a question the agent drew in place of its box (PRO-462)", () => {
+    const prompt = ev({ type: "user_message", text: "hello", queued: false });
+    const asked = [prompt, ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: true, choice: true })];
+    let t = buildTranscript(asked, true);
+    expect(t.turns[0].prompt).toMatchObject({ inputOccupied: true, inputChoice: true });
+    // Answered, with text left in the box: the message waits on that instead.
+    t = buildTranscript([...asked, ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: true })], true);
+    expect(t.turns[0].prompt?.inputOccupied).toBe(true);
+    expect(t.turns[0].prompt?.inputChoice).toBeUndefined();
+    t = buildTranscript([...asked, ev({ type: "input_occupied", promptSeq: prompt.seq, occupied: false })], true);
+    expect(t.turns[0].prompt?.inputOccupied).toBeUndefined();
+    expect(t.turns[0].prompt?.inputChoice).toBeUndefined();
+  });
 });
 
 // #722, review 1: a message stopped while it waited on the input box, and messages the agent received as one prompt.

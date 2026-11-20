@@ -145,6 +145,16 @@ impl Sessions {
         self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
+    /// Bots (`bots`, PRO-466). A read fails fast on a wedged owner; a change waits for its answer.
+    pub fn bots<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        let request = json!({"operation": operation, "params": params});
+        if matches!(operation, "list" | "get" | "templates" | "roleRead") {
+            self.quick("runtime.session.bots", request)
+        } else {
+            self.call("runtime.session.bots", request)
+        }
+    }
+
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
         self.quick("runtime.session.automations", json!({}))
     }
@@ -163,6 +173,16 @@ impl Sessions {
 
     pub fn delete_automation(&self, id: &str) -> Result<()> {
         self.call("runtime.session.automationDelete", json!({"id":id}))
+    }
+
+    /// Room for an automation's longest first check (Try it waits for it)
+    /// plus the usual call.
+    fn precheck_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(crate::automations::precheck::MAX_TIMEOUT_SECONDS) + 120)
+    }
+
+    pub fn try_automation_precheck(&self, input: Value) -> Result<crate::automations::precheck::PrecheckTrial> {
+        self.0.call_within("runtime.session.automationPrecheckTry", json!({"input":input}), Self::precheck_timeout())
     }
 
     pub fn run_automation(&self, id: &str) -> Result<crate::automations::AutomationRun> {
@@ -386,6 +406,12 @@ impl Sessions {
 
     pub fn answer_questions(&self, session: &str, tab: &str, request: &str, answers: HashMap<String, String>) -> Result<()> {
         self.quick_tab("questions", session, tab, json!({"requestId":request,"answers":answers}))
+    }
+
+    /// A question the CLI drew in its own terminal (PRO-460). Not a quick
+    /// call: the keys go in with the pauses the CLI needs between them.
+    pub fn answer_terminal_prompt(&self, session: &str, tab: &str, prompt: &str, choice: Option<usize>) -> Result<()> {
+        self.tab("terminalPrompt", session, tab, json!({"promptId":prompt,"choice":choice}))
     }
 
     pub fn set_model(&self, session: &str, tab: &str, model: &str) -> Result<()> {

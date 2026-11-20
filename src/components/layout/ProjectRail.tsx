@@ -1,7 +1,7 @@
 import { PrivacyImage } from "@/components/ui/privacy-image";
 import { SessionRowData } from "./SessionRowExtras";
 import { useMemo, useState, type ReactNode } from "react";
-import { CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, Search, SquarePen } from "@/icons";
+import { Bot as BotIcon, CalendarClock, CircleDot, Folder, FolderOpen, Home, ImagePlus, Search, SquarePen } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,8 @@ import { cn } from "@/lib/cn";
 import { usePrefs } from "@/lib/prefs";
 import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
 import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
-import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { runShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
 import { useSessionRowFacts } from "@/lib/sessionRowStatus";
@@ -33,7 +34,6 @@ export interface RailProps {
   onNewSession: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
-  onOpenStats: () => void;
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
@@ -89,8 +89,11 @@ export function AppDestinations({
     dot: automationFailures > 0 ? { tone: "warning", label: `${automationFailures} failed` } : automationRunning ? { tone: "info", label: "Running" } : null,
     count: automationFailures || undefined,
   };
+  // Bots (PRO-467) only while Settings → Experimental → Bots is on; it opens as its shortcut does.
+  const botsOn = useExperimentalSettings()?.bots === true;
+  const bots = { id: "bots", label: "Bots", shortcut: "app.bots", icon: <BotIcon />, onOpen: () => runShortcut("app.bots") } satisfies Destination;
   // Skills and Usage are reached from Settings (and their shortcuts), not from here.
-  return <DestinationList active={active} destinations={[home, overview, newSession, search, automations, issues]} />;
+  return <DestinationList active={active} destinations={[home, overview, newSession, search, ...(botsOn ? [bots] : []), automations, issues]} />;
 }
 
 /**

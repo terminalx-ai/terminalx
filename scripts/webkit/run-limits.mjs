@@ -319,6 +319,7 @@ try {
         const calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
         checks["each changed limit is saved by itself, and a limit out of range is not"] = JSON.stringify(calls) === JSON.stringify([{ budgetPoints: 30 }, { windowCeiling: 90 }]);
         // A repository's own budget.
+        await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
         await nav.getByRole("button", { name: "local-0", exact: true }).click();
         const own = settings.getByTestId("repository-orchestrator-settings");
         await own.waitFor();
