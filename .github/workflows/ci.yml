@@ -118,7 +118,9 @@ jobs:
   # (docs/CI-RUNNERS.md "macOS runner time").
   webkit-layout:
     runs-on: macos-latest
-    timeout-minutes: 35
+    # The layout checks alone take about 30 minutes on a hosted runner, and the machine
+    # screens another 3: at 35 the job was cancelled on runs where every check had passed.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
