@@ -182,18 +182,22 @@ pub struct BotPause {
 /// they may do. The owner is never listed: they may always ask and approve.
 ///
 /// `kind` and `may` a newer build wrote are kept as they are and written
-/// back; this build grants nothing for them.
+/// back; this build grants nothing for them. A field a newer build left out
+/// reads as empty, so one such entry never makes the whole bot unreadable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotAsker {
     /// [`ASKER_PERSON`] or [`ASKER_BOT`].
+    #[serde(default)]
     pub kind: String,
     /// A person's account user id, or a bot's id.
+    #[serde(default)]
     pub id: String,
     /// How a person is shown, as they were named when added. A bot is shown by its own name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// [`MAY_ASK_APPROVE`], [`MAY_ASK`] or [`MAY_HAND_OFF`].
+    #[serde(default)]
     pub may: String,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
@@ -298,6 +302,11 @@ pub struct BotPatch {
     /// The whole list: an entry left out is removed.
     #[serde(default)]
     pub who_can_ask: Option<Vec<BotAsker>>,
+    /// The bot's `modified` as the caller read it. A patch that replaces a
+    /// whole list (`worksIn`, `whoCanAsk`) is refused when the bot has changed
+    /// since, so it never puts back what someone else just removed.
+    #[serde(default)]
+    pub if_modified: Option<String>,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -483,6 +492,9 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
     change(sink, |bots| {
         let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
         let mut bot = bots[index].clone();
+        if patch.works_in.is_some() || patch.who_can_ask.is_some() {
+            refuse_unless!(patch.if_modified.as_ref().is_none_or(|seen| *seen == bot.modified), "{} changed since this was read. The latest is shown now; make the change again.", bot.name);
+        }
         if let Some(name) = &patch.name {
             let name = clean_name(name)?;
             if name != bot.name {

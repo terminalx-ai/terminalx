@@ -16,12 +16,16 @@
 - Bots: each bot has a settings page (PRO-478): where it runs (this Mac;
   cloud and another machine come later), its access, the organisations it
   works in, its channels (TerminalX, and the state of the GitHub and Linear
-  connections), and who besides you may ask it for work. Access is enforced
-  on every tool call of the bot's chats, as it is set now: Ask before outward
-  actions asks you on a card before a push, merge, deploy, post or message;
-  Read and report refuses every change and asks before a report leaves. No
-  level lets a bot change its own record or the app's settings. Agent and
-  model, rename and delete are under the page's menu.
+  connections), and who besides you may ask it for work. Access sets the
+  mode the bot's chats run in, and every tool call is also checked against
+  the access as it is set now: Ask before outward actions reads freely and
+  asks you on a card before it changes anything or runs a command; Read and
+  report reads and runs only commands known to read, asks before a comment or
+  a message, and refuses the rest. At every level a bot is refused writes to
+  its own record and the app's settings, `terminalx bots` changes other than
+  pausing itself, and answers to permission cards. This is not a sandbox: a
+  bot with full access can still write files on this Mac by other means.
+  Agent and model, rename and delete are under the page's menu.
 
 ## 0.2.37
 

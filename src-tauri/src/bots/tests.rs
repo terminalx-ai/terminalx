@@ -501,3 +501,28 @@ fn an_asker_this_build_does_not_know_is_kept_as_it_was() {
     assert_eq!(serde_json::to_value(&saved.who_can_ask[0]).unwrap(), unknown);
     assert_eq!(saved.who_can_ask.len(), 2);
 }
+
+#[test]
+fn a_list_change_made_on_an_older_read_is_refused() {
+    let (_home, sink, _events) = bots_on();
+    let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let seen = bot.modified.clone();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    update(sink.as_ref(), &bot.id, serde_json::from_value(json!({"roleTitle": "Chief"})).unwrap()).unwrap();
+    let stale = serde_json::from_value(json!({"whoCanAsk": [], "ifModified": seen})).unwrap();
+    assert!(update(sink.as_ref(), &bot.id, stale).unwrap_err().to_string().contains("changed since"));
+    let fresh = get(&bot.id).unwrap().modified;
+    update(sink.as_ref(), &bot.id, serde_json::from_value(json!({"worksIn": ["personal"], "ifModified": fresh})).unwrap()).unwrap();
+}
+
+#[test]
+fn an_asker_missing_a_field_leaves_the_bot_readable() {
+    let (_home, sink, _events) = bots_on();
+    let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let path = crate::store::root().unwrap().join("bots.json");
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw["bots"][0]["whoCanAsk"] = json!([{"kind": "person", "id": "u1"}]);
+    std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let read = get(&bot.id).expect("still readable");
+    assert_eq!((read.who_can_ask[0].id.as_str(), read.who_can_ask[0].may.as_str()), ("u1", ""));
+}

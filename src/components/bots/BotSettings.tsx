@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -20,14 +20,21 @@ import { BotAvatar } from "./BotAvatar";
  * it for work. The things the owner sets rarely. Every change is saved at once; nothing here is a budget or a cap.
  */
 export function BotSettings({ bot }: { bot: Bot }) {
-  const [busy, setBusy] = useState<string | null>(null);
+  // Each section waits on its own save; the others stay usable.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const save = (what: string, patch: BotPatch) => {
-    setBusy(what);
+    setBusy((current) => new Set(current).add(what));
     updateBot(bot.id, patch)
       .then(() => setError(null), (cause) => setError(errorMessage(cause)))
-      .finally(() => setBusy(null));
+      .finally(() => setBusy((current) => {
+        const next = new Set(current);
+        next.delete(what);
+        return next;
+      }));
   };
+  // A whole list is saved against the bot as this page read it, so a change made elsewhere meanwhile is not undone.
+  const saveList = (what: "worksIn" | "whoCanAsk", patch: BotPatch) => save(what, { ...patch, ifModified: bot.modified });
   return (
     <div className="flex min-w-0 max-w-[1040px] flex-col" data-testid="bot-settings">
       {error && <p role="alert" className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive" data-testid="bot-settings-error">{error}</p>}
@@ -35,16 +42,16 @@ export function BotSettings({ bot }: { bot: Bot }) {
         <RunsOn bot={bot} />
       </Section>
       <Section title="Access" note={`What ${bot.name} may do without asking you first.`}>
-        <Access bot={bot} busy={busy === "access"} onChange={(access) => save("access", { access })} />
+        <Access bot={bot} busy={busy.has("access")} onChange={(access) => save("access", { access })} />
       </Section>
       <Section title="Works in" note={`${bot.name} is yours and goes where you work. Its role and skills go everywhere. What it learns inside an organisation stays there.`}>
-        <WorksIn bot={bot} busy={busy === "worksIn"} onChange={(worksIn) => save("worksIn", { worksIn })} />
+        <WorksIn bot={bot} busy={busy.has("worksIn")} onChange={(worksIn) => saveList("worksIn", { worksIn })} />
       </Section>
       <Section title="Channels" note={`Where you can reach ${bot.name} and where it reports.`}>
         <Channels bot={bot} />
       </Section>
       <Section title="Who can ask" note={`People and bots that may give ${bot.name} work. ${bot.name} acts with your accounts.`}>
-        <WhoCanAsk bot={bot} busy={busy === "whoCanAsk"} onChange={(whoCanAsk) => save("whoCanAsk", { whoCanAsk })} />
+        <WhoCanAsk bot={bot} busy={busy.has("whoCanAsk")} onChange={(whoCanAsk) => saveList("whoCanAsk", { whoCanAsk })} />
       </Section>
     </div>
   );
@@ -63,12 +70,27 @@ function Section({ title, note, children }: { title: string; note: string; child
   );
 }
 
+/** Arrow keys move between a radio group's enabled cards and choose the one reached, as a radio group does. */
+function moveBetweenRadios(event: KeyboardEvent<HTMLElement>) {
+  const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+  if (!step) return;
+  const radios = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=radio]:not(:disabled)")];
+  const at = radios.indexOf(document.activeElement as HTMLButtonElement);
+  if (radios.length === 0 || at < 0) return;
+  event.preventDefault();
+  const next = radios[(at + step + radios.length) % radios.length];
+  next.focus();
+  next.click();
+}
+
 /** One choice of a set of cards: its icon, title and what it means. */
-function ChoiceCard({ icon: Icon, title, note, checked, disabled, badge, onSelect, testId }: {
+function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disabled, badge, onSelect, testId }: {
   icon: ComponentType<{ className?: string }>;
   title: string;
   note: string;
   checked: boolean;
+  /** Takes the group's tab stop though not chosen: the level an unknown value is held to. */
+  focusable?: boolean;
   disabled?: boolean;
   badge?: string;
   onSelect?: () => void;
@@ -79,6 +101,8 @@ function ChoiceCard({ icon: Icon, title, note, checked, disabled, badge, onSelec
       type="button"
       role="radio"
       aria-checked={checked}
+      // One stop in the tab order per group: the chosen card; arrows move within it.
+      tabIndex={checked || focusable ? 0 : -1}
       disabled={disabled}
       onClick={checked ? undefined : onSelect}
       className={cn(
@@ -105,7 +129,7 @@ function RunsOn({ bot }: { bot: Bot }) {
   const known = bot.runsOn === "thisMac";
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div role="radiogroup" aria-label="Runs on" className="flex min-w-0 flex-wrap gap-2.5">
+      <div role="radiogroup" aria-label="Runs on" onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
         <ChoiceCard icon={Laptop} title="This Mac" note="Works while this Mac is awake. Uses your local agent logins. No compute cost." checked={known} testId="bot-runs-on-this-mac" />
         <ChoiceCard icon={Cloud} title="Cloud workspace" note="Always on. Keeps working when this Mac is off or asleep. Billed per hour of work." checked={false} disabled badge="Comes with cloud bots" testId="bot-runs-on-cloud" />
         <ChoiceCard icon={Server} title="Another machine" note="A paired Mac or a headless server you own." checked={false} disabled badge="Comes with cloud bots" testId="bot-runs-on-machine" />
@@ -121,17 +145,17 @@ function RunsOn({ bot }: { bot: Bot }) {
 
 const ACCESS: { value: BotAccess; icon: ComponentType<{ className?: string }>; title: string; note: string }[] = [
   { value: "full", icon: ShieldOff, title: "Full access", note: "Runs without asking, like your sessions. May push, merge and post." },
-  { value: "askOutward", icon: ShieldAlert, title: "Ask before outward actions", note: "Works freely in its worktrees. Asks before a merge, a post or a message." },
-  { value: "readReport", icon: Eye, title: "Read and report", note: "Reads, comments and files findings. Changes nothing." },
+  { value: "askOutward", icon: ShieldAlert, title: "Ask before outward actions", note: "Reads freely. Asks before it changes anything or runs a command." },
+  { value: "readReport", icon: Eye, title: "Read and report", note: "Reads and runs only commands that read. Asks before a comment or a message. Changes nothing." },
 ];
 
 function Access({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (access: BotAccess) => void }) {
   const known = effectiveAccess(bot.access) === bot.access;
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div role="radiogroup" aria-label="Access" aria-busy={busy} className="flex min-w-0 flex-wrap gap-2.5">
+      <div role="radiogroup" aria-label="Access" aria-busy={busy} onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
         {ACCESS.map((level) => (
-          <ChoiceCard key={level.value} icon={level.icon} title={level.title} note={level.note} checked={bot.access === level.value} disabled={busy} onSelect={() => onChange(level.value)} testId={`bot-access-${level.value}`} />
+          <ChoiceCard key={level.value} icon={level.icon} title={level.title} note={level.note} checked={bot.access === level.value} focusable={!known && level.value === "readReport"} disabled={busy} onSelect={() => onChange(level.value)} testId={`bot-access-${level.value}`} />
         ))}
       </div>
       {!known && (
@@ -174,13 +198,19 @@ function ListBox({ children, label }: { children: ReactNode; label: string }) {
 
 /** The organisations the owner is in, other than the server's personal one (the Personal row stands for working alone). */
 function useOrganizations(): OrganizationSummary[] {
+  return useOrganizationList() ?? [];
+}
+
+/** The organisations, or null while they cannot be known (signed out, or the account not read yet). */
+function useOrganizationList(): OrganizationSummary[] | null {
   const { status } = useAccount();
-  if (status.state !== "signed-in") return [];
-  return (status.organizations ?? []).filter((org) => !org.isPersonal);
+  if (status.state !== "signed-in" || !status.organizations) return null;
+  return status.organizations.filter((org) => !org.isPersonal);
 }
 
 function WorksIn({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (worksIn: string[]) => void }) {
-  const orgs = useOrganizations();
+  const known = useOrganizationList();
+  const orgs = known ?? [];
   const places = bot.worksIn;
   const on = (place: string) => places.includes(place);
   // A bot works somewhere: the last place it works in cannot be switched off.
@@ -188,8 +218,9 @@ function WorksIn({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (
   const toggle = (place: string, next: boolean) => onChange(next ? [...places, place] : places.filter((value) => value !== place));
   // Places this app does not know (an organisation left, a value a newer app wrote) are shown as they are.
   const unknown = places.filter((place) => place !== "personal" && !orgs.some((org) => org.id === place));
-  const placeSwitch = (place: string, label: string) => (
-    <Switch size="md" checked={on(place)} disabled={busy || last(place)} onCheckedChange={(next) => toggle(place, next)} aria-label={label} data-testid={`bot-works-in-switch-${place}`} />
+  // While the organisations cannot be known, one switched off could not be switched back on here.
+  const placeSwitch = (place: string, label: string, locked = false) => (
+    <Switch size="md" checked={on(place)} disabled={busy || last(place) || locked} onCheckedChange={(next) => toggle(place, next)} aria-label={label} data-testid={`bot-works-in-switch-${place}`} />
   );
   return (
     <ListBox label="Works in">
@@ -207,7 +238,16 @@ function WorksIn({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (
         />
       ))}
       {unknown.map((place) => (
-        <ListRow key={place} icon={Building2} name={<span title={place}>{place}</span>} state="On" on detail="An organisation you are not in now, or one this version does not know" action={placeSwitch(place, `Works in ${place}`)} testId="bot-works-in-unknown" />
+        <ListRow
+          key={place}
+          icon={Building2}
+          name={<span title={place}>{place}</span>}
+          state="On"
+          on
+          detail={known ? "An organisation you are not in now, or one this version does not know" : "Sign in to TerminalX to see your organisations and change this"}
+          action={placeSwitch(place, `Works in ${place}`, !known)}
+          testId="bot-works-in-unknown"
+        />
       ))}
     </ListBox>
   );
@@ -319,11 +359,13 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
       {askers.map((asker, index) => {
         const other = asker.kind === "bot" ? store.bots.find((value) => value.id === asker.id) : undefined;
         const name = asker.kind === "bot" ? other?.name ?? (store.unreadable > 0 ? "A bot this version can't read" : "A removed bot") : asker.name || asker.id;
-        const role = asker.kind === "person" ? "Member" : asker.kind === "bot" ? (other ? `${other.roleTitle}${bot.reportsTo === other.id ? " · its lead" : ""}` : "Bot") : asker.kind;
+        // A person added from an organisation the bot no longer works in is kept, inactive, until it works there again.
+        const inactive = asker.kind === "person" && !!asker.org && !bot.worksIn.includes(asker.org);
+        const role = inactive ? "Inactive · the bot no longer works in their organisation" : asker.kind === "person" ? "Member" : asker.kind === "bot" ? (other ? `${other.roleTitle}${bot.reportsTo === other.id ? " · its lead" : ""}` : "Bot") : asker.kind;
         const choices = MAY_FOR[asker.kind];
         const mark = asker.kind === "bot" ? <BotAvatar roleTemplateId={other?.roleTemplateId ?? ""} size="xs" className="size-[22px]! rounded-md!" /> : <PersonMark name={name} />;
         return (
-          <AskerRow key={`${asker.kind}:${asker.id}`} mark={mark} name={name} role={role} testId="bot-asker">
+          <AskerRow key={`${asker.kind}:${asker.id}`} mark={mark} name={name} role={role} inactive={inactive} testId="bot-asker">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button type="button" disabled={busy} className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[12.5px] text-muted-foreground outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60" aria-label={`What ${name} may do: ${mayLabel(asker.may)}`} data-testid="bot-asker-may">
@@ -348,9 +390,9 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
   );
 }
 
-function AskerRow({ mark, name, role, children, testId }: { mark: ReactNode; name: string; role: string; children: ReactNode; testId: string }) {
+function AskerRow({ mark, name, role, inactive = false, children, testId }: { mark: ReactNode; name: string; role: string; inactive?: boolean; children: ReactNode; testId: string }) {
   return (
-    <li className="flex min-h-9 min-w-0 items-center gap-3 border-t border-hairline py-1.5 first:border-t-0" data-testid={testId}>
+    <li className={cn("flex min-h-9 min-w-0 items-center gap-3 border-t border-hairline py-1.5 first:border-t-0", inactive && "opacity-60")} data-inactive={inactive || undefined} data-testid={testId}>
       {mark}
       <span className="w-[160px] min-w-0 truncate text-[13px] text-foreground" title={name}>{name}</span>
       <span className="min-w-0 flex-1 truncate text-[12.5px] text-faint">{role}</span>
@@ -428,7 +470,7 @@ function OrganizationPeople({ org, listed, onAdd }: { org: OrganizationSummary; 
         people.map((member) => {
           const name = member.displayName || member.email;
           return (
-            <DropdownMenuItem key={member.userId} onSelect={() => onAdd({ kind: "person", id: member.userId, name, may: "ask" })} data-testid="bot-asker-add-person">
+            <DropdownMenuItem key={member.userId} onSelect={() => onAdd({ kind: "person", id: member.userId, name, may: "ask", org: org.id })} data-testid="bot-asker-add-person">
               <PersonMark name={name} /> <span className="truncate">{name}</span>
             </DropdownMenuItem>
           );

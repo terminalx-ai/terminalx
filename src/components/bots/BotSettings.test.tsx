@@ -39,6 +39,8 @@ const bot = (id: string, name: string, extra: Partial<Bot> = {}): Bot => ({
 });
 const listOf = (revision: number, bots: Bot[], unreadable = 0): BotList => ({ revision, bots, unreadable });
 const ORG = { id: "org-1", name: "Example Org", role: "member" };
+/** Every bot's `modified` here: a whole list is saved against it. */
+const SEEN = "2026-11-20T10:00:00Z";
 
 let bots: Bot[] = [];
 function serve(list: Bot[]) {
@@ -127,7 +129,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(rows[0].textContent).toContain("Turn on to let Sentry take work there");
 
     fireEvent.click(page.getByTestId("bot-works-in-switch-org-1"));
-    await waitFor(() => expect(lastPatch()).toEqual({ worksIn: ["personal", "org-1"] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ worksIn: ["personal", "org-1"], ifModified: SEEN }));
     await waitFor(() => expect(page.getByTestId("bot-works-in-org").textContent).toContain("cloud time billed to Example Org"));
     // Two places: Personal may now be switched off.
     expect((page.getByTestId("bot-works-in-switch-personal") as HTMLButtonElement).disabled).toBe(false);
@@ -138,7 +140,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     const page = await open([bot("b1", "Sentry", { worksIn: ["personal", "org-gone"] })], "b1");
     expect(page.getByTestId("bot-works-in-unknown").textContent).toContain("org-gone");
     fireEvent.click(page.getByTestId("bot-works-in-switch-org-gone"));
-    await waitFor(() => expect(lastPatch()).toEqual({ worksIn: ["personal"] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ worksIn: ["personal"], ifModified: SEEN }));
   });
 
   it("access: each level is saved as picked; a level a newer app wrote is said plainly", async () => {
@@ -167,7 +169,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     const page = await open([bot("b1", "Sentry", { reportsTo: "b2" }), bot("b2", "Atlas", { roleTitle: "CTO", roleTemplateId: "cto" })], "b1");
     mouseClick(page.getByTestId("bot-asker-add"));
     fireEvent.click(await screen.findByTestId("bot-asker-add-bot"));
-    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "bot", id: "b2", may: "handOff" }] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "bot", id: "b2", may: "handOff" }], ifModified: SEEN }));
     const row = await page.findByTestId("bot-asker");
     expect(row.textContent).toContain("Atlas");
     expect(row.textContent).toContain("CTO · its lead");
@@ -177,11 +179,11 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     const choices = (await screen.findAllByRole("menuitemradio")).map((item) => item.textContent);
     expect(choices).toEqual(["Can hand off work", "Can ask"]);
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Can ask" }));
-    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "bot", id: "b2", may: "ask" }] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "bot", id: "b2", may: "ask" }], ifModified: SEEN }));
 
     mouseClick(within(await page.findByTestId("bot-asker")).getByTestId("bot-asker-may"));
     fireEvent.click(await screen.findByTestId("bot-asker-remove"));
-    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [], ifModified: SEEN }));
   });
 
   it("who can ask: a member of an organisation it works in is added to ask; one this version cannot read is shown as it is", async () => {
@@ -196,10 +198,58 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(people.map((item) => item.textContent?.trim())).toEqual(["AK Avery Kim"]);
     expect(mocks.roster).toHaveBeenCalledWith("org-1");
     fireEvent.click(people[0]);
-    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "team", id: "t1", may: "triage" }, { kind: "person", id: "u-ak", name: "Avery Kim", may: "ask" }] }));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "team", id: "t1", may: "triage" }, { kind: "person", id: "u-ak", name: "Avery Kim", may: "ask", org: "org-1" }], ifModified: SEEN }));
     const person = (await page.findAllByTestId("bot-asker"))[1];
     mouseClick(within(person).getByTestId("bot-asker-may"));
     expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["Can ask and approve", "Can ask"]);
+  });
+
+  it("who can ask: a person whose organisation the bot no longer works in is kept and shown inactive", async () => {
+    mocks.account.status.organizations = [ORG];
+    const page = await open([bot("b1", "Sentry", { worksIn: ["personal"], whoCanAsk: [{ kind: "person", id: "u-ak", name: "Avery Kim", may: "ask", org: "org-1" }, { kind: "person", id: "u-old", name: "Before orgs", may: "ask" }] })], "b1");
+    const [avery, older] = page.getAllByTestId("bot-asker");
+    expect(avery.dataset.inactive).toBe("true");
+    expect(avery.textContent).toContain("Inactive");
+    expect(older.dataset.inactive).toBeUndefined();
+    fireEvent.click(page.getByTestId("bot-works-in-switch-org-1"));
+    await waitFor(() => expect(page.getAllByTestId("bot-asker")[0].dataset.inactive).toBeUndefined());
+  });
+
+  it("signed out, the organisations cannot be known, so one it works in cannot be switched off here", async () => {
+    const signedIn = mocks.account.status;
+    mocks.account.status = { ...signedIn, state: "signed-out", organizations: [] };
+    try {
+      const page = await open([bot("b1", "Sentry", { worksIn: ["personal", "org-1"] })], "b1");
+      const row = page.getByTestId("bot-works-in-unknown");
+      expect(row.textContent).toContain("Sign in");
+      expect((page.getByTestId("bot-works-in-switch-org-1") as HTMLButtonElement).disabled).toBe(true);
+      expect((page.getByTestId("bot-works-in-switch-personal") as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      mocks.account.status = signedIn;
+    }
+  });
+
+  it("access: arrow keys move between the levels and pick the one reached; the chosen level is the tab stop", async () => {
+    const page = await open([bot("b1", "Sentry")], "b1");
+    const full = page.getByTestId("bot-access-full");
+    expect([full.tabIndex, page.getByTestId("bot-access-askOutward").tabIndex]).toEqual([0, -1]);
+    full.focus();
+    fireEvent.keyDown(full, { key: "ArrowRight" });
+    await waitFor(() => expect(lastPatch()).toEqual({ access: "askOutward" }));
+    expect(document.activeElement).toBe(page.getByTestId("bot-access-askOutward"));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    await waitFor(() => expect(lastPatch()).toEqual({ access: "full" }));
+  });
+
+  it("a section waits on its own save; the others stay usable", async () => {
+    const page = await open([bot("b1", "Sentry", { worksIn: ["personal", "org-gone"] })], "b1");
+    let finish: (value: Bot) => void = () => {};
+    mocks.api.update.mockImplementationOnce(() => new Promise<Bot>((resolve) => { finish = resolve; }));
+    fireEvent.click(page.getByTestId("bot-access-readReport"));
+    await waitFor(() => expect((page.getByTestId("bot-access-full") as HTMLButtonElement).disabled).toBe(true));
+    expect((page.getByTestId("bot-works-in-switch-org-gone") as HTMLButtonElement).disabled).toBe(false);
+    expect((page.getByTestId("bot-asker-add") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => finish(bot("b1", "Sentry", { access: "readReport", worksIn: ["personal", "org-gone"] })));
   });
 
   it("is reached from the team table, goes back to it, and the header menu renames and deletes", async () => {

@@ -5,7 +5,9 @@
 // with one, at the designed 1440×900, the scaled 1280×800 and narrower
 // windows, dark and light: nothing spills past the main slot or sideways off
 // the page, the choice cards and list rows stay inside their sections, no two
-// controls overlap, and a long bot name truncates. Picking an access level
+// controls overlap, and a long bot name truncates. The header's menu, its
+// three dialogs and the Add a person or a bot list are opened at the largest
+// and the smallest window and measured the same way. Picking an access level
 // saves it through the stubbed `bot_update`.
 //
 //   pnpm build && node scripts/webkit/bot-settings.mjs
@@ -91,6 +93,62 @@ async function measure(page) {
   });
 }
 
+/** An open menu or dialog: inside the window, its controls inside it and clear of each other. */
+async function measurePopup(page, selector) {
+  return page.evaluate((selector) => {
+    const popups = [...document.querySelectorAll(selector)].filter((element) => element.getBoundingClientRect().width > 0);
+    if (popups.length !== 1) return [`${popups.length} open ${selector}`];
+    const popup = popups[0];
+    const box = popup.getBoundingClientRect();
+    const problems = [];
+    if (box.left < -1 || box.top < -1 || box.right > innerWidth + 1 || box.bottom > innerHeight + 1) problems.push(`${selector} leaves the window`);
+    const overlap = (a, b) => a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1;
+    const label = (element) => (element.getAttribute("aria-label") || element.textContent || element.tagName).trim().slice(0, 40);
+    const controls = [...popup.querySelectorAll("button, input, select, [role=menuitem], [role=menuitemradio], h2")].filter((element) => {
+      const rect = element.getBoundingClientRect();
+      // Only what is in view: a long list scrolls inside the popup.
+      return rect.width > 0 && rect.height > 0 && rect.bottom > box.top && rect.top < box.bottom;
+    });
+    for (const control of controls) {
+      const rect = control.getBoundingClientRect();
+      if (rect.left < box.left - 1 || rect.right > box.right + 1) problems.push(`"${label(control)}" spills out of ${selector}`);
+    }
+    for (let i = 0; i < controls.length; i++) for (let j = i + 1; j < controls.length; j++) {
+      if (controls[i].contains(controls[j]) || controls[j].contains(controls[i])) continue;
+      if (overlap(controls[i].getBoundingClientRect(), controls[j].getBoundingClientRect())) problems.push(`"${label(controls[i])}" overlaps "${label(controls[j])}"`);
+    }
+    return problems;
+  }, selector);
+}
+
+/** Open each popup the page has, measure it, and close it. */
+async function popups(page, main) {
+  const results = {};
+  const close = async (selector) => {
+    await page.keyboard.press("Escape");
+    await page.waitForFunction((selector) => ![...document.querySelectorAll(selector)].some((element) => element.getBoundingClientRect().width > 0), selector);
+  };
+  const menu = async () => {
+    await main.getByTestId("bot-menu").click();
+    await page.locator("[role=menu]").waitFor();
+  };
+  await menu();
+  results["the header menu"] = await measurePopup(page, "[role=menu]");
+  for (const [item, name] of [["bot-menu-agent", "agent and model"], ["bot-menu-rename", "rename"], ["bot-menu-delete", "delete"]]) {
+    await page.getByTestId(item).click();
+    await page.locator("[role=dialog], [role=alertdialog]").first().waitFor();
+    results[`the ${name} dialog`] = await measurePopup(page, "[role=dialog], [role=alertdialog]");
+    await close("[role=dialog], [role=alertdialog]");
+    if (item !== "bot-menu-delete") await menu();
+  }
+  await main.getByTestId("bot-asker-add").scrollIntoViewIfNeeded();
+  await main.getByTestId("bot-asker-add").click();
+  await page.locator("[role=menu]").waitFor();
+  results["the Add a person or a bot list"] = await measurePopup(page, "[role=menu]");
+  await close("[role=menu]");
+  return results;
+}
+
 const shots = process.env.BOT_SETTINGS_SHOTS;
 const server = await serve();
 const browser = await launch();
@@ -118,6 +176,11 @@ try {
       const problems = await measure(page);
       failed += report(`${name} ${viewport.width}x${viewport.height}`, { "fits, nothing overlaps": problems.length === 0 }, problems);
       if (shots) await page.screenshot({ path: `${shots}/bot-settings-${orgs}-${scheme}-${viewport.width}.png`, fullPage: true });
+      if (viewport === viewports[0] || viewport === viewports.at(-1)) {
+        const found = await popups(page, main);
+        const all = Object.entries(found).flatMap(([what, problems]) => problems.map((problem) => `${what}: ${problem}`));
+        failed += report(`${name} ${viewport.width}x${viewport.height}: menu, dialogs and Add list`, Object.fromEntries(Object.entries(found).map(([what, problems]) => [`${what} fits`, problems.length === 0])), all);
+      }
     }
     await page.setViewportSize(viewports[0]);
     await main.getByTestId("bot-access-readReport").click();

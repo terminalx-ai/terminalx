@@ -59,7 +59,8 @@ function SmallDialog({ title, note, children, onClose, busy }: { title: string; 
   return (
     <Dialog open onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
       <DialogContent width="max-w-[26rem]" className="p-4">
-        <DialogTitle className="text-sm font-semibold">{title}</DialogTitle>
+        {/* Clear of the Close button at the top right, however long the name. */}
+        <DialogTitle className="mr-8 truncate text-sm font-semibold" title={title}>{title}</DialogTitle>
         <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">{note}</DialogDescription>
         {children}
       </DialogContent>

@@ -444,7 +444,7 @@ pub fn refused(command: &str) -> Option<(&'static Rule, String)> {
 
 /// The rule a program (by its base name) and its arguments break. git's
 /// arguments start at its subcommand.
-pub(crate) fn rule_broken(program: &str, args: &[&str]) -> Option<(&'static Rule, String)> {
+fn rule_broken(program: &str, args: &[&str]) -> Option<(&'static Rule, String)> {
     let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
     RULES.iter().filter(|rule| rule.programs.contains(&program)).find(|rule| args.starts_with(rule.words) || plain.starts_with(rule.words)).map(|rule| (rule, format!("{program} {}", rule.words.join(" "))))
 }
@@ -529,6 +529,17 @@ fn git_arguments(args: &[String]) -> Vec<&str> {
         }
     }
     args.get(at..).unwrap_or_default().iter().map(String::as_str).collect()
+}
+
+/// The words of `command` when it is one plain command, as a shell would
+/// run it: no list, pipe, substitution, redirection or expansion.
+pub(crate) fn single_command(command: &str) -> Option<Vec<String>> {
+    let mut commands = simple_commands(command);
+    if commands.len() != 1 || command.contains("$(") || command.contains('`') {
+        return None;
+    }
+    let words = commands.pop()?;
+    words.iter().all(|word| !word.contains(['>', '<', '$'])).then_some(words)
 }
 
 /// A command line as the simple commands a shell would run from it, each as

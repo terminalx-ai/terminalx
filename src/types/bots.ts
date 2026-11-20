@@ -33,6 +33,8 @@ export interface BotAsker {
   /** How a person is shown, as they were named when added. A bot is shown by its own name. */
   name?: string;
   may: BotAskerMay;
+  /** The organisation a person was added from. They are inactive while the bot does not work there. */
+  org?: string;
 }
 
 /** Ask and approve (a person only), ask, or hand off work (another bot only). */
@@ -84,6 +86,8 @@ export interface BotPatch {
   worksIn?: string[];
   /** The whole list: an entry left out is removed. */
   whoCanAsk?: BotAsker[];
+  /** The bot's `modified` as read: a whole-list change is refused when the bot changed since. */
+  ifModified?: string;
 }
 
 /** What wakes a duty. Data only until a person switches the duty on. */
