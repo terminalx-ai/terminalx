@@ -306,6 +306,8 @@ async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
     let error = tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap_err();
     assert_eq!(fault(&error), Some(Fault::FellBehind), "{error:#}");
     assert!(!error.chain().any(|cause| cause.is::<tokio::time::error::Elapsed>()), "{error:#}");
+    // The relay diagnostics are the desktop app's; the serve runtime has none.
+    #[cfg(feature = "desktop")]
     assert_eq!(crate::pairing::phone_session_category(error), "fell-behind");
     drop(phone);
 }
@@ -330,6 +332,8 @@ async fn a_write_the_phone_never_reads_is_recorded_as_a_timeout() {
     assert!(error.chain().any(|cause| cause.is::<tokio::time::error::Elapsed>()), "{error:#}");
     assert_eq!(fault(&error), None, "{error:#}");
     assert_ne!(connection.check_buffer().err().as_ref().and_then(fault), Some(Fault::FellBehind), "the queue never overflowed");
+    // The relay diagnostics are the desktop app's; the serve runtime has none.
+    #[cfg(feature = "desktop")]
     assert_eq!(crate::pairing::phone_session_category(error), "timeout");
     drop(phone);
 }
