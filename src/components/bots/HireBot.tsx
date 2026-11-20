@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight, Cpu, Laptop, Loader2, MessageSquare, Search, Shield, Sparkles, Users, Waypoints } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { createBot, loadBotTemplates, useBotStore } from "@/lib/bots";
-import { showBotsTeam } from "@/lib/botsPage";
-import { useSessionStore } from "@/lib/sessions";
+import { getBotsPage, showBotsTeam } from "@/lib/botsPage";
+import { getSessionStore, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import type { BotRoleTemplate } from "@/types/bots";
 import { BotAvatar } from "./BotAvatar";
-import { roleDuties, wakeLabel } from "./botLabels";
+import { accessLabel, roleDuties, wakeLabel, worksInLabel } from "./botLabels";
 import { wakeIcon } from "./FirstBot";
 
 /** The role list's groups (23.03). A role this build does not place goes under Other. */
@@ -59,13 +59,13 @@ export function HireBot({ initialRoleId }: { initialRoleId: string | null }) {
     <div className="flex min-h-0 flex-1 flex-col" data-testid="bots-hire-page">
       <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-hairline px-6 py-2" data-testid="bots-header">
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5">
-          <button type="button" onClick={showBotsTeam} className="rounded-sm text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
+          <button type="button" onClick={() => showBotsTeam()} className="rounded-sm text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
             Bots
           </button>
           <ChevronRight className="size-3.5 text-faint" />
           <h1 className="text-[15px] font-semibold text-foreground">Hire a bot</h1>
         </nav>
-        <p className="min-w-0 flex-1 truncate text-[12.5px] text-faint">Pick a role and a name. The bot asks for the rest.</p>
+        <p className="min-w-0 flex-1 truncate text-[12.5px] text-faint">Pick a role and a name. Everything else starts from your defaults.</p>
         <label className="ml-auto flex h-8 w-56 min-w-0 items-center gap-2 rounded-lg border border-hairline bg-input px-2.5 text-[12.5px] focus-within:ring-2 focus-within:ring-ring/40">
           <Search className="size-3.5 shrink-0 text-faint" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search roles" aria-label="Search roles" spellCheck={false} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-faint" />
@@ -120,7 +120,8 @@ export function HireBot({ initialRoleId }: { initialRoleId: string | null }) {
               </div>
               <div className="flex min-w-0 flex-col gap-6 @3xl/hire:flex-row">
                 <RoleDetail role={role} />
-                <HireForm key={role.id} role={role} />
+                {/* Not keyed by the role: a name typed before picking another role is kept. */}
+                <HireForm role={role} />
               </div>
             </div>
           )}
@@ -155,7 +156,7 @@ function RoleDetail({ role }: { role: BotRoleTemplate }) {
       </section>
       {role.duties.length > 0 && (
         <section>
-          <Heading note="all start off; switch them on once it is hired">Duties it comes with</Heading>
+          <Heading note="all start off">Duties it comes with</Heading>
           <ul className="divide-y divide-hairline border-y border-hairline" data-testid="bots-hire-duties">
             {role.duties.map((duty) => {
               const Icon = wakeIcon(duty.wake);
@@ -202,7 +203,20 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  // Set while this form is on screen: a hire that finishes after the person went elsewhere does not take them back.
+  const live = useRef(true);
   const trimmed = name.trim();
+
+  useEffect(() => {
+    live.current = true;
+    input.current?.focus();
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  // A refusal was about the role it was for.
+  useEffect(() => setError(null), [role.id]);
   const agent = sessions.harnesses.find((harness) => harness.id === "claude")?.name ?? "Claude Code";
 
   const hire = () => {
@@ -210,10 +224,11 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
     setBusy(true);
     createBot(role.id, trimmed).then(
       () => {
-        setError(null);
-        showBotsTeam();
+        if (live.current && getSessionStore().view === "bots" && getBotsPage().page === "hire") showBotsTeam(true);
+        else if (live.current) setBusy(false);
       },
       (cause) => {
+        if (!live.current) return;
         setError(errorMessage(cause));
         setBusy(false);
       },
@@ -232,6 +247,7 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
       <label className="flex flex-col gap-1.5">
         <span className="text-[13px] text-foreground">Name</span>
         <input
+          ref={input}
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="What you'll call it"
@@ -240,12 +256,12 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
           className="h-9 rounded-lg border border-hairline bg-input px-3 text-[13.5px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40"
           data-testid="bots-hire-name"
         />
-        <span className="text-[12px] text-faint">The name is the only thing to fill in. {trimmed || "The bot"} asks you for anything else it needs.</span>
+        <span className="break-words text-[12px] text-faint">The name is the only thing to fill in. You can change the rest once it is hired.</span>
       </label>
       {error && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{error}</p>}
       <div>
-        <Button type="submit" variant="accent" size="sm" disabled={!trimmed || busy} data-testid="bots-hire-submit">
-          {busy ? <Loader2 className="animate-spin" /> : <Check />} {trimmed ? `Hire ${trimmed}` : "Hire"}
+        <Button type="submit" variant="accent" size="sm" className="max-w-full" disabled={!trimmed || busy} data-testid="bots-hire-submit">
+          {busy ? <Loader2 className="animate-spin" /> : <Check />} <span className="min-w-0 truncate">{trimmed ? `Hire ${trimmed}` : "Hire"}</span>
         </Button>
       </div>
       <div className="rounded-lg border border-hairline bg-card" data-testid="bots-hire-defaults">
@@ -258,9 +274,10 @@ function HireForm({ role }: { role: BotRoleTemplate }) {
         <dl className="divide-y divide-hairline border-t border-hairline px-3">
           <Default icon={<Cpu />} label="Agent and model" value={`${agent} · its default model`} />
           <Default icon={<Laptop />} label="Runs on" value="This Mac" />
-          <Default icon={<Shield />} label="Access" value="Full access" />
+          <Default icon={<Shield />} label="Access" value={accessLabel("full")} />
           <Default icon={<Users />} label="Reports to" value="You" />
-          <Default icon={<Waypoints />} label="Works in" value="Wherever you give it work" />
+          {/* What the store gives every new bot (src-tauri bots `create`): it works for you alone. */}
+          <Default icon={<Waypoints />} label="Works in" value={worksInLabel(["personal"])} />
         </dl>
         {more && <p className="border-t border-hairline px-3 py-2 text-[12px] text-faint">Each of these can be changed on the bot once it is hired. Hiring asks for nothing more than a role and a name.</p>}
       </div>

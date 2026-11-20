@@ -1,9 +1,10 @@
-import { useEffect, useState, type ComponentType } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { Bell, Bot as BotIcon, CalendarClock, CircleDot, LayoutGrid, Laptop, Loader2, MessageSquare, Plus, ShieldOff, SquareTerminal, GitPullRequest } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { createBot, loadBotTemplates, useBotStore } from "@/lib/bots";
-import { showHireBot } from "@/lib/botsPage";
+import { getBotsPage, showBotsTeam, showHireBot } from "@/lib/botsPage";
+import { getSessionStore } from "@/lib/sessions";
 import type { BotDutyWake, BotRoleTemplate } from "@/types/bots";
 import { BotAvatar } from "./BotAvatar";
 import { BotsHeader } from "./BotsHeader";
@@ -21,8 +22,11 @@ export function wakeIcon(wake: BotDutyWake): ComponentType<{ className?: string 
       return CircleDot;
     case "bot":
       return BotIcon;
-    default:
+    case "message":
       return MessageSquare;
+    default:
+      // A kind a newer app wrote.
+      return Bell;
   }
 }
 
@@ -32,6 +36,14 @@ export function FirstBot() {
   const [templates, setTemplates] = useState<BotRoleTemplate[] | null>(store.templates);
   const [error, setError] = useState<string | null>(null);
   const [hiring, setHiring] = useState<string | null>(null);
+  // Set while this page is on screen. It goes as soon as the first bot arrives, before the hire's answer is handled.
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (templates) return;
@@ -46,7 +58,18 @@ export function FirstBot() {
   // One click: the role's own title is its first name, and it can be renamed any time.
   const hire = (template: BotRoleTemplate) => {
     setHiring(template.id);
-    createBot(template.id, template.title).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setHiring(null));
+    createBot(template.id, template.title).then(
+      () => {
+        // The cards are gone with the focus on them: give it to the team page, if that is still what shows.
+        if (getBotsPage().page === "team" && getSessionStore().view === "bots") showBotsTeam(true);
+        else if (live.current) setHiring(null);
+      },
+      (cause) => {
+        if (!live.current) return;
+        setError(errorMessage(cause));
+        setHiring(null);
+      },
+    );
   };
 
   return (
@@ -61,7 +84,7 @@ export function FirstBot() {
           <div>
             <h2 className="text-[22px] font-semibold text-foreground">Hire your first bot</h2>
             <p className="mt-1.5 max-w-[720px] text-[13.5px] leading-[1.6] text-muted-foreground">
-              A bot is an agent with a standing job. It keeps a role, a memory and a list of work, wakes up for its duties without being asked, and comes to you only when it needs a decision.
+              A bot is an agent with a standing job. It keeps a role, a memory and a list of work, and comes to you only when it needs a decision. Duties that wake it without being asked come in a later build.
             </p>
           </div>
 
@@ -81,10 +104,10 @@ export function FirstBot() {
               Uses the Claude Code and Codex logins you already have.
             </Point>
             <Point icon={ShieldOff} title="Full access, with a brake">
-              Works without asking, like your sessions. Pause stops one bot or all of them at once, and you can lower one bot to read and report.
+              Works without asking, like your sessions. Pause stops one bot or all of them at once.
             </Point>
             <Point icon={Bell} title="Asks you when it needs you">
-              A question comes to you with its answers. One choice and the bot goes on.
+              A question comes to you with its answers. One choice and the bot goes on. Coming with the Needs you queue.
             </Point>
           </ul>
 

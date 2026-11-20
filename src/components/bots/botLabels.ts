@@ -6,10 +6,13 @@ export function runsOnLabel(runsOn: BotRunsOn): string {
   return runsOn === "thisMac" ? "This Mac" : runsOn;
 }
 
-/** Whom a bot reports to: you, or another bot by its id. A bot that is gone is said to be. */
-export function reportsToLabel(reportsTo: string, bots: Bot[]): string {
+/**
+ * Whom a bot reports to: you, or another bot by its id. A lead that is not in the list is gone, unless records exist
+ * that this build cannot read: it may be one of those.
+ */
+export function reportsToLabel(reportsTo: string, bots: Bot[], unreadable = 0): string {
   if (reportsTo === "owner") return "You";
-  return bots.find((bot) => bot.id === reportsTo)?.name ?? "A removed bot";
+  return bots.find((bot) => bot.id === reportsTo)?.name ?? (unreadable > 0 ? "A bot this version can't read" : "A removed bot");
 }
 
 /** Where it works: `personal` is you alone; an empty list means wherever it is given work. */
@@ -44,7 +47,8 @@ export function wakeLabel(wake: BotDutyWake): string {
     case "message":
       return "When you message it";
     default:
-      return "";
+      // A kind a newer app wrote is shown as itself.
+      return String((wake as { kind?: unknown }).kind ?? "");
   }
 }
 

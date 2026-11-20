@@ -17,11 +17,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), botsApi: mocks.api }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mocks.switches }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mocks.switches, getExperimentalSettings: () => mocks.switches }));
 
 const { bootBots, resetBotsForTests } = await import("@/lib/bots");
 const { resetBotsPageForTests, showHireBot, showBotsTeam } = await import("@/lib/botsPage");
-const { getSessionStore } = await import("@/lib/sessions");
+const { getSessionStore, openAgents } = await import("@/lib/sessions");
+const { useLeaveBotsWhenOff } = await import("@/lib/botsPage");
+const { conflictOf, resolveKeymap } = await import("@/lib/shortcuts");
 const { BotsView } = await import("./BotsView");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { BotsSidebarSection, NO_BOTS_TEXT } = await import("./BotsSidebarSection");
@@ -116,6 +118,106 @@ describe("Bots: the sidebar section and the first-bot page (PRO-467)", () => {
     expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
     expect(main().getAllByTestId("bots-table-row").map((row) => row.dataset.bot)).toEqual(["b1"]);
   });
+
+  it("says why a one-click hire failed and lets it be tried again", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("The bots' store is read-only.");
+    render(<Screen />);
+    fireEvent.click(await main().findByRole("button", { name: "Hire CTO" }));
+    expect((await main().findByRole("alert")).textContent).toMatch(/read-only/);
+    expect(main().getByText("Hire your first bot")).toBeTruthy();
+    await waitFor(() => expect((main().getByRole("button", { name: "Hire CTO" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(sidebar().queryAllByTestId("bot-row")).toHaveLength(0);
+  });
+});
+
+describe("Bots: states (PRO-467 review)", () => {
+  it("says it is reading until the list arrives, with no counts or table", async () => {
+    mocks.api.list.mockReturnValue(new Promise(() => {}));
+    void bootBots();
+    act(() => showBotsTeam());
+    render(<Screen />);
+    expect(main().getByTestId("bots-reading")).toBeTruthy();
+    expect(main().queryByTestId("bots-stats")).toBeNull();
+    expect(main().queryByTestId("bots-table")).toBeNull();
+    expect(main().queryByText("Hire your first bot")).toBeNull();
+    expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
+  });
+
+  it("on a failed read shows no counts or table and offers Retry, which reads again", async () => {
+    await boot(new Error("store is locked"));
+    render(<Screen />);
+    expect(main().queryByTestId("bots-stats")).toBeNull();
+    expect(main().queryByTestId("bots-table")).toBeNull();
+    mocks.api.list.mockResolvedValue(listOf(3, [bot("a", "Atlas")]));
+    fireEvent.click(main().getByTestId("bots-retry"));
+    await waitFor(() => expect(main().getAllByTestId("bots-table-row")).toHaveLength(1));
+    expect(main().queryByRole("alert")).toBeNull();
+  });
+
+  it("counts records this version cannot read alongside the ones it can, the same in the sidebar and the Team card", async () => {
+    await boot(listOf(2, [bot("a", "Atlas"), bot("i", "Iris", { reportsTo: "hidden-lead" })], 2));
+    render(<Screen />);
+    expect(screen.getByTestId("bots-sidebar-section").querySelector("[data-list-name]")?.nextElementSibling?.textContent).toBe("4");
+    const team = main().getAllByTestId("bots-stat")[0].textContent;
+    expect(team).toMatch(/^Team4 bots/);
+    expect(team).toMatch(/2 cannot be read by this version/);
+    expect(sidebar().getAllByTestId("bot-row")).toHaveLength(2);
+    // Its lead may be one of the records that cannot be read: it is not called removed.
+    const iris = main().getAllByTestId("bots-table-row")[1];
+    expect(iris.textContent).toMatch(/A bot this version can't read/);
+    expect(iris.textContent).not.toMatch(/A removed bot/);
+  });
+
+  it("a folded section still says that records cannot be read, and why the list failed", async () => {
+    await boot(listOf(2, [bot("a", "Atlas")], 1));
+    render(<Screen />);
+    fireEvent.click(sidebar().getByRole("button", { name: "Bots", expanded: true }));
+    expect(sidebar().queryAllByTestId("bot-row")).toHaveLength(0);
+    expect(sidebar().getByTestId("bots-sidebar-unreadable")).toBeTruthy();
+    // The fold is kept: open it again for the tests after this one.
+    fireEvent.click(sidebar().getByRole("button", { name: "Bots", expanded: false }));
+  });
+
+  it("names a lowered access level, an unknown place and an unknown wake as themselves", async () => {
+    const { wakeLabel } = await import("./botLabels");
+    expect(wakeLabel({ kind: "calendar" } as never)).toBe("calendar");
+    await boot(listOf(2, [bot("a", "Atlas", { access: "readReport", runsOn: "otherMac" })]));
+    render(<Screen />);
+    expect(main().getByTestId("bot-role-line").textContent).toBe("CTO · Read and report");
+    expect(main().getByTestId("bots-table-row").textContent).toMatch(/otherMac/);
+  });
+});
+
+describe("Bots: the switch and the shortcut", () => {
+  function Bounce() {
+    useLeaveBotsWhenOff();
+    return null;
+  }
+
+  it("leaves the Bots page for the welcome screen when the switch goes off, not before the switches are read", () => {
+    act(() => showBotsTeam());
+    mocks.switches = null;
+    const { rerender } = render(<Bounce />);
+    expect(getSessionStore().view).toBe("bots");
+    mocks.switches = { bots: false };
+    act(() => rerender(<Bounce key="off" />));
+    expect(getSessionStore().view).toBe("welcome");
+    // Any other page is left alone.
+    act(() => openAgents());
+    rerender(<Bounce key="again" />);
+    expect(getSessionStore().view).toBe("agents");
+  });
+
+  it("with the switch off, ⇧⌘J belongs to nothing: another action can take it and keeps it", () => {
+    const action = { id: "app.home" } as const;
+    expect(conflictOf("mod+shift+j", action.id)?.id).toBe("app.bots");
+    mocks.switches = { bots: false };
+    expect(conflictOf("mod+shift+j", action.id)).toBeNull();
+    const keymap = resolveKeymap({ "app.home": ["mod+shift+j"] });
+    expect(keymap["app.home"]).toEqual(["mod+shift+j"]);
+    expect(keymap["app.bots"]).toEqual([]);
+  });
 });
 
 describe("Bots: hiring (23.03)", () => {
@@ -155,6 +257,45 @@ describe("Bots: hiring (23.03)", () => {
     expect((await main().findByRole("alert")).textContent).toMatch(/already exists/);
     expect((input as HTMLInputElement).value).toBe("Argus");
     expect(main().getByTestId("bots-hire-page")).toBeTruthy();
+  });
+
+  it("starts with the defaults the new bot really gets, focuses the name and keeps it when the role changes", async () => {
+    await boot(listOf(0, []));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    const input = (await main().findByTestId("bots-hire-name")) as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    const defaults = main().getByTestId("bots-hire-defaults").textContent;
+    expect(defaults).toMatch(/Works inPersonal/);
+    expect(defaults).toMatch(/AccessFull access/);
+    fireEvent.change(input, { target: { value: "Argus" } });
+    fireEvent.click(main().getAllByTestId("bots-hire-role").find((row) => row.dataset.role === "cto")!);
+    await waitFor(() => expect(main().getByRole("heading", { name: "CTO" })).toBeTruthy());
+    expect((main().getByTestId("bots-hire-name") as HTMLInputElement).value).toBe("Argus");
+  });
+
+  it("does not take the person back to the team when they went elsewhere while the hire ran", async () => {
+    await boot(listOf(0, []));
+    let answer!: (value: Bot) => void;
+    mocks.api.create.mockReturnValue(new Promise<Bot>((resolve) => (answer = resolve)));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    await waitFor(() => expect(mocks.api.create).toHaveBeenCalled());
+    act(() => openAgents());
+    await act(async () => answer(bot("b2", "Argus")));
+    expect(getSessionStore().view).toBe("agents");
+  });
+
+  it("after a hire the team page takes the focus", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockResolvedValue(bot("b2", "Argus"));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    await waitFor(() => expect(document.activeElement).toBe(main().getByRole("heading", { name: "Bots", level: 1 })));
   });
 
   it("groups the roles, putting one this build does not place under Other, and filters them", async () => {

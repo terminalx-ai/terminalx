@@ -1,13 +1,13 @@
-import { Cloud, Laptop, Plus, Users } from "@/icons";
+import { Plus, RotateCw, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { ListSection } from "@/components/layout/SessionSidebar";
-import { useBotStore } from "@/lib/bots";
+import { reloadBots, useBotStore } from "@/lib/bots";
 import { showBotsTeam, showHireBot } from "@/lib/botsPage";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { cn } from "@/lib/cn";
 import type { Bot } from "@/types/bots";
-import { BotAvatar } from "./BotAvatar";
+import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { runsOnLabel, statusLine } from "./botLabels";
 
 /** What the sidebar says with no bots (23.11). */
@@ -38,6 +38,22 @@ function BotsList() {
       mark={<Users className="size-3.5 shrink-0 text-muted-foreground" />}
       note={count > 0 ? String(count) : undefined}
       data-testid="bots-sidebar-section"
+      // Shown even while the section is folded: they say the list is not the whole team.
+      notes={
+        <>
+          {store.error && (
+            <p role="alert" className="flex items-center gap-1 px-2.5 py-1 text-[12px] text-destructive" title={store.error}>
+              <span className="min-w-0 flex-1">Couldn't read the bots: {store.error}</span>
+              <WithTooltip label="Read the bots again">
+                <Button variant="ghost" size="icon-xs" aria-label="Read the bots again" onClick={() => void reloadBots()}>
+                  <RotateCw />
+                </Button>
+              </WithTooltip>
+            </p>
+          )}
+          {store.unreadable > 0 && <p className="px-2.5 py-1 text-[12px] text-warning" data-testid="bots-sidebar-unreadable">{unreadableText(store.unreadable)}</p>}
+        </>
+      }
       actions={
         <WithTooltip label="Hire a bot">
           <Button variant="ghost" size="icon-xs" aria-label="Hire a bot" className="text-faint" onClick={() => showHireBot()} data-testid="bots-sidebar-hire">
@@ -46,12 +62,6 @@ function BotsList() {
         </WithTooltip>
       }
     >
-      {store.error && (
-        <p role="alert" className="px-2.5 py-1 text-[12px] text-destructive" title={store.error}>
-          Couldn't read the bots: {store.error}
-        </p>
-      )}
-      {store.unreadable > 0 && <p className="px-2.5 py-1 text-[12px] text-warning" data-testid="bots-sidebar-unreadable">{unreadableText(store.unreadable)}</p>}
       {store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0 && (
         <p className="px-2.5 py-1 text-[12px] leading-[1.45] text-faint" data-testid="bots-sidebar-empty">{NO_BOTS_TEXT}</p>
       )}
@@ -71,7 +81,7 @@ function BotRow({ bot }: { bot: Bot }) {
     <li>
       <button
         type="button"
-        onClick={showBotsTeam}
+        onClick={() => showBotsTeam()}
         aria-label={`${bot.name}, ${bot.roleTitle}, ${status}, runs on ${place}`}
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40"
         data-testid="bot-row"
@@ -86,7 +96,7 @@ function BotRow({ bot }: { bot: Bot }) {
           <span className={cn("truncate text-[11.5px]", bot.paused ? "text-warning" : "text-faint")}>{status}</span>
         </span>
         <span title={place} className="shrink-0 text-faint [&_svg]:size-3">
-          {bot.runsOn === "thisMac" ? <Laptop /> : <Cloud />}
+          <RunsOnIcon runsOn={bot.runsOn} />
         </span>
       </button>
     </li>

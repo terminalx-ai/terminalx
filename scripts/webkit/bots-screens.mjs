@@ -50,7 +50,12 @@ const viewports = [
   { width: 1440, height: 900 },
   { width: 1100, height: 760 },
   { width: 900, height: 640 },
+  // The window's smallest size (tauri.conf.json minWidth × minHeight).
+  { width: 760, height: 520 },
 ];
+
+/** An 80-character name, to see that every place showing it truncates. */
+const LONG_NAME = "Kestrel the very thorough reviewer of every pull request and dependency upgrade x".slice(0, 80);
 
 /** Every visible element of the main slot stays inside it; the page never scrolls sideways; header controls do not overlap. */
 async function measure(page) {
@@ -78,6 +83,16 @@ async function measure(page) {
         if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) problems.push(`header: "${controls[i].textContent.trim().slice(0, 30)}" overlaps "${controls[j].textContent.trim().slice(0, 30)}"`);
       }
     }
+    // Team table: a bot's name stays inside its own cell, however long.
+    for (const row of document.querySelectorAll("[data-testid=bots-table-row]")) {
+      const cell = row.querySelector("td").getBoundingClientRect();
+      const name = row.querySelector("td p").getBoundingClientRect();
+      if (name.right > cell.right + 1) problems.push(`table row ${row.dataset.bot}: name spills out of its cell`);
+    }
+    // Hire a bot: the Hire button stays inside its column.
+    const form = document.querySelector("[data-testid=bots-hire-form]");
+    const submit = document.querySelector("[data-testid=bots-hire-submit]");
+    if (form && submit && submit.getBoundingClientRect().right > form.getBoundingClientRect().right + 1) problems.push("Hire button spills out of its column");
     // Sidebar bot rows: name and avatar inside the row.
     for (const row of document.querySelectorAll("[data-testid=bot-row]")) {
       const box = row.getBoundingClientRect();
@@ -133,7 +148,7 @@ try {
   // 23.03
   await main.getByTestId("bots-hire").click();
   await main.getByRole("button", { name: /Security auditor/ }).click();
-  await main.getByTestId("bots-hire-name").fill("Sentry");
+  await main.getByTestId("bots-hire-name").fill(LONG_NAME);
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     const problems = await measure(page);

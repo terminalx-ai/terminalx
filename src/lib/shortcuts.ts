@@ -1,4 +1,5 @@
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
 /**
  * Every keyboard shortcut the app has: one registry of actions, each with its
@@ -456,8 +457,19 @@ export function resolveKeymap(raw: unknown, mac = isMac): Keymap {
     });
   for (const action of SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(defaultBindings(action.id, mac));
   for (const action of SHORTCUT_ACTIONS) if (overrides[action.id]) keymap[action.id] = claim(overrides[action.id]!);
+  // An action behind an Experimental switch takes its default keys last: whatever else uses them keeps them.
+  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
   for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
   return keymap;
+}
+
+function gated(action: ShortcutAction): boolean {
+  return !!action.requires;
+}
+
+/** False while the Experimental switch the action is behind is off (or not read yet): its keys then belong to nothing. */
+export function shortcutOffered(action: ShortcutAction): boolean {
+  return !action.requires || getExperimentalSettings()?.[action.requires] === true;
 }
 
 let cached: { raw: unknown; keymap: Keymap } | null = null;
@@ -483,7 +495,7 @@ export function bindingsOf(id: ShortcutId): string[] {
 /** The other action that has `binding`, if any. */
 export function conflictOf(binding: string, id: ShortcutId, keymap: Keymap = currentKeymap()): ShortcutAction | null {
   const wanted = normalizeBinding(binding);
-  return SHORTCUT_ACTIONS.find((action) => action.id !== id && keymap[action.id].includes(wanted)) ?? null;
+  return SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted)) ?? null;
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((binding, i) => binding === b[i]);
