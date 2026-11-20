@@ -11,7 +11,7 @@ writer of each tab's transcript. Desktops talk to it two ways:
   events, and for configuration (model, effort, permission mode).
 - **The API command mailbox** (terminalx-saas contract §11-13) for every
   command whose replay would be harmful: `send`, `steer`, `stop`,
-  `permission-decision`. A desktop never sends these over live RPC, so there
+  `permission-decision`, `follow-up`. A desktop never sends these over live RPC, so there
   is exactly one delivery path and one receipt per command, whether the
   runtime is online, reconnecting or suspended. A machine has no mailbox: it
   takes these as live calls with durable receipts (`agent-commands/1`,
@@ -76,14 +76,15 @@ Every plaintext is JSON with `"v": 1`. It is AES-256-GCM encrypted with AAD
 | `steer` | `{ v, text }` | Mid-turn: typed into the running CLI now; Claude Code and Codex take it at their next step. Idle: like `send`. |
 | `stop` | `{ v }` | The hard stop: ends the tab's agent process (the conversation resumes with the next message) and drops the tab's queued follow-ups (listed in the receipt). Escape is not this; see `session.interrupt`. |
 | `permission-decision` | `{ v, requestId, optionId }` or `{ v, requestId, answers }` | Answers that pending request. If it is no longer pending, the command is `rejected` with `request-not-pending`. |
+| `follow-up` | `{ v, op, followUpId, text? }` | #1328, runtimes with `follow-ups/1`. Changes the tab's held follow-up whose `clientCommandId` is `followUpId`: `edit` replaces its `text` (checked as a send's), `withdraw` drops it unsent, `release` puts it first and interrupts the running turn (Escape), so it goes as soon as the turn settles. Only its sender or a manager may; a held lease of someone else refuses it as it refuses a stop. One that is no longer held is `rejected` with `follow-up-gone`. The API takes this kind from terminalx-saas#289; before it, the API refuses it with `cloud_workspace_request_invalid`, and the desktop says the cloud service does not take these changes yet. |
 
-The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps?, requestId?, message? }`. It is
+The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps?, requestId?, followUpId?, interrupted?, message? }`. It is
 encrypted with AAD `["terminalx-agent-command-result/1", organizationId, workspaceId, clientCommandId, outcome, keyId]`
 under the command's own key (`keyId` is the command's), which its author holds. A command whose key is unknown gets a
 receipt with no body; its category (`key-unknown`) is enough.
 
 Rejection categories are `key-unknown`, `decrypt-failed`, `payload-invalid`, `tab-unknown`, `forbidden`,
-`request-not-pending`, `agent-unavailable` and `apply-failed`.
+`request-not-pending`, `follow-up-gone`, `agent-unavailable` and `apply-failed`.
 
 ### Exactly-once (§11.4)
 

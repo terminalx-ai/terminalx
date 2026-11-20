@@ -13,12 +13,14 @@ import {
   type AgentTabStatus,
   type CachedTab,
   type CloudAgentScope,
+  type FollowUpChange,
   type OutboxEntry,
   type OutboxKind,
   type OutboxPayload,
   type WakeResult,
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
+import { inputRefusalText } from "@/lib/cloudCollab";
 import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
 import { clearDrafts, getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 
@@ -1250,7 +1252,7 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
 }
 
 /** `data.reason` of a live `session.send` the runtime refused with a sentence meant for the person. */
-const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden", "attachment-missing"]);
+const LIVE_SEND_REFUSALS = new Set(["command-not-queued", "slash-command-forbidden", "shell-command-forbidden", "file-mention-forbidden", "attachment-missing", "follow-up-gone"]);
 
 /**
  * What a refused live command says to the person (docs/MACHINES.md decision
@@ -1274,10 +1276,10 @@ function liveTarget(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcC
   return { client, sessionId: tab.info.sessionId };
 }
 
-/** A command applied live: what the outbox would have said once it settled. */
-function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, requestId?: string): OutboxEntry {
+/** A command applied live: what the outbox would have said once it settled. `clientCommandId`: the request's id, where it names what it queued. */
+function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, requestId?: string, clientCommandId?: string): OutboxEntry {
   const now = Date.now();
-  return { clientCommandId: `live-${now}`, tabId, kind, ...(text !== undefined ? { text } : {}), ...(requestId ? { requestId } : {}), state: "applied", createdAt: now, updatedAt: now };
+  return { clientCommandId: clientCommandId ?? `live-${now}`, tabId, kind, ...(text !== undefined ? { text } : {}), ...(requestId ? { requestId } : {}), state: "applied", createdAt: now, updatedAt: now };
 }
 
 /**
@@ -1293,8 +1295,10 @@ async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: stri
   const durable = takesLiveCommands(scope, target.client);
   const settings = durable ? (s.tabs.get(tabId)?.pendingConfig ?? null) : null;
   let receipt: { settingsIgnored?: boolean } | undefined;
+  // Its id names the follow-up it becomes when a turn runs (#1328), for a change to it later.
+  const requestId = `send-${crypto.randomUUID().replace(/-/g, "")}`;
   try {
-    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(settings ?? {}) });
+    receipt = await target.client.mutate<{ settingsIgnored?: boolean }>("session.send", { sessionId: target.sessionId, tabId, text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}), ...(settings ?? {}) }, requestId);
   } catch (error) {
     throw liveCommandError(error);
   }
@@ -1305,7 +1309,7 @@ async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: stri
     current.settingsIgnored = receipt?.settingsIgnored === true;
     publish(s);
   }
-  return appliedEntry(tabId, "send", text);
+  return appliedEntry(tabId, "send", text, undefined, requestId);
 }
 
 /** Steer, stop or decide on a machine (`agent-commands/1`); an older machine takes prompts only. */
@@ -1404,6 +1408,81 @@ export function isDeciding(scope: CloudAgentScope, requestId: string): boolean {
   return s.deciding.has(requestId) || !!decisionFor(s.outbox, requestId);
 }
 
+/** Said where a runtime from before `follow-ups/1` holds a tab's follow-ups (#1328). */
+export const FOLLOW_UPS_OLD_RUNTIME = "Editing, deleting or sending a held message now needs a newer runtime on this workspace or machine.";
+
+/** Said when the cloud service refuses a held message's change: it is from before the `follow-up` command (#1328). */
+export const FOLLOW_UPS_OLD_SERVICE = "The cloud service does not take changes to held messages yet. They still go to the agent one after each turn.";
+
+/** Whether `client`'s runtime takes changes to its held follow-ups (#1328). */
+export function changesFollowUps(scope: CloudAgentScope, client: WorkspaceRpcClient | null): boolean {
+  if (!client?.hasCapability("follow-ups/1")) return false;
+  // A machine takes them live, with the receipts of `agent-commands/1`.
+  return !isDevScope(scope) || takesLiveCommands(scope, client);
+}
+
+/**
+ * Change a follow-up a tab's runtime holds (#1328): its text, withdrawn
+ * unsent, or released (first in line, the running turn interrupted). A cloud
+ * workspace takes it through the mailbox, in order behind the tab's earlier
+ * commands, and this waits for its receipt: a held message that went to the
+ * agent meanwhile is refused (`follow-up-gone`) and the refusal is thrown. A
+ * machine takes it live.
+ */
+export async function changeCloudFollowUp(scope: CloudAgentScope, tabId: string, change: FollowUpChange, client: WorkspaceRpcClient | null): Promise<void> {
+  if (isDevScope(scope)) {
+    const target = liveTarget(scope, tabId, client);
+    if (!changesFollowUps(scope, target.client)) throw new Error(target.client.hasCapability("agent-commands/1") ? FOLLOW_UPS_OLD_RUNTIME : DEV_SCOPE_NOTICE);
+    try {
+      await target.client.mutate("session.followUp", { sessionId: target.sessionId, tabId, ...change });
+    } catch (error) {
+      throw liveCommandError(error);
+    }
+    return;
+  }
+  const entry = await enqueue(scope, tabId, "follow-up", change, client);
+  const settled = await commandSettled(scope, entry.clientCommandId);
+  if (settled.state !== "applied") throw new Error(followUpRefusal(settled));
+}
+
+/** A follow-up change that did not apply, in words: the runtime's own sentence where it wrote one. */
+function followUpRefusal(entry: OutboxEntry): string {
+  const refused = inputRefusalText(entry.category, entry.receipt);
+  if (refused) return refused;
+  const message = entry.receipt?.message;
+  if (typeof message === "string" && message.trim() && message.length <= 400) return message;
+  if (entry.category === "lease-held") return "Someone else is driving this tab.";
+  // A cloud service from before the `follow-up` command refuses it as malformed, and stores nothing.
+  if (entry.category === "cloud_workspace_request_invalid") return FOLLOW_UPS_OLD_SERVICE;
+  if (entry.state === "outcome-unknown") return "The workspace could not say whether the change was made. Look at the held messages before trying again.";
+  if (entry.state === "cancelled") return "The change was cancelled before it reached the workspace.";
+  return `The workspace did not make the change${entry.category ? ` (${entry.category})` : ""}.`;
+}
+
+/**
+ * The outbox entry `clientCommandId` once it is settled (applied, rejected,
+ * cancelled or of unknown outcome). Refused when the workspace's commands
+ * are let go here meanwhile (it was deleted, or access to it went).
+ */
+function commandSettled(scope: CloudAgentScope, clientCommandId: string): Promise<OutboxEntry> {
+  const s = store(scope);
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (stores.get(cloudAgentsKey(scope)) !== s) {
+        s.listeners.delete(check);
+        reject(new Error("This workspace is no longer open here, so the change could not be followed."));
+        return true;
+      }
+      const entry = s.outbox.find((candidate) => candidate.clientCommandId === clientCommandId);
+      if (!entry || !TERMINAL_OUTBOX_STATES.has(entry.state)) return false;
+      s.listeners.delete(check);
+      resolve(entry);
+      return true;
+    };
+    if (!check()) s.listeners.add(check);
+  });
+}
+
 /**
  * The reader chose to try an unconfirmed message again: a new command with a
  * new id. Never done automatically.
@@ -1411,6 +1490,8 @@ export function isDeciding(scope: CloudAgentScope, requestId: string): boolean {
 export function sendAgain(scope: CloudAgentScope, entry: OutboxEntry, client: WorkspaceRpcClient | null) {
   if (entry.kind === "stop") return stopCloudAgent(scope, entry.tabId, client);
   if (entry.kind === "permission-decision") throw new Error("A decision is never sent twice");
+  // Its change is made again from the held messages, as they are by then.
+  if (entry.kind === "follow-up") throw new Error("A change to a held message is never sent twice");
   // A message with images goes again with its images (uploaded again: the runtime may have
   // dropped them), or not at all. It is never sent as its text alone, or as nothing.
   if (entry.kind === "send" && (entry.images ?? 0) > 0) {

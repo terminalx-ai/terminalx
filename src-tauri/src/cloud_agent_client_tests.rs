@@ -394,6 +394,10 @@ fn invalid_commands_are_refused_before_anything_is_stored() {
         ("send", json!({ "text": "  " })),
         ("permission-decision", json!({ "optionId": "allow" })),
         ("permission-decision", json!({ "requestId": "r1" })),
+        // #1328: a held follow-up's change names it and a known op; an edit carries its text.
+        ("follow-up", json!({ "op": "withdraw" })),
+        ("follow-up", json!({ "op": "move", "followUpId": "c1" })),
+        ("follow-up", json!({ "op": "edit", "followUpId": "c1" })),
         ("delete-everything", json!({})),
         ("send", json!("hi")),
     ] {
@@ -442,6 +446,11 @@ fn status_polling_settles_commands_and_decrypts_their_receipts() {
     assert_eq!(synced[0].state, "applied");
     assert_eq!(synced[0].outcome.as_deref(), Some("applied"));
     assert_eq!(synced[0].receipt.as_ref().unwrap()["queued"], json!(true));
+    // A held follow-up's change travels the same way (#1328).
+    let change = fixture.client.enqueue(ORG, WS, "tab-1", "follow-up", json!({ "op": "edit", "followUpId": "c1", "text": "edited" }), true).unwrap();
+    assert_eq!((change.kind.as_str(), change.text.as_deref()), ("follow-up", Some("edited")));
+    let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
+    assert!(synced.iter().any(|entry| entry.client_command_id == change.client_command_id && entry.state == "applied"));
 }
 
 fn checkpoint_for(tab_id: &str, sealed_for_tab: &str, epoch: u64, version: u64) -> Value {

@@ -69,10 +69,14 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * answered once per `clientRequestId` from the runtime's durable receipts.
  * Only a runtime with no cloud mailbox (a machine) grants it; a cloud
  * workspace's commands keep going through the mailbox.
+ * `follow-ups/1` (#1328): the runtime edits, withdraws and releases (sends
+ * next, interrupting the turn) a follow-up it holds: through the mailbox's
+ * `follow-up` command on a cloud workspace, live as `session.followUp` with
+ * the receipts of `agent-commands/1` on a machine.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "follow-ups/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -155,6 +159,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.steer": "agent-commands/1",
   "session.stop": "agent-commands/1",
   "session.decide": "agent-commands/1",
+  "session.followUp": "follow-ups/1",
 };
 
 /**
@@ -384,6 +389,17 @@ export type AgentProcessState = "running" | "exited" | "not-started";
 export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
 
 /** An agent tab as `session.tabs` and `session.configure` describe it (docs/CLOUD-AGENT-TABS.md). */
+/** A follow-up the runtime holds until the tab's turn ends, by the id of the command that sent it. */
+export interface HeldFollowUpInfo {
+  clientCommandId: string;
+  text: string;
+  actorId?: string | null;
+  /** How many images it carries. */
+  images?: number;
+  /** The names of its other files. */
+  files?: string[];
+}
+
 export interface AgentTabInfo {
   sessionCreated?: string | null;
   sessionLastMessageAt?: string | null;
@@ -405,8 +421,12 @@ export interface AgentTabInfo {
   status: AgentTabStatus;
   process: AgentProcessState;
   pendingPermissions: { requestId: string; toolName: string; input: unknown; options: unknown[] }[];
-  /** `actorId`: who queued it, on a runtime with `collab/1`. */
-  followUps: { clientCommandId: string; text: string; actorId?: string | null }[];
+  /**
+   * `actorId`: who queued it, on a runtime with `collab/1`. `images` and
+   * `files` (#1328): what it carries besides its text, from a runtime with
+   * `follow-ups/1`; absent when nothing.
+   */
+  followUps: HeldFollowUpInfo[];
   /** Who holds the tab's input lease, on a runtime with `collab/1`. */
   lease?: { tabId: string; holderId: string; acquiredAt: number; expiresAt: number } | null;
   /**

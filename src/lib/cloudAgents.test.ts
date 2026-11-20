@@ -13,6 +13,10 @@ vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 import {
   applyLiveTab,
   applyLiveTabs,
+  changeCloudFollowUp,
+  changesFollowUps,
+  FOLLOW_UPS_OLD_RUNTIME,
+  FOLLOW_UPS_OLD_SERVICE,
   settledStatus,
   attachCloudAgentTab,
   configureCloudAgentTab,
@@ -893,7 +897,7 @@ describe("cloud agent tabs store", () => {
     applyLiveTabs(dev, [tabInfo()]);
     const client = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})) });
     const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
-    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" }, expect.stringMatching(/^send-[0-9a-f]{32}$/));
     expect(entry.state).toBe("applied");
     // What the runtime refused to type or to queue is said in its own words, not as a bare code (PRO-88).
     const refusals = [
@@ -949,6 +953,70 @@ describe("cloud agent tabs store", () => {
     expect(backend.calls).toEqual([]);
   });
 
+  // #1328: a held follow-up is changed by its sending command's id, on the runtime that holds it.
+  describe("changing a held follow-up", () => {
+    it("goes through the mailbox and waits for the runtime's receipt", async () => {
+      vi.useFakeTimers();
+      applyLiveTabs(scope, [tabInfo()]);
+      const client = fakeClient(true, { capabilities: ["session/1", "follow-ups/1"] });
+      expect(changesFollowUps(scope, client)).toBe(true);
+      let done = false;
+      const edited = changeCloudFollowUp(scope, "t-1", { op: "edit", followUpId: "cmd-held", text: "use tabs" }, client).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.calls.find((call) => call.cmd === "cloud_agent_enqueue")!.args).toMatchObject({ tabId: "t-1", kind: "follow-up", payload: { op: "edit", followUpId: "cmd-held", text: "use tabs" } });
+      expect(client.nudgeMailbox).toHaveBeenCalled();
+      expect(done).toBe(false);
+      const [entry] = backend.outbox;
+      backend.syncs = [[{ ...entry!, state: "applied", updatedAt: 50 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      await edited;
+      expect(done).toBe(true);
+    });
+
+    it("throws the runtime's refusal, in its words", async () => {
+      vi.useFakeTimers();
+      applyLiveTabs(scope, [tabInfo()]);
+      const client = fakeClient(true, { capabilities: ["session/1", "follow-ups/1"] });
+      const released = changeCloudFollowUp(scope, "t-1", { op: "release", followUpId: "cmd-gone" }, client);
+      const failed = released.catch((error: unknown) => errorText(error));
+      await vi.advanceTimersByTimeAsync(0);
+      const [entry] = backend.outbox;
+      const message = "That message is no longer held: it went to the agent, or was withdrawn.";
+      backend.syncs = [[{ ...entry!, state: "rejected", category: "follow-up-gone", receipt: { v: 1, outcome: "rejected", message }, updatedAt: 50 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await failed).toBe(message);
+      // Never sent twice: the change is made again from the queue as it is then.
+      expect(() => sendAgain(scope, entry!, client)).toThrow(/never sent twice/);
+      // A cloud service from before the command refuses it as malformed: said as that.
+      const refused = changeCloudFollowUp(scope, "t-1", { op: "withdraw", followUpId: "cmd-held" }, client).catch((error: unknown) => errorText(error));
+      await vi.advanceTimersByTimeAsync(0);
+      const last = backend.outbox.at(-1)!;
+      backend.syncs = [[{ ...last, state: "rejected", category: "cloud_workspace_request_invalid", updatedAt: 60 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await refused).toBe(FOLLOW_UPS_OLD_SERVICE);
+    });
+
+    it("is live on a machine, by its request id, and refused by one that cannot take it", async () => {
+      const machine = { organizationId: "", workspaceId: "machine:m4" };
+      await loadCloudAgents(machine);
+      applyLiveTabs(machine, [tabInfo()]);
+      const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1", "follow-ups/1"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+      // The send's request id is what names the follow-up it became.
+      const sent = await sendToCloudAgent(machine, "t-1", "after this", client);
+      expect(sent.clientCommandId).toBe(client.mutate.mock.calls[0]![2]);
+      await changeCloudFollowUp(machine, "t-1", { op: "withdraw", followUpId: sent.clientCommandId }, client);
+      expect(client.mutate).toHaveBeenLastCalledWith("session.followUp", { sessionId: "s-1", tabId: "t-1", op: "withdraw", followUpId: sent.clientCommandId });
+      client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("conflict", "That message is no longer held: it went to the agent, or was withdrawn.", "session.followUp", { reason: "follow-up-gone" }));
+      expect(await changeCloudFollowUp(machine, "t-1", { op: "release", followUpId: "x" }, client).catch((error: unknown) => errorText(error))).toMatch(/no longer held/);
+      const old = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn() });
+      expect(changesFollowUps(machine, old)).toBe(false);
+      await expect(changeCloudFollowUp(machine, "t-1", { op: "withdraw", followUpId: "x" }, old)).rejects.toThrow(FOLLOW_UPS_OLD_RUNTIME);
+      expect(old.mutate).not.toHaveBeenCalled();
+      await flushCloudAgentCache(machine);
+      expect(backend.calls).toEqual([]);
+    });
+  });
+
   it("sends the settings chosen while away with a machine's next prompt", async () => {
     const machine = { organizationId: "", workspaceId: "machine:m2" };
     await loadCloudAgents(machine);
@@ -957,7 +1025,7 @@ describe("cloud agent tabs store", () => {
     await configureCloudAgentTab(machine, "t-1", { model: "opus" }, Object.assign(fakeClient(false, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn() })).catch(() => undefined);
     expect(getCloudAgents(machine).tabs[0]!.pendingConfig).toEqual({ model: "opus" });
     await sendToCloudAgent(machine, "t-1", "hello", client);
-    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello", model: "opus" });
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello", model: "opus" }, expect.stringMatching(/^send-/));
     expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
   });
 

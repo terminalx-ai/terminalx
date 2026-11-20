@@ -249,10 +249,12 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer()],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : [])],
       authority,
     });
   }
+  /** #1328: whether the runtime takes changes to its held follow-ups (`follow-ups/1`). */
+  followUps = false;
   /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
   /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
@@ -371,7 +373,8 @@ function cloudHandlers() {
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => outbox,
-    cloud_agent_outbox_sync: () => outbox,
+    // The runtime applies a held follow-up's change at once (#1328).
+    cloud_agent_outbox_sync: () => (outbox = outbox.map((entry) => (entry.kind === "follow-up" ? { ...entry, state: "applied" } : entry))),
     cloud_agent_checkpoints: () => [],
     cloud_agent_checkpoint: () => null,
     cloud_agent_enqueue: (args) => {
@@ -676,6 +679,64 @@ describe("cloud session actions", () => {
     // Connected: nothing needed waking.
     expect(activate).not.toHaveBeenCalled();
     expect(guard.violations).toEqual([]);
+  });
+
+  it("#1328: the runtime's held follow-ups are in the tray, where one is edited, deleted or sent now through the mailbox", async () => {
+    runtime.followUps = true;
+    runtime.events = [ev({ type: "user_message", text: "clean up", queued: false })];
+    runtime.tabs = [tabInfo({ status: "in_progress", followUps: [
+      { clientCommandId: "cmd-a", text: "then run the tests", actorId: null },
+      { clientCommandId: "cmd-b", text: "and deploy", actorId: null, images: 1 },
+    ] })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    const tray = await screen.findByRole("region", { name: "Held follow-ups" });
+    expect(within(tray).getByText("then run the tests")).toBeTruthy();
+    expect(within(tray).getByText("Image")).toBeTruthy();
+    // In the tray, not drawn again as Queued cards in the chat.
+    expect(screen.queryByTestId("cloud-pending-messages")).toBeNull();
+    // The runtime keeps them in the order they were sent and never pauses them: said, not offered.
+    expect(within(tray).getByRole("button", { name: /Pause queue/ }).hasAttribute("disabled")).toBe(true);
+    expect(within(tray).getByRole("button", { name: "Drag follow-up 1" }).getAttribute("title")).toMatch(/order they were sent/);
+
+    fireEvent.click(within(tray).getByRole("button", { name: "Edit follow-up 1" }));
+    fireEvent.change(within(tray).getByLabelText("Edit held follow-up"), { target: { value: "then run the unit tests" } });
+    fireEvent.click(within(tray).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "follow-up")?.payload).toEqual({ op: "edit", followUpId: "cmd-a", text: "then run the unit tests" }));
+    await waitFor(() => expect(within(tray).queryByTestId("held-editor")).toBeNull(), { timeout: 3_000 });
+
+    fireEvent.click(within(tray).getByRole("button", { name: "Send follow-up 2 now" }));
+    await waitFor(() => expect(enqueued.filter((entry) => entry.kind === "follow-up").map((entry) => entry.payload)).toContainEqual({ op: "release", followUpId: "cmd-b" }), { timeout: 3_000 });
+    // The tray waits for each change's receipt before taking the next.
+    await waitFor(() => expect(within(tray).getByRole("button", { name: "Delete follow-up 1" }).hasAttribute("disabled")).toBe(false), { timeout: 3_000 });
+    fireEvent.click(within(tray).getByRole("button", { name: "Delete follow-up 1" }));
+    await waitFor(() => expect(enqueued.filter((entry) => entry.kind === "follow-up").map((entry) => entry.payload)).toContainEqual({ op: "withdraw", followUpId: "cmd-a" }), { timeout: 3_000 });
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("#1328: with follow-ups sent now, a message mid-turn steers the running turn; holding sends it for the runtime to hold", async () => {
+    runtime.followUps = true;
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    await screen.findByText("Fix login redirect");
+    const prefs = mocks.prefs as typeof mocks.prefs & { followUps?: "now" | "hold" };
+    try {
+      prefs.followUps = "now";
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
+      // Send already steers: no second way offered.
+      expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
+      fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+      await waitFor(() => expect(enqueued.map((entry) => entry.kind)).toEqual(["steer"]));
+      // A command is never steered into a turn: it is held.
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/compact" } });
+      fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+      await waitFor(() => expect(enqueued.map((entry) => [entry.kind, entry.payload.text])).toEqual([["steer", "use the staging config"], ["send", "/compact"]]));
+    } finally {
+      delete prefs.followUps;
+    }
   });
 
   it("selecting a stopped session makes no resume; sending there wakes it exactly once and keeps the selection", async () => {

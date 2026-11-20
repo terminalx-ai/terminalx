@@ -171,6 +171,11 @@ PRO-343 settles the rest of the namespace as follows:
   mailbox API and the receipt journal opened (`WorkspaceRpc::set_agents`). A
   runtime with a mailbox does not grant it in `rpc.hello`, and answers
   `session.steer`, `session.stop` and `session.decide` with `method_not_found`.
+- `session.followUp` (`follow-ups/1`, #1328) is the mailbox's `follow-up`
+  kind, live: it edits, withdraws or releases a follow-up the machine holds,
+  with the same receipts. A runtime with a mailbox grants `follow-ups/1` (it
+  takes the command there) and answers `session.followUp` with
+  `method_not_found`.
 - The four commands are decided and applied by the mailbox's own code
   (`cloud_agents::mailbox::decide`), so they mean what the mailbox kinds mean:
   who may send, steer and stop (a driver, or a manager over a held lease), who
@@ -759,6 +764,7 @@ the pull request that adds it.
 | `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |
 | `session.stop` | `agent-commands/1` | Served | Drops queued sends, stops the agent; applied again after a crash (decision 3) |
 | `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |
+| `session.followUp` | `follow-ups/1` | Served | Edits, withdraws or releases a held follow-up, by the mailbox's rules with the receipts of `agent-commands/1` (#1328) |
 | `runtime.agents` | `agents/1` | Served | Machine-wide; with each agent's version and sign-in, and the agents with no CLI there (PRO-350) |
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |

@@ -276,6 +276,57 @@ impl FollowUps {
         Ok(dropped)
     }
 
+    /// One follow-up of a tab, by its command id, while it is held.
+    pub fn get(&self, tab_id: &str, id: &str) -> Option<FollowUp> {
+        self.tabs.lock().unwrap().get(tab_id)?.iter().find(|follow_up| follow_up.client_command_id == id).cloned()
+    }
+
+    /// Change a held follow-up's text (#1328), durably. False when it is no
+    /// longer held (it went to the agent, or was withdrawn).
+    pub fn edit(&self, tab_id: &str, id: &str, text: &str) -> Result<bool> {
+        let mut found = false;
+        self.change(|tabs| {
+            if let Some(follow_up) = tabs.get_mut(tab_id).and_then(|queue| queue.iter_mut().find(|follow_up| follow_up.client_command_id == id)) {
+                follow_up.text = text.to_string();
+                found = true;
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// Take a held follow-up out of its tab's queue (#1328), durably;
+    /// returns it, or None when it is no longer held.
+    pub fn remove(&self, tab_id: &str, id: &str) -> Result<Option<FollowUp>> {
+        let mut taken = None;
+        self.change(|tabs| {
+            if let Some(queue) = tabs.get_mut(tab_id) {
+                if let Some(at) = queue.iter().position(|follow_up| follow_up.client_command_id == id) {
+                    taken = Some(queue.remove(at));
+                }
+                if queue.is_empty() {
+                    tabs.remove(tab_id);
+                }
+            }
+        })?;
+        Ok(taken)
+    }
+
+    /// Put a held follow-up first in its tab's queue (#1328), durably, so it
+    /// is the next to go. False when it is no longer held.
+    pub fn to_front(&self, tab_id: &str, id: &str) -> Result<bool> {
+        let mut found = false;
+        self.change(|tabs| {
+            if let Some(queue) = tabs.get_mut(tab_id) {
+                if let Some(at) = queue.iter().position(|follow_up| follow_up.client_command_id == id) {
+                    let follow_up = queue.remove(at);
+                    queue.insert(0, follow_up);
+                    found = true;
+                }
+            }
+        })?;
+        Ok(found)
+    }
+
     /// Drop every follow-up of a tab (a stop); returns what was dropped.
     pub fn clear(&self, tab_id: &str) -> Result<Vec<FollowUp>> {
         let mut dropped = Vec::new();
@@ -391,5 +442,31 @@ mod tests {
         let queue = FollowUps::open(dir.path()).unwrap();
         assert_eq!(queue.list("t1"), vec![item("b")]);
         assert_eq!(queue.tabs(), vec!["t1".to_string()]);
+    }
+
+    /// #1328: a held follow-up is edited, put first or withdrawn by its id,
+    /// durably; one that is no longer held changes nothing.
+    #[test]
+    fn a_held_follow_up_is_edited_moved_first_and_withdrawn_by_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = FollowUps::open(dir.path()).unwrap();
+        let item = |id: &str, text: &str| FollowUp { policy_stamp: None, client_command_id: id.into(), session_id: "s".into(), text: text.into(), actor_id: String::new(), images: Vec::new(), files: Vec::new() };
+        for id in ["a", "b", "c"] {
+            queue.push("t1", item(id, id)).unwrap();
+        }
+        assert!(queue.edit("t1", "b", "b, edited").unwrap());
+        assert!(queue.to_front("t1", "c").unwrap());
+        drop(queue);
+        let queue = FollowUps::open(dir.path()).unwrap();
+        assert_eq!(queue.list("t1"), vec![item("c", "c"), item("a", "a"), item("b", "b, edited")]);
+        assert_eq!(queue.get("t1", "b"), Some(item("b", "b, edited")));
+        assert_eq!(queue.remove("t1", "a").unwrap(), Some(item("a", "a")));
+        assert!(!queue.edit("t1", "a", "gone").unwrap());
+        assert!(!queue.to_front("t1", "a").unwrap());
+        assert_eq!(queue.remove("t1", "a").unwrap(), None);
+        assert_eq!(queue.get("t2", "c"), None, "ids are per tab");
+        queue.remove("t1", "b").unwrap();
+        queue.remove("t1", "c").unwrap();
+        assert!(queue.tabs().is_empty(), "a tab whose last follow-up was withdrawn is gone");
     }
 }
