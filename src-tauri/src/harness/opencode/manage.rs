@@ -907,6 +907,64 @@ mod tests {
         assert_eq!(after.catalog.iter().find(|provider| provider.id == "openrouter").unwrap().base_url.as_deref(), Some(url.as_str()));
     }
 
+    /// An address that must never be asked: it takes connections but answers none.
+    fn untouched() -> (String, std::net::TcpListener) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        (format!("http://{}/v1", listener.local_addr().unwrap()), listener)
+    }
+
+    fn never_asked(listener: &std::net::TcpListener, what: &str) {
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "{what} was sent the key");
+    }
+
+    /// Issue #1319, for a catalogue provider checked at `/models`: the key is
+    /// checked where it will be saved, whether the address is left alone, new,
+    /// or cleared, and no other address ever sees it.
+    #[test]
+    fn a_replacement_key_is_checked_only_where_it_will_be_sent() {
+        let (_dir, paths) = paths();
+        let (catalogue, catalogue_listener) = untouched();
+        std::fs::write(paths.catalog_file(), json!({
+            "acme": {"id": "acme", "name": "Acme", "env": ["ACME_API_KEY"], "npm": "@ai-sdk/openai", "api": catalogue, "models": {}},
+        }).to_string()).unwrap();
+        let saved_base = |paths: &Paths| -> Option<String> {
+            let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
+            config.pointer("/provider/acme/options/baseURL").and_then(Value::as_str).map(str::to_owned)
+        };
+
+        // Replace with the base URL left as saved: the saved gateway is asked, not the catalogue's address.
+        let (saved, served) = gateway();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_file(), json!({"provider": {"acme": {"options": {"baseURL": saved}, "whitelist": []}}}).to_string()).unwrap();
+        let result = connect_in(&paths, "acme", "acme-key-0123456789", None).unwrap();
+        assert!(matches!(result.check, KeyCheck::Accepted));
+        let request = served.join().unwrap();
+        assert!(request.starts_with("GET /v1/models "), "{request}");
+        assert!(request.contains("Bearer acme-key-0123456789"));
+        never_asked(&catalogue_listener, "the catalogue address");
+        assert_eq!(saved_base(&paths).as_deref(), Some(saved.as_str()), "left unchanged, the gateway stays");
+
+        // A new base URL: it alone is asked, and it is what is saved.
+        let (new, served) = gateway();
+        connect_in(&paths, "acme", "acme-key-9876543210", Some(&format!("  {new}  "))).unwrap();
+        assert!(served.join().unwrap().contains("Bearer acme-key-9876543210"));
+        never_asked(&catalogue_listener, "the catalogue address");
+        assert_eq!(saved_base(&paths).as_deref(), Some(new.as_str()));
+
+        // Cleared on purpose: the catalogue's own address is asked, and nothing is saved in its place.
+        let (catalogue, served) = gateway();
+        std::fs::write(paths.catalog_file(), json!({
+            "acme": {"id": "acme", "name": "Acme", "env": ["ACME_API_KEY"], "npm": "@ai-sdk/openai", "api": catalogue, "models": {}},
+        }).to_string()).unwrap();
+        let cleared = connect_in(&paths, "acme", "acme-key-0000000000", Some("")).unwrap();
+        assert!(matches!(cleared.check, KeyCheck::Accepted));
+        assert!(served.join().unwrap().contains("Bearer acme-key-0000000000"), "cleared, the key is checked at the catalogue's address");
+        assert_eq!(saved_base(&paths), None, "cleared, no base URL is kept");
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        assert_eq!(auth["acme"], json!({"type": "api", "key": "acme-key-0000000000"}));
+    }
+
     #[test]
     fn a_key_file_that_cannot_be_read_is_never_overwritten() {
         let (_dir, paths) = paths();
